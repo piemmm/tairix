@@ -554,8 +554,9 @@ engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 (`decision` — `Dialog`/`Tooltip`/`HelpTip`, a `Dialog` being a form a window
 draws over itself for an answer typed in it), the alert (`alert` — `Alert`, the
 content of the desktop's own error, warning and question windows: severity
-mark, headline, scrolling detail and the bottom row of answers, sized 4:3 to
-what it says), and the form fields
+mark, headline, detail and the bottom row of answers, as wide as its text up
+to a readable measure and exactly as tall as what it says, the whole text
+scrolling only past the screen's share, nothing elided), and the form fields
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
 the `collection` row chrome — never its pointer wash, which is the slot
 control's alone — and a real control in each row's slot, a
@@ -569,8 +570,8 @@ chosen by pointer or arrow keys, a translucent well shown over the one
 credential question (`credential` — `CredentialSheet`, the one surface that
 asks for an account and its password so a more-privileged program can be
 started as that account: the desktop session's prompt window and the settings
-application's in-window sheet compose the same focus order, wording and
-secret hygiene).
+application's dialog window compose the same focus order, wording and secret
+hygiene, each drawing it across a window of its own).
 
 An application's *screen* is not here. This crate holds only behaviour any
 surface may reuse, so a composition that arranges these controls into one

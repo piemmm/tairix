@@ -24,10 +24,13 @@
 //! floppy drives are single-unit devices), so any LUN other than `0` is
 //! refused.
 
+use tairix_abi::blkio::CommandKind;
 use tairix_abi::Errno;
 
 use crate::bot::MsdTransport;
-use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense};
+use crate::scsi::{
+    unknown_unit_budget, CommandOutcome, DataPhase, ResetRecord, ScsiTransport, Sense,
+};
 
 /// CBI command blocks are fixed 12-byte frames (CBI 1.1 §2.2 for the UFI
 /// and SFF-8070i sets this transport serves).
@@ -76,6 +79,11 @@ pub struct Cbi<T: MsdTransport> {
     /// [`CbiStatus::CommandStatus`] spelling, whose completion carries no
     /// sense.
     sense: Option<Sense>,
+    /// The exchange a reset recovery runs in: the last command's, so a
+    /// command that spent its own still gets the reset it owes.
+    recovery_ns: u64,
+    /// How the last broken exchange's reset recovery went.
+    reset: ResetRecord,
 }
 
 impl<T: MsdTransport> Cbi<T> {
@@ -87,6 +95,8 @@ impl<T: MsdTransport> Cbi<T> {
             interface_number,
             status,
             sense: None,
+            recovery_ns: unknown_unit_budget().exchange_ns(CommandKind::Query, 0),
+            reset: ResetRecord::default(),
         }
     }
 
@@ -119,6 +129,7 @@ impl<T: MsdTransport> Cbi<T> {
     /// patterns, then the halt of each bulk pipe cleared (CBI 1.1 §2.2),
     /// which the reset alone leaves as it was.
     fn reset_recovery(&mut self) -> Result<(), Errno> {
+        self.transport.begin_exchange(self.recovery_ns);
         let mut block = [0xFFu8; CBI_COMMAND_LEN];
         block[0] = 0x1D; // SEND DIAGNOSTIC
         block[1] = 0x04; // Self-test — the reset spelling the spec fixes.
@@ -132,7 +143,8 @@ impl<T: MsdTransport> Cbi<T> {
         if cause == Errno::NotFound {
             return cause;
         }
-        after_reset(cause, self.reset_recovery())
+        let reset = self.reset_recovery();
+        self.reset.after(cause, reset)
     }
 
     /// Read and interpret the command-completion interrupt block,
@@ -151,9 +163,9 @@ impl<T: MsdTransport> Cbi<T> {
     ///
     /// # Errors
     ///
-    /// What [`after_reset`] answers for the reset any failure here owes: a
-    /// completion that never came, a block of the wrong size or shape, or a
-    /// phase error / persistent failure.
+    /// What [`after_reset`](crate::scsi::after_reset) answers for the reset
+    /// any failure here owes: a completion that never came, a block of the
+    /// wrong size or shape, or a phase error / persistent failure.
     fn completion(&mut self, opcode: u8) -> Result<bool, Errno> {
         let mut block = [0u8; CBI_STATUS_LEN];
         let received = self
@@ -205,7 +217,9 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
         lun: u8,
         cb: &[u8],
         mut data: DataPhase<'_>,
+        exchange_ns: u64,
     ) -> Result<CommandOutcome, Errno> {
+        self.reset.begin();
         // CBI carries no transport-level LUN; only unit 0 exists.
         if lun != 0 {
             return Err(Errno::OutOfRange);
@@ -217,7 +231,8 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
         // stale completion stand for this command's.
         self.sense = None;
         self.transport.discard_interrupts()?;
-        self.transport.begin_exchange();
+        self.transport.begin_exchange(exchange_ns);
+        self.recovery_ns = exchange_ns;
         let mut block = [0u8; CBI_COMMAND_LEN];
         block[..cb.len()].copy_from_slice(cb);
 
@@ -283,6 +298,10 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
 
     fn scrub(&mut self) {
         self.transport.scrub();
+    }
+
+    fn take_resynced(&mut self) -> bool {
+        self.reset.take()
     }
 }
 

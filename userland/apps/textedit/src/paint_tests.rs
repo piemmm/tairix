@@ -178,16 +178,18 @@ fn the_hex_view_draws_digits_and_ascii_by_byte_class() {
     assert_eq!(cell(&surface, &layout, 0, 0), muted, "the offset column");
 }
 
+/// A question is drawn beside the window for its dialog window, never over
+/// the window's own content.
 #[test]
-fn a_modal_question_veils_the_window() {
+fn a_question_leaves_the_window_as_it_was() {
     let (mut view, layout, registry) = window(b"x");
     let theme = registry.active();
     let clear = paint(&view, &layout, theme, false);
     let mut damage = Region::new();
     view.act(crate::view::Action::GoToLine, &layout, &mut damage);
-    let veiled = paint(&view, &layout, theme, false);
-    let corner = |surface: &Surface| surface.pixels()[2];
-    assert_ne!(corner(&clear), corner(&veiled));
+    assert!(view.modal().is_some());
+    let asking = paint(&view, &layout, theme, false);
+    assert_eq!(clear.pixels(), asking.pixels());
 }
 
 /// A paint under a clip draws exactly what a whole paint draws inside it, and

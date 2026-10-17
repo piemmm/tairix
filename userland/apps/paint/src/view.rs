@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveEndings};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveEndings};
 use tairix_browse::vfs::write_document_title;
 use tairix_colour::Rgba;
 use tairix_controls::{
@@ -25,7 +25,9 @@ use tairix_input::{InputEvent, Modifiers, PointerButton};
 use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
 use tairix_theme::Theme;
-use tairix_window::docapp::{DocumentView, ToolGone, ToolMove, ToolOpening, ToolWindow};
+use tairix_window::docapp::{
+    DialogWindow, DocumentView, ToolGone, ToolMove, ToolOpening, ToolWindow,
+};
 use tairix_window::document::{Access, SavedDocument};
 
 use crate::adjust::AdjustPane;
@@ -810,7 +812,7 @@ enum Then {
     Enter(u16, String),
 }
 
-/// A modal form of settings over the window.
+/// A form of settings the window asks in a dialog of its own.
 #[derive(Debug)]
 enum Modal {
     /// A form of settings.
@@ -1211,6 +1213,39 @@ impl DocumentView for View {
         damage: &mut Region,
     ) -> Outcome {
         View::tool_gone(self, id, why, layout, damage)
+    }
+
+    /// A form acts on the picture as it stood when the form opened, which
+    /// its rows were filled from, so it holds the window until it is
+    /// answered.
+    fn dialog_window(
+        &self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<DialogWindow<'_>> {
+        let form = self.modal()?;
+        Some(DialogWindow {
+            title: form.title(),
+            rect: form.rect(layout.dialog_origin(), scale, theme),
+            modality: DialogModality::OwnerModal,
+        })
+    }
+
+    fn dialog_input(
+        &mut self,
+        input: &InputEvent,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        View::on_dialog(self, input, now_ns, layout, (scale, theme), damage)
+    }
+
+    fn dialog_refused(&mut self, why: &str, layout: &Layout, damage: &mut Region) -> Outcome {
+        View::dialog_refused(self, why, layout, damage)
     }
 }
 

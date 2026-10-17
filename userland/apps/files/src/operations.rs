@@ -1,11 +1,13 @@
 //! The long file operations the file manager runs off its event loop: a
 //! paste, a delete, a move to Trash.
 //!
-//! One worker carries them out one at a time, in the order they were asked:
-//! two copies sharing one disk finish no sooner side by side, and each would
-//! read as stalled. An operation is answered to the window that started it
-//! and to no other, and a window that closes cancels its own operation and has
-//! its answer dropped.
+//! Each operation is known by the id of its own progress window, and a folder
+//! window may have several. One worker carries them out one at a time, in the
+//! order they were asked: two copies sharing one disk finish no sooner side by
+//! side, and each would read as stalled. So an operation that touches a tree
+//! an earlier one is still working in waits behind it, as every operation
+//! does. An operation is answered to its own id and no other, and one whose
+//! window closes is cancelled and has its answer dropped.
 //!
 //! # No I/O, and no lock
 //!
@@ -70,19 +72,21 @@ pub struct Finished {
     pub ending: Ending,
 }
 
-/// Where a window's operation stands, as its progress panel shows it.
+/// Where an operation stands, as its progress window shows it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Standing {
     /// The items done so far.
     pub done: usize,
     /// Whether a cancel was asked for.
     pub cancelling: bool,
+    /// Whether it waits for the operations asked before it.
+    pub waiting: bool,
 }
 
 /// Why an operation was not taken. The job is handed back with it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Refusal {
-    /// The window already has one.
+    /// An operation of that id is already held.
     Busy,
     /// As many as the desk holds are already waiting.
     Full,
@@ -92,7 +96,7 @@ pub enum Refusal {
 
 /// The operation the worker is carrying out.
 struct Running {
-    window: u64,
+    id: u64,
     done: usize,
     cancel: bool,
     /// Its window closed, so its answer belongs to nobody.
@@ -126,16 +130,16 @@ impl<J> OperationDesk<J> {
         }
     }
 
-    /// Ask for `job` to run on behalf of `window`.
+    /// Ask for `job` to run as operation `id`.
     ///
     /// # Errors
     ///
     /// The job, handed back with why it was not taken.
-    pub fn submit(&mut self, window: u64, job: J) -> Result<(), (J, Refusal)> {
+    pub fn submit(&mut self, id: u64, job: J) -> Result<(), (J, Refusal)> {
         if self.stopping {
             return Err((job, Refusal::Stopping));
         }
-        if self.holds(window) {
+        if self.holds(id) {
             return Err((job, Refusal::Busy));
         }
         // Room for this job and for every answer still to come, so recording
@@ -147,48 +151,50 @@ impl<J> OperationDesk<J> {
         {
             return Err((job, Refusal::Full));
         }
-        self.waiting.push_back((window, job));
+        self.waiting.push_back((id, job));
         Ok(())
     }
 
-    /// Whether `window` has an operation waiting, running, or answered and
-    /// not collected.
+    /// Whether operation `id` is waiting, running, or answered and not
+    /// collected.
     #[must_use]
-    pub fn holds(&self, window: u64) -> bool {
-        self.waiting.iter().any(|(owner, _)| *owner == window)
-            || self.running_for(window).is_some()
-            || self.landed.iter().any(|(owner, _)| *owner == window)
+    pub fn holds(&self, id: u64) -> bool {
+        self.waiting.iter().any(|(held, _)| *held == id)
+            || self.running_for(id).is_some()
+            || self.landed.iter().any(|(held, _)| *held == id)
     }
 
-    /// Where `window`'s unfinished operation stands, if it has one.
+    /// Where unfinished operation `id` stands, if it is held.
     #[must_use]
-    pub fn standing(&self, window: u64) -> Option<Standing> {
-        if let Some(running) = self.running_for(window) {
+    pub fn standing(&self, id: u64) -> Option<Standing> {
+        if let Some(running) = self.running_for(id) {
             return Some(Standing {
                 done: running.done,
                 cancelling: running.cancel,
+                waiting: false,
             });
         }
         self.waiting
             .iter()
-            .any(|(owner, _)| *owner == window)
+            .any(|(held, _)| *held == id)
             .then_some(Standing {
                 done: 0,
                 cancelling: false,
+                waiting: true,
             })
     }
 
-    /// Cancel `window`'s operation: one still waiting ends at once with
-    /// nothing done, one running stops before its next step.
-    pub fn cancel(&mut self, window: u64) {
-        if let Some(running) = self.running_for_mut(window) {
+    /// Cancel operation `id`: one still waiting ends at once with nothing
+    /// done, one running stops before its next step.
+    pub fn cancel(&mut self, id: u64) {
+        if let Some(running) = self.running_for_mut(id) {
             running.cancel = true;
             return;
         }
-        if let Some(at) = self.waiting.iter().position(|(owner, _)| *owner == window) {
+        if let Some(at) = self.waiting.iter().position(|(held, _)| *held == id) {
             drop(self.waiting.remove(at));
             self.landed.push((
-                window,
+                id,
                 Finished {
                     done: 0,
                     ending: Ending::Cancelled,
@@ -197,9 +203,9 @@ impl<J> OperationDesk<J> {
         }
     }
 
-    /// Take `window`'s answer, if it has landed.
-    pub fn take(&mut self, window: u64) -> Option<Finished> {
-        let at = self.landed.iter().position(|(owner, _)| *owner == window)?;
+    /// Take operation `id`'s answer, if it has landed.
+    pub fn take(&mut self, id: u64) -> Option<Finished> {
+        let at = self.landed.iter().position(|(held, _)| *held == id)?;
         Some(self.landed.swap_remove(at).1)
     }
 
@@ -214,15 +220,15 @@ impl<J> OperationDesk<J> {
         self.nudged = true;
     }
 
-    /// `window` has closed: what it was waiting for never runs, what is
-    /// running stops at its next step, and no answer is kept for it.
-    pub fn forget(&mut self, window: u64) {
-        self.waiting.retain(|(owner, _)| *owner != window);
-        if let Some(running) = self.running_for_mut(window) {
+    /// Operation `id`'s window has closed: if it waits it never runs, if it
+    /// runs it stops at its next step, and no answer is kept for it.
+    pub fn forget(&mut self, id: u64) {
+        self.waiting.retain(|(held, _)| *held != id);
+        if let Some(running) = self.running_for_mut(id) {
             running.cancel = true;
             running.orphaned = true;
         }
-        self.landed.retain(|(owner, _)| *owner != window);
+        self.landed.retain(|(held, _)| *held != id);
     }
 
     /// Send the worker away: nothing waiting runs, and what runs stops at its
@@ -247,14 +253,14 @@ impl<J> OperationDesk<J> {
         if self.stopping || self.running.is_some() {
             return None;
         }
-        let (window, job) = self.waiting.pop_front()?;
+        let (id, job) = self.waiting.pop_front()?;
         self.running = Some(Running {
-            window,
+            id,
             done: 0,
             cancel: false,
             orphaned: false,
         });
-        Some((window, job))
+        Some((id, job))
     }
 
     /// Whether the running operation should stop before its next step.
@@ -283,7 +289,7 @@ impl<J> OperationDesk<J> {
             return false;
         }
         self.landed.push((
-            running.window,
+            running.id,
             Finished {
                 done: running.done,
                 ending,
@@ -296,16 +302,16 @@ impl<J> OperationDesk<J> {
         !core::mem::replace(&mut self.nudged, true)
     }
 
-    fn running_for(&self, window: u64) -> Option<&Running> {
+    fn running_for(&self, id: u64) -> Option<&Running> {
         self.running
             .as_ref()
-            .filter(|running| running.window == window && !running.orphaned)
+            .filter(|running| running.id == id && !running.orphaned)
     }
 
-    fn running_for_mut(&mut self, window: u64) -> Option<&mut Running> {
+    fn running_for_mut(&mut self, id: u64) -> Option<&mut Running> {
         self.running
             .as_mut()
-            .filter(|running| running.window == window && !running.orphaned)
+            .filter(|running| running.id == id && !running.orphaned)
     }
 }
 

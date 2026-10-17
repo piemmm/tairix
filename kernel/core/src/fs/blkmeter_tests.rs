@@ -10,6 +10,10 @@ use tairix_log::Event;
 
 use super::*;
 
+/// The medium the fixture declares: a disk not known not to rotate, so it is
+/// served as rotational.
+const FIXTURE_MEDIUM: BlkMedium = BlkMedium::of_transport(tairix_abi::blkio::BlkTransport::Ata);
+
 /// A sink that discards every event: these tests assert the counters and the
 /// overlay, not the audit trail (`blkclient`'s own tests pin that).
 struct NullSink;
@@ -49,7 +53,7 @@ impl FixtureBlock {
             fail: None,
             promise: MountAvailability::Available,
             name: BlkDeviceName::new("fixture-blk"),
-            medium: Some(BlkMedium::HardDisk),
+            medium: Some(FIXTURE_MEDIUM),
             flushes: 0,
             discards: 0,
         }
@@ -151,7 +155,7 @@ fn a_new_meter_reports_its_identity_and_no_readings() {
 #[test]
 fn adopting_the_device_takes_its_name_and_its_mediums_budget() {
     let mut meter = meter();
-    meter.adopt_device(Some(BlkMedium::HardDisk), BlkDeviceName::new("fixture-blk"));
+    meter.adopt_device(Some(FIXTURE_MEDIUM), BlkDeviceName::new("fixture-blk"));
     let source = meter.io_source();
     assert_eq!(source.device.as_str(), "fixture-blk");
     assert_eq!(source.budget, BlkDeviceClass::Rotational.budget());
@@ -344,7 +348,7 @@ fn concurrent_attempts_read_a_deeper_queue() {
 fn a_metered_device_names_itself_and_reads_as_what_it_wraps() {
     let device = MeteredBlock::new(FixtureBlock::new(4), DEV, &SINK);
     assert_eq!(device.device_name().as_str(), "fixture-blk");
-    assert_eq!(device.medium(), Some(BlkMedium::HardDisk));
+    assert_eq!(device.medium(), Some(FIXTURE_MEDIUM));
     assert_eq!(device.device_class(), BlkDeviceClass::Rotational);
 
     let source = device.io_source();

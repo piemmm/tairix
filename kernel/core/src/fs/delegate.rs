@@ -1224,6 +1224,27 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         self.read_link_target(node, info.size)
     }
 
+    /// Whether `cred` holds every one of `access` on the node at
+    /// `components`: what an open asks of the node before it hands out a
+    /// descriptor for its bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::PermissionDenied`] for an access the node withholds;
+    /// otherwise as [`Self::stat`].
+    pub fn authorize(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        final_link: FinalLink,
+        access: &[Access],
+    ) -> Result<(), VfsError> {
+        let (_, _, meta) = self.resolve_final(cred, components, final_link)?;
+        access
+            .iter()
+            .try_for_each(|&access| meta.authorize(cred, access))
+    }
+
     /// Read up to `buf.len()` bytes from the file at `components` starting
     /// at `offset`, returning the number of bytes read (short of
     /// `buf.len()` at end-of-file).
@@ -1667,9 +1688,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         offset: u64,
         data: &[u8],
     ) -> Result<usize, VfsError> {
-        let place = self.place_for_write(cred, components, FinalLink::Follow)?;
-        let (_, info, _) = place.found.ok_or(VfsError::NotFound)?;
-        Self::deny_non_file(info.kind)?;
+        let place = self.writable_file(cred, components)?;
         self.mutate(|fs| fs.write_at(place.parent, place.name.as_bytes(), offset, data))
             .map_err(map_driver_error)
     }
@@ -1687,11 +1706,28 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         components: &[String],
         size: u64,
     ) -> Result<(), VfsError> {
-        let place = self.place_for_write(cred, components, FinalLink::Follow)?;
-        let (_, info, _) = place.found.ok_or(VfsError::NotFound)?;
-        Self::deny_non_file(info.kind)?;
+        let place = self.writable_file(cred, components)?;
         self.mutate(|fs| fs.truncate(place.parent, place.name.as_bytes(), size))
             .map_err(map_driver_error)
+    }
+
+    /// The place of the regular file at `components`, a final link followed,
+    /// whose bytes `cred` may write. They are the file's to grant, as reading
+    /// them is: write permission on its directory governs its name, never its
+    /// contents.
+    fn writable_file(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+    ) -> Result<Place, VfsError> {
+        let place = match self.walk(cred, components, FinalLink::Follow)? {
+            Walk::Root { .. } => return Err(VfsError::InvalidPath),
+            Walk::Leaf(place) => place,
+        };
+        let (_, info, meta) = place.found.as_ref().ok_or(VfsError::NotFound)?;
+        Self::deny_non_file(info.kind)?;
+        meta.authorize(cred, Access::Write)?;
+        Ok(place)
     }
 
     /// Refuse a node whose bytes a write may not touch.

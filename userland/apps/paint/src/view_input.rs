@@ -113,9 +113,6 @@ impl View {
             }
             _ => {}
         }
-        if let Some(outcome) = self.modal_pointer(event, layout, scale, theme, damage) {
-            return outcome;
-        }
         if self.picker.is_dragging() {
             return self
                 .dock_pointer(event, layout, scale, theme, damage)
@@ -182,21 +179,49 @@ impl View {
         }
     }
 
-    /// A pointer event while a question is showing, which takes them all.
-    fn modal_pointer(
+    /// Feed `input` that reached the form's dialog window at `now_ns`.
+    pub(crate) fn on_dialog(
         &mut self,
-        event: &InputEvent,
+        input: &InputEvent,
+        now_ns: u64,
         layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
+        (scale, theme): (Scale, &Theme),
         damage: &mut Region,
-    ) -> Option<Outcome> {
-        let window = layout.window();
-        let Modal::Form(form) = self.modal.as_mut()?;
-        Some(match form.on_pointer(event, window, scale, theme, damage) {
+    ) -> Outcome {
+        let origin = layout.dialog_origin();
+        let Some(Modal::Form(form)) = self.modal.as_mut() else {
+            return Outcome::none();
+        };
+        let answer = match *input {
+            InputEvent::KeyPressed { key, modifiers } => {
+                let stroke = Keystroke {
+                    key,
+                    modifiers,
+                    at_ns: now_ns,
+                };
+                form.on_key(stroke, origin, scale, theme, damage)
+            }
+            InputEvent::KeyReleased { .. } | InputEvent::ModifiersChanged { .. } => None,
+            _ => form.on_pointer(input, origin, scale, theme, damage),
+        };
+        match answer {
             Some(answer) => self.answer_modal(answer, layout, damage),
             None => Outcome::none(),
-        })
+        }
+    }
+
+    /// The desktop would not open the form's dialog, for `why`: the form is
+    /// turned down and the reason said.
+    pub(crate) fn dialog_refused(
+        &mut self,
+        why: &str,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        self.modal = None;
+        self.say(alloc::format!("The form could not be shown: {why}"));
+        damage.add(layout.message());
+        Outcome::none()
     }
 
     /// The pointer on the window's chrome: the tool box, the view strip, the
@@ -2249,7 +2274,6 @@ impl View {
     }
 
     fn answer_modal(&mut self, answer: Answer, layout: &Layout, damage: &mut Region) -> Outcome {
-        layout.damage_all(damage);
         match (self.modal.take(), answer) {
             (Some(Modal::Form(form)), Answer::Confirmed) => {
                 self.form_answered(form, layout, damage)
@@ -2436,7 +2460,7 @@ impl View {
         }
     }
 
-    /// Put `form` over the window.
+    /// Ask `form` in a dialog of the window's own.
     pub(super) fn ask(&mut self, form: Form, layout: &Layout, damage: &mut Region) {
         // A form answers the picture as it stood when it opened, so none opens
         // while a worker may yet change it.
@@ -2445,7 +2469,6 @@ impl View {
         }
         self.end_gesture(layout, damage);
         self.modal = Some(Modal::Form(Box::new(form)));
-        layout.damage_all(damage);
     }
 
     /// Ask a worker for `transform` of the picture showing.
@@ -2617,13 +2640,6 @@ impl View {
         damage: &mut Region,
     ) -> Outcome {
         self.modifiers = stroke.modifiers;
-        if let Some(Modal::Form(form)) = &mut self.modal {
-            let answer = form.on_key(stroke, layout.window(), scale, theme, damage);
-            return match answer {
-                Some(answer) => self.answer_modal(answer, layout, damage),
-                None => Outcome::none(),
-            };
-        }
         if stroke.key == Key::Named(NamedKey::Escape)
             && self.turn_down_pane_drag(layout, scale, theme, damage)
         {

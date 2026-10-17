@@ -42,6 +42,7 @@
 //! It lives beside the events rather than in any one surface because the
 //! subjects differ but the rule does not — a listing row in the file manager,
 //! an icon on the desktop, a window id on the window manager's title bars.
+//! [`wheel`](mod@wheel) holds the one distance a wheel detent scrolls a view.
 //!
 //! [`InputRouter`]: https://docs.rs/tairix-wm
 //! [`tairix_geometry`]: tairix_geometry
@@ -51,6 +52,7 @@
 #![deny(missing_docs)]
 
 pub mod click;
+pub mod wheel;
 
 pub use click::{ClickKind, ClickRun, DoubleClickTracker};
 pub use tairix_abi::touch::PinchPhase;

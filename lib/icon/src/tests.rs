@@ -2,7 +2,9 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{
+    BlkMedium, BlkRemovability, BlkRotation, BlkRotationEvidence, BlkTransport,
+};
 use tairix_raster::{Color, Paint};
 
 use crate::glyph::{builtin_icon, disk_icon, IconKind};
@@ -264,20 +266,48 @@ fn a_settings_category_is_never_the_reading_it_stands_beside() {
 }
 
 #[test]
-fn disk_icon_maps_every_medium() {
-    assert_eq!(disk_icon(Some(BlkMedium::HardDisk)), IconKind::DiskHard);
+fn disk_icon_draws_only_what_the_device_reported() {
+    let spinning = BlkRotation::from_rate_field(7200, BlkRotationEvidence::AtaIdentify);
+    let flash = BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd);
+    let ata = BlkMedium::of_transport(BlkTransport::Ata);
+    let usb = BlkMedium::of_transport(BlkTransport::Usb);
     assert_eq!(
-        disk_icon(Some(BlkMedium::SolidState)),
+        disk_icon(Some(ata.with_rotation(spinning))),
+        IconKind::DiskHard
+    );
+    assert_eq!(
+        disk_icon(Some(ata.with_rotation(flash))),
         IconKind::DiskSolidState
     );
-    assert_eq!(disk_icon(Some(BlkMedium::Nvme)), IconKind::DiskNvme);
-    assert_eq!(disk_icon(Some(BlkMedium::UsbFlash)), IconKind::DiskUsb);
-    assert_eq!(disk_icon(Some(BlkMedium::UsbDisk)), IconKind::DiskExternal);
-    assert_eq!(disk_icon(Some(BlkMedium::SdCard)), IconKind::DiskSdCard);
-    // A paravirtual device is none of these, and an unclassified mount is not
-    // known to be any of them: both draw the generic drive rather than a
-    // guess.
-    assert_eq!(disk_icon(Some(BlkMedium::Virtual)), IconKind::Disk);
+    assert_eq!(
+        disk_icon(Some(BlkMedium::of_transport(BlkTransport::Nvme))),
+        IconKind::DiskNvme
+    );
+    assert_eq!(
+        disk_icon(Some(BlkMedium::of_transport(BlkTransport::Sd))),
+        IconKind::DiskSdCard
+    );
+    assert_eq!(disk_icon(Some(usb.with_rotation(flash))), IconKind::DiskUsb);
+    // A disk in a USB enclosure whose bridge reported its rotation is a hard
+    // disk, exactly as one on an ATA bus is.
+    let enclosed = BlkRotation::from_rate_field(5400, BlkRotationEvidence::RotationRateVpd);
+    assert_eq!(
+        disk_icon(Some(usb.with_rotation(enclosed))),
+        IconKind::DiskHard
+    );
+    // A USB unit that reported no rotation is drawn as the external drive,
+    // whatever its removable bit says: the stick is a claim of flash.
+    assert_eq!(
+        disk_icon(Some(usb.with_removability(BlkRemovability::from_rmb(true)))),
+        IconKind::DiskExternal
+    );
+    // A paravirtual device, a disk not known to rotate or not, and an
+    // unclassified mount all draw the generic drive rather than a guess.
+    assert_eq!(
+        disk_icon(Some(BlkMedium::of_transport(BlkTransport::Virtual))),
+        IconKind::Disk
+    );
+    assert_eq!(disk_icon(Some(ata)), IconKind::Disk);
     assert_eq!(disk_icon(None), IconKind::Disk);
 }
 

@@ -6,7 +6,7 @@
 //!
 //! This process is the **sole owner** of one xHCI controller: it maps the
 //! controller's register BAR, owns its DMA rings and root-hub ports, brings
-//! it up, and enumerates the attached device. It then **publishes one
+//! it up, and enumerates every attached device. It then **publishes one
 //! hardware-tree node per USB interface** (carrying the device's
 //! `vid:pid:class` match keys) so `devmgr` autoloads the matching **class**
 //! driver (`drivers/input/usb_hid`, …), and **serves that class driver's URB
@@ -20,31 +20,28 @@
 //! # The asynchronous event loop (`plans/USB.md` §1.1)
 //!
 //! The HCD multiplexes two independent event streams on one kernel **wait-set**
-//! (`U3a3`) so it never busy-polls and never blocks one interface inside
-//! another's handler (the charter forbids spinning a core):
+//! (`U3a3`) and never waits on either inside the other's handler:
 //!
 //! * **A URB-submit IPC call** on the per-interface endpoint it serves: it
-//!   `call_recv`s the URB and drives it. An interrupt-IN report not yet
-//!   arrived is left **outstanding** (the class driver's `ipc_call` parks in
-//!   the kernel); a control transfer or a ready report is replied at once.
-//! * **The controller's completion interrupt**: *acknowledge, drain once, then
-//!   dispatch*. The acknowledgement's single `USBSTS` read carries the fault and
-//!   port-change latches, so the whole service needs no second read of it. Then
-//!   one pass over the event ring (`UsbDevice::pump_reports`) sorts every posted
-//!   event into its consumer's buffer — each served interrupt-IN endpoint's
-//!   reports into its per-device FIFO with the endpoint re-armed, each watched
-//!   hub's status-change report into its parked slot, bulk completions into
-//!   their FIFOs, a Port Status Change Event into the root-scan arming.
-//!   Everything after that reads those buffers rather than walking the ring
-//!   again: hot-plug is serviced, then any now-satisfiable outstanding URB is
-//!   **replied** from the buffered report, bounce-copied into the shared buffer
-//!   the class driver reads.
+//!   `call_recv`s the call and drives it. One that does not finish at once —
+//!   a report not yet arrived, a control or bulk transfer, an interface
+//!   operation the engine runs over several commands — is held, and its
+//!   class driver's `ipc_call` parks in the kernel until it is answered.
+//! * **The controller's completion interrupt**, acknowledged with the single
+//!   `USBSTS` read that also carries the fault latch.
 //!
-//!   Capturing on the interrupt rather than only when a class driver submits
-//!   decouples device polling from a CPU-starved class driver, so reports are
-//!   never dropped under load (`plans/USB.md`). It also watches the root-hub
-//!   port and retracts the interface node on a disconnect (`hw_remove_node`),
-//!   so `devmgr` unloads the class driver while the controller stays up.
+//! Every wake then runs one service step of the engine
+//! ([`tairix_usb::device::UsbHost::service`]): it routes every event the
+//! controller posted, captures reports with their endpoints re-armed, and runs
+//! every operation — an enumeration, a port reset, a pipe recovery — that an
+//! event or a due timer moved. Its topology report publishes and retracts
+//! interface nodes, held calls are driven against what it did, and the loop
+//! parks until the earliest deadline the engine, a held URB or a retry owes.
+//! One slow device holds no other device's step.
+//!
+//! Capturing reports in the service step rather than only when a class driver
+//! submits decouples device polling from a CPU-starved class driver, so reports
+//! are never dropped under load (`plans/USB.md`).
 //!
 //! # Per-interrupt cost
 //!
@@ -103,22 +100,18 @@ mod program {
     use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, ProcId, RegisterWindow};
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_usb::bringup::{
-        bring_up_controller_diagnostic, derive_controller_resources, BringupPhase, ControllerDevice,
+        bring_up_controller_diagnostic, derive_controller_resources, BringupPhase, ControllerHost,
     };
-    use tairix_drv_bus_usb::domain::{
-        timer_work_due, ControllerDomainEvent, ControllerHealth, OneShot, SkippedPortRetry,
-        RECOVERY_SETTLE_NS,
-    };
+    use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth, Retries};
     use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
-    use tairix_drv_bus_usb::serve::UrbReply;
+    use tairix_drv_bus_usb::serve::{urb_failure_level, UrbReply};
     use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_log::{log, Event, EventId, Field, Level};
     use tairix_rt::shm::SharedRegion;
-    use tairix_rt::{ClockDelay, LogSink};
+    use tairix_rt::LogSink;
     use tairix_usb::device::{
-        DeviceEngine, DeviceIdentity, EnumStage, EventWait, HubEvent, MAX_INTERFACES,
-        XHCI_MAX_SLOTS,
+        DeviceEngine, DeviceIdentity, HubEvent, Serviced, MAX_INTERFACES, XHCI_MAX_SLOTS,
     };
     use tairix_usb::{SlabBank, XhciOpenStage};
     use tairix_util::fmt::format_hex_u64;
@@ -149,6 +142,10 @@ mod program {
     /// Diagnostic event id: a URB failed, was refused, or was abandoned at its
     /// deadline, with the controller's verdict on the endpoint it ran on.
     const HCD_URB_FAILED: EventId = EventId(27_153);
+
+    /// Diagnostic event id: the endpoint of a transfer abandoned at its
+    /// deadline stopped, and where the controller then stood against it.
+    const HCD_ABANDON_SETTLED: EventId = EventId(27_154);
 
     /// Security event id: a class driver's control request reached past its
     /// own interface and was refused.
@@ -194,30 +191,6 @@ mod program {
     /// (a generous bound on simultaneous controllers; the first HCD claims
     /// the first block on its first try).
     const URB_ENDPOINT_BLOCKS: u64 = 64;
-
-    /// The engine's parked event-wait seam on metal: waits park on the
-    /// controller's bound interrupt line with the remaining wall-clock
-    /// budget as the deadline, so a completion wakes the wait early, a
-    /// timeout returns it to the caller's deadline check, and a quiet
-    /// controller costs no CPU. The clock is the kernel monotonic clock,
-    /// the same source [`tairix_rt::ClockDelay`] reads.
-    struct IrqEventWait {
-        /// The bound controller interrupt line ([`tairix_rt::irq_bind`]).
-        handle: u64,
-    }
-
-    impl EventWait for IrqEventWait {
-        fn now_us(&self) -> u64 {
-            tairix_rt::clock_get() / 1_000
-        }
-
-        fn wait_us(&self, budget_us: u64) {
-            // A refused wait (a revoked handle) degrades to the caller's
-            // deadline check rather than spinning: the caller re-reads the
-            // clock and fails closed when the budget is spent.
-            let _ = tairix_rt::irq_wait(self.handle, budget_us.saturating_mul(1_000));
-        }
-    }
 
     /// Wait-set token for "the controller completion interrupt fired".
     const TOKEN_IRQ: u64 = 0;
@@ -292,8 +265,7 @@ mod program {
 
     /// The live controller and kernel the interface table drives.
     struct Live<'d, 'h> {
-        device: &'d mut ControllerDevice<'h>,
-        delay: ClockDelay,
+        host: &'d mut ControllerHost<'h>,
         /// The event loop's wait-set.
         set: u64,
         /// This controller's endpoint block ([`claim_urb_block`]).
@@ -310,36 +282,39 @@ mod program {
             Self: 'a;
 
         fn table_len(&self) -> usize {
-            self.device.device_table_len()
+            self.host.view().map_or(0, |core| core.device_table_len())
         }
 
         fn identity(&self, index: usize) -> Option<DeviceIdentity> {
-            self.device.device_identity(index)
+            self.host.view().ok()?.device_identity(index)
         }
 
         fn describe(&self, index: usize) -> Result<HwNode, DriverError> {
-            self.device.describe_device(index, HW_NODE_ROOT, 0)
+            self.host.view()?.describe_device(index, HW_NODE_ROOT, 0)
         }
 
         fn engine(&mut self, index: usize) -> Self::Engine<'_> {
-            self.device.engine_for(index)
+            self.host.engine_for(index)
         }
 
-        fn detach_if_gone(&mut self, index: usize) -> Result<bool, DriverError> {
-            self.device.detach_if_device_gone(index)
+        fn confirm_departure(&mut self, index: usize) -> Result<(), DriverError> {
+            self.host.confirm_departure(index)
         }
 
-        fn next_hub_change(&mut self) -> Result<HubEvent, DriverError> {
-            self.device.next_hub_change(&self.delay)
+        fn departure_settled(&self, index: usize) -> bool {
+            self.host.departure_settled(index)
         }
 
         fn faulted(&mut self) -> bool {
-            self.device.controller_faulted()
+            self.host.controller_faulted()
         }
 
         fn reset(&mut self) -> Result<(), DriverError> {
             // Which USBSTS fault bit latched is the only evidence a metal
             // capture gets for why the controller died (QEMU models no Pi USB).
+            let (usbsts, usbcmd) = self.host.device().map_or((None, None), |mut core| {
+                (core.read_usbsts(), core.read_usbcmd())
+            });
             log(
                 &LogSink,
                 &Event {
@@ -347,12 +322,12 @@ mod program {
                     id: HCD_DISCONNECT,
                     message: "usb-hcd: resetting the controller to recover it",
                     fields: &[
-                        opt_u32_field("usbsts", self.device.read_usbsts()),
-                        opt_u32_field("usbcmd", self.device.read_usbcmd()),
+                        opt_u32_field("usbsts", usbsts),
+                        opt_u32_field("usbcmd", usbcmd),
                     ],
                 },
             );
-            self.device.reset_and_reenumerate(&self.delay)
+            self.host.reset_and_reenumerate()
         }
 
         fn open_endpoint(&mut self, slot: usize) -> Option<u64> {
@@ -472,7 +447,7 @@ mod program {
                     index,
                     transfer,
                     errno,
-                } => log_urb_error(self.device, index, transfer, errno),
+                } => log_urb_error(self.host, index, transfer, errno),
                 Note::FaultDetached => {
                     log(
                         &LogSink,
@@ -488,13 +463,6 @@ mod program {
                     HCD_WAIT_ERROR,
                     Level::Warn,
                     "usb-hcd: disconnect confirmation after transfer fault failed",
-                    "err_hex",
-                    err as u64,
-                ),
-                Note::HubServiceFailed(err) => log_hex_event(
-                    HCD_WAIT_ERROR,
-                    Level::Warn,
-                    "usb-hcd: hub watch re-arm after transfer fault failed",
                     "err_hex",
                     err as u64,
                 ),
@@ -538,65 +506,36 @@ mod program {
         }
     }
 
-    /// Service every pending root-port connect/disconnect: the engine scans
-    /// the `PORTSC.CSC` latches (a `SuperSpeed` device trains directly on a
-    /// root port — on the Pi 4 the USB3 side of every jack is one — and
-    /// pulling a hub assembly clears the root port it sat on), attaches or
-    /// detaches what changed, and the published interfaces are reconciled
-    /// after each event. Loops until the scan reports quiet, since one
-    /// interrupt can carry several ports' changes; a failed service is
-    /// logged with its whole attach-fault breadcrumb and the loop stops
-    /// (the latch was consumed, so it cannot re-fire spuriously).
-    ///
-    /// Returns whether anything was attached or detached, so the caller only
-    /// pays for the post-teardown controller-fault check when a teardown
-    /// actually happened.
-    fn service_root_changes(
-        live: &mut Live<'_, '_>,
-        interfaces: &mut Interfaces<NodeBuffer>,
-    ) -> bool {
-        let mut changed = false;
-        loop {
-            match live.device.next_root_change(&live.delay) {
-                Ok(HubEvent::None) => return changed,
-                Ok(
-                    HubEvent::Attached(_) | HubEvent::HubAttached(_) | HubEvent::HubRecovered(_),
-                ) => {
-                    interfaces.reconcile(live);
-                    changed = true;
-                    log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Info,
-                            id: HCD_READY,
-                            message: "usb-hcd: root-port device attached and served",
-                            fields: &[],
-                        },
-                    );
-                }
-                Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
-                    interfaces.reconcile(live);
-                    changed = true;
-                    log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Info,
-                            id: HCD_DISCONNECT,
-                            message: "usb-hcd: root-port device disconnected, interfaces retracted",
-                            fields: &[],
-                        },
-                    );
-                }
-                Err(err) => {
-                    log_topology_service_failure(
-                        live.device,
-                        "usb-hcd: root-port hot-plug service failed",
-                        err,
-                    );
-                    return changed;
-                }
-            }
-        }
+    /// Log what one service step did to the topology.
+    fn log_topology(event: HubEvent) {
+        let (level, id, message) = match event {
+            HubEvent::Attached(_) => (Level::Info, HCD_READY, "usb-hcd: device attached and served"),
+            HubEvent::HubAttached(_) => (Level::Info, HCD_READY, "usb-hcd: hub attached and watched"),
+            HubEvent::Detached(_) => (
+                Level::Info,
+                HCD_DISCONNECT,
+                "usb-hcd: device disconnected, interface retracted",
+            ),
+            HubEvent::HubDetached(_) => (
+                Level::Info,
+                HCD_DISCONNECT,
+                "usb-hcd: hub disconnected with everything behind it",
+            ),
+            HubEvent::HubRecovered(_) => (
+                Level::Warn,
+                HCD_RECOVERY,
+                "usb-hcd: a hub's status transfer failed; its endpoint was recovered and its ports reconciled",
+            ),
+        };
+        log(
+            &LogSink,
+            &Event {
+                level,
+                id,
+                message,
+                fields: &[],
+            },
+        );
     }
 
     /// Audit a controller fault-domain edge, naming the controller's owner
@@ -632,73 +571,32 @@ mod program {
     }
 
     /// Spend the single deferred re-attach the bring-up walk owed a port it
-    /// could not serve (`SkippedPortRetry`): re-drive every connected but
-    /// unserved port, publish an interface for whatever that served, and log
-    /// the outcome.
+    /// could not serve (`SkippedPortRetry`): every connected but unserved
+    /// port is looked at again, its end reported as the walk's settle.
     ///
     /// A port skipped by the walk had its connect latch consumed there, so no
     /// hot-plug event will ever wake it again — this is the one chance a
     /// device that merely lost the boot race gets before a user has to unplug
-    /// it. A port still unserved afterwards is logged with its failing
-    /// snapshot and left alone; the retry is never re-armed, so a genuinely
-    /// broken device cannot loop.
-    fn retry_skipped_ports(live: &mut Live<'_, '_>, interfaces: &mut Interfaces<NodeBuffer>) {
-        if let Err(err) = live.device.retry_skipped_ports(&live.delay) {
-            log_hex_event(
-                HCD_WAIT_ERROR,
-                Level::Warn,
-                "usb-hcd: deferred re-attach of unserved port(s) failed",
-                "err_hex",
-                err as u64,
-            );
-        }
-        interfaces.reconcile(live);
-        if live.device.skipped_port_count() == 0 {
+    /// it. The retry is never re-armed, so a genuinely broken device cannot
+    /// loop.
+    fn retry_skipped_ports(host: &mut ControllerHost<'_>) {
+        host.retry_skipped_ports();
+    }
+
+    /// Run the deferred retry of every endpoint recovery that failed.
+    fn retry_owed_recoveries(host: &mut ControllerHost<'_>) {
+        host.retry_owed_recoveries();
+        if !host.recovery_owed() {
             log(
                 &LogSink,
                 &Event {
                     level: Level::Info,
-                    id: HCD_READY,
-                    message: "usb-hcd: deferred re-attach served every connected port",
+                    id: HCD_RECOVERY,
+                    message: "usb-hcd: deferred endpoint recovery settled",
                     fields: &[],
                 },
             );
-            return;
         }
-        log_skipped_ports(live.device);
-    }
-
-    /// Run the deferred retry of every endpoint recovery that failed, log its
-    /// outcome, and publish or retract whatever it served or freed.
-    fn retry_owed_recoveries(
-        live: &mut Live<'_, '_>,
-        interfaces: &mut Interfaces<NodeBuffer>,
-        health: &mut ControllerHealth,
-    ) {
-        match live.device.retry_owed_recoveries(&live.delay) {
-            Err(err) => {
-                log_topology_service_failure(
-                    live.device,
-                    "usb-hcd: deferred endpoint recovery failed",
-                    err,
-                );
-            }
-            Ok(()) if !live.device.recovery_owed() => {
-                log(
-                    &LogSink,
-                    &Event {
-                        level: Level::Info,
-                        id: HCD_RECOVERY,
-                        message: "usb-hcd: deferred endpoint recovery settled",
-                        fields: &[],
-                    },
-                );
-            }
-            Ok(()) => {}
-        }
-        interfaces.reconcile(live);
-        // A teardown the retry ran can leave the controller halted.
-        interfaces.recover(health, live);
     }
 
     /// Bind the URB transport endpoint `id`. Binding it grant-restricted
@@ -739,29 +637,13 @@ mod program {
         None
     }
 
-    /// Run the engine's consumer-independent report pump on a controller
-    /// interrupt: capture every served interrupt-IN device's reports into the
-    /// per-device buffers and keep every such endpoint armed, independent of
-    /// any class-driver URB ([`tairix_usb::device::UsbDevice::pump_reports`]).
-    ///
-    /// A drain fault and any newly dropped reports (a class driver that has
-    /// stalled past the buffer depth) are logged so a stuck consumer is never
-    /// silent; neither is fatal to the loop — the pump is best-effort and the
-    /// hot-plug watch owns device teardown.
-    fn pump_reports(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        reported_drops: &mut u64,
-    ) {
-        if let Err(err) = device.pump_reports() {
-            log_hex_event(
-                HCD_WAIT_ERROR,
-                Level::Warn,
-                "usb-hcd: report pump failed",
-                "err_hex",
-                err as u64,
-            );
-        }
-        let dropped = device.dropped_report_total();
+    /// Log the interrupt reports dropped since the last look, because a class
+    /// driver stalled past the buffer depth, so a stuck consumer is never
+    /// silent.
+    fn note_dropped_reports(host: &ControllerHost<'_>, reported_drops: &mut u64) {
+        let dropped = host
+            .view()
+            .map_or(*reported_drops, |core| core.dropped_report_total());
         if dropped > *reported_drops {
             log_hex_event(
                 HCD_WAIT_ERROR,
@@ -771,6 +653,41 @@ mod program {
                 dropped,
             );
             *reported_drops = dropped;
+        }
+    }
+
+    /// Log where each abandoned transfer's stopped endpoint stood against it:
+    /// a device still working on the transfer is told from a completion the
+    /// host lost.
+    fn log_abandon_reports(host: &ControllerHost<'_>) {
+        let u = tairix_log::FieldValue::UnsignedInt;
+        while let Some((index, at)) = host
+            .device()
+            .ok()
+            .and_then(|mut core| core.take_abandon_report())
+        {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Warn,
+                    id: HCD_ABANDON_SETTLED,
+                    message: "usb-hcd: an abandoned transfer's endpoint stopped",
+                    fields: &[
+                        Field {
+                            key: "index",
+                            value: u(index as u64),
+                        },
+                        Field {
+                            key: "dci",
+                            value: u(u64::from(at.dci)),
+                        },
+                        Field {
+                            key: "td_progress",
+                            value: tairix_log::FieldValue::Str(at.progress.as_str()),
+                        },
+                    ],
+                },
+            );
         }
     }
 
@@ -790,9 +707,12 @@ mod program {
     /// engine's latched raw completion code for the endpoint it ran on — the
     /// report endpoint's for a report poll, the bulk pipe's for a bulk
     /// transfer — so a metal capture shows the controller's verdict
-    /// (transaction error, stall, babble, …) behind the coarse errno.
+    /// (transaction error, stall, babble, …) behind the coarse errno. One
+    /// abandoned at its deadline carries its endpoint's EP State instead;
+    /// where the controller stood against it follows once the endpoint
+    /// stops ([`log_abandon_reports`]).
     fn log_urb_error(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
+        host: &ControllerHost<'_>,
         index: usize,
         transfer: UsbTransferType,
         errno: Errno,
@@ -806,129 +726,60 @@ mod program {
             (HCD_URB_FAILED, "usb-hcd: URB failed")
         };
         // A transfer abandoned at its deadline ended with no completion.
-        let fault_code = match transfer {
+        let fault_code = host.view().map_or(0, |core| match transfer {
             _ if errno == Errno::TimedOut => 0,
-            UsbTransferType::Bulk => device.last_bulk_fault_code(index),
-            UsbTransferType::Interrupt => device.last_report_fault_code(index),
+            UsbTransferType::Bulk => core.last_bulk_fault_code(index),
+            UsbTransferType::Interrupt => core.last_report_fault_code(index),
             UsbTransferType::Control => 0,
-        };
+        });
+        let ep_state = (errno == Errno::TimedOut)
+            .then(|| host.view().ok()?.abandoned_ep_state(index))
+            .flatten();
+        let u = tairix_log::FieldValue::UnsignedInt;
         log(
             &LogSink,
             &Event {
-                level: Level::Warn,
+                level: urb_failure_level(errno),
                 id,
                 message,
                 fields: &[
                     Field {
                         key: "index",
-                        value: tairix_log::FieldValue::UnsignedInt(index as u64),
+                        value: u(index as u64),
                     },
                     Field {
                         key: "errno",
-                        value: tairix_log::FieldValue::UnsignedInt(errno as u64),
+                        value: u(errno as u64),
                     },
                     Field {
                         key: "fault_code",
-                        value: tairix_log::FieldValue::UnsignedInt(u64::from(fault_code)),
+                        value: u(u64::from(fault_code)),
+                    },
+                    Field {
+                        key: "ep_state",
+                        value: ep_state
+                            .map_or(tairix_log::FieldValue::Null, |state| u(u64::from(state))),
                     },
                 ],
             },
         );
     }
 
-    /// Emit a topology (hub status-change or root-port) service failure
-    /// with its **whole** breadcrumb: the coarse error alone cannot name
-    /// the failing hot-plug step, so a failed attach's snapshot — the
-    /// stage it failed in, the last observed completion/event-type/reject,
-    /// the targeted port and its final observed `wPortStatus` (`0` for a
-    /// root port, which has none) — is logged when one exists (the
-    /// snapshot is taken at the failure, before the cleanup transfers
-    /// overwrite the live state). A failure outside an attach (a status
-    /// read, retire, or watch re-arm) logs the live diagnostics instead.
-    /// This is how a metal capture localises a failed hot-plug (QEMU
-    /// models no Pi USB).
-    fn log_topology_service_failure(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        message: &'static str,
-        err: tairix_abi::DriverError,
-    ) {
-        let u = |v: u64| tairix_log::FieldValue::UnsignedInt(v);
-        let usbsts = opt_u32_field("usbsts", device.read_usbsts());
-        let event = |fields: &[Field<'_>]| {
-            log(
-                &LogSink,
-                &Event {
-                    level: Level::Warn,
-                    id: HCD_WAIT_ERROR,
-                    message,
-                    fields,
-                },
-            );
-        };
-        if let Some(fault) = device.last_attach_fault() {
-            event(&[
-                Field {
-                    key: "err",
-                    value: u(err as u64),
-                },
-                Field {
-                    key: "attach_port",
-                    value: u(u64::from(fault.port)),
-                },
-                Field {
-                    key: "enum_stage",
-                    value: u(u64::from(fault.stage.as_u8())),
-                },
-                Field {
-                    key: "completion",
-                    value: u(u64::from(fault.completion)),
-                },
-                Field {
-                    key: "event_type",
-                    value: u(u64::from(fault.event_type)),
-                },
-                Field {
-                    key: "reject",
-                    value: u(u64::from(fault.reject)),
-                },
-                Field {
-                    key: "port_status",
-                    value: u(u64::from(fault.port_status)),
-                },
-                usbsts,
-            ]);
-        } else {
-            event(&[
-                Field {
-                    key: "err",
-                    value: u(err as u64),
-                },
-                Field {
-                    key: "enum_stage",
-                    value: u(u64::from(device.enum_stage().as_u8())),
-                },
-                Field {
-                    key: "completion",
-                    value: u(u64::from(device.last_completion_code())),
-                },
-                Field {
-                    key: "event_type",
-                    value: u(u64::from(device.last_event_type())),
-                },
-                Field {
-                    key: "reject",
-                    value: u(u64::from(device.last_reject_reason())),
-                },
-                usbsts,
-            ]);
-        }
+    /// A service step that could not run: the event ring could not be read.
+    fn log_service_failure(err: DriverError) {
+        log_hex_event(
+            HCD_WAIT_ERROR,
+            Level::Warn,
+            "usb-hcd: controller service step failed",
+            "err_hex",
+            err as u64,
+        );
     }
 
     /// Emit the one-shot controller bring-up failure with its **whole**
     /// breadcrumb: QEMU models no Pi USB, so this diagnostic is how a metal
-    /// run localises the stall. The phase alone cannot separate a timeout
-    /// from a rejected completion or name the failing enumeration step, so
-    /// the phase-specific controller state is always included.
+    /// run localises the stall, the phase-specific controller state always
+    /// included.
     fn log_bringup_failure(err: &tairix_drv_bus_usb::bringup::ControllerBringupError) {
         let phase = Field {
             key: "phase",
@@ -962,28 +813,11 @@ mod program {
                 opt_u32_field("usbcmd", err.usbcmd),
                 opt_u32_field("usbsts", err.usbsts),
             ]),
-            BringupPhase::Enumerate => event(&[
+            BringupPhase::PortPower => event(&[
                 phase,
                 error,
-                Field {
-                    key: "enum_stage",
-                    value: tairix_log::FieldValue::UnsignedInt(u64::from(
-                        err.enum_stage.map_or(0, EnumStage::as_u8),
-                    )),
-                },
-                Field {
-                    key: "completion",
-                    value: tairix_log::FieldValue::UnsignedInt(u64::from(err.last_completion)),
-                },
-                Field {
-                    key: "event_type",
-                    value: tairix_log::FieldValue::UnsignedInt(u64::from(err.last_event_type)),
-                },
-                Field {
-                    key: "reject",
-                    value: tairix_log::FieldValue::UnsignedInt(u64::from(err.last_reject)),
-                },
-                opt_u32_field("port1_portsc", err.port1_portsc),
+                opt_u32_field("usbcmd", err.usbcmd),
+                opt_u32_field("usbsts", err.usbsts),
             ]),
             BringupPhase::Setup | BringupPhase::BarMap | BringupPhase::ControllerStart => {
                 event(&[phase, error]);
@@ -991,20 +825,23 @@ mod program {
         }
     }
 
-    /// Emit the post-bring-up topology summary, so a metal capture shows
-    /// what the walk actually served — and warn when a connected device was
-    /// present but failed enumeration and was skipped, which otherwise looks
-    /// exactly like an empty port.
-    fn log_bringup_summary(device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>) {
-        let live = (0..device.device_table_len())
-            .filter(|&index| device.device_live(index))
+    /// Emit the topology a walk settled on, so a metal capture shows what it
+    /// actually served — and warn when a connected device was present but
+    /// failed enumeration and was skipped, which otherwise looks exactly like
+    /// an empty port.
+    fn log_walk_settled(host: &ControllerHost<'_>) {
+        let Ok(mut core) = host.device() else {
+            return;
+        };
+        let live = (0..core.device_table_len())
+            .filter(|&index| core.device_live(index))
             .count();
         log(
             &LogSink,
             &Event {
                 level: Level::Info,
                 id: HCD_READY,
-                message: "usb-hcd: bring-up walk complete",
+                message: "usb-hcd: walk of the ports complete",
                 fields: &[
                     Field {
                         key: "devices",
@@ -1012,25 +849,21 @@ mod program {
                     },
                     Field {
                         key: "hub_watch",
-                        value: tairix_log::FieldValue::Bool(device.hub_watch_active()),
+                        value: tairix_log::FieldValue::Bool(core.hub_watch_active()),
                     },
                 ],
             },
         );
-        log_skipped_ports(device);
+        log_skipped_ports(&mut core);
     }
 
     /// Warn that connected device(s) were present but left unserved, naming
     /// the **first failing port's snapshot** — the port, the enumeration step
-    /// it failed in, and the completion/event-type/reject codes the failing
-    /// transfer saw, captured at the failure before the cleanup transfers
-    /// overwrote the live state.
-    ///
-    /// The live engine breadcrumb is not usable here: the walk continues past
-    /// a skip, so after a multi-port controller it describes whichever port
-    /// ran *last*, not the one that failed. QEMU models no Pi USB, so this is
-    /// the diagnostic a metal capture localises an unserved device with.
-    fn log_skipped_ports(device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>) {
+    /// it failed in, and the completion and event type the failing command or
+    /// transfer ended with, or that its deadline did. QEMU models no Pi USB,
+    /// so this is the diagnostic a metal capture localises an unserved device
+    /// with.
+    fn log_skipped_ports(device: &mut tairix_usb::device::UsbDevice<RegisterWindow, SlabBank<'_>>) {
         if device.skipped_port_count() == 0 {
             return;
         }
@@ -1040,7 +873,7 @@ mod program {
             value: u(u64::from(device.skipped_port_count())),
         };
         let message = "usb-hcd: connected device(s) failed enumeration and were skipped";
-        match device.last_attach_fault() {
+        match device.take_attach_fault() {
             Some(fault) => {
                 log(
                     &LogSink,
@@ -1071,8 +904,8 @@ mod program {
                                 value: u(u64::from(fault.event_type)),
                             },
                             Field {
-                                key: "reject",
-                                value: u(u64::from(fault.reject)),
+                                key: "timed_out",
+                                value: tairix_log::FieldValue::Bool(fault.timed_out),
                             },
                             Field {
                                 key: "port_status",
@@ -1097,16 +930,16 @@ mod program {
     }
 
     /// Enter the strict-priority real-time scheduling class so the
-    /// controller-interrupt report pump ([`pump_reports`]) preempts CPU-bound
-    /// work and cannot be starved: under a load like `stress --cpu N` the
-    /// IRQ-woken wake that drains the interrupt-IN endpoints and re-arms them
-    /// must run before the armed transfer ring fills, no matter how busy
-    /// userland is, or reports are dropped at the hardware (the on-metal
-    /// "missed keypresses under load" defect; `plans/USB.md`).
+    /// interrupt-woken service step preempts CPU-bound work and cannot be
+    /// starved: under a load like `stress --cpu N` the step that drains the
+    /// interrupt-IN endpoints and re-arms them must run before the armed
+    /// transfer ring fills, no matter how busy userland is, or reports are
+    /// dropped at the hardware (the on-metal "missed keypresses under load"
+    /// defect; `plans/USB.md`).
     ///
     /// The manifest grants `CAP_SCHED_REALTIME`; a build that somehow runs
-    /// without it degrades gracefully to fair scheduling — the report pump
-    /// still runs, only without the strict guarantee — rather than refusing to
+    /// without it degrades gracefully to fair scheduling — the service still
+    /// runs, only without the strict guarantee — rather than refusing to
     /// start.
     fn enter_realtime_class() {
         let rt = tairix_rt::sched_set_realtime(true);
@@ -1116,7 +949,7 @@ mod program {
                 &Event {
                     level: Level::Info,
                     id: HCD_READY,
-                    message: "usb-hcd: entered real-time scheduling class (report pump cannot be starved)",
+                    message: "usb-hcd: entered real-time scheduling class (report capture cannot be starved)",
                     fields: &[],
                 },
             );
@@ -1133,13 +966,11 @@ mod program {
 
     /// Bind the controller's interrupt line, returning the kernel handle.
     ///
-    /// Called **before** the controller is brought up: the engine's
-    /// synchronous event waits park on this line (its interrupter is enabled
-    /// as part of starting the controller), so it must already be kernel-owned
-    /// — a completion posted the moment interrupts are enabled then latches
-    /// instead of going astray. [`None`] refuses the controller before any
-    /// register is touched: one with no usable interrupt line cannot be served
-    /// event-driven.
+    /// Called **before** the controller is brought up, whose interrupter is
+    /// enabled as part of starting it, so a completion posted the moment
+    /// interrupts are enabled latches instead of going astray. [`None`]
+    /// refuses the controller before any register is touched: one with no
+    /// usable interrupt line cannot be served event-driven.
     fn bind_controller_irq(line: Option<u32>) -> Option<u64> {
         let Some(line) = line else {
             log(
@@ -1209,40 +1040,6 @@ mod program {
         Some(set)
     }
 
-    /// Publish an interface node for every device enumerated at bring-up,
-    /// then announce that the controller is serving.
-    ///
-    /// A cold boot with nothing plugged in is a first-class state: the
-    /// controller comes up with no node, and the first hot-plug connect —
-    /// delivered through the onboard hub's status-change watch, or a root-port
-    /// connect — publishes from the event loop.
-    fn publish_initial_interfaces(
-        live: &mut Live<'_, '_>,
-        interfaces: &mut Interfaces<NodeBuffer>,
-    ) {
-        interfaces.reconcile(live);
-        if !live.device.any_device_live() {
-            log(
-                &LogSink,
-                &Event {
-                    level: Level::Info,
-                    id: HCD_READY,
-                    message: "usb-hcd: controller up, awaiting first device connect",
-                    fields: &[],
-                },
-            );
-        }
-        log(
-            &LogSink,
-            &Event {
-                level: Level::Info,
-                id: HCD_READY,
-                message: "usb-hcd: controller up, serving URB transport",
-                fields: &[],
-            },
-        );
-    }
-
     /// Tell the kernel every device present as the controller came up is
     /// published — the walk's own and the one re-attach owed a port it could
     /// not serve — so a device published later arrived on a running machine.
@@ -1268,27 +1065,21 @@ mod program {
         let Ok(resources) = derive_controller_resources(host.resources()) else {
             return end(DriverExit::NoResources, &[]);
         };
-        let delay = ClockDelay::new();
         let Some(irq_handle) = bind_controller_irq(host.irq_line()) else {
             return end(DriverExit::BringupFailed, &[]);
         };
-        let wait = IrqEventWait { handle: irq_handle };
-
-        let mut device = match bring_up_controller_diagnostic(
+        let mut controller = match bring_up_controller_diagnostic(
             &host,
-            &delay,
-            &wait,
             resources.bar_base,
             resources.bar_len,
             resources.dma_aperture_top,
         ) {
-            Ok(device) => device,
+            Ok(controller) => controller,
             Err(err) => {
                 log_bringup_failure(&err);
                 return end(DriverExit::BringupFailed, &[]);
             }
         };
-        log_bringup_summary(&mut device);
 
         let Some(set) = create_event_set(irq_handle) else {
             return end(DriverExit::NoService, &[]);
@@ -1303,45 +1094,42 @@ mod program {
             return end(DriverExit::NoService, &[]);
         };
         let mut live = Live {
-            device: &mut device,
-            delay,
+            host: &mut controller,
             set,
             urb_base,
             instance: origin.proc_id(),
         };
-        let mut interfaces = Interfaces::new();
-        publish_initial_interfaces(&mut live, &mut interfaces);
 
         // The owner id names the controller in the audit log: its own
         // discovered endpoint block, never a board constant.
         let controller_owner = u32::try_from(urb_base & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-        let mut controller_health = ControllerHealth::new(controller_owner);
-
-        // A port the walk could not serve had its connect latch consumed
-        // there, so no hot-plug event will ever wake it again. Owe it one
-        // deferred re-attach so a device that merely lost the boot race comes
-        // up without the user unplugging it.
-        let mut port_retry = SkippedPortRetry::default();
-        if live.device.skipped_port_count() > 0 {
-            port_retry.arm(tairix_rt::clock_get());
-        } else {
-            settle();
-        }
-
-        serve_events(
-            &mut live,
-            &mut interfaces,
-            &mut controller_health,
-            &mut port_retry,
-        )
+        let mut health = ControllerHealth::new(controller_owner);
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: HCD_READY,
+                message: "usb-hcd: controller up, serving URB transport",
+                fields: &[],
+            },
+        );
+        serve_events(&mut live, &mut Interfaces::new(), &mut health)
     }
 
-    /// The asynchronous event loop: park — unbounded, with no periodic wakes —
-    /// until a transport endpoint or the controller interrupt is ready, never
-    /// spinning a quiet controller. Downstream hot-plug arrives through the
-    /// watched hub's status-change interrupt-IN completion; a root-port
-    /// connect/disconnect through the controller's Port Status Change
-    /// interrupt.
+    /// Where the bring-up stands: its walk, then the one deferred re-attach
+    /// of a port the walk could not serve. Once both are done the kernel is
+    /// told every device present at boot is published.
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum Boot {
+        Walking,
+        Retrying,
+        Settled,
+    }
+
+    /// The asynchronous event loop: serve the engine, act on what it did,
+    /// and park — never spinning a quiet controller — until the controller
+    /// interrupts, a transport endpoint is ready, or the earliest deadline an
+    /// operation, a held URB or a retry owes is due.
     ///
     /// Returns the process exit code: once the controller fails closed, or
     /// once the wait-set is torn down under us.
@@ -1349,45 +1137,73 @@ mod program {
         live: &mut Live<'_, '_>,
         interfaces: &mut Interfaces<NodeBuffer>,
         health: &mut ControllerHealth,
-        port_retry: &mut SkippedPortRetry,
     ) -> i32 {
-        // Running total of interrupt reports the engine has dropped because a
-        // class driver stalled past the buffer depth; logged (once per new
-        // loss) so a genuinely stuck consumer is never silent.
         let mut reported_drops = 0u64;
-        let mut recovery_retry = OneShot::default();
+        let mut retries = Retries::default();
+        let mut boot = Boot::Walking;
         loop {
-            let mut token = 0u64;
             let now_ns = tairix_rt::clock_get();
-            // A controller recovery owns the devices while it runs, and its
-            // reset settles whatever their recoveries owed.
-            if !recovery_retry.is_armed()
-                && !health.is_recovering()
-                && !health.is_failed_closed()
-                && live.device.recovery_owed()
-            {
-                recovery_retry.arm(now_ns, RECOVERY_SETTLE_NS);
-                log(
-                    &LogSink,
-                    &Event {
-                        level: Level::Warn,
-                        id: HCD_RECOVERY,
-                        message: "usb-hcd: an endpoint recovery failed; retrying it once the path settles",
-                        fields: &[],
-                    },
-                );
+            let (engine_deadline, torn_down) = match live.host.service(now_ns) {
+                Ok(serviced) => {
+                    act_on(
+                        &serviced,
+                        live,
+                        interfaces,
+                        health,
+                        &mut retries,
+                        &mut boot,
+                        now_ns,
+                    );
+                    let torn_down = serviced.topology.iter().any(|event| {
+                        matches!(event, HubEvent::Detached(_) | HubEvent::HubDetached(_))
+                    });
+                    (serviced.next_deadline, torn_down)
+                }
+                Err(err) => {
+                    log_service_failure(err);
+                    (None, false)
+                }
+            };
+            note_dropped_reports(live.host, &mut reported_drops);
+            log_abandon_reports(live.host);
+            let serving = !(health.is_recovering() || health.is_failed_closed());
+            if serving {
+                interfaces.drive_busy(live);
+                interfaces.deliver_streams(live);
             }
-            // Park only as long as the nearest armed one-shot allows: the
-            // controller's grace window — a faulted controller raises no
-            // further interrupt (xHCI §4.24.1), so it must be retried and
-            // failed closed off a timer — the single deferred re-attach owed
-            // to a port the walk could not serve, and the deferred retry of a
-            // failed endpoint recovery. With none armed the loop parks
-            // unbounded (never a spin).
+            // A teardown can leave the controller halted with a latched Host
+            // System Error on the Pi 4 VL805, and a faulted controller raises
+            // no further interrupt (xHCI §4.24.1). Only a teardown pays for
+            // the register read; an attempt that failed is retried off the
+            // grace timer, never on every pass.
+            let faulted =
+                live.host.command_ring_dead() || (torn_down && live.host.controller_faulted());
+            if serving && faulted {
+                interfaces.recover(health, live);
+            }
+            run_due_retries(live, interfaces, health, &mut retries, now_ns);
+            if interfaces.next_deadline().is_some_and(|at| at <= now_ns) {
+                interfaces.expire_overdue(now_ns, health, live);
+            }
+            // Nothing is retried below a controller failed closed; its reason
+            // is already logged and every node retracted.
+            if health.is_failed_closed() {
+                return end(DriverExit::DeviceFault, &[]);
+            }
+            if live.host.work_ready() {
+                continue;
+            }
+            // A reset's walk owns the recovery while it runs, so the grace
+            // window bounds the park only between attempts.
+            let grace = if interfaces.is_resetting() {
+                None
+            } else {
+                health.wait_timeout(now_ns)
+            };
             let timeout = [
-                health.wait_timeout(now_ns),
-                port_retry.wait_timeout(now_ns),
-                recovery_retry.wait_timeout(now_ns),
+                engine_deadline.map(|at| at.saturating_sub(now_ns)),
+                grace,
+                retries.wait_timeout(now_ns),
                 interfaces
                     .next_deadline()
                     .map(|at| at.saturating_sub(now_ns)),
@@ -1396,12 +1212,11 @@ mod program {
             .flatten()
             .min()
             .unwrap_or(WAITSET_TIMEOUT_NONE);
+            let mut token = 0u64;
             let wait_ret = tairix_rt::waitset_wait(live.set, timeout, &mut token);
-            let timed_out = if wait_ret >= 0 {
+            if wait_ret >= 0 {
                 match token {
-                    TOKEN_IRQ => {
-                        service_controller_interrupt(live, interfaces, health, &mut reported_drops);
-                    }
+                    TOKEN_IRQ => service_controller_interrupt(live, interfaces, health),
                     // Registered as `TOKEN_URB_BASE + slot`.
                     token => {
                         let slot = token
@@ -1412,10 +1227,7 @@ mod program {
                         }
                     }
                 }
-                false
-            } else if Errno::from_syscall(wait_ret) == Errno::TimedOut {
-                true
-            } else {
+            } else if Errno::from_syscall(wait_ret) != Errno::TimedOut {
                 log_hex_event(
                     HCD_WAIT_ERROR,
                     Level::Error,
@@ -1425,181 +1237,127 @@ mod program {
                 );
                 interfaces.retract_all(live);
                 return end(DriverExit::ServeFailed, &[]);
-            };
-            let now_ns = tairix_rt::clock_get();
-            if timer_work_due(timed_out, now_ns, (health, port_retry, &recovery_retry)) {
-                // Spend each deferred retry whenever its deadline has passed,
-                // even if the controller's own recovery runs instead: an
-                // overdue one-shot left armed would bound every later park at
-                // zero and spin the loop.
-                let retry_due = port_retry.take_if_due(now_ns);
-                let recovery_due = recovery_retry.take_if_due(now_ns);
-                // A controller recovery re-runs the whole bring-up walk, which
-                // subsumes both retries.
-                let attempted = interfaces.recover(health, live);
-                let serving = !attempted && !health.is_failed_closed();
-                if retry_due && serving {
-                    retry_skipped_ports(live, interfaces);
-                }
-                if recovery_due && serving {
-                    retry_owed_recoveries(live, interfaces, health);
-                }
-                if retry_due {
-                    settle();
-                }
-                // What a retry or recovery above parked is delivered now,
-                // not left for an unrelated interrupt.
-                if serving {
-                    interfaces.drive_busy(health, live);
-                }
-            }
-            if interfaces.next_deadline().is_some_and(|at| at <= now_ns) {
-                interfaces.expire_overdue(now_ns, health, live);
-            }
-            // Nothing is retried below a controller failed closed; its reason
-            // is already logged and every node retracted.
-            if health.is_failed_closed() {
-                return end(DriverExit::DeviceFault, &[]);
             }
         }
     }
 
-    /// Service the controller interrupt: acknowledge it, drain the event ring
-    /// **once** into the per-consumer buffers, then dispatch from those buffers
-    /// — hot-plug, then the buffered reports handed to any outstanding URB —
-    /// recovering the controller around each teardown path that can latch a
-    /// fault.
-    ///
-    /// Draining before dispatching is what keeps the ring walked once per
-    /// interrupt with one shared classifier, rather than each consumer walking
-    /// it again with its own copy of that decision.
-    fn service_controller_interrupt(
+    /// Act on what one service step did: publish and retract the nodes its
+    /// topology changes call for, and close the walk that settled.
+    fn act_on(
+        serviced: &Serviced,
         live: &mut Live<'_, '_>,
         interfaces: &mut Interfaces<NodeBuffer>,
         health: &mut ControllerHealth,
-        reported_drops: &mut u64,
+        retries: &mut Retries,
+        boot: &mut Boot,
+        now_ns: u64,
     ) {
-        // Acknowledge IMAN.IP before draining so a completion posted during
-        // the drain re-asserts rather than being lost. Event Handler Busy is
-        // released only by the per-event ERDP advance the drain performs,
-        // never by a standalone write on an empty ring: writing ERDP while the
-        // controller still has an un-dequeued event re-asserts immediately and
-        // spins the loop, while a per-event advance only ever clears EHB once
-        // the ring is genuinely caught up.
-        // The acknowledgement's single USBSTS read also carries the fault and
-        // port-change latches, so the whole service needs no further read of
-        // it. A controller already faulted when we woke raises no further
-        // interrupt, so recover before touching anything else.
-        let faulted = live
-            .device
-            .acknowledge_interrupt()
-            .is_ok_and(|status| status.faulted);
-        if faulted && interfaces.recover(health, live) {
+        if !serviced.topology.is_empty() {
+            for &event in &serviced.topology {
+                log_topology(event);
+            }
+            // A reset's walk is matched against the nodes once it settles.
+            if !interfaces.is_resetting() {
+                interfaces.reconcile(live);
+            }
+        }
+        if !serviced.settled {
             return;
         }
-        // Nothing is served through a controller whose last reset did not
-        // bring it back — the grace one-shot owns the next attempt — nor
-        // through one failed closed.
-        if health.is_recovering() || health.is_failed_closed() {
-            return;
-        }
-        // Drain the event ring once, here, into the per-consumer buffers: every
-        // served interrupt-IN device's reports into its FIFO (with its endpoint
-        // re-armed), each watched hub's status-change completion into its parked
-        // slot, bulk completions into their FIFOs, and a Port Status Change
-        // Event into the root-scan arming. Capturing reports off the interrupt
-        // rather than only when a class driver submits is what makes the report
-        // path immune to a CPU-starved class driver — no report is lost merely
-        // because the software above it was not scheduled — and it covers every
-        // interrupt-IN device the controller serves, not just the one whose URB
-        // happens to be in flight. Everything below dispatches from those
-        // buffers rather than walking the ring again.
-        pump_reports(live.device, reported_drops);
-        // Hot-plug. Root-port connects/disconnects come from the `PORTSC.CSC`
-        // latches (a `SuperSpeed` device trains directly on a root port;
-        // pulling a hub assembly clears the root port it sat on — either way
-        // the change stays latched even when its Port Status Change Event was
-        // drained by an engine wait). Then a watched hub's status-change report
-        // drives downstream connect/disconnect. Both leave the controller up.
-        let mut topology_changed = service_root_changes(live, interfaces);
-        // Every hub with a report parked is serviced, not just the first: a
-        // hub's status-change endpoint is re-armed only once its report is
-        // serviced, so a second reporting hub left until "the next interrupt"
-        // may never get one. Bounded by the watched-hub count — each keeps one
-        // status transfer outstanding, so that is every report the drain can
-        // have parked — which stops a flapping hub whose endpoint re-completes
-        // during each service from holding this loop and starving the other
-        // devices' URBs.
-        for _ in 0..live.device.watched_hub_count() {
-            match live.device.next_hub_change(&live.delay) {
-                Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
-                    // A fresh leaf device, or a fresh hub tier with the
-                    // devices enumerated behind it.
-                    interfaces.reconcile(live);
-                    topology_changed = true;
+        interfaces.finish_recovery(health, live);
+        log_walk_settled(live.host);
+        match *boot {
+            Boot::Walking => {
+                let (skipped, any) = live.host.view().map_or((0, false), |core| {
+                    (core.skipped_port_count(), core.any_device_live())
+                });
+                if !any {
                     log(
                         &LogSink,
                         &Event {
                             level: Level::Info,
                             id: HCD_READY,
-                            message: "usb-hcd: hub-port device attached and served",
+                            message: "usb-hcd: controller up, awaiting first device connect",
                             fields: &[],
                         },
                     );
                 }
-                Ok(HubEvent::Detached(_) | HubEvent::HubDetached(_)) => {
-                    // A vanished leaf device, or a vanished hub tier with
-                    // everything behind it.
-                    interfaces.reconcile(live);
-                    topology_changed = true;
-                    log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Info,
-                            id: HCD_DISCONNECT,
-                            message: "usb-hcd: device disconnected, interface retracted",
-                            fields: &[],
-                        },
-                    );
-                }
-                Ok(HubEvent::HubRecovered(_)) => {
-                    interfaces.reconcile(live);
-                    topology_changed = true;
-                    log(
-                        &LogSink,
-                        &Event {
-                            level: Level::Warn,
-                            id: HCD_RECOVERY,
-                            message: "usb-hcd: a hub's status transfer failed; its endpoint was recovered and its ports reconciled",
-                            fields: &[],
-                        },
-                    );
-                }
-                Ok(HubEvent::None) => break,
-                Err(err) => {
-                    log_topology_service_failure(
-                        live.device,
-                        "usb-hcd: hub status-change service failed",
-                        err,
-                    );
-                    break;
+                if skipped > 0 {
+                    retries.arm_port(now_ns);
+                    *boot = Boot::Retrying;
+                } else {
+                    settle();
+                    *boot = Boot::Settled;
                 }
             }
+            Boot::Retrying if !retries.port_pending() => {
+                settle();
+                *boot = Boot::Settled;
+            }
+            Boot::Retrying | Boot::Settled => {}
         }
-        // A disconnect-handling teardown above (a hub status-change detach or
-        // a hub-assembly detach) can leave the controller halted with a
-        // latched Host System Error on the Pi 4 VL805; recover before
-        // servicing so the re-plug is still seen. Only a teardown can latch it,
-        // so a routine report interrupt pays nothing to check.
-        if topology_changed && interfaces.recover(health, live) {
-            return;
+    }
+
+    /// Arm a failed endpoint recovery's retry, and run each retry whose
+    /// deadline has passed: spending it even when a controller recovery runs
+    /// instead, since an overdue one-shot left armed would bound every later
+    /// park at zero and spin the loop.
+    fn run_due_retries(
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
+        health: &mut ControllerHealth,
+        retries: &mut Retries,
+        now_ns: u64,
+    ) {
+        let serving =
+            !(interfaces.is_resetting() || health.is_recovering() || health.is_failed_closed());
+        if serving && live.host.recovery_owed() && retries.arm_recovery(now_ns) {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Warn,
+                    id: HCD_RECOVERY,
+                    message:
+                        "usb-hcd: an endpoint recovery failed; retrying it once the path settles",
+                    fields: &[],
+                },
+            );
         }
-        // Hand the buffered reports to any held URB: a drained completion may
-        // satisfy any transport. A transfer fault that proves an unplug
-        // recovers the controller its teardown may have halted.
-        interfaces.drive_busy(health, live);
-        if !health.is_recovering() && !health.is_failed_closed() {
-            interfaces.deliver_streams(live);
+        if health.wait_timeout(now_ns).is_some_and(|left| left == 0) {
+            interfaces.recover(health, live);
+        }
+        // A controller recovery re-walks every port, which subsumes both.
+        let serving = serving && !interfaces.is_resetting();
+        let due = retries.take_due(now_ns);
+        if due.port && serving {
+            retry_skipped_ports(live.host);
+        }
+        if due.recovery && serving {
+            retry_owed_recoveries(live.host);
+        }
+    }
+
+    /// Acknowledge the controller interrupt. The acknowledgement's single
+    /// `USBSTS` read also carries the fault latch: a controller already
+    /// faulted when we woke raises no further interrupt, so it is recovered
+    /// here. The service step at the top of the loop does the rest.
+    ///
+    /// `IMAN.IP` is acknowledged before the ring is drained so a completion
+    /// posted during the drain re-asserts rather than being lost; Event
+    /// Handler Busy is released only by the per-event `ERDP` advance the
+    /// drain performs, never by a standalone write on an empty ring.
+    fn service_controller_interrupt(
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
+        health: &mut ControllerHealth,
+    ) {
+        let faulted = live
+            .host
+            .device()
+            .and_then(|mut core| core.acknowledge_interrupt())
+            .is_ok_and(|status| status.faulted);
+        if faulted && !health.is_recovering() {
+            interfaces.recover(health, live);
         }
     }
 

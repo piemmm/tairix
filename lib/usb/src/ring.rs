@@ -112,6 +112,45 @@ impl ProducerRing {
         (slot + 1) % self.data_slots()
     }
 
+    /// Device-visible address of data slot `slot`.
+    fn address_of(&self, slot: usize) -> Option<u64> {
+        slot.checked_mul(crate::trb::TRB_LEN)
+            .and_then(|at| u64::try_from(at).ok())
+            .and_then(|at| self.base.checked_add(at))
+    }
+
+    /// Data slot at device address `address`, `None` for one that is not.
+    fn slot_at(&self, address: u64) -> Option<usize> {
+        let offset = address.checked_sub(self.base)?;
+        let len = crate::trb::TRB_LEN as u64;
+        if offset % len != 0 {
+            return None;
+        }
+        usize::try_from(offset / len)
+            .ok()
+            .filter(|&slot| slot < self.data_slots())
+    }
+
+    /// Device address of the ring's first slot, where its wrap link points.
+    #[must_use]
+    pub const fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// Device address of the wrap Link TRB.
+    #[must_use]
+    pub fn link_address(&self) -> Option<u64> {
+        self.address_of(self.link_slot())
+    }
+
+    /// Device address of the TRB the consumer takes after the one at
+    /// `address`, the wrap link followed; `None` when `address` is no data
+    /// slot of this ring.
+    #[must_use]
+    pub fn following(&self, address: u64) -> Option<u64> {
+        self.address_of(self.next_slot(self.slot_at(address)?))
+    }
+
     /// TRBs enqueued and not yet retired.
     #[must_use]
     pub fn in_flight(&self) -> usize {
@@ -155,11 +194,7 @@ impl ProducerRing {
             return Err(DriverError::Busy);
         }
         let slot = self.enqueue;
-        let address = slot
-            .checked_mul(crate::trb::TRB_LEN)
-            .and_then(|at| u64::try_from(at).ok())
-            .and_then(|at| self.base.checked_add(at))
-            .ok_or(DriverError::OutOfRange)?;
+        let address = self.address_of(slot).ok_or(DriverError::OutOfRange)?;
         let mut stamped = trb;
         if self.cycle {
             stamped.control |= CONTROL_CYCLE;
@@ -189,6 +224,32 @@ impl ProducerRing {
             trb: stamped,
             link,
         })
+    }
+
+    /// Device address of the oldest TRB in flight, `None` when none is.
+    #[must_use]
+    pub fn head(&self) -> Option<u64> {
+        if self.in_flight() == 0 {
+            return None;
+        }
+        self.address_of(self.dequeue)
+    }
+
+    /// Device address and cycle state of the TRB after the oldest in flight:
+    /// where the consumer stands once it is done with that one, the wrap link
+    /// already followed.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if nothing is in flight.
+    pub fn after_head(&self) -> Result<(u64, bool), DriverError> {
+        if self.in_flight() == 0 {
+            return Err(DriverError::OutOfRange);
+        }
+        let slot = self.next_slot(self.dequeue);
+        let address = self.address_of(slot).ok_or(DriverError::OutOfRange)?;
+        // A slot past the enqueue point was stamped before the last wrap.
+        Ok((address, self.cycle != (slot > self.enqueue)))
     }
 
     /// Retire the oldest in-flight TRB after its completion event.

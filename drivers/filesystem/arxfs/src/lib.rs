@@ -2412,7 +2412,7 @@ impl<B: Block> ARXFS<B> {
         (block_size, total_blocks): (NonZeroUsize, u64),
         established: Established,
     ) -> Self {
-        let class = block.device_class();
+        let cost = block.command_cost();
         let Established {
             fs_uuid,
             protection,
@@ -2447,7 +2447,7 @@ impl<B: Block> ARXFS<B> {
             incompat: 0,
             saved_op: Roots::default(),
             saved_txn: Roots::default(),
-            schedule: CommitScheduler::new(class),
+            schedule: CommitScheduler::new(cost),
             read_only: false,
             cluster_cache: None,
             tree_edit: None,

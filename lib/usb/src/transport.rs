@@ -47,45 +47,47 @@ use crate::device::{setup_get_configuration_descriptor, BULK_BUF_LEN, CTRL_DATA_
 ///
 /// The HCD's live engine implements this; a malformed transfer never reaches
 /// it because [`drive_urb`] validates the URB first. The transfers the
-/// served device classes need are present: a control-IN transfer (used
-/// during enumeration and for class-IN requests), a **no-data** control-OUT
-/// (a class request carrying its whole meaning in SETUP — the BOT Mass
-/// Storage Reset, `plans/DEVICES.md` D2), a control-OUT **data stage** (a
-/// class request carrying a payload — the CBI ADSC command channel,
-/// `plans/DEVICES.md` D5), a non-blocking interrupt-IN poll (the HID report
-/// and CBI completion paths), and non-blocking bulk IN/OUT (the
+/// served device classes need are present: control transfers IN, OUT and
+/// with no data stage (class requests, the BOT Mass Storage Reset and the
+/// CBI ADSC command channel, `plans/DEVICES.md` D2 and D5), an interrupt-IN
+/// poll (the HID report and CBI completion paths), and bulk IN/OUT (the
 /// mass-storage data path, `plans/DEVICES.md` D1).
+///
+/// Nothing here waits. A transfer or request the controller has not finished
+/// answers `Ok(None)`, and the HCD drives the same one again on its next
+/// controller event; it is queued or started on the first drive and reaped
+/// on a later one.
 pub trait UrbEngine {
-    /// Run a control-IN transfer (SETUP + IN data stage) into `data`,
-    /// returning the bytes the device delivered.
-    ///
-    /// # Errors
-    ///
-    /// A [`DriverError`] from the controller/device (e.g.
-    /// [`DriverError::DeviceFault`]).
-    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError>;
-
-    /// Run a no-data control transfer (SETUP + status stage only, USB 2.0
-    /// §9.3 `wLength == 0`): a class request whose whole meaning rides in
-    /// `setup`, e.g. the BOT Bulk-Only Mass Storage Reset.
-    ///
-    /// # Errors
-    ///
-    /// A [`DriverError`] from the controller/device (e.g.
-    /// [`DriverError::DeviceFault`]).
-    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError>;
-
-    /// Run a control-OUT transfer (SETUP + OUT data stage carrying `data` +
-    /// status stage): a class request with a payload, e.g. the CBI ADSC
-    /// command block.
+    /// Drive a control-IN transfer (SETUP + IN data stage) into `data`:
+    /// `Ok(Some(n))` once the device delivered `n` bytes.
     ///
     /// # Errors
     ///
     /// * [`DriverError::EndpointStalled`] — the device refused the request
-    ///   with a protocol STALL (the control endpoint recovers on the next
-    ///   SETUP, USB 2.0 §8.5.3.4).
+    ///   with a protocol STALL; the control pipe serves the next transfer
+    ///   (it recovers on the next SETUP, USB 2.0 §8.5.3.4).
     /// * Any other [`DriverError`] from the controller/device.
-    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError>;
+    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8])
+        -> Result<Option<usize>, DriverError>;
+
+    /// Drive a no-data control transfer (SETUP + status stage only, USB 2.0
+    /// §9.3 `wLength == 0`): a class request whose whole meaning rides in
+    /// `setup`, e.g. the BOT Bulk-Only Mass Storage Reset. `Ok(Some(()))`
+    /// once it completed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::control_in`].
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<Option<()>, DriverError>;
+
+    /// Drive a control-OUT transfer (SETUP + OUT data stage carrying `data` +
+    /// status stage): a class request with a payload, e.g. the CBI ADSC
+    /// command block. `Ok(Some(()))` once it completed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::control_in`].
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<Option<()>, DriverError>;
 
     /// What the interface's control requests may reach; `None` once the
     /// interface is gone, which reaches nothing.
@@ -138,25 +140,28 @@ pub trait UrbEngine {
     /// As [`Self::bulk_in`].
     fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError>;
 
-    /// Abandon `urb`, held when its deadline passed: a bulk pipe is stopped
-    /// and restarted empty, so what was queued on it can never complete late
-    /// into a later transfer; a report poll leaves its endpoint armed.
+    /// Abandon `urb`, held when its deadline passed: a control transfer's TD
+    /// is taken back from the slot's pipe, a bulk pipe is stopped and
+    /// restarted empty — either so what was queued can never complete late
+    /// into a later transfer, and the pipe serving nothing until it is done
+    /// — and a report poll leaves its endpoint armed.
     ///
     /// # Errors
     ///
-    /// A controller fault stopping the pipe.
+    /// The abandonment could not be started.
     fn abandon(&mut self, urb: &UrbRequest) -> Result<(), DriverError>;
 
-    /// Clear the halt of the bulk endpoint at address `endpoint`, on the
-    /// device and in the controller, restarting the pipe empty with both data
-    /// toggles at `DATA0`; whatever was queued on it is abandoned.
+    /// Drive clearing the halt of the bulk endpoint at address `endpoint`,
+    /// on the device and in the controller, restarting the pipe empty with
+    /// both data toggles at `DATA0`; whatever was queued on it is abandoned.
+    /// `Ok(Some(()))` once it is done.
     ///
     /// # Errors
     ///
     /// [`DriverError::OutOfRange`] for an endpoint that is none of the
     /// device's bulk pipes, a controller or device fault, or
     /// [`DriverError::Unsupported`] from an engine with no bulk pipes.
-    fn clear_halt(&mut self, _endpoint: u8) -> Result<(), DriverError> {
+    fn clear_halt(&mut self, _endpoint: u8) -> Result<Option<()>, DriverError> {
         Err(DriverError::Unsupported)
     }
 
@@ -173,9 +178,10 @@ pub trait UrbEngine {
         Err(DriverError::Unsupported)
     }
 
-    /// Select `alternate` on `interface` — the node's own or one it claimed —
-    /// reprogramming the controller for the endpoints the setting brings and
-    /// reserving their bandwidth before the device is told.
+    /// Drive selecting `alternate` on `interface` — the node's own or one it
+    /// claimed — reprogramming the controller for the endpoints the setting
+    /// brings and reserving their bandwidth before the device is told.
+    /// `Ok(Some(()))` once it is done.
     ///
     /// # Errors
     ///
@@ -184,7 +190,7 @@ pub trait UrbEngine {
     /// the node does not govern, [`DriverError::Busy`] while a stream runs on
     /// the interface, or the device's refusal. An engine serving no periodic
     /// endpoints refuses with [`DriverError::Unsupported`].
-    fn set_interface(&mut self, _interface: u8, _alternate: u8) -> Result<(), DriverError> {
+    fn set_interface(&mut self, _interface: u8, _alternate: u8) -> Result<Option<()>, DriverError> {
         Err(DriverError::Unsupported)
     }
 
@@ -229,13 +235,14 @@ pub trait UrbEngine {
         Err(DriverError::Unsupported)
     }
 
-    /// Stop the stream on `endpoint`, discarding what it still had queued.
+    /// Drive stopping the stream on `endpoint`, discarding what it still had
+    /// queued. `Ok(Some(()))` once it is done.
     ///
     /// # Errors
     ///
     /// [`DriverError::NotFound`] for no such stream, or
     /// [`DriverError::Unsupported`].
-    fn iso_stop(&mut self, _endpoint: u8) -> Result<(), DriverError> {
+    fn iso_stop(&mut self, _endpoint: u8) -> Result<Option<()>, DriverError> {
         Err(DriverError::Unsupported)
     }
 
@@ -373,10 +380,11 @@ pub fn control_permitted(
 ///
 /// * `Ok(Some(n))` — the transfer completed; `n` bytes landed in `data`. The
 ///   HCD frames a completion with [`frame_completion`] and replies now.
-/// * `Ok(None)` — an interrupt-IN report has not arrived yet. The HCD leaves
-///   the caller's URB call outstanding and re-drives this same `request` on
-///   its next controller interrupt (the report path); it never busy-polls and
-///   never blocks one interface inside another's handler.
+/// * `Ok(None)` — the transfer has not finished, or an interrupt-IN report
+///   has not arrived yet. The HCD leaves the caller's URB call outstanding
+///   and re-drives this same `request` on its next controller event; it
+///   never busy-polls and never blocks one interface inside another's
+///   handler.
 /// * `Err(_)` — a malformed or illegal URB (a bad endpoint/direction/transfer
 ///   type, an oversize length, a control request outside the interface's
 ///   [`UrbScope`], which is [`Errno::PermissionDenied`]), refused **before**
@@ -412,24 +420,19 @@ pub fn drive_urb<E: UrbEngine>(
             // The served control-OUT shapes: the no-data form (SETUP only)
             // and the data-stage form carrying the shared buffer's bytes.
             if urb.direction == UsbDirection::Out {
-                if urb.length == 0 {
-                    engine
-                        .control_no_data(urb.setup)
-                        .map_err(DriverError::as_errno)?;
-                    return Ok(Some(0));
+                let done = if urb.length == 0 {
+                    engine.control_no_data(urb.setup)
+                } else {
+                    engine.control_out(urb.setup, slice)
                 }
-                engine
-                    .control_out(urb.setup, slice)
-                    .map_err(DriverError::as_errno)?;
-                return Ok(Some(urb.length));
-            }
-            // A control transfer completes synchronously within the call.
-            let transferred = engine
-                .control_in(urb.setup, slice)
                 .map_err(DriverError::as_errno)?;
-            Ok(Some(
-                u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange)?,
-            ))
+                return Ok(done.map(|()| urb.length));
+            }
+            engine
+                .control_in(urb.setup, slice)
+                .map_err(DriverError::as_errno)?
+                .map(|transferred| u32::try_from(transferred).map_err(|_| Errno::LengthOutOfRange))
+                .transpose()
         }
         UsbTransferType::Interrupt => {
             // The interface's own interrupt-IN endpoint, whose report lands
@@ -488,11 +491,11 @@ pub fn drive_urb<E: UrbEngine>(
 /// [`Errno::NotFound`] once the interface is gone,
 /// [`Errno::PermissionDenied`] for another interface's endpoint, or the
 /// engine's refusal.
-pub fn on_own_endpoint<E: UrbEngine>(
+pub fn on_own_endpoint<E: UrbEngine, T>(
     endpoint: u8,
     engine: &mut E,
-    operation: impl FnOnce(&mut E, u8) -> Result<(), DriverError>,
-) -> Result<(), Errno> {
+    operation: impl FnOnce(&mut E, u8) -> Result<T, DriverError>,
+) -> Result<T, Errno> {
     let scope = engine.scope().ok_or(Errno::NotFound)?;
     if !scope.owns_endpoint(endpoint) {
         return Err(Errno::PermissionDenied);
@@ -537,6 +540,11 @@ pub trait UrbCall {
     /// truncated reply).
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
 }
+
+/// The longest budget a control URB may state: the protocol's bound on a
+/// device completing a control request, beyond which the HCD holds none.
+pub const CONTROL_BUDGET_MAX: NonZeroU32 =
+    NonZeroU32::MIN.saturating_add(tairix_abi::usb_urb::USB_CONTROL_TIMEOUT_MAX_MS - 1);
 
 /// The class-side URB transport client: builds URBs, submits them over a
 /// [`UrbCall`] transport, and decodes the completions.
@@ -641,44 +649,52 @@ impl<T: UrbCall> UrbClient<T> {
     }
 
     /// Submit a control-IN URB on endpoint 0 reading `length` bytes into the
-    /// shared buffer, returning the bytes the device delivered.
+    /// shared buffer, returning the bytes the device delivered. The HCD holds
+    /// it for `budget_ms` at most, and never past
+    /// [`USB_CONTROL_TIMEOUT_MAX_MS`](tairix_abi::usb_urb::USB_CONTROL_TIMEOUT_MAX_MS).
     ///
     /// # Errors
     ///
-    /// The carried completion [`Errno`], or an encode/transport error.
-    pub fn control_in(&mut self, setup: [u8; 8], length: u32) -> Result<u32, Errno> {
+    /// The carried completion [`Errno`] — [`Errno::TimedOut`] once the budget
+    /// passed — or an encode/transport error.
+    pub fn control_in(
+        &mut self,
+        setup: [u8; 8],
+        length: u32,
+        budget_ms: NonZeroU32,
+    ) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint: 0,
             transfer_type: UsbTransferType::Control,
             direction: UsbDirection::In,
             length,
             setup,
-            timeout_ms: None,
+            timeout_ms: Some(budget_ms),
         })
     }
 
     /// Submit a no-data control-OUT URB on endpoint 0 (SETUP + status stage
-    /// only): a class request whose whole meaning rides in `setup`, e.g. the
-    /// BOT Bulk-Only Mass Storage Reset.
+    /// only), bounded as [`Self::control_in`]: a class request whose whole
+    /// meaning rides in `setup`, e.g. the BOT Bulk-Only Mass Storage Reset.
     ///
     /// # Errors
     ///
     /// The carried completion [`Errno`], or an encode/transport error.
-    pub fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
+    pub fn control_no_data(&mut self, setup: [u8; 8], budget_ms: NonZeroU32) -> Result<(), Errno> {
         self.submit(&UrbRequest {
             endpoint: 0,
             transfer_type: UsbTransferType::Control,
             direction: UsbDirection::Out,
             length: 0,
             setup,
-            timeout_ms: None,
+            timeout_ms: Some(budget_ms),
         })
         .map(|_| ())
     }
 
     /// Submit a control-OUT URB on endpoint 0 whose OUT data stage carries
-    /// `length` bytes from the shared buffer: a class request with a
-    /// payload, e.g. the CBI ADSC command block.
+    /// `length` bytes from the shared buffer, bounded as [`Self::control_in`]:
+    /// a class request with a payload, e.g. the CBI ADSC command block.
     ///
     /// # Errors
     ///
@@ -687,7 +703,12 @@ impl<T: UrbCall> UrbClient<T> {
     /// encode/transport error. A zero `length` is refused
     /// ([`Errno::LengthOutOfRange`]): the no-data form is
     /// [`Self::control_no_data`], and the two must not be conflated.
-    pub fn control_out(&mut self, setup: [u8; 8], length: u32) -> Result<(), Errno> {
+    pub fn control_out(
+        &mut self,
+        setup: [u8; 8],
+        length: u32,
+        budget_ms: NonZeroU32,
+    ) -> Result<(), Errno> {
         if length == 0 {
             return Err(Errno::LengthOutOfRange);
         }
@@ -697,7 +718,7 @@ impl<T: UrbCall> UrbClient<T> {
             direction: UsbDirection::Out,
             length,
             setup,
-            timeout_ms: None,
+            timeout_ms: Some(budget_ms),
         })
         .map(|_| ())
     }
@@ -923,48 +944,59 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         self.shm.len().min(BULK_BUF_LEN)
     }
 
-    /// Run a control-IN transfer of `data.len()` bytes into `data`, returning
-    /// the bytes the device delivered.
+    /// Run a control-IN transfer of `data.len()` bytes into `data` within
+    /// `budget_ms`, returning the bytes the device delivered.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for a data stage past the shared buffer,
     /// or the completion's [`Errno`].
-    pub fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, Errno> {
+    pub fn control_in(
+        &mut self,
+        setup: [u8; 8],
+        data: &mut [u8],
+        budget_ms: NonZeroU32,
+    ) -> Result<usize, Errno> {
         if data.len() > self.shm.len() {
             return Err(Errno::LengthOutOfRange);
         }
         let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        let delivered = usize::try_from(self.client.control_in(setup, len)?)
+        let delivered = usize::try_from(self.client.control_in(setup, len, budget_ms)?)
             .map_err(|_| Errno::LengthOutOfRange)?
             .min(data.len());
         data[..delivered].copy_from_slice(&self.shm[..delivered]);
         Ok(delivered)
     }
 
-    /// Run a control-OUT transfer whose data stage carries `data`.
+    /// Run a control-OUT transfer whose data stage carries `data`, within
+    /// `budget_ms`.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for a data stage past the shared buffer,
     /// or the completion's [`Errno`].
-    pub fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), Errno> {
+    pub fn control_out(
+        &mut self,
+        setup: [u8; 8],
+        data: &[u8],
+        budget_ms: NonZeroU32,
+    ) -> Result<(), Errno> {
         let staged = self
             .shm
             .get_mut(..data.len())
             .ok_or(Errno::LengthOutOfRange)?;
         staged.copy_from_slice(data);
         let len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
-        self.client.control_out(setup, len)
+        self.client.control_out(setup, len, budget_ms)
     }
 
-    /// Run a no-data control transfer.
+    /// Run a no-data control transfer within `budget_ms`.
     ///
     /// # Errors
     ///
     /// The completion's [`Errno`].
-    pub fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
-        self.client.control_no_data(setup)
+    pub fn control_no_data(&mut self, setup: [u8; 8], budget_ms: NonZeroU32) -> Result<(), Errno> {
+        self.client.control_no_data(setup, budget_ms)
     }
 
     /// Read up to `data.len()` bytes from bulk-IN `endpoint` by `deadline`,

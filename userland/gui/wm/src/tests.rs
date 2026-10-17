@@ -901,6 +901,38 @@ fn a_floating_transient_is_passed_over_for_the_keyboard_and_raised_within_its_fa
     assert_eq!(c.window_at_except(Point::new(30, 30), first), Some(owner));
 }
 
+/// A transient opened in place waits with its family where the family stands,
+/// floating or not, and rises with it later.
+#[test]
+fn a_transient_opened_in_place_waits_with_its_family() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let owner = c.add_window(Point::ORIGIN, opaque(40, 40, RED));
+    let front = c.add_window(Point::ORIGIN, opaque(40, 40, GREEN));
+    let held = c
+        .add_transient_window_in_place(owner, Point::new(4, 4), opaque(10, 10, BLUE))
+        .expect("the owner is a window");
+    let floating = c
+        .add_floating_window_in_place(owner, Point::new(20, 20), opaque(10, 10, BLUE))
+        .expect("the owner is a window");
+    assert!(c
+        .window(floating)
+        .is_some_and(crate::window::Window::is_floating));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(front));
+    assert_eq!(
+        c.window_at(Point::new(22, 22)),
+        Some(front),
+        "neither lifts its family over the window in front"
+    );
+    assert!(c.raise(owner));
+    assert_eq!(c.window_at(Point::new(6, 6)), Some(held));
+    assert_eq!(c.window_at(Point::new(22, 22)), Some(floating));
+    assert_eq!(
+        c.family_front(owner),
+        Some(held),
+        "the floating one is passed over for the keyboard"
+    );
+}
+
 /// A tip or a menu over a tool window joins its owner's family, so raising
 /// the family brings it too.
 #[test]

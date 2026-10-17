@@ -1,9 +1,8 @@
 //! Host tests for lending a member's data window to one client at a time.
 
 use super::{MemberDevice, MemberWindow};
-use crate::testkit::{MemberDisk, DEVICE_BLOCKS};
+use crate::testkit::{MemberDisk, DEVICE_BLOCKS, MEMBER_MEDIUM};
 
-use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::DriverError;
 
@@ -26,7 +25,7 @@ fn a_member_device_reports_the_medium_of_the_disk_it_holds() {
     let window = MemberWindow::new();
     let lease = window.lend().expect("a free window is lent");
     let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease);
-    assert_eq!(device.medium(), Some(BlkMedium::UsbDisk));
+    assert_eq!(device.medium(), Some(MEMBER_MEDIUM));
 }
 
 #[test]

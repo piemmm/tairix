@@ -31,7 +31,7 @@
 //! against `WIRE_LEN` (validate every input, fail
 //! closed).
 
-use crate::blkio::{BlkStatus, FaultDomainState};
+use crate::blkio::{BlkMedium, BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
 use crate::driver::exit::DriverEnding;
 use crate::driver::net::MAC_ADDRESS_LEN;
@@ -680,6 +680,10 @@ pub enum HwProperty {
     /// (`console_relocate`). The value is `1`; only discovery states it, a
     /// driver never publishes it.
     BootConsole = 8,
+    /// The node is a block unit: what its medium is and the evidence for
+    /// each fact, as the driver that probed it found. Built and read through
+    /// [`HwResource::block_medium`] and [`HwNode::block_medium`].
+    BlockMedium = 9,
 }
 
 impl HwProperty {
@@ -694,6 +698,7 @@ impl HwProperty {
         Self::BusSpeed,
         Self::RadioCoexistence,
         Self::BootConsole,
+        Self::BlockMedium,
     ];
 
     /// Raw on-wire key.
@@ -721,6 +726,7 @@ impl HwProperty {
             6 => Some(Self::BusSpeed),
             7 => Some(Self::RadioCoexistence),
             8 => Some(Self::BootConsole),
+            9 => Some(Self::BlockMedium),
             _ => None,
         }
     }
@@ -1779,6 +1785,17 @@ impl HwResource {
         Ok((key, self.xlate))
     }
 
+    /// The fact that a block unit's medium is `medium`
+    /// ([`HwProperty::BlockMedium`]): its record ([`BlkMedium::encode`]) read
+    /// as a little-endian word.
+    #[must_use]
+    pub fn block_medium(medium: BlkMedium) -> Self {
+        Self::property(
+            HwProperty::BlockMedium,
+            u64::from_le_bytes(BlkMedium::encode(Some(medium))),
+        )
+    }
+
     /// The fact that entry `index` of the node's `clocks` is a fixed clock
     /// running at `hz` ([`HwProperty::FixedClockRate`]), or [`None`] for a
     /// rate past what the record carries.
@@ -2827,6 +2844,13 @@ impl HwNode {
             .find_map(|(held, value)| (held == key).then_some(value))
     }
 
+    /// The medium a block unit's node states ([`HwProperty::BlockMedium`]),
+    /// or [`None`] when it states none or one this ABI does not define.
+    #[must_use]
+    pub fn block_medium(&self) -> Option<BlkMedium> {
+        BlkMedium::decode(&self.property(HwProperty::BlockMedium)?.to_le_bytes())
+    }
+
     /// Whether the node states [`HwProperty::KernelDriven`].
     #[must_use]
     pub fn is_kernel_driven(&self) -> bool {
@@ -3657,6 +3681,31 @@ mod tests {
     }
 
     #[test]
+    fn a_block_unit_states_its_medium_and_nothing_malformed_reads_as_one() {
+        use crate::blkio::{BlkRemovability, BlkRotation, BlkRotationEvidence, BlkTransport};
+
+        let medium = BlkMedium::of_transport(BlkTransport::Usb)
+            .with_rotation(BlkRotation::from_rate_field(
+                7200,
+                BlkRotationEvidence::RotationRateVpd,
+            ))
+            .with_removability(BlkRemovability::from_rmb(true));
+        let mut node = HwNode::new(12, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+        assert_eq!(node.block_medium(), None);
+        node.push_resource(HwResource::block_medium(medium))
+            .unwrap();
+        assert!(!node.states_discovery_only());
+        let wire = HwNode::from_bytes(&node.to_le_bytes()).expect("decodes");
+        assert_eq!(wire.block_medium(), Some(medium));
+
+        let mut forged = HwNode::new(13, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
+        forged
+            .push_resource(HwResource::property(HwProperty::BlockMedium, u64::MAX))
+            .unwrap();
+        assert_eq!(forged.block_medium(), None);
+    }
+
+    #[test]
     fn a_kernel_driven_node_says_so_and_no_other_does() {
         let mut node = HwNode::new(4, HW_NODE_ROOT_ID, HwDeviceClass::InterruptController);
         assert!(!node.is_kernel_driven());
@@ -3698,7 +3747,8 @@ mod tests {
     #[test]
     fn a_property_refuses_every_non_canonical_field() {
         let good = HwResource::property(HwProperty::UsbInterface, 0);
-        for (at, value) in [(2, 1u8), (4, 1), (16, 2), (8, 9)] {
+        let unknown_key = u8::try_from(HwProperty::ALL.len() + 1).expect("few keys");
+        for (at, value) in [(2, 1u8), (4, 1), (16, 2), (8, unknown_key)] {
             let mut wire = good.to_le_bytes();
             wire[at] = value;
             assert_eq!(

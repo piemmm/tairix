@@ -67,7 +67,7 @@ under the floor and are unchanged.
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
 | `decision` | `Dialog`, `Tooltip`, `HelpTip`; a `Dialog` is a form a window draws over itself for an answer typed in it |
-| `alert` | `Alert`: an alert window's content — severity mark, headline, scrolling detail, and the bottom row of up to four answers — laid out at the smallest 4:3 size that holds it, answering Enter or Space with the focused button and Escape with its cancel |
+| `alert` | `Alert`: an alert window's content — severity mark, headline, detail, and the bottom row of up to four answers — as wide as its text up to a readable measure and exactly as tall as its content, the whole text scrolling past the screen's share, answering Enter or Space with the focused button and Escape with its cancel |
 
 A continuous control reports where its interaction *settled*, distinctly from
 the values it took along the way: `Slider` answers `SliderAction::SetValue`

@@ -23,11 +23,12 @@
 //! through the seam; the ring state machines themselves hold no
 //! memory ([`ProducerRing`], [`EventRingCursor`]).
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::DmaReach;
-use tairix_abi::{Delay, DriverError, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource};
-use tairix_inline::{BitSet256, RingBuf};
+use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource};
+use tairix_inline::{ArrayVec, BitSet256, RingBuf};
 
 use crate::alternate::is_control_only;
 use crate::descriptor::{
@@ -42,13 +43,26 @@ use crate::periodic::ServiceInterval;
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
 use crate::{ControllerStatus, DmaProgram, PortStatus, Xhci};
-use tairix_abi::usb_urb::{IsoLayout, UrbRequest, UsbDirection, UsbSpeed, UsbTransferType};
+use tairix_abi::usb_urb::UsbSpeed;
 use tairix_abi::RegisterBlock;
 
 #[path = "device_iso.rs"]
 mod iso;
+#[path = "device_ops.rs"]
+pub(crate) mod ops;
+#[path = "device_port.rs"]
+pub(crate) mod port;
+#[path = "device_recover.rs"]
+pub(crate) mod recover;
 #[path = "device_recovery.rs"]
 pub(crate) mod recovery;
+#[path = "device_route.rs"]
+pub(crate) mod route;
+#[path = "device_urb.rs"]
+mod urb;
+
+pub use ops::{Serviced, UsbHost};
+pub use urb::DeviceEngine;
 
 use recovery::{Escalation, Ladder, OnHalt, Rung};
 
@@ -166,48 +180,14 @@ pub trait DmaBank {
     fn device_quiesced(&self);
 }
 
-/// The parked wait seam the engine's synchronous event waits block through.
-///
-/// Every wait for a controller completion (`UsbDevice::await_event_for`)
-/// and the root-port connect debounce ([`UsbDevice::bring_up`])
-/// gives the CPU up between event-ring polls by parking on this seam and is
-/// bounded by wall-clock time read from the same seam — never an iteration
-/// count, never a spin. On metal the host-controller driver implements it by
-/// parking on the controller's bound interrupt line (`irq_wait` with the
-/// remaining budget as the deadline), so a completion wakes the task early
-/// and a quiet controller costs no CPU; host tests supply a deterministic
-/// stand-in whose clock advances on each wait so timeouts terminate.
-pub trait EventWait {
-    /// A monotonically non-decreasing microsecond timestamp. The epoch is
-    /// unspecified; only differences are meaningful.
-    fn now_us(&self) -> u64;
-
-    /// Park the calling task until the controller signals a new event or
-    /// `budget_us` microseconds elapse, whichever is first. Spurious early
-    /// wake-ups are permitted (the caller re-polls and re-checks its
-    /// deadline); never returning before the controller's next event *and*
-    /// before the budget elapses is not.
-    fn wait_us(&self, budget_us: u64);
-}
-
-/// Wall-clock budget, in microseconds, for one synchronous completion wait
-/// ([`UsbDevice::await_event_for`]): a command or transfer that produces no
-/// event within this window is a fault, failed closed. USB 2.0 §9.2.6 gives
-/// a device up to 5 s to complete a standard request, the slowest completion
-/// the enumeration path legitimately waits on; controller commands complete
-/// in microseconds, so any honest completion is orders of magnitude inside
-/// this bound. A defence against a dead controller/device, not a capacity.
-const AWAIT_EVENT_BUDGET_US: u64 = 5_000_000;
-
-/// Wall-clock window, in microseconds, the boot-time root-port scan
-/// ([`UsbDevice::bring_up`]) allows a powered port to
-/// report a connect before concluding the root hub is empty: the hub
-/// power-on-good ceiling (`bPwrOn2PwrGood` ≤ ~200 ms, USB 2.0 §11.11) plus
-/// the 100 ms attach-debounce interval (USB 2.0 §7.1.7.3) with headroom.
-/// An empty root hub spends this window parked, then the controller stays
-/// up awaiting the first connect event-driven. A protocol settle window,
-/// not a scalable capacity.
-const CONNECT_WINDOW_US: u64 = 500_000;
+/// Wall-clock window, in microseconds, the bring-up walk
+/// ([`UsbHost::bring_up`]) allows a powered root port to report a connect
+/// before it walks the ports: the hub power-on-good ceiling
+/// (`bPwrOn2PwrGood` ≤ ~200 ms, USB 2.0 §11.11) plus the 100 ms
+/// attach-debounce interval (USB 2.0 §7.1.7.3) with headroom, so a device
+/// present at boot is served before the walk settles. A protocol settle
+/// window, not a scalable capacity.
+pub(crate) const CONNECT_WINDOW_US: u64 = 500_000;
 
 /// How many times enumeration drives one device through its port reset,
 /// Enable Slot and Address Device when bringing its control pipe up faults
@@ -228,11 +208,12 @@ const CONNECT_WINDOW_US: u64 = 500_000;
 /// its address, so a fresh slot's `SET_ADDRESS`, sent to the default
 /// address, reaches it only once a reset has returned it to Default state. A
 /// recovery bound, not a scalable capacity.
-const ENUM_ATTEMPTS: u32 = 4;
+pub(crate) const ENUM_ATTEMPTS: u32 = 4;
 
 /// TRB slots in the command, EP0 and hub status-change rings. Protocol
-/// working sets, not scalable capacities: each only ever holds a single
-/// in-flight command, control TD or status transfer.
+/// working sets, not scalable capacities: an EP0 ring holds one control TD
+/// and a hub's ring one status transfer, and commands past the command
+/// ring's room wait their turn in software.
 pub const RING_TRBS: usize = 16;
 
 /// Interrupt-IN transfers the engine keeps armed on a report endpoint at
@@ -385,7 +366,7 @@ const DCI_CONTROL: u8 = 1;
 /// units and is commonly ≤ 100 ms (USB 2.0 §11.11); this fixed budget
 /// covers the typical worst case rather than decoding the field. A fixed
 /// protocol settle, not a scalable capacity.
-const HUB_POWER_ON_GOOD_US: u32 = 100_000;
+pub(crate) const HUB_POWER_ON_GOOD_US: u32 = 100_000;
 
 /// Poll spacing, in microseconds, while awaiting a port's reset
 /// completion — the same figure for a root-hub port and a downstream hub
@@ -415,7 +396,7 @@ pub(crate) const PORT_RESET_POLLS: u32 = 40;
 pub(crate) const PORT_RESET_SETTLE_US: u32 = 10_000;
 
 /// Bounded attempts for the hub-descriptor read
-/// ([`UsbDevice::read_hub_topology`]): production stacks retry this
+/// ([`port::read_hub_topology`]): production stacks retry this
 /// exchange (Linux's hub driver issues it up to three times) because real
 /// hubs occasionally answer it wrongly once and honestly on the retry. A
 /// fixed protocol retry budget, not a scalable capacity.
@@ -510,6 +491,9 @@ pub(crate) struct DeviceRegion {
     base: usize,
     /// The device slot's output device context.
     output_ctx: usize,
+    /// The input context the slot's commands stage through, so no two
+    /// slots' Address Device or Configure Endpoint share one.
+    input_ctx: usize,
     /// The device's default-control-endpoint transfer ring.
     ep0_ring: usize,
     /// [`CTRL_DATA_LEN`] bytes the device's control data stages move
@@ -553,6 +537,7 @@ impl DeviceRegion {
         Self {
             base,
             output_ctx: packer.take(OUTPUT_CONTEXTS * ctx_size),
+            input_ctx: packer.take(INPUT_CONTEXTS * ctx_size),
             ep0_ring: packer.take(RING_TRBS * trb::TRB_LEN),
             int_ring: packer.take(INT_RING_TRBS * trb::TRB_LEN),
             bulk_in_ring: packer.take(BULK_RING_TRBS * trb::TRB_LEN),
@@ -613,7 +598,7 @@ impl DeviceRegion {
 /// Where each **controller-shared** structure lives inside the engine's
 /// dedicated shared chunk — the first [`DmaBank::grow`] the engine
 /// performs: DCBAA (sized from the controller's reported `MaxSlots`),
-/// ERST, command ring, event segment, input context, and the scratchpad.
+/// ERST, command ring, event segment, and the scratchpad.
 /// Per-device and per-hub regions are **not** here: each is its own
 /// demand-allocated chunk ([`DeviceRegion::at`] / [`HubRegion::at`]), so the
 /// shared chunk's size is exactly what the silicon's reported geometry
@@ -631,7 +616,6 @@ struct Layout {
     /// back to back so the event cursor reads them as one ring.
     event_segment: usize,
     event_segments: usize,
-    input_ctx: usize,
     /// Offset of the scratchpad buffer pointer array (xHCI §6.6): one
     /// 64-bit device-visible pointer per scratchpad buffer, the array
     /// `DCBAA[0]` points at. Meaningful only when
@@ -692,7 +676,6 @@ impl Layout {
         let dcbaa = packer.take((usize::from(max_slots) + 1) * 8);
         let erst = packer.take(event_segments * ERST_ENTRY_LEN);
         let command_ring = packer.take(RING_TRBS * trb::TRB_LEN);
-        let input_ctx = packer.take(INPUT_CONTEXTS * ctx_size);
         let (scratchpad_array, scratchpad_pages) = if scratchpad_count > 0 {
             let array = packer.take(scratchpad_count * 8);
             // The buffer pages must be page-aligned, not merely 64-aligned.
@@ -714,7 +697,6 @@ impl Layout {
             command_ring,
             event_segment,
             event_segments,
-            input_ctx,
             scratchpad_array,
             scratchpad_pages,
             scratchpad_count,
@@ -741,19 +723,11 @@ impl Layout {
             erst: self.erst + base,
             command_ring: self.command_ring + base,
             event_segment: self.event_segment + base,
-            input_ctx: self.input_ctx + base,
             scratchpad_array,
             scratchpad_pages,
             base,
             ..self
         }
-    }
-
-    /// Offset of context `index` inside the input context (§6.2.5:
-    /// index 0 is the input control context, 1 the slot context, and
-    /// `1 + dci` the endpoint contexts).
-    fn input_ctx_entry(&self, index: usize) -> usize {
-        self.input_ctx + index * self.ctx_size
     }
 
     /// TRBs in the whole event ring.
@@ -1027,7 +1001,7 @@ const PORT_FEATURE_RESET: u8 = 4;
 /// cleared with a class `CLEAR_FEATURE`; clearing only `C_PORT_CONNECTION`
 /// while a `C_PORT_RESET`/`C_PORT_ENABLE` latched by enumeration remains set
 /// leaves the port flagged forever, so the watch re-fires endlessly on a
-/// stale change. [`UsbDevice::clear_hub_port_changes`] clears each set one.
+/// stale change. [`port::clear_hub_port_changes`] clears each set one.
 const PORT_FEATURE_C_CONNECTION: u8 = 16;
 const PORT_FEATURE_C_ENABLE: u8 = 17;
 const PORT_FEATURE_C_SUSPEND: u8 = 18;
@@ -1210,7 +1184,7 @@ const fn setup_set_hub_depth(depth: u8) -> [u8; 8] {
 /// hub `port` (USB 2.0 §11.24.2.13): `bmRequestType = 0x23`
 /// (host-to-device, class, other), `feature` in `wValue`, the 1-based
 /// `port` in `wIndex`, no data stage.
-const fn setup_set_port_feature(feature: u8, port: u8) -> [u8; 8] {
+pub(crate) const fn setup_set_port_feature(feature: u8, port: u8) -> [u8; 8] {
     [0x23, 0x03, feature, 0x00, port, 0x00, 0x00, 0x00]
 }
 
@@ -1218,7 +1192,7 @@ const fn setup_set_port_feature(feature: u8, port: u8) -> [u8; 8] {
 /// (USB 2.0 §11.24.2.7): `bmRequestType = 0xA3` (device-to-host, class,
 /// other), the 1-based `port` in `wIndex`, a 4-byte
 /// `wPortStatus`/`wPortChange` IN data stage.
-const fn setup_get_port_status(port: u8) -> [u8; 8] {
+pub(crate) const fn setup_get_port_status(port: u8) -> [u8; 8] {
     [0xA3, 0x00, 0x00, 0x00, port, 0x00, 0x04, 0x00]
 }
 
@@ -1306,7 +1280,7 @@ pub(crate) enum Attachment {
 
 /// The port an attachment hangs off.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Upstream {
+pub(crate) enum Upstream {
     /// The 1-based root-hub port.
     Root(u8),
     /// The 1-based downstream port of the hub at the hub-table index.
@@ -1939,6 +1913,21 @@ impl BulkPipe {
             secondary: true,
         }
     }
+
+    /// The pipe's place among an interface's four.
+    const fn index(self) -> usize {
+        (matches!(self.direction, BulkDirection::Out) as usize) << 1 | self.secondary as usize
+    }
+}
+
+/// A bulk pipe's recovery, while one runs.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+enum BulkRecovery {
+    /// None runs: the pipe serves.
+    #[default]
+    Idle,
+    /// One runs; the TD whose failure started it, answered once it ends.
+    Running(Option<(usize, DriverError)>),
 }
 
 /// One retired bulk TD, as reported by [`UsbDevice::poll_bulk`].
@@ -2095,8 +2084,7 @@ impl ReportQueue {
     }
 }
 
-/// Upper bound on transfer completions one [`UsbDevice::drain_events`] pass
-/// consumes before yielding.
+/// Upper bound on the events one service step routes before yielding.
 ///
 /// The loop exits as soon as the shared event ring is empty; this is only a
 /// safety cap against a controller that never stops presenting events. It
@@ -2160,6 +2148,10 @@ struct SlotCtxBase {
 /// Endpoint context dword 0 **EP State** field (§6.2.3): the controller's to
 /// report, zero in an input context.
 const EP_CTX_STATE_MASK: u32 = 0b111;
+
+/// The flag bits below the TR Dequeue Pointer in endpoint context dwords
+/// 2–3 (§6.2.3): the Dequeue Cycle State and the reserved bits.
+const EP_CTX_DEQUEUE_FLAGS: u64 = 0xF;
 
 /// Slot context dword 0 **Hub** bit (§6.2.2): the device on this slot is
 /// a USB hub. The controller routes packets to — and, with the TT
@@ -2332,47 +2324,26 @@ impl EnumStage {
     }
 }
 
-/// [`UsbDevice::last_reject`] reason: the wait succeeded, or none has
-/// run yet.
-const REJECT_NONE: u8 = 0;
-/// [`UsbDevice::last_reject`] reason: an event of a TRB-type the
-/// consumer does not handle (e.g. an asynchronous controller event).
-const REJECT_UNEXPECTED_TYPE: u8 = 1;
-/// [`UsbDevice::last_reject`] reason: a completion for a TRB this
-/// transfer did not enqueue.
-const REJECT_ADDRESS_MISMATCH: u8 = 2;
-/// [`UsbDevice::last_reject`] reason: an event carrying a completion
-/// code the driver does not model.
-const REJECT_UNDECODABLE_CODE: u8 = 3;
-/// [`UsbDevice::last_reject`] reason: the poll budget elapsed with no
-/// event observed — a genuine timeout.
-const REJECT_BUDGET_TIMEOUT: u8 = 4;
-
-/// The diagnostics of a failed downstream-port attach, snapshotted at the
-/// moment the attach failed — **before** the best-effort latch drain and
-/// watch re-arm run their own transfers and overwrite the live
-/// [`UsbDevice::enum_stage`] / completion / reject state. The first failure
-/// of a service is kept (matching the error the per-port fail-soft scan
-/// surfaces); [`UsbDevice::next_hub_change`] and the bring-up walks clear it
-/// on entry.
+/// The diagnostics of a failed attach, as the port's own operation saw
+/// them: each operation keeps its own, so ports attaching side by side never
+/// overwrite each other's.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AttachFault {
-    /// The 1-based downstream hub port whose attach failed.
+    /// The 1-based root or downstream hub port whose attach failed.
     pub port: u8,
     /// The surfaced [`DriverError`].
     pub error: DriverError,
     /// The enumeration step the attach failed in ([`EnumStage::PortReset`]
     /// = the port never reported reset-complete + enabled).
     pub stage: EnumStage,
-    /// Raw completion code of the last event the failing transfer observed
-    /// (`0` = none — a timeout).
+    /// Raw completion code of the event that ended the failing command or
+    /// transfer (`0` = none).
     pub completion: u8,
-    /// Raw TRB-type of the last event the failing transfer's wait observed
-    /// (`0` = none).
+    /// Raw TRB-type of that event (`0` = none).
     pub event_type: u8,
-    /// Why the failing transfer's event wait rejected (the
-    /// [`UsbDevice::last_reject_reason`] vocabulary).
-    pub reject: u8,
+    /// Whether no event ended the failing command or transfer before its
+    /// deadline.
+    pub timed_out: bool,
     /// The raw `wPortStatus` the attach's reset-completion wait last
     /// observed (`0` = none read): at a "port never enabled" fault, the
     /// port's final connect/enable/reset/speed state as the hub reported
@@ -2380,16 +2351,104 @@ pub struct AttachFault {
     pub port_status: u16,
 }
 
-/// The outcome of servicing one topology change — a hub status-change
-/// report ([`UsbDevice::next_hub_change`]) or a root-port connect/
-/// disconnect ([`UsbDevice::next_root_change`]): the engine reads the
-/// changed port, and either a fresh device was enumerated, a served
-/// device disconnected, or the change required no topology action.
+/// What the controller said of a transfer abandoned at its deadline: the
+/// endpoint's state then, and where its dequeue pointer stood once the
+/// endpoint had stopped — the only state in which that pointer is the
+/// controller's own (xHCI 1.2 §4.6.9).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AbandonedTransfer {
+    /// The endpoint's Device Context Index.
+    pub dci: u8,
+    /// Its EP State at the deadline (xHCI 1.2 §6.2.3): `1` running, `2`
+    /// halted, `3` stopped, `4` error.
+    pub ep_state: u8,
+    /// Where the stopped controller stood against the transfer.
+    pub progress: TdProgress,
+}
+
+/// How far the controller had got through a transfer's TRBs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TdProgress {
+    /// On its first TRB: nothing of it had completed.
+    NotStarted,
+    /// On a later TRB of it: a control transfer's data or status stage.
+    Underway,
+    /// On the TRB after its last: the controller had finished it, and its
+    /// completion was lost.
+    Completed,
+    /// On none of its TRBs nor the one after: the ring was not where the
+    /// engine had left it.
+    Elsewhere,
+}
+
+impl TdProgress {
+    /// Stable diagnostic name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Underway => "underway",
+            Self::Completed => "completed",
+            Self::Elsewhere => "elsewhere",
+        }
+    }
+}
+
+/// Where a transfer lay on its ring, for a stopped controller's dequeue
+/// pointer to be read against.
+#[derive(Clone, Debug)]
+pub(crate) struct TdSpan {
+    /// Its TRBs, the first first.
+    trbs: ArrayVec<u64, 3>,
+    /// The TRB after its last, the wrap link followed.
+    next: u64,
+    /// The ring's wrap link, which a dequeue pointer may rest on in place of
+    /// the base it leads to.
+    link: u64,
+    base: u64,
+}
+
+impl TdSpan {
+    /// The transfer whose TRBs on `ring` are `trbs`, the first first.
+    pub(crate) fn on(ring: &ProducerRing, trbs: ArrayVec<u64, 3>) -> Option<Self> {
+        Some(Self {
+            next: ring.following(*trbs.last()?)?,
+            link: ring.link_address()?,
+            base: ring.base(),
+            trbs,
+        })
+    }
+
+    /// Where a stopped controller whose dequeue pointer is `dequeue` stood
+    /// against the transfer.
+    pub(crate) fn progress(&self, dequeue: u64) -> TdProgress {
+        let dequeue = if dequeue == self.link {
+            self.base
+        } else {
+            dequeue
+        };
+        match self.trbs.iter().position(|&trb| trb == dequeue) {
+            Some(0) => TdProgress::NotStarted,
+            Some(_) => TdProgress::Underway,
+            None if dequeue == self.next => TdProgress::Completed,
+            None => TdProgress::Elsewhere,
+        }
+    }
+}
+
+/// A transfer abandoned at its deadline whose endpoint is not yet stopped.
+#[derive(Clone, Debug)]
+struct PendingAbandon {
+    slot: u8,
+    dci: u8,
+    ep_state: u8,
+    span: TdSpan,
+}
+
+/// What a port's operation did to the topology, as the service step reports
+/// it ([`Serviced::topology`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum HubEvent {
-    /// No actionable change (no completion pending, or a change on a port
-    /// carrying no device this engine tracks).
-    None,
     /// A device connected on a downstream or root port and was enumerated
     /// as a fresh device at the carried device index; the HCD emits a new
     /// interface node for it. Re-attach is always a brand-new
@@ -2427,6 +2486,9 @@ pub enum HubEvent {
 struct HubState {
     /// The hub's xHCI slot (never `0` while the entry is live).
     slot: u8,
+    /// The attachment serial telling this hub from a later one at the same
+    /// table index.
+    serial: u64,
     /// Hub-table index of the parent hub, `None` for the root-attached hub.
     parent: Option<usize>,
     /// The parent hub's 1-based downstream port this hub hangs off, `0`
@@ -2435,8 +2497,7 @@ struct HubState {
     /// The 1-based root-hub port this tier ultimately hangs off: its own
     /// port for a root-attached hub, the parent's inherited value for a
     /// deeper tier. Carried into every downstream slot context (xHCI
-    /// §6.2.2) and read by the root-port connect/disconnect scan
-    /// ([`UsbDevice::next_root_change`]).
+    /// §6.2.2), and the root port its tier's operations reconcile.
     root_port: u8,
     /// The hub's own Route String (xHCI §8.9.1): `0` for the root-attached
     /// hub; a downstream hub extends its parent's by one nibble.
@@ -2459,15 +2520,6 @@ struct HubState {
     /// below a non-high-speed hub inherits these.
     tt_hub_slot: u8,
     tt_port: u8,
-    /// Offset of the hub slot's output device context, in the
-    /// [`Self::device_region`] it was enumerated on.
-    output_ctx: usize,
-    /// Offset of the hub's default-control-endpoint transfer ring, paired
-    /// with [`Self::ep0_ring`].
-    ep0_ring_off: usize,
-    /// Offset of the control data buffer the hub's control transfers stage
-    /// through.
-    ctrl_data: usize,
     /// The [`HubRegion`] holding this hub's status-change ring and report
     /// buffer.
     region: HubRegion,
@@ -2477,10 +2529,6 @@ struct HubState {
     /// [`UsbDevice::claim_device_entry`]'s reuse while claimed, and retired
     /// on detach).
     device_region: usize,
-    /// The hub's default-control-endpoint producer ring, **parked** here
-    /// while the hub is not the active control context. `None` while
-    /// active.
-    ep0_ring: Option<ProducerRing>,
     /// The hub's interrupt-IN status-change endpoint as
     /// `(dci, max_packet, interval)`, captured from its configuration
     /// descriptor during enumeration so the watch can be configured once
@@ -2519,6 +2567,18 @@ impl HubState {
 struct DeviceState {
     /// The device's xHCI slot (never `0` while the entry is live).
     slot: u8,
+    /// The attachment serial telling this interface from a later one at the
+    /// same table index.
+    serial: u64,
+    /// The control transfer the interface's URB has queued, reaped on a
+    /// later drive.
+    urb_control: Option<route::ControlId>,
+    /// The request the interface holds while its operation runs.
+    request: Option<urb::Request>,
+    /// Each bulk pipe's recovery, by [`BulkPipe::index`]: a pipe being
+    /// recovered arms nothing, and the TD whose failure started it is
+    /// answered once it ends.
+    bulk_recovery: [BulkRecovery; 4],
     /// The device's xHCI protocol speed ID.
     speed: u8,
     /// The configuration descriptor the device was configured with, as it
@@ -2537,24 +2597,8 @@ struct DeviceState {
     /// The [`Layout`] region holding this device's endpoint rings and
     /// buffers.
     region: DeviceRegion,
-    /// Offset of the slot's output device context. A composite sibling's is
-    /// the primary entry's, as are its EP0 ring and control data buffer.
-    output_ctx: usize,
-    /// Offset of the device's default-control-endpoint transfer ring,
-    /// paired with [`Self::ep0_ring`].
-    ep0_ring_off: usize,
-    /// Offset of the control data buffer the device's control transfers
-    /// stage through.
-    ctrl_data: usize,
-    /// The device's default-control-endpoint producer ring, **parked** here
-    /// while the device is not the active control context
-    /// ([`UsbDevice::activate_device_control`] /
-    /// [`UsbDevice::rest_active_context`]). `None` while active.
-    ep0_ring: Option<ProducerRing>,
-    /// The served interface's identity and position. The root-port scan
-    /// ([`UsbDevice::next_root_change`]) and the disconnect confirmation
-    /// ([`UsbDevice::detach_if_device_gone`]) key a directly-attached
-    /// device's fate off its root port.
+    /// The served interface's identity and position: a directly-attached
+    /// device's fate is decided by its root port's operation.
     identity: DeviceIdentity,
     /// Device Context Index of the device's interrupt-IN endpoint, read
     /// from its endpoint descriptor during enumeration (§4.5.1).
@@ -2594,30 +2638,17 @@ struct DeviceState {
     /// than [`REPORT_QUEUE_CAP`] reports behind (a genuinely stalled
     /// consumer). Surfaced for diagnostics; never silently ignored.
     dropped_reports: u64,
-    /// The interrupt-IN endpoint completed a transfer with a halting error
-    /// code and is stopped by the controller until it is reset. Set by
-    /// [`UsbDevice::capture_report_event`] the moment the halt is observed
-    /// (which runs re-entrantly from inside a synchronous EP0/command wait,
-    /// so it MUST NOT recover the endpoint there); the actual recovery
-    /// ([`UsbDevice::recover_interrupt_endpoint`]) is performed later at a
-    /// top-level, non-re-entrant point ([`UsbDevice::recover_report_endpoint_if_pending`],
-    /// called from [`UsbDevice::next_report`] and [`UsbDevice::pump_reports`]).
-    /// Cleared once the endpoint is recovered.
+    /// A completion arrived for the interrupt-IN endpoint while a recovery of
+    /// it ran, so the recovery acts on it once it ends: it halted the
+    /// endpoint again, or the recovery's own rebuild discarded it.
     int_recovery_pending: bool,
-    /// A [`UsbDevice::recover_interrupt_endpoint`] for this device's
-    /// interrupt-IN endpoint is in progress. Recovery issues Reset Endpoint /
-    /// Set TR Dequeue commands and a device-side `CLEAR_FEATURE`, each of
-    /// which waits on the shared event ring — during which a fresh interrupt
-    /// completion for the *same* endpoint can arrive and reach
-    /// [`UsbDevice::capture_report_event`]. This guard makes that re-entrant
-    /// capture leave the ring (which recovery is rebuilding) untouched and
-    /// merely re-flag [`Self::int_recovery_pending`], so recovery can never
-    /// recurse into itself and scramble the ring — the on-metal defect where
-    /// hammering a device during USB bring-up killed its class driver.
+    /// A recovery of the interrupt-IN endpoint runs, and its ring is the
+    /// recovery's: a capture leaves it alone and flags
+    /// [`Self::int_recovery_pending`] instead.
     int_recovering: bool,
     /// The interrupt-IN endpoint's recovery ladder. Nothing is armed on the
     /// endpoint while a retry is owed, and the verdict on the device is the
-    /// retry's ([`UsbDevice::retry_owed_recoveries`]).
+    /// retry's ([`UsbHost::retry_owed_recoveries`]).
     recovery: Ladder,
     /// Bulk-IN transfer ring over the region's `bulk_in_ring`, built when
     /// the interface's bulk endpoint pair is configured. `None` otherwise.
@@ -2666,6 +2697,8 @@ struct DeviceState {
     /// the device's own endpoint can still be read. `0` until a report has
     /// been rejected.
     last_report_fault_code: u8,
+    /// The transfer last abandoned at its deadline, until its endpoint stops.
+    abandoning: Option<PendingAbandon>,
 }
 
 impl DeviceState {
@@ -2814,11 +2847,10 @@ impl DeviceState {
     }
 }
 
-/// The default control endpoint control transfers run on: one slot's EP0
-/// ring and the region its transfers stage through.
-struct ControlCursor {
-    /// The slot the endpoint belongs to.
-    slot: u8,
+/// One addressed slot's default control pipe: its EP0 ring and the region
+/// its contexts and data stages live in, the region the slot was enumerated
+/// on. A composite device's interfaces share their slot's pipe.
+struct ControlPipe {
     /// The endpoint's transfer ring. Nothing is in flight on it between
     /// transfers unless a TD could not be taken back, after which it runs
     /// nothing more.
@@ -2827,8 +2859,16 @@ struct ControlCursor {
     ring_off: usize,
     /// Region offset of the slot's output device context.
     output_ctx: usize,
+    /// Region offset of the input context the slot's commands stage through.
+    input_ctx: usize,
     /// Region offset of the buffer its data stages move through.
     ctrl_data: usize,
+    /// Its transfers: waiting, running, and the one a recovery settles.
+    queue: route::PipeQueue,
+    /// Whether it serves, is being taken back, or is dead.
+    state: route::PipeState,
+    /// Its slot's input context, which one command at a time stages into.
+    input: ops::TicketLock,
 }
 
 /// The TRBs of one control TD, which its completions name.
@@ -2842,13 +2882,16 @@ struct ControlTd {
 
 /// A control transfer that did not complete.
 #[derive(Copy, Clone, Debug)]
-struct ControlFault {
+pub(crate) struct ControlFault {
     /// What the caller is told: [`DriverError::EndpointStalled`] for a
     /// refusal the endpoint was recovered from.
-    error: DriverError,
+    pub(crate) error: DriverError,
     /// Whether the endpoint serves the next transfer: the failure left it
     /// untouched, or it was taken back from the TD.
-    endpoint_serves: bool,
+    pub(crate) endpoint_serves: bool,
+    /// The raw completion code of the event that ended the TD, `0` when none
+    /// did and its deadline ended it.
+    pub(crate) completion: u8,
 }
 
 impl ControlFault {
@@ -2858,22 +2901,24 @@ impl ControlFault {
         Self {
             error,
             endpoint_serves: true,
+            completion: 0,
         }
     }
 
-    /// No endpoint to run on: none is active, or its last TD could not be
-    /// taken back.
+    /// No pipe to run on: none is open, or its last TD could not be taken
+    /// back.
     const fn dead() -> Self {
         Self {
             error: DriverError::DeviceFault,
             endpoint_serves: false,
+            completion: 0,
         }
     }
 }
 
 /// Where the end of the TD being abandoned left its endpoint, which decides
 /// the command tried first to stop it.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Abandoned {
     /// An error completion ended the TD and halted the endpoint.
     Halted,
@@ -2886,18 +2931,18 @@ enum Abandoned {
 enum SlotHold {
     /// It may not: the slot was confirmed disabled, or never enabled.
     Released,
-    /// Disable Slot went unanswered; the late completion of the command at
-    /// `command` still releases it.
-    Pending { slot: u8, command: u64 },
+    /// Its Disable Slot, `command`, is posted and unanswered: the
+    /// confirmation releases it.
+    Pending { slot: u8, command: route::CommandId },
     /// It may, until the controller is reset.
     Held,
 }
 
-/// A chunk withheld for a slot whose Disable Slot went unanswered, returned
-/// once that command's late completion confirms the slot disabled.
+/// A chunk withheld for a slot whose Disable Slot is unanswered, returned
+/// once that command confirms the slot disabled.
 #[derive(Copy, Clone)]
 struct AwaitedDisable {
-    command: u64,
+    command: route::CommandId,
     slot: u8,
     base: usize,
 }
@@ -2911,39 +2956,52 @@ fn push_free_entry<T>(table: &mut Vec<Option<T>>) -> Result<usize, DriverError> 
     Ok(table.len() - 1)
 }
 
-/// The controller engine serving every enumerated device on one started
-/// xHCI controller.
+/// A command's completion `event`, when it succeeded.
 ///
-/// [`UsbDevice::start`] lays the DMA structures out, programs them
-/// through [`Xhci::start`], and leaves the controller running.
-/// [`UsbDevice::bring_up`] then enumerates every reachable device into the
-/// device table. [`UsbDevice::next_report`] arms one interrupt-IN transfer
-/// for the class-driver URB a device is currently serving, and the
-/// host-controller driver completes that URB from the controller event.
-pub struct UsbDevice<'w, H: RegisterBlock, M: DmaBank> {
+/// # Errors
+///
+/// [`DriverError::NoBandwidth`] when the controller cannot schedule the
+/// periodic endpoints a Configure Endpoint adds, else
+/// [`DriverError::DeviceFault`] for any other refusal.
+fn command_outcome(event: Trb) -> Result<Trb, DriverError> {
+    match event.completion_code() {
+        Ok(CompletionCode::Success) => Ok(event),
+        Ok(CompletionCode::BandwidthError | CompletionCode::SecondaryBandwidthError) => {
+            Err(DriverError::NoBandwidth)
+        }
+        _ => Err(DriverError::DeviceFault),
+    }
+}
+
+/// The controller engine serving every enumerated device on one started
+/// xHCI controller: its rings, contexts and device tables, and the routing of
+/// every event the controller posts.
+///
+/// It never waits: everything that does is an operation its
+/// [`UsbHost`] runs, borrowing it only between waits.
+pub struct UsbDevice<H: RegisterBlock, M: DmaBank> {
     xhci: Xhci<H>,
     dma: M,
     layout: Layout,
     command_ring: ProducerRing,
-    /// The **active control context**: the default control endpoint
-    /// [`Self::control`] and the addressing commands target, `None` while no
-    /// slot is active. When hubs are addressed it rests on the root-attached
-    /// hub; it is another hub's or a served device's only while that one is
-    /// enumerated or activated ([`Self::activate_hub_control`] /
-    /// [`Self::activate_device_control`]), then rested again by
-    /// [`Self::rest_active_context`]. Every other slot's ring is parked in
-    /// its table entry, intact in the DCBAA.
-    cursor: Option<ControlCursor>,
-    /// The slot whose abandoned control TD a recovery is taking back: its
-    /// control endpoint's completions are drained until the recovery ends.
-    abandoned_control: Option<u8>,
+    /// The commands posted, in ring order, and the ring's abort state.
+    commands: route::Commands,
+    /// Each addressed slot's control pipe, indexed by slot id: every slot's
+    /// EP0 stays live at once, so a control transfer names its slot and no
+    /// other is disturbed. Opened when a slot is enumerated
+    /// ([`Self::open_pipe`]) and closed as it is disabled.
+    pipes: Vec<Option<ControlPipe>>,
+    /// The control transfers queued or running on the pipes, by ticket.
+    controls: Vec<Option<route::ControlRequest>>,
+    /// The serial the next control transfer's ticket carries.
+    control_serial: u64,
     /// Chunks withheld behind Disable Slots the controller has not answered
-    /// yet, returned by their late confirmations
+    /// yet, returned by their confirmations
     /// ([`Self::settle_awaited_disable`]).
     awaited_disables: Vec<AwaitedDisable>,
     event_cursor: EventRingCursor,
-    /// Whether some root port's change bits may be latched, so
-    /// [`Self::next_root_change`] must scan `PORTSC`.
+    /// Whether some root port's change bits may be latched, so the service
+    /// step must scan `PORTSC`.
     ///
     /// Armed by the two independent latched sources the controller offers — a
     /// drained Port Status Change Event ([`Self::poll_event`]) and the
@@ -2955,12 +3013,18 @@ pub struct UsbDevice<'w, H: RegisterBlock, M: DmaBank> {
     root_change_pending: bool,
     /// Bound on the *register-handshake* polls (`Xhci` open/start/reset
     /// readiness waits) only — the brief, bounded MMIO waits the silicon
-    /// dictates. Event waits are parked on [`Self::wait`] and bounded by
-    /// wall-clock time, never by this count.
+    /// dictates.
     budget: u32,
-    /// The parked event-wait seam every synchronous completion wait and
-    /// the connect debounce block through (see [`EventWait`]).
-    wait: &'w dyn EventWait,
+    /// The instant the service step is running at, which deadlines posted
+    /// inside it count from.
+    now_ns: u64,
+    /// The readiness the host's executor works from.
+    wakes: route::Wakes,
+    /// The bus's default address, which one port at a time holds.
+    address0: ops::TicketLock,
+    /// Set while a controller reset drops every operation: what they held
+    /// goes with the reset, so their guards give nothing back.
+    resetting: bool,
     /// The concurrently served devices, indexed by the device index the
     /// [`HubEvent`]s carry and the per-device transfer paths take. `None`
     /// entries are free. Grows as devices attach ([`Self::claim_device_entry`])
@@ -2975,87 +3039,39 @@ pub struct UsbDevice<'w, H: RegisterBlock, M: DmaBank> {
     /// lifetime ([`HubState::device_region`]) even though no served device
     /// occupies the entry.
     regions: Vec<Option<DeviceRegion>>,
-    /// Index into [`Self::devices`] of the device that is the active
-    /// control context, `None` while a hub (or the root device) is active.
-    active_device: Option<usize>,
     /// The addressed hubs, indexed by the hub-table index [`HubState::
-    /// parent`] and [`DeviceState::parent_hub`] refer to. Entry `0` is the
-    /// root-attached hub; every hub is kept addressed concurrently with
-    /// the served devices so each tier's status-change endpoint is watched
-    /// and its per-port class requests can be issued. All `None` when the
-    /// root device is not a hub (no hub tier). Grows as hub tiers install
-    /// ([`Self::claim_hub_entry`]); each entry's status-change watch lives
-    /// in its own demand-allocated chunk, released on detach.
+    /// parent`] and [`DeviceState::parent_hub`] refer to. Every hub is kept
+    /// addressed concurrently with the served devices so each tier's
+    /// status-change endpoint is watched and its per-port class requests can
+    /// be issued. Grows as hub tiers install ([`Self::claim_hub_entry`]);
+    /// each entry's status-change watch lives in its own demand-allocated
+    /// chunk, released on detach.
     hubs: Vec<Option<HubState>>,
-    /// Index into [`Self::hubs`] of the hub that is the active control
-    /// context, `None` while a device (or the pre-install enumeration
-    /// cursor) is active. At rest this is `Some(0)` (the root hub) when a
-    /// hub topology exists.
-    active_hub: Option<usize>,
-    /// A just-enumerated hub's interrupt-IN status-change endpoint as
-    /// `(dci, max_packet, interval)`, set by every hub's
-    /// [`Self::finish_enumeration`] (which recognises the hub before any
-    /// [`HubState`] exists for it) — `None` when the hub reports none — and
-    /// consumed by the hub-install path.
-    pending_hub_endpoint: Option<(u8, u32, u32)>,
-    /// Slots of devices just freed by hot-removals
-    /// ([`Self::detach_device`]), retained so a *trailing* transfer event
-    /// the controller still posts for a vanished slot (an in-flight
-    /// transfer dropped by the unplug, or a Disable Slot side-effect) is
-    /// recognised as stale and drained, never mistaken for a controller
-    /// protocol violation. `0` entries are free; the whole set is cleared
-    /// once a fresh device enumerates (any trailing completion has long
-    /// since arrived by then). Without this, such a stale event matched
-    /// neither a device endpoint nor the hub endpoint and faulted the
-    /// event-ring consumers, wedging the hub status-change watch so a later
-    /// re-plug went unseen. Deduplicated, so it never holds more than the
-    /// protocol's 255 slots ([`XHCI_MAX_SLOTS`]).
-    freed_slots: Vec<u8>,
+    /// The serial the next attachment takes, telling a device or hub from a
+    /// later one at the same table index.
+    attach_serial: u64,
     /// Ports whose attachment a recovery escalation freed, each owed a reset
     /// and a fresh enumeration in the next retry round, so the caller sees the
     /// teardown before the device that answers there: a device enumerated
     /// afresh is never taken for the one its node was built from.
     /// Deduplicated, so it holds at most one entry per port.
     reenumerations: Vec<Upstream>,
-    /// The last enumeration step entered, for a
-    /// one-shot fault-localising diagnostic ([`Self::enum_stage`]).
-    stage: EnumStage,
-    /// Raw completion code of the most recent event TRB
-    /// [`Self::command`] / [`Self::control`] observed (`0` = none seen
-    /// since the current operation began — i.e. a timeout), for the
-    /// same diagnostic ([`Self::last_completion_code`]).
-    last_completion: u8,
-    /// Raw TRB-type of the most recent event [`Self::await_event_for`]
-    /// observed since the current operation began (`0` = none), for
-    /// [`Self::last_event_type`].
-    last_event_type: u8,
-    /// Why the most recent [`Self::await_event_for`] failed, for
-    /// [`Self::last_reject_reason`]: `0` none (succeeded or not yet
-    /// run), `1` an event of a TRB-type the consumer does not handle,
-    /// `2` a completion for a TRB this transfer did not enqueue,
-    /// `3` an event carrying an undecodable completion code, `4` the
-    /// event-wait budget elapsed with no event (a genuine timeout).
-    last_reject: u8,
-    /// Downstream hub ports whose connected device failed enumeration and
-    /// was skipped fail-soft by the bring-up walk ([`Self::descend_hub`]),
-    /// so the driver above can surface "a device was present but never
-    /// served" instead of it looking like an empty port. Reset on each
-    /// fresh bring-up walk.
+    /// Ports a walk found a device on but could not serve, since the last
+    /// walk began, so the driver can surface "present but unserved" rather
+    /// than an empty port.
     skipped_ports: u32,
-    /// The raw `wPortStatus` the in-progress attach's reset-completion
-    /// wait last observed (`0` = none read), feeding
-    /// [`AttachFault::port_status`] when the attach fails.
-    last_attach_status: u16,
-    /// The first failed downstream-port attach of the current service
-    /// ([`Self::last_attach_fault`]), snapshotted before the failure
-    /// path's own cleanup transfers overwrite the live diagnostics.
+    /// The first failed attach since the driver last took one
+    /// ([`Self::take_attach_fault`]).
     attach_fault: Option<AttachFault>,
     /// The controller's microframe count past `MFINDEX`'s wrap, from the
     /// first isochronous schedule on; restarted with the controller.
     bus_clock: Option<BusClock>,
+    /// What each abandoned transfer's stopped endpoint said of it, by device
+    /// index, until the driver's log takes it.
+    abandon_reports: VecDeque<(usize, AbandonedTransfer)>,
 }
 
-impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// Grow the controller's shared chunk out of `dma`, lay the shared
     /// structures out inside it, program them, and start the controller.
     ///
@@ -3071,14 +3087,12 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     ///
     /// `budget` bounds the register-handshake polls (the brief MMIO
     /// readiness waits the silicon dictates), failing closed on a stuck
-    /// controller. Every *event* wait instead parks on `wait` and is
-    /// bounded by wall-clock time (`AWAIT_EVENT_BUDGET_US`), so the
-    /// engine never spins a core while the controller works.
+    /// controller.
     ///
     /// The controller's completion interrupter is enabled here (and on
-    /// every re-program after a reset), because the engine's own waits
-    /// park on that interrupt: the caller must have routed and bound the
-    /// controller's interrupt line **before** calling this.
+    /// every re-program after a reset), because the event loop parks on that
+    /// interrupt: the caller must have routed and bound the controller's
+    /// interrupt line **before** calling this.
     ///
     /// # Errors
     ///
@@ -3094,12 +3108,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     ///   reaches them.
     ///
     /// [`DmaHost`]: tairix_abi::driver::dma::DmaHost
-    pub fn start(
-        xhci: Xhci<H>,
-        dma: M,
-        wait: &'w dyn EventWait,
-        budget: u32,
-    ) -> Result<Self, DriverError> {
+    pub(crate) fn start(xhci: Xhci<H>, dma: M, budget: u32) -> Result<Self, DriverError> {
         let mut xhci = xhci;
         let mut dma = dma;
         dma.device_quiesced();
@@ -3145,29 +3154,27 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             dma,
             layout,
             command_ring,
-            cursor: None,
-            abandoned_control: None,
+            commands: route::Commands::default(),
+            pipes: Vec::new(),
+            controls: Vec::new(),
+            control_serial: 0,
             awaited_disables: Vec::new(),
             event_cursor,
             root_change_pending: true,
             budget,
-            wait,
+            now_ns: 0,
+            wakes: route::Wakes::default(),
+            address0: ops::TicketLock::default(),
+            resetting: false,
             devices: Vec::new(),
             regions: Vec::new(),
-            active_device: None,
             hubs: Vec::new(),
-            active_hub: None,
-            pending_hub_endpoint: None,
-            freed_slots: Vec::new(),
+            attach_serial: 0,
             reenumerations: Vec::new(),
-            stage: EnumStage::Scan,
-            last_completion: 0,
-            last_event_type: 0,
-            last_reject: 0,
             skipped_ports: 0,
-            last_attach_status: 0,
             attach_fault: None,
             bus_clock: None,
+            abandon_reports: VecDeque::new(),
         })
     }
 
@@ -3176,7 +3183,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// start the controller.
     ///
     /// Factored out of [`Self::start`] so the controller re-bring-up after a
-    /// device hot-removal ([`Self::reset_and_reenumerate`]) re-programs the
+    /// fault ([`UsbHost::reset_and_reenumerate`]) re-programs the
     /// *same* held DMA region and register window identically, rather than
     /// duplicating the sequence. Every EP0, hub status-change and endpoint
     /// ring is built in its device's own region when that device is
@@ -3249,12 +3256,10 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             budget,
         )?;
 
-        // The engine's synchronous waits park on the controller's completion
-        // interrupt, so interrupt generation is part of starting the
-        // controller — enabled here so a cold boot and a post-reset
-        // re-program share the one definition. The caller has already bound
-        // the interrupt line, so the first completion has a kernel-owned
-        // line to latch onto.
+        // The event loop parks on the controller's completion interrupt, so
+        // interrupt generation is part of starting the controller — enabled
+        // here so a cold boot and a post-reset re-program share the one
+        // definition.
         xhci.enable_interrupter()?;
 
         Ok((command_ring, event_cursor))
@@ -3380,46 +3385,17 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             .ok_or(DriverError::OutOfRange)
     }
 
-    /// Retire every claimed region that no live device occupies, no hub's
-    /// contexts own, and the active control endpoint does not stage through —
-    /// the chunks a failed enumeration stranded — as
-    /// [`Self::retire_device_region`] does, under `hold`: releasing one the
-    /// controller can still reach hands it memory back. Idempotent; called on
-    /// the error paths of the attach flows so an aborted attach leaks no DMA.
-    fn retire_unattached_regions(&mut self, hold: SlotHold) {
-        for index in 0..self.regions.len() {
-            let Some(region) = self.regions[index] else {
-                continue;
-            };
-            if self.devices[index].is_some() {
-                continue;
-            }
-            let hub_claimed = self
-                .hubs
-                .iter()
-                .any(|hub| hub.as_ref().is_some_and(|hub| hub.device_region == index));
-            let active = self
-                .cursor
-                .as_ref()
-                .is_some_and(|control| control.ring_off == region.ep0_ring);
-            if hub_claimed || active {
-                continue;
-            }
-            self.retire_device_region(index, hold);
-        }
-    }
-
     /// Drop every tracked device and hub and release their
     /// demand-allocated chunks, leaving only the shared chunk live — the
     /// teardown of a full controller reset that rebuilds the tree from
     /// scratch, and sound only after one: the reset is what lets the chunks
     /// go.
     fn reset_device_tracking(&mut self) {
-        self.cursor = None;
-        self.abandoned_control = None;
-        self.active_device = None;
-        self.active_hub = None;
-        self.pending_hub_endpoint = None;
+        self.pipes.clear();
+        self.controls.clear();
+        self.commands = route::Commands::default();
+        self.address0 = ops::TicketLock::default();
+        self.clear_wakes();
         self.bus_clock = None;
         for index in 0..self.devices.len() {
             if let Some(device) = self.devices[index].take() {
@@ -3435,7 +3411,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         for hub in hubs.into_iter().flatten() {
             let _ = self.dma.release(hub.region.base);
         }
-        self.freed_slots.clear();
         self.reenumerations.clear();
     }
 
@@ -3468,7 +3443,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// completion the controller posts during the drain re-asserts `IMAN.IP`
     /// and is not lost. Delegates to [`Xhci::acknowledge_interrupt`], whose
     /// single `USBSTS` read also carries the port-change summary — folded into
-    /// [`Self::next_root_change`]'s arming here — and the fault latch, returned
+    /// the root-port scan's arming here — and the fault latch, returned
     /// so the caller recovers without a second read of the same register.
     ///
     /// This clears only `IMAN.IP`, never `ERDP`. Event Handler Busy
@@ -3578,16 +3553,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         Ok(Trb::from_bytes(image))
     }
 
-    /// Reset the per-transfer event diagnostics before a fresh command
-    /// or control transfer, so [`Self::last_completion_code`],
-    /// [`Self::last_event_type`], and [`Self::last_reject_reason`]
-    /// describe only that transfer.
-    fn reset_event_diagnostics(&mut self) {
-        self.last_completion = 0;
-        self.last_event_type = 0;
-        self.last_reject = REJECT_NONE;
-    }
-
     /// Index of the served device whose interrupt-IN report completion
     /// `event` is, routed by its stable slot and endpoint.
     fn report_async_index(&self, event: Trb) -> Option<usize> {
@@ -3612,21 +3577,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         })
     }
 
-    /// Whether `event` is a trailing transfer completion the controller posted
-    /// for a just-freed device slot ([`Self::freed_slots`]).
-    ///
-    /// A physical unplug can drop an in-flight transfer, and tearing the slot
-    /// down (Disable Slot) can itself leave a completion event behind; either
-    /// lands on the shared event ring *after* the device endpoint is gone, so
-    /// it matches neither [`Self::report_async_index`] (the device entry is
-    /// cleared) nor [`Self::hub_async_index`]. Recognising it here lets the
-    /// event-ring consumers drain it instead of faulting — a fatal fault there
-    /// would silence the hub status-change watch and a later re-plug would go
-    /// unseen.
-    fn is_stale_freed_transfer(&self, event: Trb) -> bool {
-        event.slot_id() != 0 && self.freed_slots.contains(&event.slot_id())
-    }
-
     /// Index of the served device on whose configured bulk endpoint `event`
     /// completed, routed by its stable slot and endpoint.
     fn bulk_async_index(&self, event: Trb) -> Option<usize> {
@@ -3638,85 +3588,11 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         })
     }
 
-    /// Dispatch an asynchronous completion `event` sharing the one event ring
-    /// to its endpoint's consumer, so a synchronous EP0/command wait — or the
-    /// shared report drain — neither faults on it nor drops it.
-    ///
-    /// A device report completion is **captured** into that device's report
-    /// FIFO ([`Self::capture_report_event`]: decode, retire, re-arm); a hub
-    /// status-change completion is parked for the hub watcher; a bulk
-    /// completion is parked in the device's bulk FIFO. Several interrupt
-    /// transfers are armed at once ([`INT_ARM_DEPTH`]), so more than one report
-    /// completion can arrive before it is drained — the report FIFO holds
-    /// them, unlike the hub's single status slot (only one status transfer is
-    /// ever armed).
-    ///
-    /// A command completion is the late answer to a Disable Slot that went
-    /// unanswered ([`Self::settle_awaited_disable`]), and a completion on the
-    /// control endpoint a recovery is taking back belongs to the TD it
-    /// abandoned; both are consumed here.
-    ///
-    /// Returns `Ok(true)` when `event` belonged to a registered async endpoint
-    /// (report, hub status-change, bulk), an awaited Disable Slot or an
-    /// abandoned control TD, or was a tolerated freed-slot completion,
-    /// `Ok(false)` when it belonged to none (the caller decides whether that is
-    /// a fault). A hub double-completion still fails closed
-    /// ([`DriverError::DeviceFault`]); a report capture fault is recorded on
-    /// the device rather than propagated here.
-    fn stash_async_event(&mut self, event: Trb) -> Result<bool, DriverError> {
-        if event.trb_type() == Ok(TrbType::CommandCompletion) {
-            return Ok(self.settle_awaited_disable(event) || self.is_stale_freed_transfer(event));
-        }
-        if self.abandoned_control == Some(event.slot_id()) && event.endpoint_id() == DCI_CONTROL {
-            return Ok(true);
-        }
-        if let Some(at) = self.iso_async_index(event) {
-            self.capture_iso_event(at, event);
-            return Ok(true);
-        }
-        if let Some(index) = self.report_async_index(event) {
-            // Capture the report into the device's FIFO (decode, retire the
-            // ring slot, re-arm). A capture-side fault is recorded on the
-            // device for its next URB to surface, never propagated here: an
-            // asynchronous report must not fault the synchronous EP0/command
-            // wait that happened to observe it, nor the shared drain.
-            let _ = self.capture_report_event(index, event);
-            return Ok(true);
-        }
-        if let Some(hub_index) = self.hub_async_index(event) {
-            if let Some(hub) = self.hubs[hub_index].as_mut() {
-                if hub.pending.is_some() {
-                    return Err(DriverError::DeviceFault);
-                }
-                hub.pending = Some(event);
-                return Ok(true);
-            }
-        }
-        if let Some(index) = self.bulk_async_index(event) {
-            if let Some(device) = self.devices[index].as_mut() {
-                // Several bulk TDs can be outstanding at once, so bulk parks
-                // in a FIFO sized to both rings' in-flight bound; overflow
-                // means the controller posted more completions than TDs were
-                // queued — a protocol violation, surfaced by the push.
-                device
-                    .pending_bulk
-                    .try_push_back(event)
-                    .map_err(|_| DriverError::Busy)?;
-                return Ok(true);
-            }
-        }
-        if self.is_stale_freed_transfer(event) {
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    /// Settle the Disable Slot `event` completes when it is one that went
-    /// unanswered within its wait: a confirmation clears the slot's DCBAA
-    /// entry and returns every chunk withheld behind it, a refusal leaves
-    /// them withheld until a controller reset. Whether it was one.
-    fn settle_awaited_disable(&mut self, event: Trb) -> bool {
-        let command = event.parameter;
+    /// Settle command `command`, completing as `event`, when it is a Disable
+    /// Slot chunks were withheld behind: a confirmation clears the slot's
+    /// DCBAA entry and returns every such chunk, a refusal leaves them
+    /// withheld until a controller reset. Whether it was one.
+    fn settle_awaited_disable(&mut self, command: route::CommandId, event: Trb) -> bool {
         let Some(slot) = self
             .awaited_disables
             .iter()
@@ -3749,151 +3625,107 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         true
     }
 
-    /// Wait for a completion event for one of `addresses` (the TRBs in
-    /// flight), skipping informational port-status-change events.
-    ///
-    /// A completion for a TRB never issued, an undecodable completion
-    /// code, or an unexpected event type is a controller fault,
-    /// surfaced rather than absorbed. Every reject
-    /// path records *why* it failed in [`Self::last_reject`] and the
-    /// observed event's raw TRB-type in [`Self::last_event_type`], so a
-    /// metal capture can tell an unexpected asynchronous event from a
-    /// genuine timeout — the `completion_hex` alone cannot.
-    fn await_event_for(&mut self, addresses: &[u64]) -> Result<Trb, DriverError> {
-        let deadline = self.wait.now_us().saturating_add(AWAIT_EVENT_BUDGET_US);
-        loop {
-            let Some(event) = self.poll_event()? else {
-                let now = self.wait.now_us();
-                if now >= deadline {
-                    self.last_reject = REJECT_BUDGET_TIMEOUT;
-                    return Err(DriverError::DeviceFault);
-                }
-                // Park until the controller's interrupt or the remaining
-                // budget, never spinning the event ring; a spurious wake
-                // re-polls against the same deadline.
-                self.wait.wait_us(deadline - now);
-                continue;
-            };
-            self.last_event_type = event.trb_type_raw();
-            match event.trb_type() {
-                Ok(TrbType::PortStatusChange) => {}
-                Ok(TrbType::CommandCompletion | TrbType::TransferEvent) => {
-                    // Record the raw completion code of *every* command/
-                    // transfer event the moment it is observed — before
-                    // the address match and before the fail-closed
-                    // `completion_code()` decode below. A rejection here
-                    // (an event for a TRB we did not enqueue, or a code
-                    // this driver does not model) otherwise returned
-                    // before the caller could capture the code, leaving
-                    // `last_completion_code()` reading `0` ("no event")
-                    // and conflating a genuine timeout with a real-but-
-                    // rejected completion. Capturing it here keeps the
-                    // diagnostic truthful.
-                    self.last_completion = event.completion_code_raw();
-                    if !addresses.contains(&event.parameter) {
-                        // The event is not for the transfer/command this
-                        // synchronous wait issued. If it is an asynchronous
-                        // interrupt-IN completion for a registered endpoint
-                        // (the device's report endpoint, or the hub's
-                        // status-change endpoint), park it for that endpoint's
-                        // consumer and keep waiting — the shared event ring
-                        // multiplexes all endpoints, so an in-flight hub
-                        // status report or a stray keystroke completion must
-                        // not fault an EP0 transfer. Anything else is a
-                        // genuine controller fault.
-                        if self.stash_async_event(event)? {
-                            continue;
-                        }
-                        self.last_reject = REJECT_ADDRESS_MISMATCH;
-                        return Err(DriverError::DeviceFault);
-                    }
-                    if event.completion_code().is_err() {
-                        self.last_reject = REJECT_UNDECODABLE_CODE;
-                        return Err(DriverError::OutOfRange);
-                    }
-                    return Ok(event);
-                }
-                // An event of a type the consumer does not handle (e.g.
-                // an asynchronous controller event interleaved with the
-                // transfer/command completion). Surfaced, not absorbed,
-                // with its raw type retained for the metal diagnostic.
-                _ => {
-                    self.last_reject = REJECT_UNEXPECTED_TYPE;
-                    return Err(DriverError::DeviceFault);
-                }
-            }
-        }
-    }
-
-    /// Issue one command TRB and wait for its successful completion.
+    /// The control pipe of `slot`.
     ///
     /// # Errors
     ///
-    /// [`DriverError::NoBandwidth`] when the controller cannot schedule the
-    /// periodic endpoints a Configure Endpoint adds, else
-    /// [`DriverError::DeviceFault`] for any other refusal or a dead controller.
-    fn command(&mut self, command: Trb) -> Result<Trb, DriverError> {
-        let event = self.issue_command(command)?;
-        match event.completion_code() {
-            Ok(CompletionCode::Success) => Ok(event),
-            Ok(CompletionCode::BandwidthError | CompletionCode::SecondaryBandwidthError) => {
-                Err(DriverError::NoBandwidth)
-            }
-            _ => Err(DriverError::DeviceFault),
+    /// [`DriverError::DeviceFault`] when `slot` has none open.
+    fn pipe(&self, slot: u8) -> Result<&ControlPipe, DriverError> {
+        self.pipes
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .ok_or(DriverError::DeviceFault)
+    }
+
+    /// As [`Self::pipe`], mutably.
+    fn pipe_mut(&mut self, slot: u8) -> Result<&mut ControlPipe, DriverError> {
+        self.pipes
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+            .ok_or(DriverError::DeviceFault)
+    }
+
+    /// Open `slot`'s control pipe on device-table entry `index`'s region,
+    /// with an empty EP0 ring and its output context zeroed, as Address
+    /// Device requires (§4.5.2): a reused region still holds the previous
+    /// device's contexts.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for an entry with no region,
+    /// [`DriverError::OutOfMemory`] when the pipe table cannot grow, or a
+    /// DMA fault.
+    fn open_pipe(&mut self, index: usize, slot: u8) -> Result<(), DriverError> {
+        let region = self.device_region(index)?;
+        let at = usize::from(slot);
+        if self.pipes.len() <= at {
+            self.pipes
+                .try_reserve(at + 1 - self.pipes.len())
+                .map_err(|_| DriverError::OutOfMemory)?;
+            self.pipes.resize_with(at + 1, || None);
+        }
+        let ring = self.build_ring(region.ep0_ring, RING_TRBS)?;
+        let ctx_zeros = [0u8; CTX_DWORDS * 4];
+        for offset in (0..OUTPUT_CONTEXTS * self.layout.ctx_size).step_by(ctx_zeros.len()) {
+            self.dma.write(region.output_ctx + offset, &ctx_zeros)?;
+        }
+        self.pipes[at] = Some(ControlPipe {
+            ring,
+            ring_off: region.ep0_ring,
+            output_ctx: region.output_ctx,
+            input_ctx: region.input_ctx,
+            ctrl_data: region.ctrl_data,
+            queue: route::PipeQueue::default(),
+            state: route::PipeState::Serving,
+            input: ops::TicketLock::default(),
+        });
+        Ok(())
+    }
+
+    /// Close `slot`'s control pipe, answering every transfer on it: nothing
+    /// more runs on it.
+    fn close_pipe(&mut self, slot: u8) {
+        self.fail_pipe_queue(slot);
+        if let Some(pipe) = self.pipes.get_mut(usize::from(slot)) {
+            *pipe = None;
         }
     }
 
-    /// Issue one command TRB and return its completion event, whatever
-    /// completion code it carries.
-    fn issue_command(&mut self, command: Trb) -> Result<Trb, DriverError> {
-        self.reset_event_diagnostics();
-        let outcome = self.command_ring.push(command)?;
-        publish(
-            &mut self.dma,
-            self.layout.command_ring,
-            self.command_ring.link_slot(),
-            &outcome,
-        )?;
-        self.xhci.ring_doorbell(0, 0)?;
-        // `await_event_for` records the raw completion code as it sees
-        // the event, so `last_completion_code()` is meaningful even
-        // when the caller rejects it.
-        let event = self.await_event_for(&[outcome.address])?;
-        // The controller has consumed the TRB and posted its completion, so
-        // the ring slot is free whatever the code says. Retiring only on
-        // success leaked a slot per rejected command, and the ring read full
-        // after as many rejections as it has slots.
-        self.command_ring.retire_one()?;
-        if event.trb_type() != Ok(TrbType::CommandCompletion) {
-            return Err(DriverError::DeviceFault);
-        }
-        Ok(event)
-    }
-
-    /// Clear the whole shared input context (§6.2.5.1), so a command writes
-    /// its contexts over zeroes rather than over another device's.
-    fn zero_input_ctx(&mut self) -> Result<(), DriverError> {
+    /// Clear `slot`'s whole input context (§6.2.5.1), so a command writes
+    /// its contexts over zeroes rather than over an earlier command's.
+    fn zero_input_ctx(&mut self, slot: u8) -> Result<(), DriverError> {
+        let input_ctx = self.pipe(slot)?.input_ctx;
         // Walk the contiguous span, not one write per context: with 64-byte
         // contexts a context-wide write would leave the padding between them
-        // carrying the previous device's bytes.
+        // carrying the previous command's bytes.
         let zeros = [0u8; CTX_DWORDS * 4];
         for offset in (0..INPUT_CONTEXTS * self.layout.ctx_size).step_by(zeros.len()) {
-            self.dma.write(self.layout.input_ctx + offset, &zeros)?;
+            self.dma.write(input_ctx + offset, &zeros)?;
         }
         Ok(())
     }
 
-    /// Write context `index` of the input context (§6.2.5).
+    /// Write context `index` of `slot`'s input context (§6.2.5: index 0 is
+    /// the input control context, 1 the slot context, and `1 + dci` the
+    /// endpoint contexts).
     fn write_input_ctx(
         &mut self,
+        slot: u8,
         index: usize,
         dwords: &[u32; CTX_DWORDS],
     ) -> Result<(), DriverError> {
+        let entry = self.pipe(slot)?.input_ctx + index * self.layout.ctx_size;
         let mut bytes = [0u8; CTX_DWORDS * 4];
         for (dword_index, dword) in dwords.iter().enumerate() {
             bytes[dword_index * 4..dword_index * 4 + 4].copy_from_slice(&dword.to_le_bytes());
         }
-        self.dma.write(self.layout.input_ctx_entry(index), &bytes)
+        self.dma.write(entry, &bytes)
+    }
+
+    /// Device-visible address of `slot`'s input context, which its commands
+    /// name.
+    fn input_ctx_addr(&self, slot: u8) -> Result<u64, DriverError> {
+        self.device_addr_of(self.pipe(slot)?.input_ctx)
     }
 
     /// Read one device-context block (the [`CTX_DWORDS`] dwords at
@@ -3917,112 +3749,12 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         Ok(dwords)
     }
 
-    /// Run one control transfer on the default endpoint: `setup`, an IN data
-    /// stage filling `data` when it is non-empty, and the status stage.
-    /// Returns how many bytes of `data` the device delivered, copied out of
-    /// the active slot's control data buffer before any other context can be
-    /// activated.
-    fn control(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
-        self.control_in(setup, data).map_err(|fault| fault.error)
-    }
-
-    /// [`Self::control`], saying on failure whether the endpoint still
-    /// serves.
-    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, ControlFault> {
-        let requested = u32::try_from(data.len())
-            .map_err(|_| ControlFault::serving(DriverError::LengthOutOfRange))?;
-        let delivered = self.control_transfer(setup, requested, None)?;
-        let ctrl_data = self
-            .cursor
-            .as_ref()
-            .map(|control| control.ctrl_data)
-            .ok_or(ControlFault::serving(DriverError::DeviceFault))?;
-        let delivered = usize::try_from(delivered)
-            .ok()
-            .and_then(|len| data.get_mut(..len))
-            .ok_or(ControlFault::serving(DriverError::DeviceFault))?;
-        if !delivered.is_empty() {
-            self.dma
-                .read(ctrl_data, delivered)
-                .map_err(ControlFault::serving)?;
-        }
-        Ok(delivered.len())
-    }
-
-    /// Run one control-OUT transfer on the default endpoint: `setup`, an
-    /// OUT data stage carrying `data` (staged through the active slot's
-    /// control data buffer), and the status stage.
-    fn control_out_transfer(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError> {
-        self.control_transfer(setup, 0, Some(data))
-            .map(|_| ())
-            .map_err(|fault| fault.error)
-    }
-
-    /// The shared control-transfer stage builder behind [`Self::control`]
-    /// and [`Self::control_out_transfer`]: SETUP, an optional data stage
-    /// through the active slot's control data buffer — IN of `data_in_len`
-    /// bytes, or OUT carrying `out_data` (`data_in_len` must then be `0`) —
-    /// and the status stage, which runs opposite to the data direction (IN
-    /// when there is no data stage, §4.11.2.2). Returns the bytes the device
-    /// actually moved in the data stage.
-    ///
-    /// A TD that does not complete — refused with a STALL, ended by any other
-    /// error, or left unanswered past the wait — is taken back
-    /// ([`Self::recover_control_endpoint`]) before the failure is returned,
-    /// so the endpoint serves the next transfer; a refusal surfaces as
-    /// [`DriverError::EndpointStalled`]. An endpoint that could not be taken
-    /// back runs nothing more: the controller may still own that TD.
-    fn control_transfer(
-        &mut self,
-        setup: [u8; 8],
-        data_in_len: u32,
-        out_data: Option<&[u8]>,
-    ) -> Result<u32, ControlFault> {
-        let data_len = match out_data {
-            Some(data) => {
-                if data_in_len != 0 {
-                    return Err(ControlFault::serving(DriverError::LengthOutOfRange));
-                }
-                u32::try_from(data.len())
-                    .map_err(|_| ControlFault::serving(DriverError::LengthOutOfRange))?
-            }
-            None => data_in_len,
-        };
-        if data_len as usize > CTRL_DATA_LEN {
-            return Err(ControlFault::serving(DriverError::LengthOutOfRange));
-        }
-        let (slot, ctrl_data) = match self.cursor.as_ref() {
-            Some(control) if control.ring.in_flight() == 0 => (control.slot, control.ctrl_data),
-            _ => return Err(ControlFault::dead()),
-        };
-        // Stage the OUT payload into the control data buffer before any
-        // TRB is published, so a refused write leaves nothing armed.
-        if let Some(data) = out_data {
-            if !data.is_empty() {
-                self.dma
-                    .write(ctrl_data, data)
-                    .map_err(ControlFault::serving)?;
-            }
-        }
-        self.reset_event_diagnostics();
-        let armed = self
-            .arm_control_td(setup, data_len, out_data.is_some(), ctrl_data)
-            .and_then(|td| {
-                self.xhci
-                    .ring_doorbell(slot, u32::from(DCI_CONTROL))
-                    .map(|()| td)
-            });
-        match armed {
-            Ok(td) => self.complete_control_transfer(td),
-            Err(error) => Err(self.abandon_control_td(error, Abandoned::Running)),
-        }
-    }
-
-    /// Publish one control TD's stages on the active control endpoint's
-    /// ring, its data stage (of `data_len` bytes, `out` naming the
-    /// direction) through `ctrl_data`.
+    /// Publish one control TD's stages on `slot`'s EP0 ring, its data stage
+    /// (of `data_len` bytes, `out` naming the direction) through
+    /// `ctrl_data`.
     fn arm_control_td(
         &mut self,
+        slot: u8,
         setup: [u8; 8],
         data_len: u32,
         out: bool,
@@ -4036,12 +3768,15 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             trb::SETUP_TRT_IN
         };
         let buffer = self.device_addr_of(ctrl_data)?;
-        let setup = self.push_control_trb(Trb::new(
-            TrbType::SetupStage,
-            u64::from_le_bytes(setup),
-            8,
-            trb::CONTROL_IDT | transfer_type,
-        ))?;
+        let setup = self.push_control_trb(
+            slot,
+            Trb::new(
+                TrbType::SetupStage,
+                u64::from_le_bytes(setup),
+                8,
+                trb::CONTROL_IDT | transfer_type,
+            ),
+        )?;
         let data = if data_len > 0 {
             // An IN data stage interrupts on a short packet so the honest
             // byte count is read from the residual; an OUT stage moves
@@ -4051,12 +3786,10 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             } else {
                 trb::CONTROL_DIR_IN | trb::CONTROL_ISP
             };
-            Some(self.push_control_trb(Trb::new(
-                TrbType::DataStage,
-                buffer,
-                data_len,
-                data_flags,
-            ))?)
+            Some(self.push_control_trb(
+                slot,
+                Trb::new(TrbType::DataStage, buffer, data_len, data_flags),
+            )?)
         } else {
             None
         };
@@ -4067,12 +3800,15 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         } else {
             trb::CONTROL_DIR_IN
         };
-        let status = self.push_control_trb(Trb::new(
-            TrbType::StatusStage,
-            0,
-            0,
-            status_direction | trb::CONTROL_IOC,
-        ))?;
+        let status = self.push_control_trb(
+            slot,
+            Trb::new(
+                TrbType::StatusStage,
+                0,
+                0,
+                status_direction | trb::CONTROL_IOC,
+            ),
+        )?;
         Ok(ControlTd {
             setup,
             data,
@@ -4081,191 +3817,14 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         })
     }
 
-    /// Push `trb` onto the active control endpoint's ring and publish it,
-    /// returning the address its completions name.
-    fn push_control_trb(&mut self, trb: Trb) -> Result<u64, DriverError> {
-        let control = self.cursor.as_mut().ok_or(DriverError::DeviceFault)?;
-        let outcome = control.ring.push(trb)?;
-        let (ring_off, link_slot) = (control.ring_off, control.ring.link_slot());
+    /// Push `trb` onto `slot`'s EP0 ring and publish it, returning the
+    /// address its completions name.
+    fn push_control_trb(&mut self, slot: u8, trb: Trb) -> Result<u64, DriverError> {
+        let pipe = self.pipe_mut(slot)?;
+        let outcome = pipe.ring.push(trb)?;
+        let (ring_off, link_slot) = (pipe.ring_off, pipe.ring.link_slot());
         publish(&mut self.dma, ring_off, link_slot, &outcome)?;
         Ok(outcome.address)
-    }
-
-    /// Await `td`'s completion and retire it, returning the bytes its data
-    /// stage moved: `data_len` minus the residual its short-packet event
-    /// reported. A TD that does not complete is taken back
-    /// ([`Self::abandon_control_td`]).
-    fn complete_control_transfer(&mut self, td: ControlTd) -> Result<u32, ControlFault> {
-        let residual = match self.await_control_td(td) {
-            Ok(residual) => residual,
-            Err((error, abandoned)) => return Err(self.abandon_control_td(error, abandoned)),
-        };
-        if let Some(control) = self.cursor.as_mut() {
-            while control.ring.in_flight() > 0 {
-                control.ring.retire_one().map_err(ControlFault::serving)?;
-            }
-        }
-        td.data_len
-            .checked_sub(residual)
-            .ok_or(ControlFault::serving(DriverError::DeviceFault))
-    }
-
-    /// Await the events `td` completes with — a short-packet event for its
-    /// data stage may precede the status stage's — returning the data
-    /// stage's residual. An error event on any stage ends it early. On
-    /// failure, why, and where it left the endpoint.
-    fn await_control_td(&mut self, td: ControlTd) -> Result<u32, (DriverError, Abandoned)> {
-        let slot = self.cursor.as_ref().map_or(0, |control| control.slot);
-        let watch = [td.setup, td.data.unwrap_or(td.status), td.status];
-        let mut residual = 0;
-        for _ in 0..2 {
-            let event = match self.await_event_for(&watch) {
-                Ok(event) => event,
-                // A code nothing names ended the TD, which halts the endpoint
-                // as any error does; a wait that failed otherwise saw nothing
-                // end it.
-                Err(error) if self.last_reject == REJECT_UNDECODABLE_CODE => {
-                    return Err((error, Abandoned::Halted))
-                }
-                Err(error) => return Err((error, Abandoned::Running)),
-            };
-            if event.trb_type() != Ok(TrbType::TransferEvent)
-                || event.slot_id() != slot
-                || event.endpoint_id() != DCI_CONTROL
-            {
-                return Err((DriverError::DeviceFault, Abandoned::Running));
-            }
-            match event.completion_code() {
-                Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {}
-                // A protocol STALL: the device refused the request, which a
-                // class driver may treat as an answer. The device side
-                // self-clears at the next SETUP (USB 2.0 §8.5.3.4).
-                Ok(CompletionCode::StallError) => {
-                    return Err((DriverError::EndpointStalled, Abandoned::Halted))
-                }
-                // Every error halts the control endpoint (xHCI §4.8.3).
-                _ => return Err((DriverError::DeviceFault, Abandoned::Halted)),
-            }
-            if td.data == Some(event.parameter) {
-                residual = event.transfer_residual();
-                continue;
-            }
-            if event.parameter == td.status {
-                return Ok(residual);
-            }
-            // A setup stage asks for no completion of its own.
-            return Err((DriverError::DeviceFault, Abandoned::Running));
-        }
-        Err((DriverError::DeviceFault, Abandoned::Running))
-    }
-
-    /// Take the active control endpoint back from a TD that did not
-    /// complete, reporting `error` and whether the endpoint now serves.
-    fn abandon_control_td(&mut self, error: DriverError, abandoned: Abandoned) -> ControlFault {
-        let endpoint_serves = self.recover_control_endpoint(abandoned).is_ok();
-        let error = if error == DriverError::EndpointStalled && !endpoint_serves {
-            // A refusal promises an endpoint already recovered.
-            DriverError::DeviceFault
-        } else {
-            error
-        };
-        ControlFault {
-            error,
-            endpoint_serves,
-        }
-    }
-
-    /// Take the **active** default control endpoint back from the TD it
-    /// abandoned: bring it to Stopped — Reset Endpoint (§4.6.8) from a halt,
-    /// Stop Endpoint (§4.6.9) from a TD still running — rebuild its ring at
-    /// the base, and repoint the controller's dequeue there (§4.6.10). No
-    /// device-side `CLEAR_FEATURE` is needed: a control pipe starts over at
-    /// its next SETUP (USB 2.0 §8.5.3.4). The failed transfer's breadcrumb is
-    /// kept for the diagnostics.
-    ///
-    /// The endpoint need not be where `abandoned` says: a TD that timed out
-    /// can halt, or complete, as the stop is issued. A command the controller
-    /// refuses on the endpoint's state (Context State Error) is followed by
-    /// the other, and one refused by both finds the endpoint already
-    /// stopped. Completions of the abandoned TD that land meanwhile are
-    /// drained ([`Self::abandoned_control`]).
-    ///
-    /// # Errors
-    ///
-    /// A command failing otherwise, or a DMA fault: the TD stays on the ring,
-    /// so the endpoint runs nothing more.
-    fn recover_control_endpoint(&mut self, abandoned: Abandoned) -> Result<(), DriverError> {
-        let (slot, ring_off) = self
-            .cursor
-            .as_ref()
-            .map(|control| (control.slot, control.ring_off))
-            .ok_or(DriverError::DeviceFault)?;
-        let observed = (self.last_completion, self.last_event_type, self.last_reject);
-        self.abandoned_control = Some(slot);
-        let recovered = self
-            .stop_endpoint(slot, DCI_CONTROL, abandoned)
-            .and_then(|()| {
-                let ring = self.restart_ring((slot, DCI_CONTROL), ring_off, RING_TRBS)?;
-                if let Some(control) = self.cursor.as_mut() {
-                    control.ring = ring;
-                }
-                Ok(())
-            });
-        self.abandoned_control = None;
-        (self.last_completion, self.last_event_type, self.last_reject) = observed;
-        recovered
-    }
-
-    /// Bring endpoint `dci` of `slot` to Stopped, trying first the command
-    /// where `abandoned` says it is needs. One the controller refuses on the
-    /// endpoint's state (Context State Error) is followed by the other, and
-    /// one refused by both finds it stopped already, so a recovery that failed
-    /// part-way can run again.
-    fn stop_endpoint(
-        &mut self,
-        slot: u8,
-        dci: u8,
-        abandoned: Abandoned,
-    ) -> Result<(), DriverError> {
-        let commands = match abandoned {
-            Abandoned::Halted => [TrbType::ResetEndpoint, TrbType::StopEndpoint],
-            Abandoned::Running => [TrbType::StopEndpoint, TrbType::ResetEndpoint],
-        };
-        for command in commands {
-            let event = self.issue_command(Trb::new(
-                command,
-                0,
-                0,
-                trb::control_slot(slot) | trb::control_endpoint(dci),
-            ))?;
-            match event.completion_code() {
-                Ok(CompletionCode::Success) => return Ok(()),
-                Ok(CompletionCode::ContextStateError) => {}
-                _ => return Err(DriverError::DeviceFault),
-            }
-        }
-        Ok(())
-    }
-
-    /// Rebuild stopped endpoint `dci` of `slot`'s `trbs`-slot ring at
-    /// `ring_off` with nothing on it and point the controller's dequeue at its
-    /// base, returning the ring for the caller to install once the controller
-    /// has taken it.
-    fn restart_ring(
-        &mut self,
-        (slot, dci): (u8, u8),
-        ring_off: usize,
-        trbs: usize,
-    ) -> Result<ProducerRing, DriverError> {
-        let ring = self.build_ring(ring_off, trbs)?;
-        // Dequeue Cycle State 1, matching the fresh ring.
-        self.command(Trb::new(
-            TrbType::SetTrDequeuePointer,
-            self.device_addr_of(ring_off)? | 1,
-            0,
-            trb::control_slot(slot) | trb::control_endpoint(dci),
-        ))?;
-        Ok(ring)
     }
 
     /// Prime one interrupt-IN transfer on device `index`'s endpoint: a
@@ -4302,8 +3861,8 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// This is what keeps the report endpoint continuously live: with a
     /// transfer always armed the controller has somewhere to write each
     /// interval's report, so a report is not dropped merely because software
-    /// was slow to run. Combined with the per-interrupt drain into the report
-    /// FIFO ([`Self::pump_reports`]), device polling is decoupled from the
+    /// was slow to run. Combined with the service step's capture into the
+    /// report FIFO ([`UsbHost::service`]), device polling is decoupled from the
     /// class driver's consume rate (the metal "missed keypresses under load"
     /// defect). In-flight transfers the controller has already consumed but
     /// whose completion this engine has not yet retired still count against
@@ -4317,7 +3876,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     fn ensure_reports_armed(&mut self, index: usize) -> Result<(), DriverError> {
         let (device_slot, int_dci) = {
             let device = self.device(index).ok_or(DriverError::NotFound)?;
-            if device.int_transfer.is_none() || device.recovery.owed() {
+            if device.int_transfer.is_none() || device.recovery.owed() || device.int_recovering {
                 return Ok(());
             }
             (device.slot, device.int_dci)
@@ -4343,450 +3902,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             self.xhci.ring_doorbell(device_slot, u32::from(int_dci))?;
         }
         Ok(())
-    }
-
-    /// The active control endpoint, which must be `slot`'s.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if another slot's, or none, is active.
-    fn control_for(&self, slot: u8) -> Result<&ControlCursor, DriverError> {
-        self.cursor
-            .as_ref()
-            .filter(|control| control.slot == slot)
-            .ok_or(DriverError::DeviceFault)
-    }
-
-    /// Address the device in `slot` (§4.3.4): program the input control
-    /// context (A0 | A1), the slot context from `base` (speed, root-hub
-    /// port, and — for a downstream device — Route String and TT) and the
-    /// EP0 context, point the DCBAA at the active output context, then
-    /// issue Address Device. The active control endpoint must be `slot`'s,
-    /// bound to its own region ([`Self::bind_control`]).
-    ///
-    /// The input context is cleared first (§6.2.5.1 requires software to
-    /// initialise it): the structure is shared across devices, so without
-    /// this a device is addressed over the endpoint contexts the *previous*
-    /// device's Configure Endpoint left behind.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if the controller rejects the command,
-    ///   or `slot` is not the active control endpoint's.
-    fn address_device(
-        &mut self,
-        base: SlotCtxBase,
-        slot: u8,
-        max_packet: u32,
-    ) -> Result<(), DriverError> {
-        let control = self.control_for(slot)?;
-        let (ring_off, output_ctx_off) = (control.ring_off, control.output_ctx);
-        self.zero_input_ctx()?;
-        self.write_input_ctx(0, &input_control_dwords(0, 0b11))?;
-        self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(DCI_CONTROL)))?;
-        self.write_input_ctx(
-            1 + usize::from(DCI_CONTROL),
-            &ep_ctx_dwords(
-                EP_TYPE_CONTROL,
-                max_packet,
-                0,
-                self.device_addr_of(ring_off)?,
-                None,
-            ),
-        )?;
-        let output_ctx = self.device_addr_of(output_ctx_off)?;
-        self.dma.write(
-            self.layout.dcbaa + usize::from(slot) * 8,
-            &output_ctx.to_le_bytes(),
-        )?;
-        self.stage = EnumStage::AddressDevice;
-        self.command(Trb::new(
-            TrbType::AddressDevice,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(slot),
-        ))?;
-        Ok(())
-    }
-
-    /// Re-evaluate the default control endpoint's Max Packet Size to the
-    /// device-reported `bMaxPacketSize0` (§4.6.7): Address Device assumed
-    /// the speed's worst case, and with an overstated context every EP0 IN
-    /// transfer longer than one device packet terminates short at the
-    /// first packet — the metal fault a full-speed wireless receiver with
-    /// an 8-byte EP0 hits on the 18-byte descriptor read. The input
-    /// context names only the EP0 context (A1); the controller evaluates
-    /// just its Max Packet Size field (§6.2.3.3), the ring fields carried
-    /// for well-formedness only.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if the controller rejects the
-    ///   command.
-    fn evaluate_ep0_max_packet(&mut self, slot: u8, max_packet: u32) -> Result<(), DriverError> {
-        let ring_off = self.control_for(slot)?.ring_off;
-        self.write_input_ctx(0, &input_control_dwords(0, 0b10))?;
-        self.write_input_ctx(
-            1 + usize::from(DCI_CONTROL),
-            &ep_ctx_dwords(
-                EP_TYPE_CONTROL,
-                max_packet,
-                0,
-                self.device_addr_of(ring_off)?,
-                None,
-            ),
-        )?;
-        self.command(Trb::new(
-            TrbType::EvaluateContext,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(slot),
-        ))?;
-        Ok(())
-    }
-
-    /// Read and decode the 18-byte device descriptor in two steps (USB 2.0
-    /// §5.5.3): the Address Device EP0 context assumed the speed's
-    /// worst-case packet size, but a full-speed device may legally use
-    /// 8/16/32 — and with an overstated context, any EP0 IN transfer longer
-    /// than one device packet terminates short at the first packet. So one
-    /// worst-case-safe packet ending at `bMaxPacketSize0` is read first,
-    /// the context is re-evaluated to the honest size
-    /// ([`Self::evaluate_ep0_max_packet`]), and only then the full
-    /// descriptor.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::BadMagic`] for a forged descriptor prefix or a
-    ///   `bMaxPacketSize0` the speed does not permit.
-    /// * [`DriverError::DeviceFault`] for any controller/device failure.
-    fn read_device_descriptor(
-        &mut self,
-        slot: u8,
-        base: SlotCtxBase,
-    ) -> Result<DeviceDescriptor, DriverError> {
-        self.stage = EnumStage::GetDeviceDescriptor;
-        let prefix_len_u16 = u16::try_from(DEVICE_DESCRIPTOR_PREFIX_LEN)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
-        let mut prefix = [0u8; DEVICE_DESCRIPTOR_PREFIX_LEN];
-        if self.control(setup_get_device_descriptor(prefix_len_u16), &mut prefix)? != prefix.len() {
-            return Err(DriverError::DeviceFault);
-        }
-        if usize::from(prefix[0]) < DeviceDescriptor::LEN || prefix[1] != 0x01 {
-            return Err(DriverError::BadMagic);
-        }
-        let ep0_max = ep0_max_packet_from_descriptor(base.speed, prefix[7])?;
-        if ep0_max != ep0_max_packet(base.speed)? {
-            self.evaluate_ep0_max_packet(slot, ep0_max)?;
-        }
-
-        let descriptor_len_u16 =
-            u16::try_from(DeviceDescriptor::LEN).map_err(|_| DriverError::LengthOutOfRange)?;
-        let mut bytes = [0u8; DeviceDescriptor::LEN];
-        if self.control(setup_get_device_descriptor(descriptor_len_u16), &mut bytes)? != bytes.len()
-        {
-            return Err(DriverError::DeviceFault);
-        }
-        DeviceDescriptor::decode(&bytes)
-    }
-
-    /// Read the configuration descriptor at its exact advertised length
-    /// into `config_bytes`, returning the byte count to decode: the 9-byte
-    /// header first for `wTotalLength`, then precisely that many bytes
-    /// (clamped to [`CTRL_DATA_LEN`] — a validation bound on
-    /// device-supplied data, not a scalable capacity). Asking for more
-    /// than the device holds relies on it short-packeting the reply —
-    /// conforming devices do, but real receivers have been caught
-    /// mishandling an over-long request, so only bytes the device
-    /// advertised are ever requested.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::BadMagic`] for a non-configuration header or an
-    ///   impossible `wTotalLength`.
-    /// * [`DriverError::DeviceFault`] for any controller/device failure.
-    fn read_configuration(&mut self, config_bytes: &mut [u8]) -> Result<usize, DriverError> {
-        self.stage = EnumStage::GetConfigDescriptor;
-        let header_len =
-            u16::try_from(CONFIGURATION_HEADER_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
-        let mut header = [0u8; CONFIGURATION_HEADER_LEN];
-        if self.control(setup_get_configuration_descriptor(header_len), &mut header)?
-            != header.len()
-        {
-            return Err(DriverError::DeviceFault);
-        }
-        let total = ConfigurationHeader::decode(&header)
-            .map_err(|Malformed| DriverError::BadMagic)?
-            .total
-            .min(config_bytes.len());
-        let total_u16 = u16::try_from(total).map_err(|_| DriverError::LengthOutOfRange)?;
-        if self.control(
-            setup_get_configuration_descriptor(total_u16),
-            &mut config_bytes[..total],
-        )? != total
-        {
-            return Err(DriverError::DeviceFault);
-        }
-        Ok(total)
-    }
-
-    /// Read the serial number string `index` (`iSerialNumber`) names, in the
-    /// first language the device's LANGID table lists — never an assumed one.
-    /// `None`, with no transfer issued, when `index` is `0`; `None` too when
-    /// either read is refused, faults, or answers malformed: the serial is
-    /// optional identity, so a device whose string NAKs forever or babbles is
-    /// still served, without one.
-    ///
-    /// # Errors
-    ///
-    /// A fault the control endpoint could not be taken back from, after which
-    /// the device can be configured no further.
-    fn read_serial_number(&mut self, index: u8) -> Result<Option<SerialNumber>, DriverError> {
-        if index == 0 {
-            return Ok(None);
-        }
-        let mut descriptor = [0u8; STRING_DESCRIPTOR_MAX_LEN];
-        let langid = self
-            .read_string_descriptor(0, 0, &mut descriptor)?
-            .and_then(first_langid);
-        let Some(langid) = langid else {
-            return Ok(None);
-        };
-        Ok(self
-            .read_string_descriptor(index, langid, &mut descriptor)?
-            .and_then(SerialNumber::decode))
-    }
-
-    /// Read string descriptor `index` in language `langid` into `buf` — its
-    /// header, then exactly the length that header claims — and return what
-    /// follows the header. `None` for a read that did not complete (EP0
-    /// taken back) or an answer [`StringHeader`] refuses.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::read_serial_number`].
-    fn read_string_descriptor<'b>(
-        &mut self,
-        index: u8,
-        langid: u16,
-        buf: &'b mut [u8; STRING_DESCRIPTOR_MAX_LEN],
-    ) -> Result<Option<&'b [u8]>, DriverError> {
-        self.stage = EnumStage::GetStringDescriptor;
-        let Some(read) = self.read_string(index, langid, &mut buf[..StringHeader::LEN])? else {
-            return Ok(None);
-        };
-        let Some(header) = StringHeader::decode(&buf[..read]) else {
-            return Ok(None);
-        };
-        let len = header.descriptor_len();
-        let read = if len == StringHeader::LEN {
-            read
-        } else {
-            let Some(read) = self.read_string(index, langid, &mut buf[..len])? else {
-                return Ok(None);
-            };
-            read
-        };
-        Ok(header.payload(&buf[..read]))
-    }
-
-    /// One `GET_DESCRIPTOR(string)` for `buf.len()` bytes: how many the
-    /// device delivered, or `None` when the read did not complete but left
-    /// the control endpoint serving.
-    fn read_string(
-        &mut self,
-        index: u8,
-        langid: u16,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
-        let len = u8::try_from(buf.len()).map_err(|_| DriverError::LengthOutOfRange)?;
-        match self.control_in(setup_get_string_descriptor(index, langid, len), buf) {
-            Ok(read) => Ok(Some(read)),
-            Err(ControlFault {
-                endpoint_serves: true,
-                ..
-            }) => Ok(None),
-            Err(ControlFault { error, .. }) => Err(error),
-        }
-    }
-
-    /// Complete enumeration of the device already Enable-Slotted into
-    /// `slot` and Address-Deviced with topology `base`: read its device
-    /// and configuration descriptors, and the serial number of a device
-    /// serving a mass-storage interface, then for each servable interface
-    /// configure its endpoints, then `SET_CONFIGURATION` and a best-effort
-    /// `SET_PROTOCOL(boot)` per HID interface.
-    ///
-    /// Shared by the root ([`Self::attach_root_port`]) and downstream
-    /// ([`Self::attach_downstream_device`]) paths so the post-Address
-    /// sequence is written once; they differ only in the topology carried
-    /// in `base`. The interrupt-IN endpoint is armed and doorbelled
-    /// **only** for a HID interface: arming a hub's status-change endpoint
-    /// here would deliver asynchronous reports that interleave with the
-    /// EP0 hub-class `GET_STATUS` transfers and wedge the control ring, so
-    /// it is captured for the hub-install path instead; `SET_PROTOCOL
-    /// (boot)` is likewise HID-only, since a non-HID interface STALLs it
-    /// and halts the control endpoint.
-    ///
-    /// The first served interface creates the device-table entry at
-    /// `index` — its endpoint rings live in that index's layout region —
-    /// and leaves it the active control context. Each **further** served
-    /// interface of a composite device (a wireless keyboard+mouse receiver)
-    /// takes its own free table index and ring region while sharing the
-    /// device's slot and EP0, so each function is served — and published —
-    /// separately. `hub_port` records the hub downstream port the device
-    /// hangs off (`0` for a root-attached device) and `parent_hub` the
-    /// hub-table index of that hub. A hub creates no entry, whatever
-    /// interfaces its configuration claims, and neither does an interface
-    /// this engine serves no transfer type for.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::Unsupported`] for a device that is not a hub and
-    ///   carries no interface this engine serves, before anything is
-    ///   configured.
-    /// * [`DriverError::BadMagic`] if a descriptor is forged.
-    /// * [`DriverError::DeviceFault`] for any controller/device failure.
-    fn finish_enumeration(
-        &mut self,
-        slot: u8,
-        base: SlotCtxBase,
-        index: usize,
-        hub_port: u8,
-        parent_hub: usize,
-    ) -> Result<DeviceDescriptor, DriverError> {
-        let descriptor = self.read_device_descriptor(slot, base)?;
-        let mut config_bytes = Vec::new();
-        config_bytes
-            .try_reserve_exact(CTRL_DATA_LEN)
-            .map_err(|_| DriverError::OutOfMemory)?;
-        config_bytes.resize(CTRL_DATA_LEN, 0);
-        let total = self.read_configuration(&mut config_bytes)?;
-        let interfaces = InterfaceInfo::decode_all(&config_bytes[..total])?;
-        let first = interfaces[0].ok_or(DriverError::BadMagic)?;
-
-        // A hub's interrupt-IN status-change endpoint is captured (not armed
-        // here) so the hub-install path can configure and watch it once the
-        // slot is marked a hub; arming it inline would interleave async
-        // status reports with the EP0 hub-class transfers that follow. A hub
-        // reporting none overwrites whatever an earlier, failed hub attach
-        // left captured.
-        if descriptor.is_hub() {
-            self.pending_hub_endpoint = (first.int_dci != DCI_CONTROL).then(|| {
-                (
-                    first.int_dci,
-                    u32::from(first.int_shape.max_packet_at(base.speed)),
-                    interrupt_interval(base.speed, first.int_b_interval),
-                )
-            });
-        }
-
-        if self.devices.get(index).is_none_or(Option::is_some) {
-            // The entry must be free: overwriting a live device would leak
-            // its slot and rings.
-            return Err(DriverError::Busy);
-        }
-
-        let config_bytes = &config_bytes[..total];
-        let published = |iface: &InterfaceInfo| {
-            iface.is_servable() || is_control_only(config_bytes, iface.interface_number) == Ok(true)
-        };
-        let plan = if descriptor.is_hub() {
-            // A device entry beside the hub's own entry would alias the one
-            // region both claim.
-            [None; MAX_INTERFACES]
-        } else if interfaces.iter().flatten().any(published) {
-            self.plan_interfaces(index, &interfaces, published)
-        } else {
-            // Nothing is configured for a device nothing here serves: the
-            // caller gives its slot back.
-            return Err(DriverError::Unsupported);
-        };
-        // Only a storage interface's identity rests on the serial, so only a
-        // device serving one pays for reading it.
-        let serial_number = if plan
-            .iter()
-            .flatten()
-            .any(|(_, iface)| iface.is_mass_storage())
-        {
-            self.read_serial_number(descriptor.serial_number_index)?
-        } else {
-            None
-        };
-
-        // Every Configure Endpoint rewrites the slot context, so its
-        // Context Entries field must cover the highest DCI any served
-        // sibling interface uses — a later sibling's command must never
-        // shrink an already-configured endpoint out of scope (xHCI §6.2.2).
-        let mut max_dci = DCI_CONTROL;
-        for (_, iface) in plan.iter().flatten() {
-            max_dci = max_dci
-                .max(iface.int_dci)
-                .max(iface.bulk_in.dci)
-                .max(iface.bulk_out.dci)
-                .max(iface.bulk_in2.dci)
-                .max(iface.bulk_out2.dci);
-        }
-
-        let mut rings: [Option<ConfiguredRings>; MAX_INTERFACES] = [const { None }; MAX_INTERFACES];
-        for (entry, rings_slot) in plan.iter().zip(rings.iter_mut()) {
-            let Some((target, iface)) = entry else {
-                continue;
-            };
-            *rings_slot = Some(self.configure_interface(slot, base, *target, iface, max_dci)?);
-        }
-
-        self.stage = EnumStage::SetConfiguration;
-        self.control(setup_set_configuration(first.configuration_value), &mut [])?;
-
-        let removable = self.attached_removable(base.root_port, hub_port, parent_hub);
-        let mut installed = false;
-        for (entry, rings_slot) in plan.iter().zip(rings.iter_mut()) {
-            let (Some((target, iface)), Some(configured)) = (entry, rings_slot.take()) else {
-                continue;
-            };
-            let region = self.device_region(*target)?;
-            // The interrupt DCI is live exactly when its ring was configured.
-            let int_dci = if configured.int_ring.is_some() {
-                iface.int_dci
-            } else {
-                DCI_CONTROL
-            };
-            let mut config = Vec::new();
-            config
-                .try_reserve_exact(config_bytes.len())
-                .map_err(|_| DriverError::OutOfMemory)?;
-            config.extend_from_slice(config_bytes);
-            self.install_device_entry(
-                *target,
-                slot,
-                hub_port,
-                base,
-                parent_hub,
-                region,
-                descriptor,
-                serial_number,
-                removable,
-                config,
-                iface,
-                int_dci,
-                configured.int_ring,
-                configured.bulk_rings,
-            )?;
-            installed = true;
-        }
-        if installed {
-            // The primary entry owns the slot's (currently active) EP0
-            // cursor; sibling entries share the slot and route their control
-            // transfers through it. A fresh device now owns its slot, so
-            // stop tolerating trailing events for previously-freed ones (any
-            // such completion has long since arrived in the detach→attach
-            // window).
-            self.active_device = Some(index);
-            self.freed_slots.clear();
-        }
-        self.stage = EnumStage::Configured;
-        Ok(descriptor)
     }
 
     /// Plan which interfaces of the decoded set are served and at which
@@ -4827,98 +3942,14 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         plan
     }
 
-    /// Configure one planned interface's endpoints in its `target` index's
-    /// own ring region, returning the built rings: its bulk endpoints when it
-    /// carries the pair, and its interrupt-IN endpoint when it has one (a HID
-    /// report endpoint, a CBI mass-storage interface's command-completion
-    /// channel). A hub uses only its control endpoint (arming a hub's status-change
-    /// endpoint wedges its EP0 ring — see [`Self::finish_enumeration`]). Every
-    /// slot-context write carries `max_dci` as Context Entries so a
-    /// sibling's already-configured endpoint is never shrunk out of scope.
-    fn configure_interface(
-        &mut self,
-        slot: u8,
-        base: SlotCtxBase,
-        target: usize,
-        iface: &InterfaceInfo,
-        max_dci: u8,
-    ) -> Result<ConfiguredRings, DriverError> {
-        let region = self.device_region(target)?;
-        let bulk_rings = if iface.has_bulk_pair() {
-            Some(self.configure_bulk_endpoints(slot, base, iface, region, max_dci)?)
-        } else {
-            None
-        };
-        let int_ring = if iface.int_dci == DCI_CONTROL {
-            None
-        } else {
-            Some(self.configure_interrupt_endpoint(slot, base, iface, region, max_dci)?)
-        };
-        Ok(ConfiguredRings {
-            int_ring,
-            bulk_rings,
-        })
-    }
-
-    /// Build the interface's interrupt-IN ring in `region` and configure
-    /// the endpoint the descriptor reports (DCI, max packet size, service
-    /// interval — never assumed), returning the built ring only after the
-    /// controller accepts the command.
-    fn configure_interrupt_endpoint(
-        &mut self,
-        slot: u8,
-        base: SlotCtxBase,
-        iface: &InterfaceInfo,
-        region: DeviceRegion,
-        max_dci: u8,
-    ) -> Result<ProducerRing, DriverError> {
-        let ring = self.build_ring(region.int_ring, INT_RING_TRBS)?;
-        let ring_base = self.device_addr_of(region.int_ring)?;
-        let (max_burst, payload) = iface.int_shape.payload(base.speed);
-        self.write_input_ctx(
-            0,
-            &input_control_dwords(0, 1 | (1u32 << u32::from(iface.int_dci))),
-        )?;
-        self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(max_dci)))?;
-        self.write_input_ctx(
-            1 + usize::from(iface.int_dci),
-            &ep_ctx_dwords(
-                EP_TYPE_INTERRUPT_IN,
-                u32::from(iface.int_shape.max_packet_at(base.speed)),
-                max_burst,
-                ring_base,
-                Some(Periodic {
-                    interval: interrupt_interval(base.speed, iface.int_b_interval),
-                    payload,
-                    mult: 0,
-                }),
-            ),
-        )?;
-        self.stage = EnumStage::ConfigureEndpoint;
-        self.command(Trb::new(
-            TrbType::ConfigureEndpoint,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(slot),
-        ))?;
-        Ok(ring)
-    }
-
     /// Install one freshly enumerated, served interface into the table at
-    /// `index`. The device's EP0 ring is the active control-context cursor
-    /// right now, so the entry is recorded with `ep0_ring: None` (active,
-    /// not parked); the caller parks it into the *primary* entry
-    /// (`rest_active_context` via `active_device`) once the hub must be
-    /// reactivated, and a root-attached device simply stays active. A
-    /// composite sibling entry shares the primary's slot, output context,
-    /// EP0 ring, and control data buffer, and never itself holds the parked
-    /// ring — its control transfers route through the slot's EP0 owner
-    /// ([`Self::ep0_owner_index`]).
+    /// `index`. A composite sibling entry shares its slot, and so its
+    /// control pipe, with the primary entry.
     ///
     /// # Errors
     ///
-    /// [`DriverError::DeviceFault`] if `slot`'s control endpoint is not the
-    /// active one, before anything is installed.
+    /// [`DriverError::DeviceFault`] if `slot` has no open pipe, before
+    /// anything is installed.
     #[allow(clippy::too_many_arguments)] // The one construction site's facts.
     #[allow(clippy::similar_names)] // The `*2` names are the second pipes'
                                     // own names beside their primaries — deliberate siblings.
@@ -4939,9 +3970,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         int_ring: Option<ProducerRing>,
         bulk_rings: Option<BulkRings>,
     ) -> Result<(), DriverError> {
-        let control = self.control_for(slot)?;
-        let (output_ctx, ep0_ring_off, ctrl_data) =
-            (control.output_ctx, control.ring_off, control.ctrl_data);
+        self.pipe(slot)?;
         let (bulk_in_ring, bulk_out_ring, bulk_in2_ring, bulk_out2_ring) = match bulk_rings {
             Some(rings) => (
                 Some(rings.in_ring),
@@ -4960,18 +3989,19 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         let bulk_out2_dci = bulk_out2_ring
             .as_ref()
             .map_or(0, |_| interface.bulk_out2.dci);
+        let serial = self.next_attach_serial();
         self.devices[index] = Some(DeviceState {
             slot,
+            serial,
+            urb_control: None,
+            request: None,
+            bulk_recovery: [BulkRecovery::Idle; 4],
             speed: base.speed,
             config,
             streaming: Streaming::default(),
             hub_port,
             parent_hub,
             region,
-            output_ctx,
-            ep0_ring_off,
-            ctrl_data,
-            ep0_ring: None,
             identity: DeviceIdentity {
                 root_port: base.root_port,
                 route_string: base.route_string,
@@ -5018,6 +4048,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             aborted_bulk: RingBuf::new(),
             last_bulk_fault_code: 0,
             last_report_fault_code: 0,
+            abandoning: None,
         });
         Ok(())
     }
@@ -5036,368 +4067,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.dma
             .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
         Ok(ring)
-    }
-
-    /// Configure the enumerated interface's bulk endpoints (§4.6.6) inside
-    /// `region`: the bulk-IN/OUT pair every bulk interface carries, plus —
-    /// when the interface declares them — the second pair a UAS
-    /// interface's four pipes need. Builds each transfer ring, writes the
-    /// input context adding every DCI with Context Entries raised to
-    /// `max_dci` (the highest DCI any of the device's served interfaces
-    /// uses, so a sibling's endpoint is never shrunk out of scope), and
-    /// issues one Configure Endpoint. The rings are returned — and go
-    /// live in the caller's device-table entry — only after the controller
-    /// accepts the command, so a refused configure leaves no half-armed
-    /// bulk state.
-    fn configure_bulk_endpoints(
-        &mut self,
-        slot: u8,
-        base: SlotCtxBase,
-        interface: &InterfaceInfo,
-        region: DeviceRegion,
-        max_dci: u8,
-    ) -> Result<BulkRings, DriverError> {
-        let in_ring = self.build_ring(region.bulk_in_ring, BULK_RING_TRBS)?;
-        let out_ring = self.build_ring(region.bulk_out_ring, BULK_RING_TRBS)?;
-        // The second pair is configured only whole: a UAS interface
-        // declares two endpoints per direction, and a lone extra endpoint
-        // is left unserved rather than half-configured.
-        let secondary = interface.bulk_in2.dci != 0 && interface.bulk_out2.dci != 0;
-        let (second_in, second_out) = if secondary {
-            (
-                Some(self.build_ring(region.bulk_in2_ring, BULK_RING_TRBS)?),
-                Some(self.build_ring(region.bulk_out2_ring, BULK_RING_TRBS)?),
-            )
-        } else {
-            (None, None)
-        };
-        let pipes = [
-            (EP_TYPE_BULK_IN, interface.bulk_in, region.bulk_in_ring),
-            (EP_TYPE_BULK_OUT, interface.bulk_out, region.bulk_out_ring),
-            (EP_TYPE_BULK_IN, interface.bulk_in2, region.bulk_in2_ring),
-            (EP_TYPE_BULK_OUT, interface.bulk_out2, region.bulk_out2_ring),
-        ];
-        let served = &pipes[..if secondary { 4 } else { 2 }];
-
-        let add_flags = served.iter().fold(1, |flags, (_, pipe, _)| {
-            flags | (1u32 << u32::from(pipe.dci))
-        });
-        self.write_input_ctx(0, &input_control_dwords(0, add_flags))?;
-        self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(max_dci)))?;
-        for &(ep_type, pipe, ring) in served {
-            self.write_input_ctx(
-                1 + usize::from(pipe.dci),
-                &ep_ctx_dwords(
-                    ep_type,
-                    u32::from(pipe.max_packet),
-                    pipe.burst(base.speed),
-                    self.device_addr_of(ring)?,
-                    None,
-                ),
-            )?;
-        }
-        self.stage = EnumStage::ConfigureEndpoint;
-        self.command(Trb::new(
-            TrbType::ConfigureEndpoint,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(slot),
-        ))?;
-        Ok(BulkRings {
-            in_ring,
-            out_ring,
-            in2_ring: second_in,
-            out2_ring: second_out,
-        })
-    }
-
-    /// Bring the controller up to serve **every** device reachable through
-    /// it: every connected root-hub port, transparently descending through
-    /// USB hubs — including a hub plugged into a hub, up to
-    /// [`MAX_HUB_DEPTH`] tiers — **whether or not a device is connected
-    /// yet**.
-    ///
-    /// This is the arch-neutral bring-up orchestration the host-controller
-    /// driver runs once after [`Self::start`]. xHCI numbers root-hub ports
-    /// from `1`. Port Power is asserted on every port first (the
-    /// [`Xhci::open`] reset cleared `PORTSC`, and a port-power-controlled
-    /// controller reports a powered-off port as disconnected, xHCI 1.2
-    /// §4.19.1.1), the powered ports are given the power-on-good +
-    /// attach-debounce window to report a connect — parked between scans,
-    /// never spun — and then **every** connected root port is attached
-    /// (`Self::attach_root_port`):
-    ///
-    /// * A root device that is itself a hub (the Raspberry Pi 4's onboard
-    ///   USB2 hub tier is one — its downstream ports carry the low/full/
-    ///   high-speed side of every USB-A jack) is installed and descended
-    ///   (`Self::descend_hub`): its ports are powered and every connected
-    ///   one attached — a further hub is installed, watched, and descended
-    ///   in turn, a leaf device served, each on its own demand-allocated
-    ///   region, bounded only by the controller's reported slots. Every
-    ///   hub's status-change watch is armed, so later connects/disconnects
-    ///   on any tier arrive through [`Self::next_hub_change`].
-    /// * A root device that is a leaf (a `SuperSpeed` device trains straight
-    ///   on a root port — on the Pi 4 the USB3 side of every jack is such a
-    ///   port) is served directly, concurrently with every hub tier.
-    /// * An empty port stays unserved; its later connect arrives through
-    ///   the root-port scan ([`Self::next_root_change`]).
-    ///
-    /// The walk is per-port fail-soft, exactly like a hub descent: one
-    /// port's broken device is skipped (counted in
-    /// [`Self::skipped_port_count`], its first failure snapshotted in
-    /// [`Self::last_attach_fault`]) and the remaining ports are still
-    /// served. Nothing connected at boot is a first-class state, never a
-    /// bring-up failure: the controller comes up serving nothing and the
-    /// first hot-plug connect arrives event-driven (never polled, never
-    /// spinning). The served devices afterwards are the live
-    /// [`Self::device_live`] indices; the engine holds no logging
-    /// dependency, so a driver wraps this with its own diagnostics.
-    ///
-    /// `delay` supplies the hardware-dictated settle windows (hub
-    /// power-on-good and reset-recovery); the caller owns the clock.
-    ///
-    /// # Errors
-    ///
-    /// Only a fault of the **controller itself** —
-    /// [`Xhci::set_port_power`] or a faulting port-status read during the
-    /// connect window. No device's enumeration failure is ever an error
-    /// here: it is a counted skip ([`Self::skipped_port_count`],
-    /// [`Self::last_attach_fault`]) and the controller is left serving with
-    /// its watches armed, because throwing a healthy controller away because
-    /// one device would not answer takes every *other* port and every later
-    /// hot-plug with it. [`Self::retry_skipped_ports`] gives such a port one
-    /// more chance.
-    pub fn bring_up(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
-        self.skipped_ports = 0;
-        self.attach_fault = None;
-        let max_ports = self.xhci.max_ports();
-        for port in 1..=max_ports {
-            self.xhci.set_port_power(port)?;
-        }
-        // Allow the powered ports the power-on-good + attach-debounce
-        // window to report a connect, parking between scans (a connect
-        // posts a Port Status Change Event, so the controller interrupt
-        // wakes the scan early). An empty controller spends the window
-        // parked — never spinning — and comes up serving nothing.
-        let deadline = self.wait.now_us().saturating_add(CONNECT_WINDOW_US);
-        loop {
-            let mut any_connected = false;
-            for port in 1..=max_ports {
-                if self.xhci.port_status(port)?.connected() {
-                    any_connected = true;
-                    break;
-                }
-            }
-            let now = self.wait.now_us();
-            if any_connected || now >= deadline {
-                break;
-            }
-            self.wait.wait_us(deadline - now);
-        }
-        // Consume every port's connect latch before attaching anything, so
-        // the steady-state root scan ([`Self::next_root_change`]) reacts only
-        // to *new* changes.
-        for port in 1..=max_ports {
-            let _ = self.xhci.clear_port_connect_change(port);
-        }
-        self.attach_connected_root_ports(delay);
-        Ok(())
-    }
-
-    /// Attach every connected root-hub port that is not already served,
-    /// fail-soft: one port's broken device is skipped (counted in
-    /// [`Self::skipped_ports`], its first failure snapshotted in
-    /// [`Self::attach_fault`]) and the remaining ports are still served.
-    /// Touches no port latch — the caller owns those — so it serves both the
-    /// boot walk and the deferred retry.
-    fn attach_connected_root_ports(&mut self, delay: &dyn Delay) {
-        for port in 1..=self.xhci.max_ports() {
-            if self.root_attachment_on(port).is_some() {
-                continue;
-            }
-            let Ok(status) = self.xhci.port_status(port) else {
-                continue;
-            };
-            if !status.connected() {
-                continue;
-            }
-            if self.attach_root_port(port, delay).is_err() {
-                self.skipped_ports = self.skipped_ports.saturating_add(1);
-            }
-        }
-    }
-
-    /// Give every port that is connected but unserved — on the root hub and
-    /// on every watched hub tier — one more attach attempt, and report how
-    /// many are still unserved afterwards through
-    /// [`Self::skipped_port_count`].
-    ///
-    /// A device that failed enumeration during [`Self::bring_up`] had its
-    /// connect latch consumed there, so nothing will ever wake its port
-    /// again: without this it stays dead until it is physically re-plugged,
-    /// which is a poor answer when the device that lost the boot race is the
-    /// keyboard. The re-attempt re-drives the port's reset, so it recovers a
-    /// port whose state — not just its device — was wrong. A port that is
-    /// *already* served is skipped untouched: re-resetting it would break a
-    /// working device.
-    ///
-    /// The caller bounds how often this runs; the engine does not retry on
-    /// its own, so a permanently broken device can never loop.
-    ///
-    /// # Errors
-    ///
-    /// Only a failure to restore the resting control context between hub
-    /// tiers (the controller itself is broken). Every per-port failure is a
-    /// counted skip, exactly as in [`Self::bring_up`].
-    pub fn retry_skipped_ports(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
-        self.skipped_ports = 0;
-        self.attach_fault = None;
-        self.attach_connected_root_ports(delay);
-        for hub_index in 0..self.hubs.len() {
-            if self.hubs[hub_index].is_none() {
-                continue;
-            }
-            self.attach_connected_hub_ports(hub_index, delay);
-            // Restore the resting control context between tiers, exactly as
-            // a hot-plug service does, so no hub watch loses its ring.
-            self.rest_active_context()?;
-        }
-        Ok(())
-    }
-
-    /// Attach whatever is connected on root-hub `port`: reset the port when
-    /// the protocol requires it (a USB2 port enables only through a reset;
-    /// a `SuperSpeed` port trains and enables on its own and is left alone),
-    /// enumerate the device on its own claimed table entry and region, and
-    /// serve it — a hub is installed, descended, and watched
-    /// ([`Self::descend_hub`]), a leaf device served directly. The shared
-    /// attach core of the bring-up walk ([`Self::bring_up`]) and the
-    /// root-port hot-plug scan ([`Self::next_root_change`]).
-    ///
-    /// On any failure the diagnostics are snapshotted
-    /// ([`Self::last_attach_fault`], with the *root* port number) before
-    /// the error is surfaced, mirroring [`Self::attach_hub_port`]; the
-    /// caller owns the port's connect latch. A re-attach is a brand-new
-    /// enumeration: a fresh slot, no reuse of any prior device state.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::Busy`] if the port already carries a served
-    ///   attachment (never double-attach on a connect glitch).
-    /// * [`DriverError::DeviceFault`] if the port reports no device, never
-    ///   comes back enabled from its reset, or any command/transfer faults.
-    /// * [`DriverError::NoSpace`] if the device table is full.
-    /// * [`DriverError::BadMagic`] if a descriptor is forged.
-    pub(crate) fn attach_root_port(
-        &mut self,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        let result = self.reset_confirm_and_attach_root(port, delay);
-        if let Err(err) = result {
-            // Snapshot the failure diagnostics before anything else runs:
-            // the first failure is the one the per-port fail-soft walk
-            // surfaces. `port_status` stays 0 — it carries a hub-format
-            // `wPortStatus`, which a root port does not have; the root
-            // port's raw `PORTSC` is available to the driver's diagnostics
-            // through [`Self::root_port_status_raw`].
-            if self.attach_fault.is_none() {
-                self.attach_fault = Some(AttachFault {
-                    port,
-                    error: err,
-                    stage: self.stage,
-                    completion: self.last_completion,
-                    event_type: self.last_event_type,
-                    reject: self.last_reject,
-                    port_status: 0,
-                });
-            }
-        }
-        result
-    }
-
-    /// The attach core of [`Self::attach_root_port`]: everything up to —
-    /// but not including — descending a freshly installed root hub.
-    fn reset_confirm_and_attach_root(
-        &mut self,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        let outcome = self.attach_root_on_port(port, delay)?;
-        // A freshly installed root hub is descended only now, with the
-        // cursor rested, so its own attach failures can never wedge
-        // another tier's watch. A tier that cannot be powered or watched
-        // is torn down whole rather than left half-installed.
-        if let Attachment::Hub(new_hub) = outcome {
-            if let Err(err) = self.descend_hub(new_hub, delay) {
-                let _ = self.detach_hub(new_hub);
-                return Err(err);
-            }
-        }
-        Ok(outcome)
-    }
-
-    /// Confirm the connect on root-hub `port`, reset the port when it is
-    /// not already enabled (a USB2 port enables only through a reset; a
-    /// `SuperSpeed` port trains on its own), settle the device's
-    /// [`PORT_RESET_SETTLE_US`] recovery interval either way, and enumerate
-    /// and serve the device on a fresh table entry and region — a hub is
-    /// installed and watched-ready but **not** yet descended (the caller
-    /// descends it, so its downstream failures never wedge this attach). The
-    /// slot-level stage every root attach shares.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::attach_root_port`], minus the descend.
-    pub(crate) fn attach_root_on_port(
-        &mut self,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        if self.root_attachment_on(port).is_some() {
-            // The port already carries a served attachment (a connect
-            // glitch, or a repeated scan): never double-attach.
-            return Err(DriverError::Busy);
-        }
-        self.stage = EnumStage::PortReset;
-        self.last_attach_status = 0;
-        let status = self.xhci.port_status(port)?;
-        if !status.connected() {
-            return Err(DriverError::DeviceFault);
-        }
-        let status = if status.enabled() {
-            // A `SuperSpeed` port trains and enables on its own, so it needs
-            // no reset — but it has still only just done so, and the device
-            // behind it is owed the same recovery interval before it is
-            // addressed as one that was reset.
-            self.xhci.clear_port_reset_change(port)?;
-            delay.delay_us(PORT_RESET_SETTLE_US);
-            status
-        } else {
-            self.reset_root_port(port, delay)?
-        };
-        let speed = status.speed();
-        // A speed with no control endpoint size is refused before anything
-        // is claimed for it.
-        ep0_max_packet(speed)?;
-        let index = self.claim_device_entry()?;
-        let result = self.enumerate_on_port(index, None, port, speed, delay);
-        // Rest the control cursor off the just-touched entry whether or
-        // not the attach succeeded — no hub watch may lose its ring — and
-        // release every claim nothing owns, so no attach outcome leaks DMA.
-        let rested = self.rest_active_context();
-        self.retire_unattached_regions(SlotHold::Released);
-        let outcome = result?;
-        rested?;
-        Ok(outcome)
-    }
-
-    /// Reset root-hub `port` and await the reset completing and its
-    /// recovery interval ([`Self::await_root_port_reset_complete`]),
-    /// returning the port's final status.
-    fn reset_root_port(&mut self, port: u8, delay: &dyn Delay) -> Result<PortStatus, DriverError> {
-        self.xhci.begin_port_reset(port)?;
-        self.await_root_port_reset_complete(port, delay)
     }
 
     /// The attachment served on root-hub `port`: the root-attached hub
@@ -5420,287 +4089,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             return Some(Attachment::Device(index));
         }
         None
-    }
-
-    /// Service one root-hub port connect/disconnect change, returning what
-    /// changed — the root-port counterpart of [`Self::next_hub_change`].
-    ///
-    /// Called by the HCD whenever the controller interrupt fires: a
-    /// connect or disconnect on a root port latches `PORTSC.CSC` (and
-    /// posts the Port Status Change Event that raised the interrupt), so
-    /// the scan reads each port's latch, consumes it, and reconciles the
-    /// port against what is currently served — a new connect on an
-    /// unserved port is attached (`Self::attach_root_port`: a hub tier
-    /// installed, descended, and watched, or a leaf device served), and a
-    /// disconnect detaches exactly what that port carried (a hub tier with
-    /// everything behind it, or the directly-attached device). Entirely
-    /// event-driven — with no latch set it returns [`HubEvent::None`],
-    /// and it never polls or spins.
-    ///
-    /// The `PORTSC` walk itself runs only when a root-port change has armed
-    /// it, which is what keeps a steady stream of report interrupts
-    /// (a mouse in motion) off the port registers entirely: on a PCIe
-    /// controller each `PORTSC` read is a non-posted round trip and dwarfs
-    /// the rest of the report path. Two independent latched sources arm it —
-    /// a Port Status Change Event drained by *any* ring consumer, and the
-    /// `USBSTS.PCD` summary — and neither can lose an edge, so a plug is
-    /// still seen even when its event was consumed by an engine wait.
-    ///
-    /// The scan is per-port fail-soft, mirroring [`Self::next_hub_change`]:
-    /// one port's broken device has its latch consumed and the remaining
-    /// changed ports are still serviced; the first failure is surfaced
-    /// (the caller logs it, with [`Self::last_attach_fault`] naming the
-    /// port) only when no actionable event was found.
-    ///
-    /// `delay` supplies the enumeration settle windows on a fresh connect;
-    /// the caller owns the clock.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from the first failed attach or detach when no
-    /// actionable event was produced (fail closed).
-    pub fn next_root_change(&mut self, delay: &dyn Delay) -> Result<HubEvent, DriverError> {
-        if !self.root_change_pending {
-            return Ok(HubEvent::None);
-        }
-        self.attach_fault = None;
-        let max_ports = self.xhci.max_ports();
-        let mut first_failure = None;
-        for port in 1..=max_ports {
-            let Ok(status) = self.xhci.port_status(port) else {
-                continue;
-            };
-            if !status.connect_changed() {
-                continue;
-            }
-            // Consume the latch before acting, so a failed attach cannot
-            // re-trigger forever on a stale latch (a genuine re-plug
-            // latches it anew) — the root-port analogue of draining a
-            // hub port's changes.
-            if self.xhci.clear_port_connect_change(port).is_err() {
-                continue;
-            }
-            // Reconcile against the *current* connect state, re-read after
-            // the latch was consumed: the latch says something changed,
-            // the live state says what the port carries now.
-            let connected = self.xhci.port_status(port).is_ok_and(PortStatus::connected);
-            match (self.root_attachment_on(port), connected) {
-                (Some(Attachment::Hub(hub_index)), false) => {
-                    self.detach_hub(hub_index)?;
-                    return Ok(HubEvent::HubDetached(hub_index));
-                }
-                (Some(Attachment::Device(index)), false) => {
-                    self.detach_device(index)?;
-                    return Ok(HubEvent::Detached(index));
-                }
-                (None, true) => match self.attach_root_port(port, delay) {
-                    Ok(Attachment::Hub(hub_index)) => return Ok(HubEvent::HubAttached(hub_index)),
-                    Ok(Attachment::Device(index)) => return Ok(HubEvent::Attached(index)),
-                    Err(err) => {
-                        if first_failure.is_none() {
-                            first_failure = Some(err);
-                        }
-                    }
-                },
-                // A connect glitch on a served port (its transfers fault
-                // and the fault path detaches it if the device really
-                // changed), or a flicker on an unserved one: drained.
-                (Some(_), true) | (None, false) => {}
-            }
-        }
-        if let Some(err) = first_failure {
-            return Err(err);
-        }
-        // Only a scan that walked every port and found nothing actionable
-        // disarms: an actionable event returns from inside the loop above with
-        // later ports unvisited, and the caller re-scans until it sees `None`.
-        self.root_change_pending = false;
-        Ok(HubEvent::None)
-    }
-
-    /// Reset the hub at `hub_index`'s downstream `port`, await the reset
-    /// completing ([`Self::await_hub_port_reset_complete`]), and attach
-    /// whatever is behind it ([`Self::attach_downstream_device`]) — a leaf
-    /// device, or a further hub tier that is installed and descended.
-    ///
-    /// On **any** failure the diagnostics are snapshotted
-    /// ([`Self::last_attach_fault`]) and then the port's latched changes
-    /// are drained (best-effort) before the error is surfaced: the reset
-    /// this attach issued latches `C_PORT_RESET` (and the connect change
-    /// may already be latched), and a hub keeps its status-change endpoint
-    /// re-reporting the port until every latch is cleared — an undrained
-    /// failed attach would make the watch re-fire, and re-run the same
-    /// failing enumeration, forever (the metal fault loop that starved
-    /// every other port).
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if the reset port never reports
-    ///   enabled within the reset-completion budget (it never established
-    ///   a speed/TT, so addressing it would be a guess).
-    /// * Any error of [`Self::reset_hub_port`], [`Self::hub_port_status`],
-    ///   or [`Self::attach_downstream_device`].
-    fn attach_hub_port(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        let result = self.reset_confirm_and_attach(hub_index, port, delay);
-        if let Err(err) = result {
-            // Snapshot the failure diagnostics **before** the latch drain:
-            // its own transfers overwrite the live stage/completion/reject
-            // state, and the first failure is the one the per-port
-            // fail-soft scan surfaces.
-            if self.attach_fault.is_none() {
-                self.attach_fault = Some(AttachFault {
-                    port,
-                    error: err,
-                    stage: self.stage,
-                    completion: self.last_completion,
-                    event_type: self.last_event_type,
-                    reject: self.last_reject,
-                    port_status: self.last_attach_status,
-                });
-            }
-            // Best-effort: the device just failed, so these hub-class
-            // transfers may fail too; the attach error is the one surfaced.
-            if let Ok((_, change)) = self.hub_port_status_change(hub_index, port) {
-                let _ = self.clear_hub_port_changes(hub_index, port, change);
-            }
-        }
-        result
-    }
-
-    /// The attach core of [`Self::attach_hub_port`]: reset the port so the
-    /// hub enables it and establishes its speed and transaction translator,
-    /// await the reset completing ([`Self::await_hub_port_reset_complete`]),
-    /// and attach the device behind it.
-    fn reset_confirm_and_attach(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        self.stage = EnumStage::PortReset;
-        self.last_attach_status = 0;
-        let speed = self.reset_downstream_port(hub_index, port, delay)?;
-        self.attach_downstream_device(hub_index, port, speed, delay)
-    }
-
-    /// Reset the hub at `hub_index`'s downstream `port`, await the reset
-    /// completing ([`Self::await_hub_port_reset_complete`]), and return the
-    /// protocol speed of the device behind it.
-    fn reset_downstream_port(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<u8, DriverError> {
-        self.reset_hub_port(hub_index, port)?;
-        let status = self.await_hub_port_reset_complete(hub_index, port, delay)?;
-        // A `SuperSpeed` hub's ports carry only `SuperSpeed` devices; its
-        // `wPortStatus` reserves the USB 2.0 speed bits as zero (USB 3.2
-        // §10.16.2.6), so decoding them would misread the device as
-        // full-speed and address it with the wrong EP0 packet size.
-        let hub_speed = self.hub(hub_index).ok_or(DriverError::DeviceFault)?.speed;
-        Ok(if hub_speed == SPEED_SUPER {
-            SPEED_SUPER
-        } else {
-            hub_port_speed(status)
-        })
-    }
-
-    /// Await the hub completing a downstream `port` reset: poll the port's
-    /// `wPortStatus` (USB 2.0 §11.24.2.7) at [`PORT_RESET_POLL_US`] spacing —
-    /// each interval parked on `delay`, never spun — until the hub reports
-    /// the reset signalling done and the port enabled, then wait the
-    /// `TRSTRCY` recovery settle and return the final status (its speed
-    /// bits select the downstream device's protocol speed).
-    ///
-    /// A hub exposes no interrupt for its own reset completion while its
-    /// status-change report is being serviced, so this bounded re-poll is
-    /// the protocol's completion signal; a single fixed wait is wrong both
-    /// ways (too short for a slow hub, a needless stall for a fast one).
-    /// Every observed status is recorded so a failed attach's
-    /// [`AttachFault::port_status`] shows the port's final state.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if the port does not report enabled
-    ///   within [`PORT_RESET_POLLS`] polls (the device never established a
-    ///   speed/TT, so addressing it would be a guess — fail closed).
-    /// * Any error of [`Self::hub_port_status`].
-    fn await_hub_port_reset_complete(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<u16, DriverError> {
-        for _ in 0..PORT_RESET_POLLS {
-            delay.delay_us(PORT_RESET_POLL_US);
-            let status = self.hub_port_status(hub_index, port)?;
-            self.last_attach_status = status;
-            if !hub_port_resetting(status) && hub_port_enabled(status) {
-                delay.delay_us(PORT_RESET_SETTLE_US);
-                return Ok(status);
-            }
-        }
-        Err(DriverError::DeviceFault)
-    }
-
-    /// Await a root-hub `port` completing the reset
-    /// [`Xhci::begin_port_reset`] requested, and return its final status
-    /// (whose speed field selects the device's protocol speed) — the
-    /// root-port counterpart of [`Self::await_hub_port_reset_complete`],
-    /// running the same protocol step against `PORTSC` instead of a hub's
-    /// `wPortStatus`.
-    ///
-    /// `PORTSC` is re-read at [`PORT_RESET_POLL_US`] spacing, bounded by the
-    /// **wall clock** at [`PORT_RESET_POLLS`] of those intervals, until the
-    /// port reports the reset done **and** enabled — a USB2 port enables only through its reset, and reading
-    /// `PED` in the same instant `PR` clears catches a port mid-transition.
-    /// Each interval is parked on the controller's own interrupt rather than
-    /// a blind timer: a completed reset posts a Port Status Change Event, so
-    /// a fast port wakes early and costs one park, and a stalled one still
-    /// gives the CPU up. The reset's own `PRC`/`PEC` latches are then
-    /// consumed, and only then is the `TRSTRCY` recovery interval settled —
-    /// on `delay`, because a settle the protocol mandates must not be cut
-    /// short by an unrelated controller event.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if the port does not report enabled
-    ///   within [`PORT_RESET_POLLS`] polls (it never established a speed, so
-    ///   addressing the device would be a guess — fail closed).
-    /// * Any error of [`Xhci::port_status`] or
-    ///   [`Xhci::clear_port_reset_change`].
-    fn await_root_port_reset_complete(
-        &mut self,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<PortStatus, DriverError> {
-        // Bounded by wall clock, not by an iteration count: a park on the
-        // controller's interrupt may return early on any unrelated event (a
-        // report completing), so counting parks would spend the whole budget
-        // in microseconds on a busy controller and refuse a slow port.
-        let deadline = self.wait.now_us().saturating_add(
-            u64::from(PORT_RESET_POLL_US).saturating_mul(u64::from(PORT_RESET_POLLS)),
-        );
-        loop {
-            let status = self.xhci.port_status(port)?;
-            if !status.resetting() && status.enabled() {
-                self.xhci.clear_port_reset_change(port)?;
-                delay.delay_us(PORT_RESET_SETTLE_US);
-                return Ok(status);
-            }
-            let now = self.wait.now_us();
-            if now >= deadline {
-                return Err(DriverError::DeviceFault);
-            }
-            self.wait
-                .wait_us(u64::from(PORT_RESET_POLL_US).min(deadline - now));
-        }
     }
 
     /// Number of root-hub ports the controller reports
@@ -5739,824 +4127,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         } else {
             self.hub(parent_hub)
                 .is_none_or(|hub| port_removable(hub.fixed_ports, hub_port))
-        }
-    }
-
-    /// Read a configured hub's topology from its hub class descriptor (USB
-    /// 2.0 §11.23.2.1): `bNbrPorts` and the TT Think Time in
-    /// `wHubCharacteristics` bits 5:6. The caller must already have
-    /// enumerated the device and confirmed it is a hub.
-    ///
-    /// The request mirrors what production stacks (Linux `hub.c`, Windows)
-    /// issue: the full base-descriptor size, retried a bounded number of
-    /// times when the hub answers wrongly. A truncated 8-byte read is an
-    /// exchange no mainstream host ever sends, and real hubs (a Realtek
-    /// RTS5411 on the Pi 4) answered it with garbage — the reply passed
-    /// the transfer but failed the type check, and the whole tier behind
-    /// the hub went unserved.
-    ///
-    /// `superspeed` selects the descriptor a `SuperSpeed` hub actually
-    /// serves — the fixed 12-byte [`DESC_TYPE_SS_HUB`] one (USB 3.2
-    /// §10.15.2.1); an SS hub STALLs a request for the USB 2.0
-    /// [`DESC_TYPE_HUB`] descriptor, which is how a whole USB3-attached
-    /// tier went unserved on the Pi 4's `SuperSpeed` root port. What a
-    /// reply may be is [`HubDescriptor::decode`]'s alone to decide.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::BadMagic`] for a non-hub or too-short reply on
-    ///   every attempt.
-    /// * [`DriverError::EndpointStalled`] if the hub refused the request
-    ///   on every attempt (the control endpoint is already recovered).
-    /// * [`DriverError::DeviceFault`] if the control transfer faults.
-    fn read_hub_topology(&mut self, superspeed: bool) -> Result<HubDescriptor, DriverError> {
-        let (desc_type, request) = HubDescriptor::request(superspeed);
-        let want = u16::try_from(request).map_err(|_| DriverError::LengthOutOfRange)?;
-        let mut last = DriverError::BadMagic;
-        for _ in 0..HUB_DESC_ATTEMPTS {
-            let mut desc = [0u8; HUB_DESC_REQUEST];
-            let transferred = match self.control(
-                setup_get_hub_descriptor(desc_type, want),
-                &mut desc[..request],
-            ) {
-                Ok(transferred) => transferred,
-                // The hub answered the request wrongly (a refusal STALL —
-                // EP0 is already recovered). Transport/controller faults
-                // are not retried: a timeout compounds and a fault will
-                // not heal.
-                Err(err @ DriverError::EndpointStalled) => {
-                    last = err;
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            match HubDescriptor::decode(&desc[..transferred], superspeed) {
-                Some(hub) => return Ok(hub),
-                None => last = DriverError::BadMagic,
-            }
-        }
-        Err(last)
-    }
-
-    /// Read a configured hub's `bNbrPorts` (downstream port count) from its
-    /// hub class descriptor (USB 2.0 §11.23.2.1 / USB 3.2 §10.15.2.1,
-    /// selected by the active hub's own protocol speed).
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::BadMagic`] for a non-hub or too-short reply.
-    /// * [`DriverError::DeviceFault`] if the control transfer faults.
-    pub fn hub_num_ports(&mut self) -> Result<u8, DriverError> {
-        let superspeed = self
-            .active_hub
-            .and_then(|index| self.hub(index))
-            .is_some_and(|hub| hub.speed == SPEED_SUPER);
-        Ok(self.read_hub_topology(superspeed)?.ports)
-    }
-
-    /// Set the **Hub** bit in the active slot's context (xHCI §6.2.2) so the
-    /// controller routes and splits the transactions of devices addressed
-    /// downstream of it — otherwise a device behind the hub is addressed
-    /// but never delivers a report. Issues an `A0`-only Configure Endpoint
-    /// copying the live output slot context and setting the Hub bit, Number
-    /// of Ports, and TT Think Time from the hub descriptor (single-TT).
-    /// Must run while the hub is the active slot, before any device behind
-    /// it is bound ([`Self::bind_control`]).
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::BadMagic`] if the hub descriptor is forged.
-    /// * [`DriverError::DeviceFault`] if the controller rejects the command.
-    ///
-    /// Returns the hub's descriptor so the caller records the topology it
-    /// just programmed without a second descriptor read.
-    /// `superspeed` selects the hub descriptor the hub actually serves
-    /// ([`Self::read_hub_topology`]); a `SuperSpeed` hub has no TT, so its
-    /// slot's TT Think Time is programmed zero.
-    fn configure_hub_slot(&mut self, superspeed: bool) -> Result<HubDescriptor, DriverError> {
-        let hub = self.read_hub_topology(superspeed)?;
-        let (num_ports, tt_think_time) = (hub.ports, hub.tt_think_time);
-        let (hub_slot, output_ctx) = self
-            .cursor
-            .as_ref()
-            .map(|control| (control.slot, control.output_ctx))
-            .ok_or(DriverError::DeviceFault)?;
-        let mut slot = self.read_ctx(output_ctx)?;
-        slot[0] = (slot[0] | SLOT_CTX_HUB) & !SLOT_CTX_MTT;
-        slot[1] = (slot[1] & !(0xFFu32 << SLOT_CTX_NUM_PORTS_SHIFT))
-            | (u32::from(num_ports) << SLOT_CTX_NUM_PORTS_SHIFT);
-        slot[2] = (slot[2] & !SLOT_CTX_TTT_MASK) | (u32::from(tt_think_time) << SLOT_CTX_TTT_SHIFT);
-        self.write_input_ctx(0, &input_control_dwords(0, 1))?;
-        self.write_input_ctx(1, &slot)?;
-        self.stage = EnumStage::ConfigureEndpoint;
-        self.command(Trb::new(
-            TrbType::ConfigureEndpoint,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(hub_slot),
-        ))?;
-        Ok(hub)
-    }
-
-    /// Assert `PORT_POWER` on the hub at `hub_index`'s downstream `port`
-    /// (1-based) via a class `SET_FEATURE` (USB 2.0 §11.24.2.13). A
-    /// port-power-controlled hub reports a port disconnected until this is
-    /// set; the caller waits the power-on-good time before reading
-    /// [`Self::hub_port_status`].
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if no hub is live at `hub_index`.
-    /// * [`DriverError::DeviceFault`] if the control transfer faults.
-    pub fn power_hub_port(&mut self, hub_index: usize, port: u8) -> Result<(), DriverError> {
-        self.hub_control(
-            hub_index,
-            setup_set_port_feature(PORT_FEATURE_POWER, port),
-            &mut [],
-        )
-        .map(|_| ())
-    }
-
-    /// Read the hub at `hub_index`'s downstream `port` 16-bit `wPortStatus`
-    /// via a class `GET_STATUS` (USB 2.0 §11.24.2.7).
-    ///
-    /// Decode it with [`hub_port_connected`] and [`hub_port_speed`].
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if no hub is live at `hub_index`.
-    /// * [`DriverError::DeviceFault`] if the control transfer faults or
-    ///   the device returns fewer than the two `wPortStatus` bytes
-    ///   (fail closed).
-    pub fn hub_port_status(&mut self, hub_index: usize, port: u8) -> Result<u16, DriverError> {
-        let mut buf = [0u8; 4];
-        if self.hub_control(hub_index, setup_get_port_status(port), &mut buf)? < 2 {
-            return Err(DriverError::DeviceFault);
-        }
-        Ok(u16::from_le_bytes([buf[0], buf[1]]))
-    }
-
-    /// Reset the hub at `hub_index`'s downstream `port` (1-based) via a
-    /// class `SET_FEATURE(PORT_RESET)` (USB 2.0 §11.24.2.13).
-    ///
-    /// A downstream device is enabled — and its speed (and, for a
-    /// full/low-speed device, its transaction translator) established —
-    /// only once its hub port has been reset. The attach path then polls
-    /// the port's status until the hub reports the reset complete and the
-    /// port enabled before addressing the device.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if no hub is live at `hub_index`.
-    /// * [`DriverError::DeviceFault`] if the control transfer faults
-    ///   (fail closed).
-    pub fn reset_hub_port(&mut self, hub_index: usize, port: u8) -> Result<(), DriverError> {
-        self.hub_control(
-            hub_index,
-            setup_set_port_feature(PORT_FEATURE_RESET, port),
-            &mut [],
-        )
-        .map(|_| ())
-    }
-
-    /// Clear **every** latched change on a downstream hub `port` whose
-    /// `wPortChange` word is `change`, via one class `CLEAR_FEATURE` (USB 2.0
-    /// §11.24.2.2) per set bit.
-    ///
-    /// A hub keeps its status-change endpoint asserting a report for the port
-    /// until *all* its latched changes are cleared. Enumeration resets the
-    /// port (`SET_FEATURE(PORT_RESET)`), which latches `C_PORT_RESET` (and the
-    /// hub may latch `C_PORT_ENABLE`) alongside `C_PORT_CONNECTION`; clearing
-    /// only the connect change leaves the port permanently flagged, so the
-    /// freshly-armed watch fires immediately and forever on a change that is
-    /// never a real hot-plug. Draining the whole set leaves the watch quiet
-    /// until the next genuine connect/disconnect.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if a control transfer faults (fail closed).
-    fn clear_hub_port_changes(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-        change: u16,
-    ) -> Result<(), DriverError> {
-        // A `SuperSpeed` hub latches a different change set (warm-reset,
-        // link-state, and config-error latches; no enable/suspend ones) —
-        // an uncleared latch keeps the status-change watch firing forever.
-        let features: &[(u16, u8)] = if self
-            .hub(hub_index)
-            .is_some_and(|hub| hub.speed == SPEED_SUPER)
-        {
-            &SS_PORT_CHANGE_FEATURES
-        } else {
-            &PORT_CHANGE_FEATURES
-        };
-        for &(bit, feature) in features {
-            if change & bit != 0 {
-                self.hub_control(hub_index, setup_clear_port_feature(feature, port), &mut [])?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Read the hub at `hub_index`'s downstream `port` `wPortStatus` and
-    /// `wPortChange` words (USB 2.0 §11.24.2.7) in one class `GET_STATUS`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if the transfer faults or returns fewer
-    /// than the four status/change bytes (fail closed).
-    fn hub_port_status_change(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-    ) -> Result<(u16, u16), DriverError> {
-        let mut buf = [0u8; 4];
-        if self.hub_control(hub_index, setup_get_port_status(port), &mut buf)? < buf.len() {
-            return Err(DriverError::DeviceFault);
-        }
-        Ok((
-            u16::from_le_bytes([buf[0], buf[1]]),
-            u16::from_le_bytes([buf[2], buf[3]]),
-        ))
-    }
-
-    /// Bind the active control endpoint to `slot`'s, on a fresh ring in
-    /// device-table entry `index`'s region with its output context zeroed,
-    /// so the next [`Self::address_device`] addresses the device on its own
-    /// ring and context, every other slot's staying live in the DCBAA.
-    ///
-    /// The previously active ring is parked in its owner's table entry
-    /// ([`Self::park_control`]), so [`Self::rest_active_context`] can make
-    /// the resting hub the active control context again once the device is
-    /// enumerated (every hub stays addressed for status-change watching and
-    /// per-port class requests).
-    fn bind_control(&mut self, index: usize, slot: u8) -> Result<(), DriverError> {
-        let region = self.device_region(index)?;
-        let ring = self.build_ring(region.ep0_ring, RING_TRBS)?;
-        // The output device context must reach Address Device zeroed (§4.5.2);
-        // a reused region still holds the previous device's contexts.
-        let ctx_zeros = [0u8; CTX_DWORDS * 4];
-        for offset in (0..OUTPUT_CONTEXTS * self.layout.ctx_size).step_by(ctx_zeros.len()) {
-            self.dma.write(region.output_ctx + offset, &ctx_zeros)?;
-        }
-        self.park_control();
-        self.cursor = Some(ControlCursor {
-            slot,
-            ring,
-            ring_off: region.ep0_ring,
-            output_ctx: region.output_ctx,
-            ctrl_data: region.ctrl_data,
-        });
-        Ok(())
-    }
-
-    /// Take the active control endpoint out of service, parking its ring in
-    /// whichever table entry owned it (the active hub or the active
-    /// device) and clearing the active markers. An endpoint with no owner (a
-    /// failed enumeration's, whose device was never installed) goes with its
-    /// slot.
-    fn park_control(&mut self) {
-        let active_hub = self.active_hub.take();
-        let active_device = self.active_device.take();
-        let Some(control) = self.cursor.take() else {
-            return;
-        };
-        if let Some(hub_index) = active_hub {
-            if let Some(hub) = self.hubs.get_mut(hub_index).and_then(Option::as_mut) {
-                hub.ep0_ring = Some(control.ring);
-            }
-        } else if let Some(index) = active_device {
-            if let Some(device) = self.devices.get_mut(index).and_then(Option::as_mut) {
-                device.ep0_ring = Some(control.ring);
-            }
-        }
-    }
-
-    /// The slot of the active control endpoint, `None` while none is active.
-    fn active_control_slot(&self) -> Option<u8> {
-        self.cursor.as_ref().map(|control| control.slot)
-    }
-
-    /// Make the hub at `hub_index` the active control context,
-    /// reactivating its parked EP0 ring and parking the previous owner's,
-    /// so hub class requests (`GET_STATUS`, `SET_FEATURE`, …) target that
-    /// hub. A no-op when it is already active.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if no hub is live at `hub_index`.
-    /// * [`DriverError::DeviceFault`] if the hub's EP0 ring is not parked
-    ///   (a caller bug — an activation was skipped or doubled).
-    fn activate_hub_control(&mut self, hub_index: usize) -> Result<(), DriverError> {
-        if self.active_hub == Some(hub_index) {
-            return Ok(());
-        }
-        let hub = self
-            .hubs
-            .get_mut(hub_index)
-            .and_then(Option::as_mut)
-            .ok_or(DriverError::NotFound)?;
-        let ring = hub.ep0_ring.take().ok_or(DriverError::DeviceFault)?;
-        let control = ControlCursor {
-            slot: hub.slot,
-            ring,
-            ring_off: hub.ep0_ring_off,
-            output_ctx: hub.output_ctx,
-            ctrl_data: hub.ctrl_data,
-        };
-        self.park_control();
-        self.cursor = Some(control);
-        self.active_hub = Some(hub_index);
-        Ok(())
-    }
-
-    /// Rest the active control context after another slot was enumerated
-    /// or activated: the resting state every operation returns to, chosen
-    /// so the cursor never rests on an entry a hot-removal is likely to
-    /// free mid-operation.
-    ///
-    /// The rest target is the lowest-index live hub (a hub topology's
-    /// watches must never lose their rings); with no hub installed, the
-    /// lowest-index device entry holding a parked EP0 ring (the
-    /// direct-attach topology); with a live device already active and
-    /// nothing better, the cursor stays where it is; with nothing live at
-    /// all, no control endpoint is active, so none dangles on a released
-    /// region.
-    ///
-    /// The previously active EP0 ring is parked in its owner's table entry
-    /// ([`Self::park_control`]) so a later control transfer targeting
-    /// it (a URB control-IN, the bulk halt recovery's `CLEAR_FEATURE`, a
-    /// downstream hub's class request) can reactivate it.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::activate_hub_control`] / [`Self::activate_device_control`]
-    /// for the chosen rest target (a caller bug — its ring never parked).
-    fn rest_active_context(&mut self) -> Result<(), DriverError> {
-        if let Some(hub_index) = self.hubs.iter().position(|entry| entry.as_ref().is_some()) {
-            return self.activate_hub_control(hub_index);
-        }
-        if self
-            .active_device
-            .is_some_and(|index| self.devices.get(index).is_some_and(Option::is_some))
-        {
-            // A live directly-attached device is the active context and no
-            // hub exists to rest on: staying put is the resting state.
-            return Ok(());
-        }
-        if let Some(index) = self.devices.iter().position(|entry| {
-            entry
-                .as_ref()
-                .is_some_and(|device| device.ep0_ring.is_some())
-        }) {
-            return self.activate_device_control(index);
-        }
-        self.park_control();
-        Ok(())
-    }
-
-    /// Index of the device-table entry holding slot `slot`'s **parked** EP0
-    /// ring — the entry a control transfer for that slot is activated
-    /// through. A composite device's sibling entries share the slot but
-    /// never themselves hold the ring, so a sibling's control transfer
-    /// routes through this owner. `None` while the slot's ring is not
-    /// parked (the slot is already the active control context, or no entry
-    /// holds it).
-    fn ep0_owner_index(&self, slot: u8) -> Option<usize> {
-        self.devices.iter().position(|entry| {
-            entry
-                .as_ref()
-                .is_some_and(|device| device.slot == slot && device.ep0_ring.is_some())
-        })
-    }
-
-    /// Make the served device at `index` the active control context again,
-    /// reactivating the EP0 ring [`Self::rest_active_context`] parked in its
-    /// table entry, so a post-enumeration control transfer (a URB
-    /// control-IN, the bulk halt recovery's `CLEAR_FEATURE`) targets the
-    /// *device*, never the hub.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if no device is live at `index`.
-    /// * [`DriverError::DeviceFault`] if the device's EP0 ring is not
-    ///   parked (a caller bug — the device is already the active context).
-    fn activate_device_control(&mut self, index: usize) -> Result<(), DriverError> {
-        let device = self
-            .devices
-            .get_mut(index)
-            .and_then(Option::as_mut)
-            .ok_or(DriverError::NotFound)?;
-        let ring = device.ep0_ring.take().ok_or(DriverError::DeviceFault)?;
-        let control = ControlCursor {
-            slot: device.slot,
-            ring,
-            ring_off: device.ep0_ring_off,
-            output_ctx: device.output_ctx,
-            ctrl_data: device.ctrl_data,
-        };
-        self.park_control();
-        self.cursor = Some(control);
-        self.active_device = Some(index);
-        Ok(())
-    }
-
-    /// Run a control transfer targeting the **hub** at `hub_index` rather
-    /// than whatever slot is the resting active control context: the root
-    /// hub is already active at rest, a downstream hub is activated for
-    /// the transfer and the root hub restored after — even when the
-    /// transfer itself fails, so no hub watch ever loses its ring. The IN
-    /// data lands in `data` before the resting context returns.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::NotFound`] with no hub live at `hub_index`, else as
-    /// [`Self::control`] / [`Self::activate_hub_control`].
-    fn hub_control(
-        &mut self,
-        hub_index: usize,
-        setup: [u8; 8],
-        data: &mut [u8],
-    ) -> Result<usize, DriverError> {
-        let hub_slot = self.hub(hub_index).ok_or(DriverError::NotFound)?.slot;
-        if self.active_control_slot() == Some(hub_slot) {
-            return self.control(setup, data);
-        }
-        self.activate_hub_control(hub_index)?;
-        let result = self.control(setup, data);
-        let restored = self.rest_active_context();
-        let transferred = result?;
-        restored?;
-        Ok(transferred)
-    }
-
-    /// Run a control transfer targeting the served **device** at `index`
-    /// rather than whatever slot is the resting active control context: a
-    /// directly-attached device is already active, a hub-downstream device
-    /// is activated for the transfer and the hub restored after — even when
-    /// the transfer itself fails, so the hub watch never loses its ring. The
-    /// IN data lands in `data` before the resting context returns.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::NotFound`] with no device live at `index`, else as
-    /// [`Self::control`] / [`Self::activate_device_control`].
-    fn device_control(
-        &mut self,
-        index: usize,
-        setup: [u8; 8],
-        data: &mut [u8],
-    ) -> Result<usize, DriverError> {
-        let device_slot = self.device(index).ok_or(DriverError::NotFound)?.slot;
-        if self.active_control_slot() == Some(device_slot) {
-            return self.control(setup, data);
-        }
-        // A composite sibling entry shares its slot's EP0 with the primary
-        // entry and never itself holds the parked ring; activate through
-        // whichever entry owns it.
-        let owner = self.ep0_owner_index(device_slot).unwrap_or(index);
-        self.activate_device_control(owner)?;
-        let result = self.control(setup, data);
-        let restored = self.rest_active_context();
-        let transferred = result?;
-        restored?;
-        Ok(transferred)
-    }
-
-    /// Run a control-OUT transfer (SETUP + OUT data stage + status)
-    /// targeting the served **device** at `index`, with the same
-    /// activate/restore discipline as [`Self::device_control`] so the hub
-    /// watch never loses its ring.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::NotFound`] with no device live at `index`, else as
-    /// [`Self::control_out_transfer`] /
-    /// [`Self::activate_device_control`].
-    fn device_control_out(
-        &mut self,
-        index: usize,
-        setup: [u8; 8],
-        data: &[u8],
-    ) -> Result<(), DriverError> {
-        let device_slot = self.device(index).ok_or(DriverError::NotFound)?.slot;
-        if self.active_control_slot() == Some(device_slot) {
-            return self.control_out_transfer(setup, data);
-        }
-        let owner = self.ep0_owner_index(device_slot).unwrap_or(index);
-        self.activate_device_control(owner)?;
-        let result = self.control_out_transfer(setup, data);
-        let restored = self.rest_active_context();
-        result?;
-        restored
-    }
-
-    /// Install the hub addressed on the **active** control-context slot
-    /// into the hub table and tell the controller the slot is a hub
-    /// ([`Self::configure_hub_slot`]), so devices addressed downstream of
-    /// it are routed and their split transactions scheduled (xHCI §6.2.2).
-    ///
-    /// A hub installs right after its enumeration, while it is still the
-    /// active context, claiming the device region it was enumerated on
-    /// (`device_region`); the root-attached hub with `parent = None`.
-    /// `base` is the slot-context topology the hub was addressed with — its
-    /// route string, speed, and TT coordinates, which its downstream devices
-    /// inherit.
-    /// Consumes the status-change endpoint [`Self::finish_enumeration`]
-    /// captured. The installed hub becomes the active control context.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if no device is addressed on the
-    ///   active slot, or the controller rejects the Configure Endpoint.
-    /// * [`DriverError::NoSpace`] if the hub table is full (the tier is
-    ///   left unserved fail-closed, never displacing a watched hub).
-    /// * [`DriverError::NotFound`] if `parent` names no live hub.
-    /// * [`DriverError::BadMagic`] if the hub descriptor is forged.
-    fn install_hub(
-        &mut self,
-        parent: Option<usize>,
-        parent_port: u8,
-        base: SlotCtxBase,
-        device_region: usize,
-    ) -> Result<usize, DriverError> {
-        // A hub must be addressed on the active slot for the route string's
-        // root-port and TT-hub-slot to be meaningful.
-        let (slot, output_ctx, ep0_ring_off, ctrl_data) = self
-            .cursor
-            .as_ref()
-            .map(|control| {
-                (
-                    control.slot,
-                    control.output_ctx,
-                    control.ring_off,
-                    control.ctrl_data,
-                )
-            })
-            .ok_or(DriverError::DeviceFault)?;
-        let hub_index = self.claim_hub_entry()?;
-        let depth = match parent {
-            None => 0,
-            Some(parent_index) => self.hub(parent_index).ok_or(DriverError::NotFound)?.depth + 1,
-        };
-        let superspeed = base.speed == SPEED_SUPER;
-        let descriptor = self.configure_hub_slot(superspeed)?;
-        // A `SuperSpeed` hub must be told its tier depth before it can
-        // decode downstream route strings (USB 3.2 §10.16.2.7); without
-        // it every transaction to a device behind the hub is misrouted.
-        if superspeed {
-            self.control(setup_set_hub_depth(depth), &mut [])?;
-        }
-        let region = HubRegion::at(self.dma.grow(HubRegion::layout_len())?);
-        self.hubs[hub_index] = Some(HubState {
-            slot,
-            parent,
-            parent_port,
-            root_port: base.root_port,
-            route_string: base.route_string,
-            depth,
-            speed: base.speed,
-            num_ports: descriptor.ports,
-            fixed_ports: descriptor.fixed_ports,
-            tt_hub_slot: base.tt_hub_slot,
-            tt_port: base.tt_port,
-            output_ctx,
-            ep0_ring_off,
-            ctrl_data,
-            region,
-            device_region,
-            // The hub is the active control context, so its ring is the
-            // live cursor, not parked here.
-            ep0_ring: None,
-            int_endpoint: self.pending_hub_endpoint.take(),
-            int_dci: 0,
-            int_ring: None,
-            pending: None,
-            watch: Ladder::default(),
-        });
-        self.active_hub = Some(hub_index);
-        self.active_device = None;
-        Ok(hub_index)
-    }
-
-    /// Address and configure the device on the hub at `hub_index`'s
-    /// downstream `down_port` (1-based) at protocol `speed`, on a fresh
-    /// xHCI slot and a free device-table index, leaving the root hub the
-    /// active control context.
-    ///
-    /// The shared attach core of the bring-up walk ([`Self::bring_up`]) and
-    /// a hot-plug attach ([`Self::next_hub_change`]), on a port just reset.
-    /// The hub must already be installed; this Enable-Slots the device on a
-    /// free index's region, addresses it with the route string / TT for the
-    /// downstream port, completes enumeration into the table entry, then
-    /// restores the root hub as the active control context and clears the
-    /// changes the attach latched. On failure the root hub is restored just
-    /// the same and the enumerated slot, if any, is released — one port's
-    /// broken device never leaves the engine wedged.
-    ///
-    /// A device that turns out to be a **hub** is installed into the hub
-    /// table instead ([`Attachment::Hub`], claiming the device region it
-    /// was enumerated on) and descended: its ports are powered and scanned
-    /// and its status-change watch armed ([`Self::descend_hub`]), so a hub
-    /// plugged into a hub serves the devices behind it.
-    ///
-    /// A re-attach is a brand-new enumeration: a fresh slot, no reuse of any
-    /// prior device state.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NoSpace`] if the device table is full.
-    /// * [`DriverError::OutOfRange`] if the tier would exceed
-    ///   [`MAX_HUB_DEPTH`] or the port cannot be route-encoded.
-    /// * [`DriverError::DeviceFault`] if no hub is installed at
-    ///   `hub_index`, the controller assigns no fresh slot, or any
-    ///   command/transfer faults.
-    /// * [`DriverError::BadMagic`] if a descriptor is forged.
-    pub(crate) fn attach_downstream_device(
-        &mut self,
-        hub_index: usize,
-        down_port: u8,
-        speed: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        let root_port = self
-            .hub(hub_index)
-            .ok_or(DriverError::DeviceFault)?
-            .root_port;
-        let index = self.claim_device_entry()?;
-        let result =
-            self.enumerate_on_port(index, Some((hub_index, down_port)), root_port, speed, delay);
-        // Rest the active control context again whether or not the attach
-        // succeeded — no hub watch may lose its ring — and clear *every*
-        // change this attach latched on the port: not just the connect
-        // change, but the reset/enable changes `reset_hub_port` left set,
-        // so the re-armed status-change watch fires only on the *next*
-        // genuine hot-plug rather than immediately and forever on a stale
-        // latch.
-        let restored = self.rest_active_context();
-        // Drain the latches on the failed path too: a failed attach that
-        // leaves the connect/reset changes latched makes the hub's
-        // status-change endpoint re-report the same stale change forever,
-        // and each re-service re-runs the failing enumeration — the metal
-        // symptom where one broken device pegs the hub watch in a
-        // multi-second fault loop and starves every other port's service.
-        let drained = if restored.is_ok() {
-            self.hub_port_status_change(hub_index, down_port)
-                .and_then(|(_, change)| self.clear_hub_port_changes(hub_index, down_port, change))
-        } else {
-            Ok(())
-        };
-        // Release every claim nothing owns — a failed attach's stranded
-        // chunk(s), or the claimed entry of a child that turned out to be
-        // served another way — so no attach outcome leaks DMA. On a clean
-        // attach every claim is owned (the device's entry is live, or the
-        // installed hub holds its region) and the sweep is a no-op.
-        self.retire_unattached_regions(SlotHold::Released);
-        let outcome = result?;
-        restored?;
-        drained?;
-        // A freshly installed downstream hub is descended only now, with
-        // the parent's latches drained and the resting context restored, so
-        // its own attach failures can never wedge the parent's watch. A
-        // tier that cannot be powered or watched is torn down whole rather
-        // than left half-installed holding a slot and region.
-        if let Attachment::Hub(new_hub) = outcome {
-            if let Err(err) = self.descend_hub(new_hub, delay) {
-                let _ = self.detach_hub(new_hub);
-                return Err(err);
-            }
-        }
-        Ok(outcome)
-    }
-
-    /// The slot-level core of [`Self::attach_downstream_device`] and
-    /// [`Self::attach_root_port`], run on a port just reset (or trained):
-    /// Enable Slot, bind the control endpoint to `index`'s region, Address
-    /// Device with the topology `parent` dictates (a downstream route string
-    /// / TT behind a hub, the bare root topology on `root_port` otherwise),
-    /// and complete enumeration into the table entry. A failure after the
-    /// slot was assigned — a device nothing here serves included — gives the
-    /// slot back with Disable Slot, its trailing events tolerated: once the
-    /// controller confirms, the DCBAA entry is cleared and the caller's sweep
-    /// releases the regions; otherwise the regions are withheld and the entry
-    /// kept, since the controller may still reach them.
-    ///
-    /// A fault bringing the control pipe up ([`EnumStage::is_pipe_bringup`])
-    /// that leaves the device untouched — a USB or split transaction error, or
-    /// a command the controller rejected because its own slot/port state
-    /// disagreed with software's
-    /// ([`CompletionCode::indicates_state_disagreement`]) — is a present but
-    /// disturbed device, not a broken one. Once its slot is confirmed disabled
-    /// the port is reset, which returns the device to Default state whatever
-    /// address the failed attempt left it holding, and a fresh slot re-drives
-    /// it at the speed it came back at, up to [`ENUM_ATTEMPTS`] times. A
-    /// device that answers with an error (STALL/babble), a forged descriptor,
-    /// or a fault past the pipe-bring-up phase is surfaced on the first
-    /// attempt.
-    fn enumerate_on_port(
-        &mut self,
-        index: usize,
-        parent: Option<(usize, u8)>,
-        root_port: u8,
-        speed: u8,
-        delay: &dyn Delay,
-    ) -> Result<Attachment, DriverError> {
-        let (hub_index, down_port) = parent.unwrap_or((0, 0));
-        let mut speed = speed;
-        let mut attempt: u32 = 0;
-        loop {
-            let (base, parent_slot) = self.slot_topology(parent, root_port, speed)?;
-            let max_packet = ep0_max_packet(speed)?;
-            self.stage = EnumStage::EnableSlot;
-            let event = self.command(Trb::new(TrbType::EnableSlot, 0, 0, 0))?;
-            let slot = event.slot_id();
-            if slot == 0
-                || slot > self.xhci.max_slots()
-                || (parent.is_some() && slot == parent_slot)
-            {
-                return Err(DriverError::DeviceFault);
-            }
-
-            let attached = self
-                .bind_control(index, slot)
-                .and_then(|()| self.address_device(base, slot, max_packet))
-                .and_then(|()| self.finish_enumeration(slot, base, index, down_port, hub_index))
-                .and_then(|descriptor| {
-                    if descriptor.is_hub() {
-                        // The child is itself a hub: install it into the hub
-                        // table, claiming the device region its contexts were
-                        // enumerated on. The caller descends it after its
-                        // latches are drained and the cursor rested.
-                        self.install_hub(
-                            parent.map(|(hub_index, _)| hub_index),
-                            down_port,
-                            base,
-                            index,
-                        )
-                        .map(Attachment::Hub)
-                    } else {
-                        Ok(Attachment::Device(index))
-                    }
-                });
-            let err = match attached {
-                Ok(outcome) => return Ok(outcome),
-                Err(err) => err,
-            };
-            // Preserve the failure's live breadcrumb across the cleanup:
-            // the Disable Slot below runs its own command wait, which
-            // would overwrite the stage/completion/reject state a
-            // capture needs to name the step that actually failed.
-            let (stage, completion, event_type, reject) = (
-                self.stage,
-                self.last_completion,
-                self.last_event_type,
-                self.last_reject,
-            );
-            // Tolerated first, so a trailing completion the aborted transfers
-            // post is drained rather than failing the Disable Slot wait. A
-            // slot the controller will not confirm disabled keeps the regions
-            // it was handed, which the sweep after the attach would otherwise
-            // free.
-            self.tolerate_freed_slot(slot);
-            let hold = self.disable_slot_best_effort(slot);
-            if hold == SlotHold::Released {
-                let _ = self.dma.write(
-                    self.layout.dcbaa + usize::from(slot) * 8,
-                    &0u64.to_le_bytes(),
-                );
-            } else {
-                self.retire_device_region(index, hold);
-                self.retire_unattached_regions(hold);
-            }
-            self.stage = stage;
-            self.last_completion = completion;
-            self.last_event_type = event_type;
-            self.last_reject = reject;
-
-            // A fault that means the device answered wrong, one past the
-            // pipe-bring-up phase, or the final attempt surfaces the error.
-            // So does one whose slot was never confirmed disabled: a re-drive
-            // would need the region that slot keeps, and would only enable
-            // another slot and mask the real fault.
-            attempt += 1;
-            let transient = hold == SlotHold::Released
-                && stage.is_pipe_bringup()
-                && CompletionCode::from_raw(u32::from(completion)).is_ok_and(|code| {
-                    code.indicates_device_unreachable() || code.indicates_state_disagreement()
-                });
-            if transient && attempt < ENUM_ATTEMPTS {
-                self.stage = EnumStage::PortReset;
-                speed = match parent {
-                    Some((hub_index, port)) => {
-                        self.reset_downstream_port(hub_index, port, delay)?
-                    }
-                    None => self.reset_root_port(root_port, delay)?.speed(),
-                };
-                continue;
-            }
-            return Err(err);
         }
     }
 
@@ -6611,160 +4181,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         ))
     }
 
-    /// Power, scan, and watch the freshly installed hub at `hub_index`:
-    /// assert `PORT_POWER` on every downstream port, wait the
-    /// power-on-good window, attach whatever is connected (recursing
-    /// through further hub tiers via [`Self::attach_downstream_device`],
-    /// bounded by [`MAX_HUB_DEPTH`] and the hub table), and arm the hub's
-    /// status-change watch so later connects/disconnects on this tier
-    /// arrive event-driven.
-    ///
-    /// The scan is per-port fail-soft, exactly like the bring-up walk: a
-    /// port whose device fails enumeration is skipped with its latches
-    /// drained, never costing the other ports their service. The watch is
-    /// armed even when no port is connected, so the first later hot-plug
-    /// is seen.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from powering a port or arming the watch; a single
-    /// port's failed attach is not an error.
-    fn descend_hub(&mut self, hub_index: usize, delay: &dyn Delay) -> Result<(), DriverError> {
-        let num_ports = self.hub(hub_index).ok_or(DriverError::NotFound)?.num_ports;
-        for port in 1..=num_ports {
-            self.power_hub_port(hub_index, port)?;
-        }
-        delay.delay_us(HUB_POWER_ON_GOOD_US);
-        self.attach_connected_hub_ports(hub_index, delay);
-        self.configure_hub_watch(hub_index)
-    }
-
-    /// Attach every connected downstream port of the hub at `hub_index` that
-    /// is not already served, fail-soft — the hub-tier counterpart of
-    /// [`Self::attach_connected_root_ports`], shared by the descent
-    /// ([`Self::descend_hub`]) and the deferred retry
-    /// ([`Self::retry_skipped_ports`]).
-    ///
-    /// One broken or hostile device must not cost the other ports their
-    /// service: a failed attach releases its slot and chunks inside
-    /// [`Self::attach_hub_port`] and the walk continues. A port the bank can
-    /// supply no memory for stays unserved fail-closed, never displacing a
-    /// served device. The skip is counted so the driver can surface "present
-    /// but unserved" instead of silence. An already-served port is skipped
-    /// untouched — [`Self::attach_hub_port`] resets the port it attaches, and
-    /// resetting a working device's port would tear it down.
-    fn attach_connected_hub_ports(&mut self, hub_index: usize, delay: &dyn Delay) {
-        let Some(num_ports) = self.hub(hub_index).map(|hub| hub.num_ports) else {
-            return;
-        };
-        for port in 1..=num_ports {
-            if self
-                .device_index_for_hub_and_port(hub_index, port)
-                .is_some()
-                || self.hub_index_for_hub_and_port(hub_index, port).is_some()
-            {
-                continue;
-            }
-            let Ok(status) = self.hub_port_status(hub_index, port) else {
-                continue;
-            };
-            if !hub_port_connected(status) {
-                continue;
-            }
-            if self.attach_hub_port(hub_index, port, delay).is_err() {
-                self.skipped_ports = self.skipped_ports.saturating_add(1);
-            }
-        }
-    }
-
-    /// Record `slot` in the freed-slot tolerance set ([`Self::freed_slots`])
-    /// so a trailing transfer completion for it is drained, never faulted
-    /// on. When the set is full the oldest entry is replaced — its trailing
-    /// events have had the longest window to arrive.
-    fn tolerate_freed_slot(&mut self, slot: u8) {
-        if slot == 0 || self.freed_slots.contains(&slot) {
-            return;
-        }
-        if self.freed_slots.try_reserve(1).is_err() {
-            // Bookkeeping-heap exhaustion: replace the oldest entry — its
-            // trailing events have had the longest window to arrive —
-            // rather than growing or failing the detach.
-            if self.freed_slots.is_empty() {
-                return;
-            }
-            self.freed_slots.remove(0);
-        }
-        self.freed_slots.push(slot);
-    }
-
-    /// Configure and arm the interrupt-IN status-change endpoint (USB 2.0
-    /// §11.12.3) of the hub at `hub_index`, so a downstream
-    /// connect/disconnect on that tier is delivered event-driven on the
-    /// controller's event ring rather than polled. The shared ring is
-    /// demultiplexed per endpoint ([`Self::hub_async_index`] /
-    /// [`Self::report_async_index`]), so no two hubs' status reports — and
-    /// no device report — ever collide.
-    ///
-    /// A no-op when the hub reported no status-change endpoint
-    /// ([`HubState::int_endpoint`] is `None`): a hub that exposes none
-    /// cannot be watched event-driven, so the engine runs without hotplug
-    /// on that tier rather than failing bring-up. A spec-compliant hub
-    /// always has one.
-    ///
-    /// # Errors
-    ///
-    /// * [`DriverError::NotFound`] if no hub is live at `hub_index`.
-    /// * [`DriverError`] from the Configure Endpoint command or the ring
-    ///   build.
-    pub(crate) fn configure_hub_watch(&mut self, hub_index: usize) -> Result<(), DriverError> {
-        let hub = self.hub(hub_index).ok_or(DriverError::NotFound)?;
-        let Some((dci, max_packet, interval)) = hub.int_endpoint else {
-            return Ok(());
-        };
-        let (hub_slot, region, output_ctx) = (hub.slot, hub.region, hub.output_ctx);
-        let ring = self.build_ring(region.int_ring, RING_TRBS)?;
-        let base = self.device_addr_of(region.int_ring)?;
-        if let Some(hub) = self.hub_mut(hub_index) {
-            hub.int_ring = Some(ring);
-            hub.int_dci = dci;
-        }
-
-        // Configure Endpoint (A0 | A(dci)) adding the status-change endpoint
-        // to the hub slot, copying the live slot context and raising its
-        // Context Entries to cover the new DCI.
-        let mut slot = self.read_ctx(output_ctx)?;
-        slot[0] = (slot[0] & !SLOT_CTX_CONTEXT_ENTRIES_MASK)
-            | (u32::from(dci) << SLOT_CTX_CONTEXT_ENTRIES_SHIFT);
-        self.write_input_ctx(0, &input_control_dwords(0, 1 | (1u32 << u32::from(dci))))?;
-        self.write_input_ctx(1, &slot)?;
-        self.write_input_ctx(
-            1 + usize::from(dci),
-            &ep_ctx_dwords(
-                EP_TYPE_INTERRUPT_IN,
-                max_packet,
-                0,
-                base,
-                Some(Periodic {
-                    interval,
-                    payload: max_packet,
-                    mult: 0,
-                }),
-            ),
-        )?;
-        self.stage = EnumStage::ConfigureEndpoint;
-        self.command(Trb::new(
-            TrbType::ConfigureEndpoint,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(hub_slot),
-        ))?;
-
-        // Arm one status-change transfer and ring the hub's doorbell.
-        self.arm_hub_report(hub_index)?;
-        self.xhci.ring_doorbell(hub_slot, u32::from(dci))?;
-        Ok(())
-    }
-
     /// Prime one interrupt-IN transfer on the status-change endpoint of
     /// the hub at `hub_index` (a Normal TRB pointing at that hub's report
     /// buffer).
@@ -6786,61 +4202,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         let outcome = ring.push(normal)?;
         let link_slot = ring.link_slot();
         publish(&mut self.dma, region.int_ring, link_slot, &outcome)
-    }
-
-    /// Issue a Disable Slot command for `slot` (xHCI §6.4.3.3) **best-effort**,
-    /// returning the slot to the controller's pool if the controller confirms,
-    /// and what it established: only a confirmed slot is one whose contexts
-    /// and rings the controller no longer reaches.
-    ///
-    /// A device-removal teardown must complete locally even when the gone
-    /// device's hub cannot let the controller post the Disable Slot completion
-    /// in time (the metal failure: the confirmation times out and the slot was
-    /// never freed, so a re-plug was never re-enumerated). So this never fails
-    /// the teardown: it posts the command, waits within budget, and retires the
-    /// command-ring slot whether or not the completion was observed — keeping
-    /// the command ring consistent for the next enumeration. A completion that
-    /// arrives after the wait settles the slot then
-    /// ([`Self::settle_awaited_disable`]).
-    fn disable_slot_best_effort(&mut self, slot: u8) -> SlotHold {
-        self.reset_event_diagnostics();
-        let command = Trb::new(TrbType::DisableSlot, 0, 0, trb::control_slot(slot));
-        let Ok(outcome) = self.command_ring.push(command) else {
-            return SlotHold::Held;
-        };
-        if publish(
-            &mut self.dma,
-            self.layout.command_ring,
-            self.command_ring.link_slot(),
-            &outcome,
-        )
-        .is_err()
-            || self.xhci.ring_doorbell(0, 0).is_err()
-        {
-            let _ = self.command_ring.retire_one();
-            return SlotHold::Held;
-        }
-        let answer = self.await_event_for(&[outcome.address]);
-        // Retire our producer slot regardless: a removed device's teardown must
-        // not leave the command ring wedged, and a late completion is settled
-        // by the event consumers rather than retired here a second time.
-        let _ = self.command_ring.retire_one();
-        match answer {
-            Ok(event)
-                if event.trb_type() == Ok(TrbType::CommandCompletion)
-                    && event.completion_code() == Ok(CompletionCode::Success) =>
-            {
-                SlotHold::Released
-            }
-            // Refused, or answered with a code nothing names: no later
-            // answer comes.
-            Ok(_) => SlotHold::Held,
-            Err(_) if self.last_reject == REJECT_UNDECODABLE_CODE => SlotHold::Held,
-            Err(_) => SlotHold::Pending {
-                slot,
-                command: outcome.address,
-            },
-        }
     }
 
     /// Give up the chunk at `base` the controller was handed for a slot:
@@ -6881,123 +4242,96 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// Tear down the served device at `index` after it has disconnected:
     /// drop its table entry — **and every sibling entry sharing its slot**,
     /// since a composite device's interfaces vanish together with the
-    /// physical device — then Disable its slot, so a re-attach is a
-    /// brand-new enumeration on a brand-new chunk. The hub stays addressed
-    /// and watched, and every other served device is untouched.
+    /// physical device — end every operation acting on them, and post its
+    /// slot's Disable Slot, so a re-attach is a brand-new enumeration on a
+    /// brand-new chunk. Every other served device is untouched.
     ///
-    /// The entries go before Disable Slot is issued, so nothing arms or rings
-    /// the slot being disabled: a completion landing during the wait is
-    /// drained as stale. Their regions go back to the bank only once the
-    /// controller confirms the slot disabled; until then it may still reach
-    /// them, so an unconfirmed slot keeps them withheld and its DCBAA entry
-    /// in place.
+    /// The entries go before Disable Slot is posted, so nothing arms or rings
+    /// the slot being disabled: a completion landing meanwhile is dropped as
+    /// stale. Their chunks go back to the bank only once the controller
+    /// confirms the slot disabled ([`Self::settle_awaited_disable`]); until
+    /// then it may still reach them.
     ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from the local DMA write that clears the DCBAA entry.
-    /// The Disable Slot command is best-effort and never fails the teardown
-    /// (see [`Self::disable_slot_best_effort`]).
-    fn detach_device(&mut self, index: usize) -> Result<(), DriverError> {
+    /// A Disable Slot that cannot be posted withholds the chunks until a
+    /// controller reset.
+    fn detach_device(&mut self, index: usize) {
+        if self.device(index).is_some() {
+            self.tear_down_device(index);
+            self.note_topology(HubEvent::Detached(index));
+        }
+    }
+
+    /// [`Self::detach_device`], reporting nothing: the caller reports what
+    /// the teardown it is part of did.
+    fn tear_down_device(&mut self, index: usize) {
         let Some(slot) = self.device(index).map(|device| device.slot) else {
-            return Ok(());
+            return;
         };
-        let mut retiring = [None; MAX_INTERFACES];
-        let mut streaming: [Option<Streaming>; MAX_INTERFACES] = [const { None }; MAX_INTERFACES];
-        let mut retiring_len = 0;
-        let mut lost_active = false;
+        let mut chunks: Vec<usize> = Vec::new();
         for entry_index in 0..self.devices.len() {
-            let shares_slot = self.devices[entry_index]
-                .as_ref()
-                .is_some_and(|device| device.slot == slot);
-            if !shares_slot {
+            let Some(device) = self.devices[entry_index].take_if(|device| device.slot == slot)
+            else {
                 continue;
+            };
+            // No drive comes back for its URB's answer.
+            if let Some(id) = device.urb_control {
+                self.orphan_control(id);
             }
-            if self.active_device == Some(entry_index) {
-                // The vanished device is the active control context; clear
-                // the cursor index now (its ring is dropped with the
-                // device) and re-rest the cursor after the entries are
-                // gone, so the rest target can never be the freed entry
-                // itself.
-                self.active_device = None;
-                lost_active = true;
-            }
-            let streams = self.devices[entry_index]
-                .take()
-                .map(|device| device.streaming);
+            self.cancel(route::Owner::Device {
+                index: entry_index,
+                serial: device.serial,
+                task: route::Task::Reports,
+            });
             let region = self.regions.get_mut(entry_index).and_then(Option::take);
-            if let (Some(held), Some(kept)) = (
-                retiring.get_mut(retiring_len),
-                streaming.get_mut(retiring_len),
-            ) {
-                *held = region;
-                *kept = streams;
-                retiring_len += 1;
-            } else {
-                // More entries than one enumeration installs share the slot:
-                // with nowhere to await the outcome, this one is kept.
-                if let Some(region) = region {
-                    self.retire_slot_chunk(region.base, SlotHold::Held);
-                }
-                for chunk in streams.iter().flat_map(Streaming::chunks) {
-                    self.retire_slot_chunk(chunk, SlotHold::Held);
+            for base in region
+                .map(|region| region.base)
+                .into_iter()
+                .chain(device.streaming.chunks())
+            {
+                if chunks.try_reserve(1).is_ok() {
+                    chunks.push(base);
+                } else {
+                    // With nowhere to await its outcome, it is kept.
+                    self.retire_slot_chunk(base, SlotHold::Held);
                 }
             }
         }
-        // A trailing completion for the slot (a dropped in-flight transfer,
-        // or a Disable Slot side-effect) is drained rather than faulting the
-        // wait below or a later consumer. Cleared once a fresh device
-        // enumerates.
-        self.tolerate_freed_slot(slot);
-        if lost_active {
-            // Best-effort: the cursor must land somewhere safe (another
-            // live entry, or no active slot at all), but a failed rest never
-            // fails the teardown.
-            let _ = self.rest_active_context();
-        }
-        let hold = if slot == 0 {
-            SlotHold::Released
-        } else {
-            self.disable_slot_best_effort(slot)
+        let hold = match self.post_disable_slot(slot) {
+            Ok(command) => SlotHold::Pending { slot, command },
+            Err(_) => SlotHold::Held,
         };
-        for region in retiring.into_iter().flatten() {
-            self.retire_slot_chunk(region.base, hold);
+        for base in chunks {
+            self.retire_slot_chunk(base, hold);
         }
-        for streams in streaming.iter().flatten() {
-            for chunk in streams.chunks() {
-                self.retire_slot_chunk(chunk, hold);
-            }
-        }
-        if slot != 0 && hold == SlotHold::Released {
-            self.dma.write(
-                self.layout.dcbaa + usize::from(slot) * 8,
-                &0u64.to_le_bytes(),
-            )?;
-        }
-        Ok(())
     }
 
     /// Tear down the hub at `hub_index` and **everything behind it** after
     /// it has disconnected: every served device on its downstream ports,
     /// every child hub (recursively — unplugging a hub takes each deeper
-    /// tier with it), and finally the hub's own slot, watch ring, and
-    /// claimed device region. Every other hub and served device is
-    /// untouched, and the depth is bounded by [`MAX_HUB_DEPTH`].
+    /// tier with it), every operation on its ports, and finally the hub's
+    /// own slot, watch ring and claimed device region, as
+    /// [`Self::detach_device`] tears a device down. Every other hub and
+    /// served device is untouched, and the depth is bounded by
+    /// [`MAX_HUB_DEPTH`].
     ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from the local DMA writes that clear the DCBAA
-    /// entries; the Disable Slot commands are best-effort, and an unconfirmed
-    /// one withholds the hub's chunks, as in [`Self::detach_device`].
-    fn detach_hub(&mut self, hub_index: usize) -> Result<(), DriverError> {
+    fn detach_hub(&mut self, hub_index: usize) {
+        if self.hub(hub_index).is_some() {
+            self.tear_down_hub(hub_index);
+            self.note_topology(HubEvent::HubDetached(hub_index));
+        }
+    }
+
+    /// [`Self::detach_hub`], reporting nothing.
+    fn tear_down_hub(&mut self, hub_index: usize) {
         if self.hub(hub_index).is_none() {
-            return Ok(());
+            return;
         }
         for index in 0..self.devices.len() {
             let behind = self.devices[index]
                 .as_ref()
                 .is_some_and(|device| device.hub_port != 0 && device.parent_hub == hub_index);
             if behind {
-                self.detach_device(index)?;
+                self.tear_down_device(index);
             }
         }
         for child in 0..self.hubs.len() {
@@ -7005,41 +4339,32 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                 .hub(child)
                 .is_some_and(|hub| hub.parent == Some(hub_index));
             if behind {
-                self.detach_hub(child)?;
+                self.tear_down_hub(child);
             }
         }
         let Some(hub) = self.hubs.get_mut(hub_index).and_then(Option::take) else {
-            return Ok(());
+            return;
         };
+        self.cancel(route::Owner::Hub {
+            index: hub_index,
+            serial: hub.serial,
+        });
         // A port of a hub that is gone is no port: its index can be another
         // hub's by the next round.
         self.reenumerations.retain(
             |upstream| !matches!(upstream, Upstream::Hub(parent, _) if *parent == hub_index),
         );
-        // Untracked, and its slot tolerated, before Disable Slot is issued,
-        // exactly as a detached device's: a status report landing during the
-        // wait (an armed status-change transfer the unplug dropped) is
-        // drained as stale.
-        self.tolerate_freed_slot(hub.slot);
-        if self.active_hub == Some(hub_index) {
-            // The vanished hub is the active control context; its ring is
-            // dropped with the entry. Best-effort, exactly as in
-            // `detach_device`.
-            self.active_hub = None;
-            let _ = self.rest_active_context();
-        }
-        let hold = self.disable_slot_best_effort(hub.slot);
+        let hold = match self.post_disable_slot(hub.slot) {
+            Ok(command) => SlotHold::Pending {
+                slot: hub.slot,
+                command,
+            },
+            Err(_) => SlotHold::Held,
+        };
         // The hub's status-change watch chunk, and the device-region chunk its
         // contexts were enumerated on.
         self.retire_slot_chunk(hub.region.base, hold);
         self.retire_device_region(hub.device_region, hold);
-        if hold == SlotHold::Released {
-            self.dma.write(
-                self.layout.dcbaa + usize::from(hub.slot) * 8,
-                &0u64.to_le_bytes(),
-            )?;
-        }
-        Ok(())
     }
 
     /// Whether this engine is watching at least one hub's status-change
@@ -7068,187 +4393,9 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             .count()
     }
 
-    /// Confirm and detach the served device at `index` after a transfer to it
-    /// faulted: it is freed only once the port it hangs off — its hub's
-    /// downstream port, or its root port — carries nothing. A device whose
-    /// endpoint recovery is owed a retry is the retry's to decide, so it is
-    /// left alone. The port's connection-change latch is left for its watcher
-    /// (the hub's status-change endpoint, or [`Self::next_root_change`]) to
-    /// report and drain, so a later reconnect is still seen.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from reading the port or the teardown; a port that
-    /// cannot be read is never taken for a vacant one.
-    pub fn detach_if_device_gone(&mut self, index: usize) -> Result<bool, DriverError> {
-        if self
-            .device(index)
-            .is_none_or(|device| device.recovery.owed())
-        {
-            return Ok(false);
-        }
-        if self.device_port_link(index)? != PortLink::Vacant {
-            return Ok(false);
-        }
-        self.detach_device(index)?;
-        Ok(true)
-    }
-
-    /// Service one hub status-change notification — from whichever watched
-    /// hub tier reported it — returning what changed.
-    ///
-    /// Called by the HCD when the controller interrupt fires while a hub is
-    /// watched ([`Self::hub_watch_active`]): it takes the status-change
-    /// completion the shared ring drain parked for that hub — the same drain
-    /// [`Self::pump_reports`] and every synchronous wait run —
-    /// reads the changed downstream port on the reporting hub, and either
-    /// enumerates a freshly connected device ([`HubEvent::Attached`], a
-    /// brand-new enumeration — or a fresh hub tier,
-    /// [`HubEvent::HubAttached`], installed, descended, and watched) or
-    /// frees a disconnected one ([`HubEvent::Detached`]; an unplugged hub
-    /// cascades into [`HubEvent::HubDetached`], freeing every device and
-    /// tier behind it). The status-change transfer is re-armed for the next
-    /// change. A transfer that failed halted the endpoint instead, so the
-    /// endpoint is recovered and every downstream port reconciled
-    /// ([`HubEvent::HubRecovered`]). Entirely event-driven — it neither polls
-    /// nor spins; with no completion pending it returns [`HubEvent::None`].
-    ///
-    /// `delay` supplies the downstream-port reset-recovery window on a fresh
-    /// connect; the caller owns the clock.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from a control/command transfer (fail closed); the
-    /// status-change transfer is re-armed before returning so a single odd
-    /// report never silences the watch. A hub that cannot be reached to
-    /// recover its endpoint is owed a deferred retry
-    /// ([`Self::retry_owed_recoveries`]).
-    pub fn next_hub_change(&mut self, delay: &dyn Delay) -> Result<HubEvent, DriverError> {
-        if !self.hub_watch_active() {
-            return Ok(HubEvent::None);
-        }
-        // A fresh service gets a fresh fault snapshot: whatever this call
-        // surfaces is what [`Self::last_attach_fault`] then describes.
-        self.attach_fault = None;
-        // Drain through the one shared classifier, which parks each watched
-        // hub's status-change completion (and captures reports, parks bulk,
-        // arms the root-port scan) — then take what it parked. A second
-        // hub-specific ring walk beside it would be a duplicate of that
-        // dispatch decision, and the walk it replaced read the whole event
-        // segment per poll.
-        self.drain_events()?;
-        let Some((hub_index, completion)) = self.take_parked_hub_completion() else {
-            return Ok(HubEvent::None);
-        };
-        if let Some(ring) = self
-            .hub_mut(hub_index)
-            .and_then(|hub| hub.int_ring.as_mut())
-        {
-            ring.retire_one()?;
-        }
-        // A failed status transfer halted the endpoint: anything re-armed on it
-        // would never run, and the hub would report no change again.
-        let watch = &mut self.hub_mut(hub_index).ok_or(DriverError::NotFound)?.watch;
-        if matches!(
-            completion.completion_code(),
-            Ok(CompletionCode::Success | CompletionCode::ShortPacket)
-        ) {
-            watch.completed();
-        } else {
-            return match watch.halted() {
-                OnHalt::Recover => self.recover_hub_watch(hub_index, delay),
-                OnHalt::Defer => Ok(HubEvent::None),
-            };
-        }
-        // Service the change, but re-arm the status-change endpoint
-        // **regardless of the outcome**. Right after a downstream disconnect
-        // the gone device's transaction translator can briefly fail to answer
-        // the hub's `GET_PORT_STATUS`, so servicing this report errors; if the
-        // re-arm were skipped on that error the status-change endpoint would be
-        // left with no outstanding transfer and the hub could never post
-        // another report — the later reconnect would then produce no interrupt
-        // and go unseen. Re-arming first keeps the watch live so a single odd
-        // report never silences it; the error is surfaced afterwards.
-        let outcome = self.process_hub_change(hub_index, delay);
-        // The serviced hub can only have *survived* its own report (it never
-        // detaches itself), so the re-arm targets a live watch.
-        self.arm_hub_report(hub_index)?;
-        let (slot, dci) = self
-            .hub(hub_index)
-            .map(|hub| (hub.slot, hub.int_dci))
-            .ok_or(DriverError::NotFound)?;
-        self.xhci.ring_doorbell(slot, u32::from(dci))?;
-        outcome
-    }
-
-    /// Take the first hub with a status-change completion parked by a
-    /// synchronous wait ([`Self::stash_async_event`]), returning its index and
-    /// the completion.
-    fn take_parked_hub_completion(&mut self) -> Option<(usize, Trb)> {
-        self.hubs.iter_mut().enumerate().find_map(|(index, entry)| {
-            let completion = entry.as_mut()?.pending.take()?;
-            Some((index, completion))
-        })
-    }
-
-    /// Recover the hub at `hub_index` after its status-change transfer failed,
-    /// then reconcile every downstream port: the report the failure lost may
-    /// have carried changes.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] when the hub cannot be reached to recover it; a deferred
-    /// retry is then owed ([`Self::retry_owed_recoveries`]).
-    fn recover_hub_watch(
-        &mut self,
-        hub_index: usize,
-        delay: &dyn Delay,
-    ) -> Result<HubEvent, DriverError> {
-        if let Err(err) = self.reset_hub_watch(hub_index) {
-            if let Some(hub) = self.hub_mut(hub_index) {
-                hub.watch.failed();
-            }
-            return Err(err);
-        }
-        self.reconcile_hub_ports(hub_index, delay);
-        Ok(HubEvent::HubRecovered(hub_index))
-    }
-
-    /// Bring the hub at `hub_index`'s status-change endpoint back, on the
-    /// controller and on the hub, and arm a fresh transfer.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from stopping or restarting the endpoint, the hub's
-    /// `CLEAR_FEATURE`, or the re-arm: the hub cannot be reached.
-    fn reset_hub_watch(&mut self, hub_index: usize) -> Result<(), DriverError> {
-        let (slot, dci, ring_off) = {
-            let hub = self.hub(hub_index).ok_or(DriverError::NotFound)?;
-            (hub.slot, hub.int_dci, hub.region.int_ring)
-        };
-        self.stop_endpoint(slot, dci, Abandoned::Halted)?;
-        let ring = self.restart_ring((slot, dci), ring_off, RING_TRBS)?;
-        self.hub_mut(hub_index)
-            .ok_or(DriverError::NotFound)?
-            .int_ring = Some(ring);
-        self.hub_control(hub_index, setup_clear_endpoint_halt(dci), &mut [])?;
-        self.arm_hub_report(hub_index)?;
-        self.xhci.ring_doorbell(slot, u32::from(dci))
-    }
-
-    /// Reconcile every downstream port of the hub at `hub_index`, fail-soft
-    /// per port: one broken device costs its own port alone, and its failure
-    /// is the one [`Self::last_attach_fault`] keeps.
-    fn reconcile_hub_ports(&mut self, hub_index: usize, delay: &dyn Delay) {
-        let ports = self.hub(hub_index).map_or(0, |hub| hub.num_ports);
-        for port in 1..=ports {
-            let _ = self.reconcile_hub_port(hub_index, port, delay);
-        }
-    }
-
     /// Whether a failed endpoint recovery — a served device's interrupt-IN
     /// endpoint, or a hub's status-change endpoint — is owed a deferred retry
-    /// ([`Self::retry_owed_recoveries`]).
+    /// ([`UsbHost::retry_owed_recoveries`]), or a port a re-enumeration.
     #[must_use]
     pub fn recovery_owed(&self) -> bool {
         self.devices
@@ -7257,109 +4404,6 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             .any(|device| device.recovery.owed())
             || self.hubs.iter().flatten().any(|hub| hub.watch.owed())
             || !self.reenumerations.is_empty()
-    }
-
-    /// Run each owed recovery's deferred retry once, the caller having given
-    /// the paths time to settle since the last.
-    ///
-    /// A hub's status-change endpoint is recovered again and, back, every
-    /// downstream port reconciled. A device's port is read first: one that
-    /// carries nothing any more is detached, and on one still enabled the
-    /// endpoint is recovered in place, so a device that was only disturbed
-    /// keeps its slot, index and node. A recovery still failing once its
-    /// bounded retries are spent — or a device on a port its hub disabled —
-    /// frees what it served, a hub as a whole tier, and its port is reset and
-    /// enumerated afresh in the next round. Re-enumerations run first, then
-    /// hubs, since a device's port is read through its hub.
-    ///
-    /// # Errors
-    ///
-    /// The first failure a retry met, once every owed retry has run; the
-    /// caller logs it with [`Self::last_attach_fault`].
-    pub fn retry_owed_recoveries(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
-        self.attach_fault = None;
-        let mut first_failure = None;
-        for upstream in core::mem::take(&mut self.reenumerations) {
-            if let Err(err) = self.reenumerate(upstream, delay) {
-                first_failure.get_or_insert(err);
-            }
-        }
-        for hub_index in 0..self.hubs.len() {
-            if self.hub(hub_index).is_some_and(|hub| hub.watch.owed()) {
-                if let Err(err) = self.retry_hub_watch(hub_index, delay) {
-                    first_failure.get_or_insert(err);
-                }
-            }
-        }
-        for index in 0..self.devices.len() {
-            if self
-                .device(index)
-                .is_some_and(|device| device.recovery.owed())
-            {
-                if let Err(err) = self.retry_report_recovery(index) {
-                    first_failure.get_or_insert(err);
-                }
-            }
-        }
-        first_failure.map_or(Ok(()), Err)
-    }
-
-    /// One deferred retry of the hub at `hub_index`'s owed status-change
-    /// recovery.
-    fn retry_hub_watch(&mut self, hub_index: usize, delay: &dyn Delay) -> Result<(), DriverError> {
-        let watch = &mut self.hub_mut(hub_index).ok_or(DriverError::NotFound)?.watch;
-        let escalation = match watch.climb() {
-            Rung::Escalate(escalation) => escalation,
-            Rung::Recover => {
-                let Err(err) = self.reset_hub_watch(hub_index) else {
-                    self.reconcile_hub_ports(hub_index, delay);
-                    return Ok(());
-                };
-                let watch = &mut self.hub_mut(hub_index).ok_or(DriverError::NotFound)?.watch;
-                let Some(escalation) = watch.retry_failed() else {
-                    return Err(err);
-                };
-                escalation
-            }
-        };
-        self.escalate(Attachment::Hub(hub_index), escalation)
-    }
-
-    /// One deferred retry of device `index`'s owed interrupt-IN recovery,
-    /// decided by its settled port.
-    fn retry_report_recovery(&mut self, index: usize) -> Result<(), DriverError> {
-        let link = self.device_port_link(index);
-        let ladder = &mut self
-            .device_mut(index)
-            .ok_or(DriverError::NotFound)?
-            .recovery;
-        let rung = match link {
-            Ok(PortLink::Vacant) => return self.detach_device(index),
-            // A port its hub disabled carries a device no endpoint reset reaches.
-            Ok(PortLink::Disabled) => Rung::Escalate(ladder.escalation()),
-            Ok(PortLink::Enabled) | Err(_) => ladder.climb(),
-        };
-        let escalation = match rung {
-            Rung::Escalate(escalation) => escalation,
-            Rung::Recover => {
-                let failure = match link {
-                    Ok(_) => match self.attempt_report_recovery(index) {
-                        Ok(()) => return self.ensure_reports_armed(index),
-                        Err(err) => err,
-                    },
-                    Err(err) => err,
-                };
-                let ladder = &mut self
-                    .device_mut(index)
-                    .ok_or(DriverError::NotFound)?
-                    .recovery;
-                let Some(escalation) = ladder.retry_failed() else {
-                    return Err(failure);
-                };
-                escalation
-            }
-        };
-        self.escalate(Attachment::Device(index), escalation)
     }
 
     /// Free `attachment` — a hub with everything behind it — owing its port,
@@ -7383,12 +4427,12 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         let upstream = match attachment {
             Attachment::Hub(hub_index) => {
                 let upstream = self.hub(hub_index).ok_or(DriverError::NotFound)?.upstream();
-                self.detach_hub(hub_index)?;
+                self.detach_hub(hub_index);
                 upstream
             }
             Attachment::Device(index) => {
                 let upstream = self.device(index).ok_or(DriverError::NotFound)?.upstream();
-                self.detach_device(index)?;
+                self.detach_device(index);
                 upstream
             }
         };
@@ -7401,227 +4445,89 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         Ok(())
     }
 
-    /// Reset the port at `upstream` and enumerate what answers there afresh,
-    /// on a ladder that gives it up should it fail too; a port something was
-    /// attached to meanwhile is left as it is.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from the port reset or the attach.
-    fn reenumerate(&mut self, upstream: Upstream, delay: &dyn Delay) -> Result<(), DriverError> {
-        let attached = match upstream {
-            Upstream::Root(port) => {
-                if self.root_attachment_on(port).is_some() {
-                    return Ok(());
-                }
-                // A root port still enabled is attached without a reset, which
-                // a device still holding its old address would not answer.
-                self.reset_root_port(port, delay)?;
-                self.attach_root_port(port, delay)?
+    /// What is owed a paced retry: the ports owed a re-enumeration, and the
+    /// hubs and interfaces whose endpoint recovery failed, each with its
+    /// attachment serial.
+    #[allow(clippy::type_complexity)] // Three plain lists, named by the doc.
+    fn owed_recoveries(&mut self) -> (Vec<Upstream>, Vec<(usize, u64)>, Vec<(usize, u64)>) {
+        self.attach_fault = None;
+        let ports = self.reenumerations.clone();
+        let hubs = self
+            .hubs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, hub)| {
+                hub.as_ref()
+                    .filter(|hub| hub.watch.owed())
+                    .map(|hub| (index, hub.serial))
+            })
+            .collect();
+        let devices = self
+            .devices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, device)| {
+                device
+                    .as_ref()
+                    .filter(|device| device.recovery.owed())
+                    .map(|device| (index, device.serial))
+            })
+            .collect();
+        (ports, hubs, devices)
+    }
+
+    /// Every port no attachment serves: each root port, and each downstream
+    /// port of every watched hub.
+    fn unserved_ports(&self) -> Vec<Upstream> {
+        let mut ports = Vec::new();
+        for port in 1..=self.xhci.max_ports() {
+            if self.root_attachment_on(port).is_none() && ports.try_reserve(1).is_ok() {
+                ports.push(Upstream::Root(port));
             }
-            Upstream::Hub(hub_index, port) => {
-                if self
+        }
+        for (hub_index, hub) in self.hubs.iter().enumerate() {
+            let Some(hub) = hub else {
+                continue;
+            };
+            for port in 1..=hub.num_ports {
+                let served = self
                     .device_index_for_hub_and_port(hub_index, port)
                     .is_some()
-                    || self.hub_index_for_hub_and_port(hub_index, port).is_some()
-                {
-                    return Ok(());
-                }
-                self.attach_hub_port(hub_index, port, delay)?
-            }
-        };
-        match attached {
-            Attachment::Hub(hub_index) => {
-                if let Some(hub) = self.hub_mut(hub_index) {
-                    hub.watch = Ladder::after_reset();
-                }
-            }
-            Attachment::Device(index) => {
-                let slot = self.device(index).map(|device| device.slot);
-                for device in self.devices.iter_mut().flatten() {
-                    if Some(device.slot) == slot {
-                        device.recovery = Ladder::after_reset();
-                    }
+                    || self.hub_index_for_hub_and_port(hub_index, port).is_some();
+                if !served && ports.try_reserve(1).is_ok() {
+                    ports.push(Upstream::Hub(hub_index, port));
                 }
             }
         }
-        Ok(())
+        ports
     }
 
-    /// The live link of the port device `index` hangs off: its hub's
-    /// downstream port (a class `GET_PORT_STATUS`), or its root port.
+    /// Hand every port of the hub at `hub_index` to its operation: whatever
+    /// a lost status report carried is acted on.
+    fn reconcile_hub_ports(&mut self, hub_index: usize) {
+        let ports = self.hub(hub_index).map_or(0, |hub| hub.num_ports);
+        for port in 1..=ports {
+            self.port_changed(Upstream::Hub(hub_index, port));
+        }
+    }
+
+    /// The serial the next attachment takes.
+    fn next_attach_serial(&mut self) -> u64 {
+        let serial = self.attach_serial;
+        self.attach_serial = self.attach_serial.wrapping_add(1);
+        serial
+    }
+
+    /// Reset the controller and program it afresh, dropping every device and
+    /// hub: the reset releases everything the controller held.
     ///
     /// # Errors
     ///
-    /// [`DriverError`] when the port cannot be read.
-    fn device_port_link(&mut self, index: usize) -> Result<PortLink, DriverError> {
-        let upstream = self.device(index).ok_or(DriverError::NotFound)?.upstream();
-        let (connected, enabled) = match upstream {
-            Upstream::Root(port) => {
-                let status = self.xhci.port_status(port)?;
-                (status.connected(), status.enabled())
-            }
-            Upstream::Hub(hub_index, port) => {
-                let (status, _change) = self.hub_port_status_change(hub_index, port)?;
-                (hub_port_connected(status), hub_port_enabled(status))
-            }
-        };
-        Ok(match (connected, enabled) {
-            (false, _) => PortLink::Vacant,
-            (true, false) => PortLink::Disabled,
-            (true, true) => PortLink::Enabled,
-        })
-    }
-
-    /// Read the reporting hub's port-change bitmap and act on the first
-    /// changed downstream port: enumerate a freshly connected device
-    /// ([`HubEvent::Attached`] — or a fresh hub tier,
-    /// [`HubEvent::HubAttached`], installed, descended, and watched) or
-    /// free what was served on a disconnected port ([`HubEvent::Detached`];
-    /// an unplugged hub cascades into [`HubEvent::HubDetached`]).
-    ///
-    /// Every changed port goes through the shared per-port decision
-    /// ([`Self::reconcile_hub_port`]), which drains the port's **whole**
-    /// latched change set — not just the connect change — so the
-    /// status-change watch re-arms clean and never wedges firing forever on
-    /// a stale reset/enable change. A change that is not a
-    /// connect/disconnect we act on (a reset or enable change, a connect
-    /// for a port already served, or a connect with the device table full)
-    /// is drained and ignored.
-    ///
-    /// The scan is **per-port fail-soft**, mirroring the bring-up walk: one
-    /// port's broken or unresponsive device has its latches drained
-    /// ([`Self::attach_hub_port`]) and the remaining changed ports are still
-    /// serviced, so a mouse that fails enumeration can never cost the
-    /// keyboard beside it its hot-plug. The first failure is surfaced (the
-    /// caller logs it) only when no actionable event was found.
-    fn process_hub_change(
-        &mut self,
-        hub_index: usize,
-        delay: &dyn Delay,
-    ) -> Result<HubEvent, DriverError> {
-        let hub = self.hub(hub_index).ok_or(DriverError::NotFound)?;
-        let (num_ports, report_off) = (hub.num_ports, hub.region.report);
-        let mut bitmap = [0u8; HUB_REPORT_LEN];
-        self.dma.read(report_off, &mut bitmap)?;
-        let mut first_failure = None;
-        for port in 1..=num_ports {
-            let byte = usize::from(port / 8);
-            let bit = port % 8;
-            if byte >= HUB_REPORT_LEN || bitmap[byte] & (1 << bit) == 0 {
-                continue;
-            }
-            match self.reconcile_hub_port(hub_index, port, delay) {
-                Ok(Some(event)) => return Ok(event),
-                Ok(None) => {}
-                Err(err) => {
-                    if first_failure.is_none() {
-                        first_failure = Some(err);
-                    }
-                }
-            }
-        }
-        match first_failure {
-            Some(err) => Err(err),
-            None => Ok(HubEvent::None),
-        }
-    }
-
-    /// Reconcile one downstream port's **live** state against the tracking
-    /// tables, taking whatever topology action the state demands.
-    ///
-    /// The single per-port hot-plug decision the status-change service
-    /// ([`Self::process_hub_change`]) drives every changed port through. It
-    /// is keyed on the port's *current* `GET_PORT_STATUS` state compared
-    /// with what the engine tracks — never on the latched change bits alone
-    /// — because a latch can be stale (a change already acted on, or
-    /// drained by an earlier teardown) while the state is real:
-    ///
-    /// * A device present on a port with nothing tracked is enumerated as
-    ///   brand-new (or installed, descended, and watched as a fresh hub
-    ///   tier). [`Self::attach_hub_port`] resets the port and drains every
-    ///   latch (including any connect change) whether or not it succeeds.
-    /// * Nothing on a port the engine tracks something on: the latches are
-    ///   drained and the tracked device — or hub, with every device and
-    ///   deeper tier behind it in one cascade — is freed. Every other
-    ///   served device and hub is untouched.
-    /// * Any other state (a latch with no topology action — a
-    ///   reset/enable/suspend/over-current change, or a connect for a port
-    ///   already served): the latches are drained so the status-change
-    ///   watch re-arms clean rather than re-firing on the stale change.
-    ///
-    /// Returns the event taken, or `None` when the port needed no action.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from the port-status read, the latch drain, or the
-    /// attach/detach (fail closed; the callers are per-port fail-soft).
-    fn reconcile_hub_port(
-        &mut self,
-        hub_index: usize,
-        port: u8,
-        delay: &dyn Delay,
-    ) -> Result<Option<HubEvent>, DriverError> {
-        let (status, change) = self.hub_port_status_change(hub_index, port)?;
-        if hub_port_connected(status)
-            && self
-                .device_index_for_hub_and_port(hub_index, port)
-                .is_none()
-            && self.hub_index_for_hub_and_port(hub_index, port).is_none()
-        {
-            return match self.attach_hub_port(hub_index, port, delay) {
-                Ok(Attachment::Device(index)) => Ok(Some(HubEvent::Attached(index))),
-                Ok(Attachment::Hub(new_hub)) => Ok(Some(HubEvent::HubAttached(new_hub))),
-                Err(err) => Err(err),
-            };
-        }
-        if !hub_port_connected(status) {
-            if let Some(index) = self.device_index_for_hub_and_port(hub_index, port) {
-                self.clear_hub_port_changes(hub_index, port, change)?;
-                self.detach_device(index)?;
-                return Ok(Some(HubEvent::Detached(index)));
-            }
-            if let Some(child) = self.hub_index_for_hub_and_port(hub_index, port) {
-                self.clear_hub_port_changes(hub_index, port, change)?;
-                self.detach_hub(child)?;
-                return Ok(Some(HubEvent::HubDetached(child)));
-            }
-        }
-        if change != 0 {
-            self.clear_hub_port_changes(hub_index, port, change)?;
-        }
-        Ok(None)
-    }
-
-    /// Reset the controller and re-enumerate from scratch, treating whatever
-    /// is now attached as brand-new devices.
-    ///
-    /// The recovery path for a root-port (re)connect — both the first
-    /// cold-boot attach when nothing was present at bring-up and a
-    /// disconnect→reconnect: a full Host Controller Reset clears every slot,
-    /// address, and context the controller held, then the held register
-    /// window and DMA region are re-programmed and the whole bring-up walk
-    /// re-runs. No prior device state is reused, so every (re)attached
-    /// device is treated as brand-new. (Hub-downstream hotplug uses the
-    /// finer-grained [`Self::next_hub_change`] instead, leaving the
-    /// controller running.)
-    ///
-    /// `delay` supplies the enumeration settle windows; the caller owns the
-    /// clock. Afterwards the served devices are the live
-    /// [`Self::device_live`] indices — none, if everything had already gone
-    /// again by the time the controller came back (no spurious failure).
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from the controller reset or its re-programming (fail
-    /// closed). A device that will not enumerate is a counted skip, exactly
-    /// as in [`Self::bring_up`], never a failed recovery.
-    pub fn reset_and_reenumerate(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
+    /// The reset or the re-programming failed.
+    fn reset_controller(&mut self) -> Result<(), DriverError> {
         self.xhci
             .reset_to_ready(self.budget)
             .map_err(|err| err.error)?;
-        // The reset cleared every slot the controller held, so nothing it
-        // could not be shown to have let go of is still reachable.
         self.dma.release_withheld();
         self.awaited_disables.clear();
         let layout = self.layout;
@@ -7634,27 +4540,13 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         // ports the controller comes back with already connected.
         self.root_change_pending = true;
         self.reset_device_tracking();
-        self.stage = EnumStage::Scan;
-        self.reset_event_diagnostics();
-        self.bring_up(delay)
-    }
-
-    /// The enumeration step the most recent attach last entered.
-    ///
-    /// The **live** breadcrumb, so it describes whichever attach ran last:
-    /// [`EnumStage::Scan`] means no connected port was ever entered (an
-    /// empty controller), any later variant names the step that attach
-    /// reached. To localise a *failed* attach after a multi-port walk, read
-    /// its snapshot from [`Self::last_attach_fault`] instead.
-    #[must_use]
-    pub const fn enum_stage(&self) -> EnumStage {
-        self.stage
+        Ok(())
     }
 
     /// Ports — root-hub or downstream — whose connected device failed
     /// enumeration and was skipped fail-soft by the most recent walk
-    /// ([`Self::bring_up`], [`Self::reset_and_reenumerate`], or
-    /// [`Self::retry_skipped_ports`]), so the driver can log "a device was
+    /// ([`UsbHost::bring_up`], [`UsbHost::reset_and_reenumerate`], or
+    /// [`UsbHost::retry_skipped_ports`]), so the driver can log "a device was
     /// present but never served" rather than the port silently looking
     /// empty.
     #[must_use]
@@ -7662,50 +4554,96 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.skipped_ports
     }
 
-    /// The first failed downstream-port attach of the most recent service
-    /// ([`Self::next_hub_change`]) or bring-up walk — the port, stage, and
-    /// controller/hub state snapshotted at the failure, before the failure
-    /// path's own cleanup transfers overwrote the live diagnostics. `None`
-    /// when every attach of that service succeeded (or none ran).
+    /// The EP State the endpoint of the transfer device `index` last
+    /// abandoned at its deadline had then, while that endpoint is stopping.
     #[must_use]
-    pub const fn last_attach_fault(&self) -> Option<AttachFault> {
-        self.attach_fault
+    pub fn abandoned_ep_state(&self, index: usize) -> Option<u8> {
+        self.device(index)?
+            .abandoning
+            .as_ref()
+            .map(|pending| pending.ep_state)
     }
 
-    /// Raw completion code of the most recent event TRB the last
-    /// command/control transfer observed (`0` = none seen since that
-    /// transfer began — a timeout), pairing with [`Self::enum_stage`]
-    /// to distinguish a stuck controller from a device that answered
-    /// with an error code.
-    #[must_use]
-    pub const fn last_completion_code(&self) -> u8 {
-        self.last_completion
+    /// The next report of where a stopped endpoint stood against the
+    /// transfer abandoned on it, with the device index, taken.
+    pub fn take_abandon_report(&mut self) -> Option<(usize, AbandonedTransfer)> {
+        self.abandon_reports.pop_front()
     }
 
-    /// Raw TRB-type of the most recent event the last command/control
-    /// transfer's event wait observed (`0` = none seen).
-    ///
-    /// Paired with [`Self::last_reject_reason`] this names *what* an
-    /// unexpected-event reject saw — e.g. an asynchronous controller
-    /// event interleaved with the awaited completion — which the
-    /// completion code alone cannot.
-    #[must_use]
-    pub const fn last_event_type(&self) -> u8 {
-        self.last_event_type
+    /// Endpoint `dci` of `slot`'s output context, as the controller last
+    /// wrote it.
+    fn endpoint_ctx(&mut self, slot: u8, dci: u8) -> Option<[u32; CTX_DWORDS]> {
+        let at = self.pipe(slot).ok()?.output_ctx + usize::from(dci) * self.layout.ctx_size;
+        self.read_ctx(at).ok()
     }
 
-    /// Why the last command/control transfer's event wait
-    /// failed: `0` none (it succeeded, or none has run), `1` an event of
-    /// an unhandled TRB-type (see [`Self::last_event_type`]), `2` a
-    /// completion for a TRB the transfer did not enqueue, `3` an
-    /// undecodable completion code (see [`Self::last_completion_code`]),
-    /// `4` the poll budget elapsed with no event (a genuine timeout).
-    ///
-    /// This distinguishes a fast reject (a real but unexpected event)
-    /// from a true timeout, which `completion_hex=0` alone conflates.
-    #[must_use]
-    pub const fn last_reject_reason(&self) -> u8 {
-        self.last_reject
+    /// Record that device `index` abandons the transfer `span` on `slot`'s
+    /// endpoint `dci`, with the EP State it has now. Where the controller
+    /// stood against it is read once the endpoint stops
+    /// ([`Self::settle_abandoned`]): until then the context's dequeue pointer
+    /// is not the controller's to report.
+    pub(crate) fn note_abandoned(&mut self, index: usize, slot: u8, dci: u8, span: TdSpan) {
+        let Some(ctx) = self.endpoint_ctx(slot, dci) else {
+            return;
+        };
+        if let Some(device) = self.device_mut(index) {
+            device.abandoning = Some(PendingAbandon {
+                slot,
+                dci,
+                ep_state: (ctx[0] & EP_CTX_STATE_MASK) as u8,
+                span,
+            });
+        }
+    }
+
+    /// `slot`'s endpoint `dci` has `stopped`, or could not be: report where
+    /// the controller stood against the transfer abandoned on it, if one
+    /// was. One that could not be stopped reports nothing, since its context
+    /// still says nothing the controller vouches for.
+    pub(crate) fn settle_abandoned(&mut self, slot: u8, dci: u8, stopped: bool) {
+        let Some(index) = self.devices.iter().position(|device| {
+            device.as_ref().is_some_and(|device| {
+                device
+                    .abandoning
+                    .as_ref()
+                    .is_some_and(|pending| pending.slot == slot && pending.dci == dci)
+            })
+        }) else {
+            return;
+        };
+        let Some(pending) = self
+            .device_mut(index)
+            .and_then(|device| device.abandoning.take())
+        else {
+            return;
+        };
+        if !stopped {
+            return;
+        }
+        let Some(ctx) = self.endpoint_ctx(slot, dci) else {
+            return;
+        };
+        let dequeue = (u64::from(ctx[3]) << 32 | u64::from(ctx[2])) & !EP_CTX_DEQUEUE_FLAGS;
+        // A report the queue cannot grow for is a diagnostic lost, never a
+        // recovery held up.
+        if self.abandon_reports.try_reserve(1).is_ok() {
+            self.abandon_reports.push_back((
+                index,
+                AbandonedTransfer {
+                    dci,
+                    ep_state: pending.ep_state,
+                    progress: pending.span.progress(dequeue),
+                },
+            ));
+        }
+    }
+
+    /// The first failed attach since the last call — the port, stage, and
+    /// controller/hub state its own operation saw — taken, so the next
+    /// failure is reported afresh. `None` when every attach since succeeded
+    /// (or none ran).
+    pub fn take_attach_fault(&mut self) -> Option<AttachFault> {
+        self.attach_fault.take()
     }
 
     /// Raw completion code of the most recent interrupt-IN report the engine
@@ -7713,11 +4651,9 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// attach, or no device live there).
     ///
     /// This is the controller's verdict on the device's *own* endpoint,
-    /// captured when an interrupt-IN report is rejected and — unlike
-    /// [`Self::last_completion_code`] — not overwritten by the control
-    /// transfers that follow it. It tells a metal capture whether a fault
-    /// surfaced as a transaction error, a split through a hub's translator,
-    /// or a stall.
+    /// captured when an interrupt-IN report is rejected. It tells a metal
+    /// capture whether a fault surfaced as a transaction error, a split
+    /// through a hub's translator, or a stall.
     #[must_use]
     pub fn last_report_fault_code(&self, index: usize) -> u8 {
         self.device(index)
@@ -7743,13 +4679,12 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// a downstream device's hot-plug and transfers go silent. The Pi 4 VL805
     /// latches a Host System Error during a downstream-device hot-removal
     /// teardown (after its Disable Slot completes), so the HCD checks this
-    /// after servicing a wake and recovers with [`Self::reset_and_reenumerate`]
-    /// — the same full Host Controller Reset and fresh enumeration a cold boot
-    /// with no device attached performs, returning to the proven await-connect
-    /// state so a re-plug enumerates normally.
+    /// after servicing a wake and recovers with
+    /// [`UsbHost::reset_and_reenumerate`]. A controller that would not stop a
+    /// hung command ring is as faulted: no command it is given will run.
     #[must_use]
     pub fn controller_faulted(&mut self) -> bool {
-        self.xhci.controller_faulted()
+        self.command_ring_dead() || self.xhci.controller_faulted()
     }
 
     /// Raw `PORTSC` of root-hub `port` (1-based) for a bring-up diagnostic,
@@ -7838,7 +4773,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     }
 }
 
-impl<H: RegisterBlock, M: DmaBank> Drop for UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> Drop for UsbDevice<H, M> {
     /// Reset the controller before its memory goes: one that will not reset
     /// may still master every ring, context and buffer it was handed, which
     /// are then held for the kernel to quarantine when the driver exits.
@@ -7850,17 +4785,11 @@ impl<H: RegisterBlock, M: DmaBank> Drop for UsbDevice<'_, H, M> {
 }
 
 #[cfg(test)]
-impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// Test-only access to the register seam, so the crate's unit
     /// tests can drive and assert the mock controller's state.
     pub(crate) fn host_mut(&mut self) -> &mut H {
         &mut self.xhci.host
-    }
-
-    /// Test-only access to the DMA bank, so the cost-budget regression can read
-    /// the mock bank's access counters.
-    pub(crate) fn dma_mut(&mut self) -> &mut M {
-        &mut self.dma
     }
 
     /// Test-only read of a served device's raw slot, so a hot-removal test
@@ -7869,22 +4798,48 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         self.device(index).map_or(0, |device| device.slot)
     }
 
-    /// Test-only read of the active control-context slot, so a hub-descent
-    /// test can assert which slot the hub occupies.
-    pub(crate) fn active_slot(&self) -> u8 {
-        self.active_control_slot().unwrap_or(0)
+    /// Test-only read of a tracked hub's raw slot, so a hub-descent test can
+    /// assert which slot the hub occupies.
+    pub(crate) fn raw_hub_slot(&self, hub_index: usize) -> u8 {
+        self.hub(hub_index).map_or(0, |hub| hub.slot)
+    }
+
+    /// Test-only read of a tracked hub's root port.
+    pub(crate) fn raw_hub_root_port(&self, hub_index: usize) -> u8 {
+        self.hub(hub_index).map_or(0, |hub| hub.root_port)
+    }
+
+    /// Test-only read of a tracked hub's slot and whether it is `SuperSpeed`.
+    pub(crate) fn raw_hub_slot_and_speed(&self, hub_index: usize) -> (u8, bool) {
+        self.hub(hub_index)
+            .map_or((0, false), |hub| (hub.slot, hub.speed == SPEED_SUPER))
+    }
+
+    /// Test-only lookup of the bulk pipe at endpoint `address` of the
+    /// interface at `index`.
+    pub(crate) fn raw_bulk_pipe(&self, index: usize, address: u8) -> Option<BulkPipe> {
+        self.device(index)?.bulk_pipe_of_dci(address_dci(address))
+    }
+
+    /// Test-only read of whether the root ports are owed a scan.
+    pub(crate) const fn raw_root_change_pending(&self) -> bool {
+        self.root_change_pending
+    }
+
+    /// Test-only count of the control transfers recorded, answered or not.
+    pub(crate) fn recorded_controls(&self) -> usize {
+        self.controls.iter().flatten().count()
+    }
+
+    /// Test-only count of the open control pipes.
+    pub(crate) fn open_pipes(&self) -> usize {
+        self.pipes.iter().flatten().count()
     }
 
     /// Test-only view of the DMA bank, so a test can observe its chunk
     /// accounting (a region allocated on attach, released on detach).
     pub(crate) fn dma_ref(&self) -> &M {
         &self.dma
-    }
-
-    /// Test-only raw command issue, so the wait-timeout regression can
-    /// drive one synchronous completion wait directly.
-    pub(crate) fn command_for_test(&mut self, command: Trb) -> Result<Trb, DriverError> {
-        self.command(command)
     }
 
     /// Test-only command-ring occupancy, so a regression can prove a
@@ -7894,7 +4849,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
     }
 }
 
-impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// Decode one completed interrupt-IN [`TrbType::TransferEvent`] (already
     /// confirmed to target device `index`'s slot and interrupt endpoint)
     /// into a report length, copying the report bytes into `buf`.
@@ -7996,36 +4951,6 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             .ok_or(DriverError::DeviceFault)?
             .retire_one()
     }
-
-    /// Recover device `index`'s halted interrupt-IN endpoint: stop it
-    /// ([`Self::stop_endpoint`]), restart its ring at the base, then clear the
-    /// device-side halt so its data toggle resets (USB 2.0 §9.4.5). The
-    /// endpoint accepts fresh interrupt transfers when this returns.
-    ///
-    /// A halted endpoint runs nothing until it is reset; re-arming it without
-    /// this recovery makes every re-armed transfer re-fault — a controller
-    /// interrupt storm — or, once the class driver stops retrying, silences the
-    /// device. The interrupt-IN counterpart of [`Self::recover_bulk_endpoint`].
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from stopping or restarting the endpoint, or from the
-    /// device-side `CLEAR_FEATURE`: the device did not answer.
-    fn recover_interrupt_endpoint(&mut self, index: usize) -> Result<(), DriverError> {
-        let (int_ring_off, dci, device_slot) = {
-            let device = self.device(index).ok_or(DriverError::NotFound)?;
-            (device.region.int_ring, device.int_dci, device.slot)
-        };
-        self.stop_endpoint(device_slot, dci, Abandoned::Halted)?;
-        let ring = self.restart_ring((device_slot, dci), int_ring_off, INT_RING_TRBS)?;
-        self.device_mut(index)
-            .ok_or(DriverError::DeviceFault)?
-            .int_ring = Some(ring);
-        // Clear the device-side halt on the device's own interrupt-IN endpoint,
-        // resetting its data toggle to match the rebuilt ring.
-        self.device_control(index, setup_clear_endpoint_halt(dci), &mut [])?;
-        Ok(())
-    }
 }
 
 /// Bulk transfer serving: several TDs may be queued per direction (each
@@ -8033,7 +4958,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
 /// decoded asynchronously off the shared event ring, and a device STALL is
 /// recovered in place (Reset Endpoint → Set TR Dequeue Pointer →
 /// `CLEAR_FEATURE(ENDPOINT_HALT)`) with every abandoned TD answered.
-impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// Region ring offset, staging-buffer offset, endpoint DCI, and xHCI
     /// slot of device `index`'s configured bulk endpoint for `direction`.
     ///
@@ -8157,19 +5082,17 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         Ok(slot)
     }
 
-    /// Reap the next completed bulk TD, if any: one a pipe recovery dropped
-    /// first, then completions parked while a synchronous wait ran, then fresh
-    /// controller events. A completed bulk-IN TD's bytes are copied into
-    /// `in_buf`. Never blocks: `Ok(None)` when nothing has completed yet.
-    ///
-    /// Any other event met on the way goes to its own consumer, as the shared
-    /// drain hands it, and is never charged to this device.
+    /// Reap the next completed bulk TD, if any: one a pipe recovery
+    /// answered first, then the completions the service step routed here. A
+    /// completed bulk-IN TD's bytes are copied into `in_buf`. Never blocks:
+    /// `Ok(None)` when nothing has completed yet, or while the TD's pipe is
+    /// being recovered.
     ///
     /// # Errors
     ///
-    /// A fault restarting a pipe a completion halted or left out of step. A
-    /// per-TD transfer failure is **not** an error here — it is reported in
-    /// the returned [`BulkComplete::result`].
+    /// [`DriverError::NotFound`] for no interface at `index`. A per-TD
+    /// transfer failure is **not** an error here — it is reported in the
+    /// returned [`BulkComplete::result`].
     pub(crate) fn poll_bulk(
         &mut self,
         index: usize,
@@ -8191,47 +5114,35 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
                 return Ok(Some(complete));
             }
         }
-        // Bounded by the event segment: one pass can hold at most the
-        // segment's TRBs, and `poll_bulk` never blocks.
-        for _ in 0..RING_TRBS {
-            let Some(event) = self.poll_event()? else {
-                return Ok(None);
-            };
-            if event.trb_type() == Ok(TrbType::TransferEvent)
-                && self.bulk_async_index(event) == Some(index)
-            {
-                if let Some(complete) = self.decode_bulk_event(index, event, in_buf)? {
-                    return Ok(Some(complete));
-                }
-                continue;
-            }
-            self.route_shared_event(event);
-        }
         Ok(None)
     }
 
     /// Decode one bulk [`TrbType::TransferEvent`], already known to target a
-    /// configured bulk endpoint of device `index`, retiring its TD on every
-    /// outcome so the software dequeue always matches the controller's.
+    /// configured bulk endpoint of device `index`.
     ///
-    /// `None` for what this engine's own Stop Endpoint gives the TD it
-    /// interrupted, which was answered when it was abandoned. Any other failure
-    /// halted the endpoint, or may have, so the pipe is recovered in place
-    /// before the TD is reported: a STALL as [`DriverError::EndpointStalled`],
-    /// anything else as [`DriverError::DeviceFault`]. A completion the ring
-    /// cannot account for leaves the controller and this engine out of step,
-    /// so the pipe is restarted empty and its oldest TD fails.
+    /// `None` for what a Stop Endpoint gives the TD it interrupted, which was
+    /// answered when it was abandoned, and for a completion on a pipe being
+    /// recovered, whose TDs the recovery answers. Any other failure halted
+    /// the endpoint, or may have: its TD is retired and the pipe's recovery
+    /// started, which answers it once the pipe serves again — a STALL as
+    /// [`DriverError::EndpointStalled`], anything else as
+    /// [`DriverError::DeviceFault`]. A completion the ring cannot account for
+    /// leaves the controller and this engine out of step, so the pipe is
+    /// restarted empty and its oldest TD fails.
     fn decode_bulk_event(
         &mut self,
         index: usize,
         event: Trb,
         in_buf: &mut [u8],
     ) -> Result<Option<BulkComplete>, DriverError> {
-        let pipe = self
-            .device(index)
-            .ok_or(DriverError::NotFound)?
+        let device = self.device(index).ok_or(DriverError::NotFound)?;
+        let pipe = device
             .bulk_pipe_of_dci(event.endpoint_id())
             .ok_or(DriverError::DeviceFault)?;
+        let serial = device.serial;
+        if self.bulk_recovering(index, pipe) {
+            return Ok(None);
+        }
         let code = event.completion_code();
         if code.is_ok_and(CompletionCode::is_stopped) {
             return Ok(None);
@@ -8246,20 +5157,94 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             }
         }
         let Some(slot) = self.retire_completed_bulk_td(index, pipe, event)? else {
-            return self.resynchronise_bulk_pipe(index, pipe);
+            self.begin_bulk_recovery(index, pipe, None)?;
+            self.ask(route::Work::ResyncBulk {
+                index,
+                serial,
+                pipe,
+            });
+            return Ok(None);
         };
-        let result = if succeeded {
-            self.bulk_transferred(index, pipe, slot, event, in_buf)
+        if succeeded {
+            let result = self.bulk_transferred(index, pipe, slot, event, in_buf);
+            return Ok(Some(BulkComplete { pipe, slot, result }));
+        }
+        let failure = if code == Ok(CompletionCode::StallError) {
+            DriverError::EndpointStalled
         } else {
-            let failure = if code == Ok(CompletionCode::StallError) {
-                DriverError::EndpointStalled
+            DriverError::DeviceFault
+        };
+        self.begin_bulk_recovery(index, pipe, Some((slot, failure)))?;
+        self.ask(route::Work::RecoverBulk {
+            index,
+            serial,
+            pipe,
+            failure,
+        });
+        Ok(None)
+    }
+
+    /// Whether device `index`'s bulk `pipe` is being recovered.
+    pub(crate) fn bulk_recovering(&self, index: usize, pipe: BulkPipe) -> bool {
+        self.device(index)
+            .is_some_and(|device| device.bulk_recovery[pipe.index()] != BulkRecovery::Idle)
+    }
+
+    /// Whether an answer a recovery left for device `index`'s bulk `pipe`
+    /// waits to be reaped.
+    pub(crate) fn bulk_answer_waiting(&self, index: usize, pipe: BulkPipe) -> bool {
+        self.device(index).is_some_and(|device| {
+            device
+                .aborted_bulk
+                .iter()
+                .any(|&(answered, _, _)| answered == pipe)
+        })
+    }
+
+    /// Mark device `index`'s bulk `pipe` recovering, `failed` the TD whose
+    /// failure started it, answered once the recovery ends.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] for no interface at `index`.
+    pub(crate) fn begin_bulk_recovery(
+        &mut self,
+        index: usize,
+        pipe: BulkPipe,
+        failed: Option<(usize, DriverError)>,
+    ) -> Result<(), DriverError> {
+        let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
+        device.bulk_recovery[pipe.index()] = BulkRecovery::Running(failed);
+        Ok(())
+    }
+
+    /// Device `index`'s bulk `pipe` recovery ended with `recovered`: the TD
+    /// that started it is answered — with its own failure when the pipe
+    /// serves again, as a device fault when it does not — and the pipe
+    /// serves.
+    pub(crate) fn bulk_recovered(
+        &mut self,
+        index: usize,
+        pipe: BulkPipe,
+        recovered: Result<(), DriverError>,
+    ) {
+        let Some(device) = self.device_mut(index) else {
+            return;
+        };
+        let BulkRecovery::Running(failed) =
+            core::mem::take(&mut device.bulk_recovery[pipe.index()])
+        else {
+            return;
+        };
+        if let Some((slot, failure)) = failed {
+            let answer = if recovered.is_ok() {
+                failure
             } else {
                 DriverError::DeviceFault
             };
-            self.recover_bulk_endpoint(index, pipe, failure)?;
-            Err(failure)
-        };
-        Ok(Some(BulkComplete { pipe, slot, result }))
+            // The front: it failed before every TD the recovery abandoned.
+            let _ = device.aborted_bulk.try_push_front((pipe, slot, answer));
+        }
     }
 
     /// Retire the TD `event` completes on device `index`'s bulk `pipe`,
@@ -8321,41 +5306,6 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         Ok(transferred)
     }
 
-    /// Put device `index`'s bulk `pipe` back in step with the controller after
-    /// a completion its ring could not account for: stop it, drop what was
-    /// queued and parked for it, and restart it empty. The oldest TD is
-    /// reported failed and any behind it answered the same; `None` when none
-    /// was queued, the completion naming nothing this engine sent.
-    fn resynchronise_bulk_pipe(
-        &mut self,
-        index: usize,
-        pipe: BulkPipe,
-    ) -> Result<Option<BulkComplete>, DriverError> {
-        let (_ring_off, _bufs_off, dci, device_slot) = self.bulk_params(index, pipe)?;
-        self.stop_endpoint(device_slot, dci, Abandoned::Running)?;
-        let oldest = {
-            let ring = self
-                .device_mut(index)
-                .ok_or(DriverError::NotFound)?
-                .bulk_ring_mut(pipe)
-                .ok_or(DriverError::NotFound)?;
-            if ring.in_flight() == 0 {
-                None
-            } else {
-                let slot = ring.dequeue_slot();
-                ring.retire_one()?;
-                Some(slot)
-            }
-        };
-        self.abandon_bulk_tds(index, pipe, Some(DriverError::DeviceFault))?;
-        self.restart_bulk_ring(index, pipe)?;
-        Ok(oldest.map(|slot| BulkComplete {
-            pipe,
-            slot,
-            result: Err(DriverError::DeviceFault),
-        }))
-    }
-
     /// Retire every TD still queued on device `index`'s stopped bulk `pipe`
     /// and drop what is parked for it, answering each TD with `dropped` when
     /// given; without it the caller answers the transfer itself. Called only
@@ -8393,144 +5343,6 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         }
     }
 
-    /// Point the controller at a fresh, empty ring for device `index`'s
-    /// stopped bulk `pipe`, its data toggle as it stood.
-    fn restart_bulk_ring(&mut self, index: usize, pipe: BulkPipe) -> Result<(), DriverError> {
-        let (ring_off, _bufs_off, dci, device_slot) = self.bulk_params(index, pipe)?;
-        let ring = self.restart_ring((device_slot, dci), ring_off, BULK_RING_TRBS)?;
-        self.device_mut(index)
-            .ok_or(DriverError::NotFound)?
-            .set_bulk_ring(pipe, ring);
-        Ok(())
-    }
-
-    /// Restart device `index`'s bulk `pipe` empty with the controller's data
-    /// toggle at `DATA0`, answering what was queued on it with `dropped` when
-    /// given. Reset Endpoint does both for a halted endpoint (xHCI §4.6.8);
-    /// one that is not halted is stopped, then dropped and added back over a
-    /// fresh ring, the one way to reset its sequence number.
-    fn reset_bulk_endpoint(
-        &mut self,
-        index: usize,
-        pipe: BulkPipe,
-        dropped: Option<DriverError>,
-    ) -> Result<(), DriverError> {
-        let (ring_off, _bufs_off, dci, device_slot) = self.bulk_params(index, pipe)?;
-        let event = self.issue_command(Trb::new(
-            TrbType::ResetEndpoint,
-            0,
-            0,
-            trb::control_slot(device_slot) | trb::control_endpoint(dci),
-        ))?;
-        let halted = match event.completion_code() {
-            Ok(CompletionCode::Success) => true,
-            Ok(CompletionCode::ContextStateError) => {
-                self.stop_endpoint(device_slot, dci, Abandoned::Running)?;
-                false
-            }
-            _ => return Err(DriverError::DeviceFault),
-        };
-        self.abandon_bulk_tds(index, pipe, dropped)?;
-        if halted {
-            return self.restart_bulk_ring(index, pipe);
-        }
-        let ring = self.readd_bulk_endpoint(index, (device_slot, dci), ring_off)?;
-        self.device_mut(index)
-            .ok_or(DriverError::NotFound)?
-            .set_bulk_ring(pipe, ring);
-        Ok(())
-    }
-
-    /// Drop stopped endpoint `dci` of `slot` and add it back over a fresh
-    /// ring at `ring_off`, exactly as the controller had it otherwise: its
-    /// context is copied from the output context, so its type, packet size
-    /// and burst are the controller's own, and only the dequeue pointer and
-    /// the sequence number start afresh.
-    fn readd_bulk_endpoint(
-        &mut self,
-        index: usize,
-        (slot, dci): (u8, u8),
-        ring_off: usize,
-    ) -> Result<ProducerRing, DriverError> {
-        let output_ctx = self.device(index).ok_or(DriverError::NotFound)?.output_ctx;
-        let ring = self.build_ring(ring_off, BULK_RING_TRBS)?;
-        let slot_ctx = self.read_ctx(output_ctx)?;
-        let mut endpoint = self.read_ctx(output_ctx + usize::from(dci) * self.layout.ctx_size)?;
-        endpoint[0] &= !EP_CTX_STATE_MASK;
-        let dequeue = self.device_addr_of(ring_off)? | 1;
-        endpoint[2] = crate::low_dword(dequeue);
-        endpoint[3] = crate::high_dword(dequeue);
-        endpoint[5..].fill(0);
-        let flag = 1u32 << dci;
-        self.write_input_ctx(0, &input_control_dwords(flag, 1 | flag))?;
-        self.write_input_ctx(1, &slot_ctx)?;
-        self.write_input_ctx(1 + usize::from(dci), &endpoint)?;
-        self.command(Trb::new(
-            TrbType::ConfigureEndpoint,
-            self.device_addr_of(self.layout.input_ctx)?,
-            0,
-            trb::control_slot(slot),
-        ))?;
-        Ok(ring)
-    }
-
-    /// Recover device `index`'s bulk `pipe` after a completion that halted it
-    /// (xHCI §4.8.3): answer every TD the halt abandoned with `dropped`,
-    /// restart the pipe empty with the controller's toggle reset, then clear
-    /// the device-side halt so the device's toggle resets too (USB 2.0
-    /// §9.4.5). The endpoint accepts fresh transfers when this returns.
-    fn recover_bulk_endpoint(
-        &mut self,
-        index: usize,
-        pipe: BulkPipe,
-        dropped: DriverError,
-    ) -> Result<(), DriverError> {
-        self.reset_bulk_endpoint(index, pipe, Some(dropped))?;
-        let dci = self
-            .device(index)
-            .ok_or(DriverError::NotFound)?
-            .bulk_dci(pipe);
-        // On the device's own control endpoint, never a hub's.
-        self.device_control(index, setup_clear_endpoint_halt(dci), &mut [])?;
-        Ok(())
-    }
-
-    /// Abandon device `index`'s bulk transfer on `pipe`, held past its
-    /// deadline: the pipe is stopped and restarted empty, so the TD can never
-    /// complete late into a later transfer. The data toggles are left as they
-    /// stand, for the class's reset recovery to clear.
-    pub(crate) fn abort_bulk(&mut self, index: usize, pipe: BulkPipe) -> Result<(), DriverError> {
-        let (_ring_off, _bufs_off, dci, device_slot) = self.bulk_params(index, pipe)?;
-        self.stop_endpoint(device_slot, dci, Abandoned::Running)?;
-        self.abandon_bulk_tds(index, pipe, None)?;
-        if let Some(device) = self.device_mut(index) {
-            device.last_bulk_fault_code = 0;
-        }
-        self.restart_bulk_ring(index, pipe)
-    }
-
-    /// Clear the halt of device `index`'s bulk pipe at endpoint `address`, as
-    /// `CLEAR_FEATURE(ENDPOINT_HALT)` asks of a host (USB 2.0 §9.4.5):
-    /// whatever was queued on it is abandoned, the pipe restarts empty with
-    /// the controller's toggle reset, and the device-side halt is cleared so
-    /// its toggle resets too.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::OutOfRange`] for an address naming none of the device's
-    /// bulk pipes, or a controller or device fault.
-    pub(crate) fn clear_bulk_halt(&mut self, index: usize, address: u8) -> Result<(), DriverError> {
-        let dci = address_dci(address);
-        let pipe = self
-            .device(index)
-            .ok_or(DriverError::NotFound)?
-            .bulk_pipe_of_dci(dci)
-            .ok_or(DriverError::OutOfRange)?;
-        self.reset_bulk_endpoint(index, pipe, None)?;
-        self.device_control(index, setup_clear_endpoint_halt(dci), &mut [])?;
-        Ok(())
-    }
-
     /// The raw completion code of device `index`'s most recent failed bulk
     /// transfer, `0` when none has failed or the last was abandoned at its
     /// deadline.
@@ -8541,19 +5353,19 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
     }
 }
 
-impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// Deliver device `index`'s next interrupt-IN report into `buf` from the
-    /// engine's report buffer, keeping the endpoint armed to depth and
-    /// draining any freshly-posted completions first. Never blocks: `Ok(None)`
-    /// when no report is buffered (the class driver's URB stays parked).
+    /// engine's report buffer, keeping the endpoint armed to depth. Never
+    /// blocks: `Ok(None)` when no report is buffered (the class driver's URB
+    /// stays parked).
     ///
     /// `request` is the longest report the class driver expects; the first
     /// fixes the length the endpoint is armed to — that, or one service
     /// interval's payload when it is longer — and nothing is armed before it.
     ///
-    /// The report was captured off the controller's ring — here or, under
-    /// load, already by the HCD's per-interrupt [`Self::pump_reports`] — so a
-    /// starved class driver collects buffered reports rather than losing them.
+    /// The service step captures every report off the controller's ring as
+    /// it arrives, so a starved class driver collects buffered reports
+    /// rather than losing them.
     ///
     /// # Errors
     ///
@@ -8582,19 +5394,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             }
             device.fix_int_transfer(request)?;
         }
-        // Keep the endpoint armed to depth and capture whatever the
-        // controller has posted into the report FIFO. Capture is driven off
-        // the controller interrupt too (`pump_reports`), so under load a
-        // report is usually already buffered here; draining again is cheap
-        // and keeps the class-driver path self-contained.
         self.ensure_reports_armed(index)?;
-        self.drain_events()?;
-        // Recover the interrupt endpoint if a halting completion flagged it.
-        // This is the top-level, non-re-entrant recovery point: `drain_events`
-        // above only *flags* a halt (it may run re-entrantly), so the actual
-        // reset/rebuild/CLEAR_FEATURE happens here where it cannot recurse.
-        self.recover_report_endpoint_if_pending(index)?;
-        // Deliver the oldest buffered report, if any.
         let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
         if let Some(len) = device.reports.pop_into(buf)? {
             return Ok(Some(len));
@@ -8613,108 +5413,19 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// ring included, so the next report is one the device sends after this.
     /// A recorded fault is the endpoint's, not a report's, and is kept.
     ///
+    /// Draining the ring routes what else it held too; the operations that
+    /// wakes run at the next service step.
+    ///
     /// # Errors
     ///
     /// [`DriverError::NotFound`] when no device is live at `index`, or a
     /// fault reading the event ring.
     pub(crate) fn discard_reports(&mut self, index: usize) -> Result<(), DriverError> {
-        self.drain_events()?;
+        self.advance(self.now_ns)?;
         self.device_mut(index)
             .ok_or(DriverError::NotFound)?
             .reports
             .clear();
-        Ok(())
-    }
-
-    /// Capture every completed transfer the controller has posted on the
-    /// shared event ring, so every served interrupt-IN endpoint's reports land
-    /// in its device's FIFO and its ring is re-armed to depth — **without**
-    /// needing a class-driver URB to be outstanding.
-    ///
-    /// This is the consumer-independent report path: called on every
-    /// controller interrupt (by the HCD's [`Self::pump_reports`]) and again
-    /// from each [`Self::next_report`], it decouples device polling from how
-    /// promptly any class driver — or the HCD itself — is scheduled to run.
-    /// A boot keyboard, a mouse, a CBI completion endpoint, or any other
-    /// interrupt-IN device is therefore captured the moment its report lands
-    /// in the controller's ring, so a report is never dropped merely because
-    /// the software above was starved of CPU (the on-metal "missed keypresses
-    /// under load" defect, generalised to every interrupt-IN device).
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from reading the event ring (a register-window fault).
-    /// Per-event capture faults are recorded on the owning device rather than
-    /// propagated (see [`Self::capture_report_event`]); an unattributable or
-    /// informational event is drained and ignored (the shared ring is not a
-    /// security boundary, and a stray event must never fault the report path).
-    fn drain_events(&mut self) -> Result<(), DriverError> {
-        for _ in 0..EVENT_DRAIN_BOUND {
-            let Some(event) = self.poll_event()? else {
-                return Ok(());
-            };
-            self.route_shared_event(event);
-        }
-        Ok(())
-    }
-
-    /// Hand `event`, read off the shared ring by whoever happened to be
-    /// waiting, to its own consumer: a report captured into its device's
-    /// FIFO, a hub or bulk completion parked, a late Disable Slot answer
-    /// settled, a freed-slot event tolerated. A capture-side hiccup is not
-    /// fatal here: the endpoint is re-armed on the next pass, and a real
-    /// report fault surfaces through `next_report` from the recorded flag.
-    /// Anything else — a Port Status Change, an unmodelled or stale event —
-    /// is dropped: the shared ring is not a security boundary, and a stray
-    /// event must never fault whoever read it.
-    fn route_shared_event(&mut self, event: Trb) {
-        if matches!(
-            event.trb_type(),
-            Ok(TrbType::TransferEvent | TrbType::CommandCompletion)
-        ) {
-            let _ = self.stash_async_event(event);
-        }
-    }
-
-    /// Keep every served interrupt-IN endpoint armed and drain all pending
-    /// report completions into the per-device FIFOs — the HCD's per-interrupt
-    /// report pump.
-    ///
-    /// The host-controller driver calls this on every controller completion
-    /// interrupt, **before** it services any outstanding class-driver URB, so
-    /// the controller always has landing TRBs and every report is captured the
-    /// moment it arrives — regardless of whether the class driver has a URB in
-    /// flight, and regardless of how starved that class driver is. A class
-    /// driver then merely collects the already-buffered reports when it next
-    /// submits ([`Self::next_report`]); its consume rate no longer gates
-    /// hardware polling. This is what makes the report path immune to a
-    /// CPU-starved consumer, for every interrupt-IN device the controller
-    /// serves.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError`] from reading the event ring. A per-device arming hiccup
-    /// (e.g. a device that has just vanished) is tolerated: the drain and the
-    /// hub/root hot-plug watch handle its teardown.
-    pub fn pump_reports(&mut self) -> Result<(), DriverError> {
-        for index in 0..self.devices.len() {
-            if self
-                .device(index)
-                .is_some_and(|device| device.int_dci != DCI_CONTROL && device.int_ring.is_some())
-            {
-                let _ = self.ensure_reports_armed(index);
-            }
-        }
-        self.drain_events()?;
-        // Recover any interrupt endpoint a halting completion flagged during
-        // the drain above. `drain_events` only *flags* a halt (it may run
-        // re-entrantly from a synchronous wait); the reset/rebuild/CLEAR_FEATURE
-        // happens here, at this top-level, non-re-entrant point. A per-device
-        // recovery that fails is owed a deferred retry, so it never aborts the
-        // whole pump.
-        for index in 0..self.devices.len() {
-            let _ = self.recover_report_endpoint_if_pending(index);
-        }
         Ok(())
     }
 
@@ -8735,180 +5446,68 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             .sum()
     }
 
-    /// Decode one completed interrupt-IN transfer `event` for device `index`,
-    /// retire the ring slot, and buffer the result — the capture half of the
-    /// report path (the delivery half is [`Self::next_report`]).
-    ///
-    /// The transfer is retired **unconditionally** first (so an unexpected
-    /// completion code or malformed buffer mapping still advances the ring —
-    /// a single odd transfer must never silence the device). Then:
+    /// Capture one completion on device `index`'s interrupt-IN endpoint,
+    /// retiring its TRB:
     ///
     /// * a real report is copied out of its DMA slot and **enqueued** into the
     ///   device's report FIFO ([`Self::enqueue_report`]), and the endpoint is
     ///   re-armed to depth — so its bytes survive the slot being reused;
     /// * a *successful* zero-length completion (a ZLP) carries no report: the
-    ///   endpoint is simply re-armed (an idle or ZLP-streaming HID collection
-    ///   neither buffers empty reports nor is faulted);
+    ///   endpoint is simply re-armed;
     /// * a *successful* completion whose claimed buffer mapping is malformed
     ///   (a forged residual or TRB pointer) leaves the endpoint un-halted, so
     ///   there is nothing to recover: it **records** a fail-closed fault on
     ///   the device for [`Self::next_report`] to surface once;
     /// * any halting code — a STALL, babble, data-buffer or TRB error, and a
-    ///   USB or split *transaction* error alike — leaves the endpoint halted
-    ///   (the controller runs no further transfers on it until it is reset).
-    ///   It is only **flagged** here ([`DeviceState::int_recovery_pending`]);
-    ///   the endpoint is recovered later, at a top-level, non-re-entrant point
-    ///   ([`Self::recover_report_endpoint_if_pending`]). Recovery cannot run
-    ///   here because this capture also runs re-entrantly from inside a
-    ///   synchronous command/EP0 wait, and recovery itself waits — so
-    ///   recovering here would recurse into recovery and scramble the ring it
-    ///   is rebuilding (the on-metal defect where input hammered during
-    ///   bring-up killed the class driver). A halting code is not, on its own,
-    ///   a hot-removal: a transaction error is exactly what a present-but-
-    ///   disturbed device produces.
+    ///   USB or split *transaction* error alike — leaves the endpoint halted.
+    ///   Its recovery is started as an operation while the endpoint's ladder
+    ///   allows, and owed to the driver's paced retry otherwise. A halting
+    ///   code is not, on its own, a hot-removal: a transaction error is
+    ///   exactly what a present-but-disturbed device produces.
     ///
-    /// A fault is never propagated to the caller: capture runs from the shared
-    /// drain and from synchronous EP0/command waits, where an asynchronous
-    /// report must not fault unrelated work. Recorded faults surface only
-    /// through [`Self::next_report`]; a halted endpoint is recovered by
-    /// [`Self::recover_report_endpoint_if_pending`].
-    fn capture_report_event(&mut self, index: usize, event: Trb) -> Result<(), DriverError> {
-        // A recovery for this endpoint is in progress (this capture is running
-        // re-entrantly from inside one of recovery's own synchronous
-        // command/CLEAR_FEATURE waits). Recovery is rebuilding the ring, so
-        // touching it here would corrupt it and re-entering recovery would
-        // recurse without bound — the on-metal defect where input hammered
-        // during bring-up killed the class driver. Leave the ring untouched
-        // and keep the endpoint flagged so recovery runs again after this one
-        // completes (the endpoint re-halted on this fresh completion).
-        if self
-            .device(index)
-            .is_some_and(|device| device.int_recovering)
-        {
-            if let Some(device) = self.device_mut(index) {
-                device.int_recovery_pending = true;
-            }
-            return Ok(());
+    /// While a recovery of the endpoint runs, its ring is the recovery's: a
+    /// completion is left alone and flagged, for the recovery to act on once
+    /// it ends.
+    fn capture_report_event(&mut self, index: usize, event: Trb) {
+        let Some(device) = self.device_mut(index) else {
+            return;
+        };
+        if device.int_recovering {
+            device.int_recovery_pending = true;
+            return;
         }
+        let serial = device.serial;
         let captured = self
             .decode_transfer_report(index, event)
             .and_then(|report| match report {
                 Some((at, len)) => self.enqueue_report(index, at, len),
                 None => Ok(()),
             });
-        self.retire_interrupt_transfer(index)?;
+        let _ = self.retire_interrupt_transfer(index);
         match captured {
             Ok(()) => {
                 if let Some(device) = self.device_mut(index) {
                     device.recovery.completed();
                 }
-                self.ensure_reports_armed(index)?;
+                let _ = self.ensure_reports_armed(index);
             }
-            Err(err) => match event.completion_code() {
-                // A *successful* completion whose claimed mapping the decode
-                // rejected (a hostile/buggy residual or TRB pointer). The
-                // endpoint is not halted, so there is nothing to recover:
-                // record the fault for the class driver's next URB to fail
-                // closed on.
-                Ok(CompletionCode::Success | CompletionCode::ShortPacket) => {
-                    self.record_report_fault(index, err);
+            Err(err)
+                if matches!(
+                    event.completion_code(),
+                    Ok(CompletionCode::Success | CompletionCode::ShortPacket)
+                ) =>
+            {
+                self.record_report_fault(index, err);
+            }
+            Err(_) => {
+                let recover = self
+                    .device_mut(index)
+                    .is_some_and(|device| device.recovery.halted() == OnHalt::Recover);
+                if recover {
+                    self.ask(route::Work::RecoverReports { index, serial });
                 }
-                // Any halting completion — a STALL, babble, data-buffer or TRB
-                // error, and a USB or split *transaction* error alike — leaves
-                // the endpoint halted (the controller runs no further transfers
-                // on it until it is reset). A halting code is NOT, on its own,
-                // conclusive of a hot-removal: a transaction error (CRC,
-                // timeout, bad PID) is exactly what a device that is present
-                // but momentarily disturbed produces — for instance one
-                // hammered with input while its interrupt endpoint is still
-                // being brought up.
-                //
-                // Recovery MUST NOT run here. This capture happens from the
-                // shared drain and, crucially, re-entrantly from inside a
-                // synchronous EP0/command wait: recovery issues Reset Endpoint
-                // / Set TR Dequeue commands and a device-side CLEAR_FEATURE,
-                // each of which itself waits on the shared event ring, during
-                // which another interrupt completion for this same endpoint can
-                // arrive and land back here — recursing into recovery and
-                // scrambling the ring it is rebuilding. So only *flag* the
-                // endpoint; the real, non-re-entrant recovery is performed at
-                // top level by `recover_report_endpoint_if_pending` (from
-                // `next_report` and `pump_reports`). The rejected completion
-                // code stays captured in `last_report_fault_code` (set by
-                // `decode_transfer_report`) for diagnostics.
-                _ => {
-                    if let Some(device) = self.device_mut(index) {
-                        device.int_recovery_pending = true;
-                    }
-                }
-            },
-        }
-        Ok(())
-    }
-
-    /// Recover device `index`'s interrupt-IN endpoint if a halting completion
-    /// flagged it ([`DeviceState::int_recovery_pending`]) — the top-level,
-    /// **non-re-entrant** half of the halt-recovery split.
-    ///
-    /// Called only from [`Self::next_report`] and [`Self::pump_reports`],
-    /// which run from the HCD's URB service and its per-interrupt report pump
-    /// — never from inside a synchronous command/EP0 wait. A guard
-    /// ([`DeviceState::int_recovering`]) makes any interrupt completion that
-    /// arrives during recovery's own waits re-flag the endpoint instead of
-    /// recursing, so recovery can never re-enter itself.
-    ///
-    /// A recovery that succeeds re-arms the endpoint, and the class driver's
-    /// URB stays parked, so a transient fault never reaches it. One that fails
-    /// — the device could not complete its own `CLEAR_FEATURE` handshake, which
-    /// a vanished device and a merely disturbed one both produce — leaves the
-    /// URB parked and the endpoint unarmed, and owes a deferred retry
-    /// ([`Self::retry_owed_recoveries`]) that reads the settled port to tell
-    /// the two apart.
-    ///
-    /// # Errors
-    ///
-    /// Only a bookkeeping fault re-arming a recovered endpoint; a recovery
-    /// fault is the owed retry's.
-    fn recover_report_endpoint_if_pending(&mut self, index: usize) -> Result<(), DriverError> {
-        if !self
-            .device(index)
-            .is_some_and(|device| device.int_recovery_pending)
-        {
-            return Ok(());
-        }
-        if let Some(device) = self.device_mut(index) {
-            if device.recovery.halted() == OnHalt::Defer {
-                device.int_recovery_pending = false;
-                return Ok(());
             }
         }
-        if self.attempt_report_recovery(index).is_ok() {
-            return self.ensure_reports_armed(index);
-        }
-        if let Some(device) = self.device_mut(index) {
-            device.recovery.failed();
-        }
-        Ok(())
-    }
-
-    /// One guarded recovery of device `index`'s interrupt-IN endpoint, a
-    /// success clearing the captured fault code a later check would otherwise
-    /// misread.
-    fn attempt_report_recovery(&mut self, index: usize) -> Result<(), DriverError> {
-        // Clear the pending flag before recovering: a fresh halt observed
-        // *during* recovery (via the `int_recovering` guard) sets it again, so
-        // a re-halt is not lost, while a clean recovery leaves it clear.
-        if let Some(device) = self.device_mut(index) {
-            device.int_recovery_pending = false;
-            device.int_recovering = true;
-        }
-        let outcome = self.recover_interrupt_endpoint(index);
-        let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
-        device.int_recovering = false;
-        if outcome.is_ok() {
-            device.last_report_fault_code = 0;
-        }
-        outcome
     }
 
     /// Buffer device `index`'s report of `len` bytes at DMA offset `at` as
@@ -8938,206 +5537,5 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         if let Some(device) = self.device_mut(index) {
             device.report_fault.get_or_insert(err);
         }
-    }
-
-    /// A borrowed engine view serving one device's URB transfers: the
-    /// [`UrbEngine`](crate::transport::UrbEngine) the HCD's per-interface
-    /// URB service drives for the device at `index`.
-    pub fn engine_for(&mut self, index: usize) -> DeviceEngine<'_, 'w, H, M> {
-        DeviceEngine {
-            engine: self,
-            index,
-        }
-    }
-}
-
-/// One served device's [`UrbEngine`](crate::transport::UrbEngine) view over
-/// the shared controller engine ([`UsbDevice::engine_for`]).
-///
-/// Every transfer it drives targets exactly the device at its index —
-/// control transfers activate that device's EP0 ring, interrupt reads drain
-/// its report endpoint, bulk transfers use its ring pair — so one
-/// interface's URB service can never reach another device's endpoints.
-pub struct DeviceEngine<'a, 'w, H: RegisterBlock, M: DmaBank> {
-    engine: &'a mut UsbDevice<'w, H, M>,
-    index: usize,
-}
-
-impl<H: RegisterBlock, M: DmaBank> crate::transport::UrbEngine for DeviceEngine<'_, '_, H, M> {
-    fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
-        // It targets this *device* — for a hub-downstream device the device's
-        // EP0 ring is activated for the transfer, never the hub's.
-        self.engine.device_control(self.index, setup, data)
-    }
-
-    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError> {
-        // No data stage: the request's whole meaning rides in SETUP (the
-        // engine's control path builds a SETUP + status-IN transfer when the
-        // data length is zero). It targets this *device* exactly as
-        // `control_in` does — never the hub above it.
-        self.engine
-            .device_control(self.index, setup, &mut [])
-            .map(|_| ())
-    }
-
-    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError> {
-        // An OUT data stage carrying the shared buffer's bytes (the CBI
-        // ADSC command channel). It targets this *device* exactly as
-        // `control_in` does — never the hub above it.
-        self.engine.device_control_out(self.index, setup, data)
-    }
-
-    fn scope(&self) -> Option<crate::transport::UrbScope> {
-        let device = self.engine.device(self.index)?;
-        let mut interfaces = device.streaming.claimed_set();
-        interfaces.insert(u16::from(device.identity.interface_number));
-        Some(crate::transport::UrbScope {
-            interfaces,
-            endpoints: device.pipe_dci_mask() | device.streaming.dci_mask(),
-        })
-    }
-
-    fn interrupt_in(
-        &mut self,
-        endpoint: u8,
-        request: usize,
-        data: &mut [u8],
-    ) -> Result<Option<usize>, DriverError> {
-        // The URB names an endpoint *number*; only the interface's own
-        // interrupt-IN endpoint is read.
-        if !endpoint_dci(endpoint, true).is_some_and(|dci| self.owns_report_endpoint(dci)) {
-            return Err(DriverError::OutOfRange);
-        }
-        self.engine.next_report(self.index, request, data)
-    }
-
-    fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<(), DriverError> {
-        self.engine.set_interface(self.index, interface, alternate)
-    }
-
-    fn claim_interface(&mut self, interface: u8) -> Result<(), DriverError> {
-        self.engine.claim_interface(self.index, interface)
-    }
-
-    fn iso_start(
-        &mut self,
-        endpoint: u8,
-        layout: IsoLayout,
-    ) -> Result<crate::transport::IsoStreamShape, DriverError> {
-        self.engine.iso_start(self.index, endpoint, layout)
-    }
-
-    fn iso_queue(&mut self, endpoint: u8, slot: u16, region: &[u8]) -> Result<(), DriverError> {
-        self.engine.iso_queue(self.index, endpoint, slot, region)
-    }
-
-    fn iso_stop(&mut self, endpoint: u8) -> Result<(), DriverError> {
-        self.engine.iso_stop(self.index, endpoint)
-    }
-
-    fn iso_take(
-        &mut self,
-        endpoint: u8,
-        region: &mut [u8],
-    ) -> Result<Option<crate::transport::IsoSlotDone>, DriverError> {
-        self.engine.iso_take(self.index, endpoint, region)
-    }
-
-    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
-        // The URB names an endpoint *number*; it must be one of the
-        // interface's configured bulk-IN endpoints (an IN DCI is `2n + 1`).
-        let pipe = self
-            .bulk_pipe_for(endpoint, BulkDirection::In)
-            .ok_or(DriverError::OutOfRange)?;
-        // The URB transport holds one URB outstanding per interface: arm
-        // the TD on first drive, reap its completion on a later one.
-        if self.engine.bulk_in_flight(self.index, pipe) == 0 {
-            self.engine.queue_bulk_in(self.index, pipe, data.len())?;
-            return Ok(None);
-        }
-        match self.engine.poll_bulk(self.index, data)? {
-            Some(complete) if complete.pipe == pipe => match complete.result {
-                Ok(n) => Ok(Some(
-                    usize::try_from(n).map_err(|_| DriverError::DeviceFault)?,
-                )),
-                Err(err) => Err(err),
-            },
-            // A completion for another pipe cannot belong to the one
-            // outstanding URB — a protocol violation, surfaced.
-            Some(_) => Err(DriverError::DeviceFault),
-            None => Ok(None),
-        }
-    }
-
-    fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError> {
-        let pipe = self
-            .bulk_pipe_for(endpoint, BulkDirection::Out)
-            .ok_or(DriverError::OutOfRange)?;
-        if self.engine.bulk_in_flight(self.index, pipe) == 0 {
-            self.engine.queue_bulk_out(self.index, pipe, data)?;
-            return Ok(None);
-        }
-        // An OUT completion carries no device bytes to copy back.
-        let mut no_in_bytes = [0u8; 0];
-        match self.engine.poll_bulk(self.index, &mut no_in_bytes)? {
-            Some(complete) if complete.pipe == pipe => match complete.result {
-                Ok(n) => Ok(Some(
-                    usize::try_from(n).map_err(|_| DriverError::DeviceFault)?,
-                )),
-                Err(err) => Err(err),
-            },
-            Some(_) => Err(DriverError::DeviceFault),
-            None => Ok(None),
-        }
-    }
-
-    fn abandon(&mut self, urb: &UrbRequest) -> Result<(), DriverError> {
-        // A report poll's endpoint stays armed: its reports keep landing in
-        // the device's FIFO for the next poll to collect.
-        if urb.transfer_type != UsbTransferType::Bulk {
-            return Ok(());
-        }
-        let pipe = self.bulk_pipe_of(urb).ok_or(DriverError::OutOfRange)?;
-        self.engine.abort_bulk(self.index, pipe)
-    }
-
-    fn clear_halt(&mut self, endpoint: u8) -> Result<(), DriverError> {
-        self.engine.clear_bulk_halt(self.index, endpoint)
-    }
-
-    fn discard_reports(&mut self, endpoint: u8) -> Result<(), DriverError> {
-        if !self.owns_report_endpoint(address_dci(endpoint)) {
-            return Err(DriverError::OutOfRange);
-        }
-        self.engine.discard_reports(self.index)
-    }
-}
-
-impl<H: RegisterBlock, M: DmaBank> DeviceEngine<'_, '_, H, M> {
-    /// The bulk pipe `urb` runs on.
-    fn bulk_pipe_of(&self, urb: &UrbRequest) -> Option<BulkPipe> {
-        let direction = match urb.direction {
-            UsbDirection::In => BulkDirection::In,
-            UsbDirection::Out => BulkDirection::Out,
-        };
-        self.bulk_pipe_for(urb.endpoint, direction)
-    }
-
-    /// The configured bulk pipe of this device whose endpoint *number* is
-    /// `endpoint` in `direction`, `None` when no configured pipe matches
-    /// (the URB is refused fail-closed).
-    fn bulk_pipe_for(&self, endpoint: u8, direction: BulkDirection) -> Option<BulkPipe> {
-        let dci = endpoint_dci(endpoint, direction == BulkDirection::In)?;
-        self.engine.device(self.index)?.bulk_pipe_of_dci(dci)
-    }
-
-    /// Whether `dci` is the device's own interrupt-IN endpoint, which a
-    /// device without one records as the control endpoint's.
-    fn owns_report_endpoint(&self, dci: u8) -> bool {
-        dci != DCI_CONTROL
-            && self
-                .engine
-                .device(self.index)
-                .is_some_and(|device| device.int_dci == dci)
     }
 }

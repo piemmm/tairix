@@ -1,71 +1,56 @@
-//! The running long operation's modal input routing — what an event means
-//! while a recursive delete, a move to Trash, or a paste runs — how often its
-//! panel shows a new count, and the words a refusal is stated in.
+//! What an event to an operation's own progress window means, how often that
+//! window shows a new count, and the words a refusal is stated in.
 //!
 //! # Why this is its own module
 //!
 //! The `Run` binary around it is a freestanding program — it only exists when
 //! the crate is built for a bare-metal target — so nothing inside it can be
 //! reached by a host test. Which press cancels a running operation is worth
-//! testing: it is a pure function of the event, the window, and the drawn rail,
-//! so it lives here, compiles on the host, and is covered by the tests beside
-//! it.
+//! testing: it is a pure function of the event and the window's client, so it
+//! lives here, compiles on the host, and is covered by the tests beside it.
 //!
 //! # No I/O, and no authority
 //!
 //! Nothing here touches the operation, the filesystem, or the window. It
-//! classifies one event and the program acts on the answer.
+//! classifies one event and the program acts on the answer. Nothing classifies
+//! the folder window's own input for an operation: it is a window of its own,
+//! and the folder goes on being used while it runs.
 
 use alloc::string::String;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_abi::Errno;
-use tairix_browse::render::{content_area, progress_cancel_at};
-use tairix_browse::{DeletePlan, Places, ToolbarBand};
+use tairix_browse::render::progress_cancel_at;
+use tairix_browse::DeletePlan;
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::{Theme, Timeline};
 
 use crate::sidebar::press_point;
 
-/// The disposition of a poll taken while a long operation runs.
+/// What an event to an operation's progress window asks of the operation.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum OperationControl {
+pub enum ProgressControl {
     /// The user asked to cancel (Escape, or a click on the Cancel button).
     Cancel,
-    /// The desktop asked the window to close.
-    Close,
-    /// The desktop needs the window's pixels again: the panel is presented
-    /// only as its count moves, which a stalled operation may not do.
+    /// The desktop needs the window's pixels again: it is presented only as
+    /// its count moves, which a stalled operation may not do.
     Redraw,
-    /// Nothing that affects the running operation.
+    /// Nothing that affects the operation.
     Ignore,
 }
 
-/// Classify a polled `event` while a long operation runs: a close request, a
-/// cancel (Escape, or a primary press on the progress panel's Cancel button),
-/// or nothing that affects the run. A press anywhere but the Cancel button is
-/// ignored, so nothing navigates behind the modal panel (fail closed).
-///
-/// `window` is the whole window, `places` the drawn rail (`None` when the
-/// window shows none), and `toolbar` whether the command band is drawn. The
-/// panel is painted in what that chrome leaves, so the press is resolved
-/// against the same shared inset: testing the window itself misses the drawn
-/// button by the rail's width. Taking the values the frame is drawn from —
-/// and insetting here rather than at the call site — is what keeps the
-/// painted button and the press that must match it from ever disagreeing.
+/// Classify `event` to an operation's progress window, whose client is
+/// `client`: a cancel (Escape, or a primary press on the drawn Cancel
+/// button), a redraw, or nothing.
 #[must_use]
-pub fn operation_control(
-    places: Option<&Places>,
+pub fn progress_control(
+    client: Rect,
     scale: Scale,
     theme: &Theme,
-    window: Rect,
-    toolbar: ToolbarBand,
     event: &WindowEvent,
-) -> OperationControl {
-    let panel = content_area(window, scale, theme, places, toolbar);
+) -> ProgressControl {
     match event {
-        WindowEvent::CloseRequested { .. } => OperationControl::Close,
         WindowEvent::Key {
             key:
                 KeyInput::Pressed {
@@ -73,51 +58,15 @@ pub fn operation_control(
                     ..
                 },
             ..
-        } => OperationControl::Cancel,
+        } => ProgressControl::Cancel,
         WindowEvent::Pointer { x, y, action, .. } => match press_point(*action, *x, *y) {
-            Some(point) if progress_cancel_at(panel, scale, theme, point) => {
-                OperationControl::Cancel
+            Some(point) if progress_cancel_at(client, scale, theme, point) => {
+                ProgressControl::Cancel
             }
-            _ => OperationControl::Ignore,
+            _ => ProgressControl::Ignore,
         },
-        WindowEvent::RedrawRequested { .. } => OperationControl::Redraw,
-        // Nothing else reaches the running operation. A desktop change is
-        // already adopted by the caller before this is reached. The alternate
-        // close means "leave this folder",
-        // which would move the listing the running operation is walking, so it
-        // is ignored while the panel is up rather than deferred. An icon-bar
-        // click or any menu outcome names a gesture, and acting on it
-        // would take the running operation somewhere the user cannot see, so
-        // it too waits for the panel to go. An open target waits too: the
-        // queue keeps it, so the drain happens when the panel is down rather
-        // than navigating the listing this operation is walking.
-        // The layer-surface feeds and a tool window's moves address surfaces
-        // this application never opens, so they cannot arrive here at all;
-        // they are listed rather than caught by a wildcard so a new event
-        // still has to be thought about.
-        // The rest is input that must not navigate behind the modal panel.
-        WindowEvent::TerrainChanged { .. }
-        | WindowEvent::AlertClosed { .. }
-        | WindowEvent::LayerPointer { .. }
-        | WindowEvent::ToolMoved { .. }
-        | WindowEvent::AlternateCloseRequested { .. }
-        | WindowEvent::OpenRequested
-        | WindowEvent::AppBarDefault
-        | WindowEvent::AppBarMenu { .. }
-        | WindowEvent::MenuClosed { .. }
-        | WindowEvent::Key { .. }
-        | WindowEvent::Focus { .. }
-        | WindowEvent::Minimized { .. }
-        | WindowEvent::ContentReleased { .. }
-        | WindowEvent::Resized { .. }
-        | WindowEvent::Scrolled { .. }
-        | WindowEvent::FilePicked { .. }
-        | WindowEvent::PickCancelled { .. }
-        | WindowEvent::FolderPicked { .. }
-        | WindowEvent::DragOver { .. }
-        | WindowEvent::DragEnded { .. }
-        | WindowEvent::PreviewRendered { .. }
-        | WindowEvent::Pinch { .. } => OperationControl::Ignore,
+        WindowEvent::RedrawRequested { .. } => ProgressControl::Redraw,
+        _ => ProgressControl::Ignore,
     }
 }
 
@@ -131,7 +80,7 @@ pub const fn mode_flip_allowed(writing: bool, rereading: bool) -> bool {
 }
 
 /// Whether a new count is shown now, at `now_ns`: once a desktop frame since
-/// the panel last showed one at `shown_ns`.
+/// the progress window last showed one at `shown_ns`.
 #[must_use]
 pub const fn progress_due(now_ns: u64, shown_ns: u64) -> bool {
     now_ns.saturating_sub(shown_ns) >= Timeline::FRAME_NS
@@ -156,6 +105,15 @@ pub fn confirmation_may_open(
 #[must_use]
 pub fn empty_confirmation_may_open(trash: &[String], shown: &[String], busy: bool) -> bool {
     !busy && trash == shown
+}
+
+/// The words a refusal is stated in, naming the item by what the user sees,
+/// the last component of its `path`: "could not delete “Notes”: its volume is
+/// read-only".
+#[must_use]
+pub fn item_refusal(verb: &str, path: &[impl AsRef<str>], reason: &str) -> String {
+    let name = path.last().map_or("", AsRef::as_ref);
+    alloc::format!("could not {verb} \u{201c}{name}\u{201d}: {reason}")
 }
 
 /// Why a copy could not make its destination file or folder, from the

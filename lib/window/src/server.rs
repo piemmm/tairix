@@ -49,10 +49,10 @@ use tairix_abi::window_ipc::{
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
     encode_open_target_reply, encode_picked_file_reply, encode_picked_name_reply,
     encode_terrain_reply, encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu,
-    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
-    DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PickPurpose,
-    PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
-    WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
+    ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems,
+    DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget,
+    PickPurpose, PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion,
+    WindowRequest, WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
     DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN,
     WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
     WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX,
@@ -367,6 +367,27 @@ pub trait WindowHost {
     /// does, and the default accepts it without drawing anything.
     fn tool_opened(&mut self, window_id: u64, spec: &ToolSpec) -> Result<(), Errno> {
         let _ = (window_id, spec);
+        Ok(())
+    }
+
+    /// A validated `CreateDialog` opened dialog window `window_id`, a
+    /// transient of the caller's own top-level window
+    /// `spec.transient.parent_window_id`. The host frames it as a dialog
+    /// whose band reads `spec.title` after the name it attests the owner's
+    /// application by, centres it over its owner on screen, stacks it with
+    /// its owner off the taskbar, gives it the keyboard only when `focus` —
+    /// the caller has earned the front — and, for
+    /// [`DialogModality::OwnerModal`], holds the owner until it closes.
+    ///
+    /// An error refuses it exactly as [`popup_opened`](Self::popup_opened)'s
+    /// does, and the default accepts it without drawing anything.
+    fn dialog_opened(
+        &mut self,
+        window_id: u64,
+        focus: bool,
+        spec: &DialogSpec,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, focus, spec);
         Ok(())
     }
 
@@ -1036,13 +1057,10 @@ struct ResizeSpec {
     surface: DisplayMode,
 }
 
-/// Everything a transient — a popup or a tool window — opens with, in one
-/// place: the app half fills it in for [`WindowClient::create_popup`] and
-/// [`WindowClient::create_tool`], the engine's transient path receives the
-/// decoded request as the same unit, so both halves describe one once.
-///
-/// [`WindowClient::create_popup`]: crate::client::WindowClient::create_popup
-/// [`WindowClient::create_tool`]: crate::client::WindowClient::create_tool
+/// Everything a transient — a popup, a tool window or a dialog — opens with,
+/// in one place: the app half fills it in for the client's create call, and
+/// the engine's transient path receives the decoded request as the same unit,
+/// so both halves describe one once. Where it opens is each kind's own.
 #[derive(Copy, Clone)]
 pub struct TransientSpec {
     /// The caller's own top-level window the transient belongs to and is
@@ -1056,22 +1074,47 @@ pub struct TransientSpec {
     pub frame_count: u32,
     /// The geometry of one frame, which must hold for every frame.
     pub surface: DisplayMode,
+}
+
+/// Everything one `CreatePopup` asks for: what any transient opens with, and
+/// where from its parent's client origin.
+#[derive(Copy, Clone)]
+pub struct PopupSpec {
+    /// The parent, region, event route and geometry.
+    pub transient: TransientSpec,
     /// Physical pixels right of the parent window's client origin.
     pub offset_x: i32,
     /// Physical pixels below the parent window's client origin.
     pub offset_y: i32,
 }
 
-/// Everything one `CreateTool` asks for: what any transient opens with, then
-/// how a tool window opens and what its band reads.
+/// Everything one `CreateTool` asks for: what any transient opens with, where
+/// from its parent's client origin, how it opens and what its band reads.
 #[derive(Copy, Clone)]
 pub struct ToolSpec {
-    /// The parent, region, event route, geometry and offset.
+    /// The parent, region, event route and geometry.
     pub transient: TransientSpec,
+    /// Physical pixels right of the parent window's client origin.
+    pub offset_x: i32,
+    /// Physical pixels below the parent window's client origin.
+    pub offset_y: i32,
     /// Where along its band, from the client's left edge, the press its
     /// parent holds carries it, if any; less than the client's width.
     pub carry: Option<u32>,
     /// What its mini title bar reads.
+    pub title: WindowTitle,
+}
+
+/// Everything one `CreateDialog` asks for: what any transient opens with,
+/// whether it holds its owner and what its band reads. It names no place: the
+/// host centres a dialog over its owner.
+#[derive(Copy, Clone)]
+pub struct DialogSpec {
+    /// The owner, region, event route and geometry.
+    pub transient: TransientSpec,
+    /// Whether it holds its owner until it closes.
+    pub modality: DialogModality,
+    /// What its title band reads beside the application's name.
     pub title: WindowTitle,
 }
 
@@ -1358,11 +1401,11 @@ struct WindowRecord<R> {
     /// It is held here rather than sent in the event because an event is one
     /// fixed 40-byte frame and a name is wider than that.
     menu_text: Option<CommittedText>,
-    /// The top-level window this record is a **transient** of — the parent
-    /// of a popup — or `None` for an ordinary top-level window. A transient
-    /// is closed when the window it hangs from closes, so the link lives
-    /// beside the window it binds.
-    parent: Option<u64>,
+    /// The top-level window this record is a **transient** of, and of which
+    /// kind, or `None` for an ordinary top-level window. A transient is
+    /// closed when the window it hangs from closes, so the link lives beside
+    /// the window it binds.
+    transient: Option<Transient>,
     /// The desktop stacking layer this surface sits in, or `None` for an
     /// ordinary window.
     ///
@@ -1370,6 +1413,22 @@ struct WindowRecord<R> {
     /// so the two can never disagree: an operation reserved for a layer
     /// surface refuses any window whose answer here is `None`.
     layer: Option<LayerDepth>,
+}
+
+/// The window a transient hangs from, and what it is to that window.
+#[derive(Copy, Clone)]
+struct Transient {
+    parent: u64,
+    kind: TransientKind,
+}
+
+/// What a transient is: a dialog stays until it is answered, so an alert may
+/// hold it; a popup or tool window comes and goes with a gesture, so none may.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum TransientKind {
+    Popup,
+    Tool,
+    Dialog,
 }
 
 /// One committed quick-entry text, with the open whose answer it belongs to.
@@ -1607,7 +1666,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 };
                 create_reply(reply, self.create(host, caller, spec), self.server)
             }
-            WindowRequest::CreatePopup { .. } | WindowRequest::CreateTool { .. } => create_reply(
+            WindowRequest::CreatePopup { .. }
+            | WindowRequest::CreateTool { .. }
+            | WindowRequest::CreateDialog { .. } => create_reply(
                 reply,
                 self.create_transient(host, caller, decoded),
                 self.server,
@@ -1911,6 +1972,7 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::Create { .. }
             | WindowRequest::CreatePopup { .. }
             | WindowRequest::CreateTool { .. }
+            | WindowRequest::CreateDialog { .. }
             | WindowRequest::OpenLayer { .. } => {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
@@ -2021,14 +2083,16 @@ impl<M: ShmMapper> WindowServer<M> {
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
-                parent: None,
+                transient: None,
                 layer: None,
             },
         );
         Ok(window_id)
     }
 
-    /// Open the popup or tool window `decoded` asks for, for `caller`.
+    /// Open the popup, tool window or dialog `decoded` asks for, for
+    /// `caller`, a dialog given the keyboard only where the caller has earned
+    /// the front.
     fn create_transient(
         &mut self,
         host: &mut dyn WindowHost,
@@ -2054,10 +2118,9 @@ impl<M: ShmMapper> WindowServer<M> {
                     event_endpoint,
                     frame_count,
                     surface: surface_of(width_px, height_px, stride_bytes, format),
-                    offset_x,
-                    offset_y,
                 };
-                self.open_transient(host, caller, &spec, |host, window_id| {
+                let kind = TransientKind::Popup;
+                self.open_transient(host, caller, &spec, kind, |host, window_id| {
                     host.popup_opened(
                         window_id,
                         parent_window_id,
@@ -2088,23 +2151,60 @@ impl<M: ShmMapper> WindowServer<M> {
                         event_endpoint,
                         frame_count,
                         surface: surface_of(width_px, height_px, stride_bytes, format),
-                        offset_x,
-                        offset_y,
                     },
+                    offset_x,
+                    offset_y,
                     carry,
                     title,
                 };
-                self.open_transient(host, caller, &spec.transient, |host, window_id| {
+                let kind = TransientKind::Tool;
+                self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
                     host.tool_opened(window_id, &spec)
                 })
+            }
+            WindowRequest::CreateDialog {
+                owner_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                modality,
+                title,
+            } => {
+                let spec = DialogSpec {
+                    transient: TransientSpec {
+                        parent_window_id: owner_window_id,
+                        shm_handle,
+                        event_endpoint,
+                        frame_count,
+                        surface: surface_of(width_px, height_px, stride_bytes, format),
+                    },
+                    modality,
+                    title,
+                };
+                // Earned as an alert's is, and spent the same way: one
+                // activation brings one surface over the user's work.
+                let focus = self.holds_the_front(host, caller);
+                let kind = TransientKind::Dialog;
+                let window_id =
+                    self.open_transient(host, caller, &spec.transient, kind, |host, window_id| {
+                        host.dialog_opened(window_id, focus, &spec)
+                    })?;
+                if focus {
+                    self.activations.remove(&caller);
+                }
+                Ok(window_id)
             }
             _ => Err(Errno::NotSupported),
         }
     }
 
-    /// Open a transient — a popup or a tool window — for `caller`, hung
-    /// from the caller's own top-level window `spec.parent_window_id`,
-    /// telling the host through `opened` before anything is committed.
+    /// Open a transient of `kind` for `caller`, hung from the caller's own
+    /// top-level window `spec.parent_window_id`, telling the host through
+    /// `opened` before anything is committed.
     ///
     /// A transient is validated exactly like a top-level [`Self::create`] —
     /// no kernel caller, the geometry holds every frame — and its parent must
@@ -2120,13 +2220,14 @@ impl<M: ShmMapper> WindowServer<M> {
         host: &mut dyn WindowHost,
         caller: ProcId,
         spec: &TransientSpec,
+        kind: TransientKind,
         opened: impl FnOnce(&mut dyn WindowHost, u64) -> Result<(), Errno>,
     ) -> Result<u64, Errno> {
         if caller.is_kernel() {
             return Err(Errno::PermissionDenied);
         }
         let parent = owned_window(&self.windows, caller, spec.parent_window_id)?;
-        if parent.parent.is_some() || parent.layer.is_some() {
+        if parent.transient.is_some() || parent.layer.is_some() {
             return Err(Errno::NotSupported);
         }
         let frame_len = frame_bytes(&spec.surface)?;
@@ -2159,7 +2260,10 @@ impl<M: ShmMapper> WindowServer<M> {
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
-                parent: Some(spec.parent_window_id),
+                transient: Some(Transient {
+                    parent: spec.parent_window_id,
+                    kind,
+                }),
                 layer: None,
             },
         );
@@ -2219,7 +2323,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
-                parent: None,
+                transient: None,
                 layer: Some(spec.depth),
             },
         );
@@ -2773,10 +2877,11 @@ impl<M: ShmMapper> WindowServer<M> {
 
     /// Close `caller`'s window `window_id`, dropping its region mapping.
     ///
-    /// Closing a top-level window also closes every popup anchored to it,
-    /// so a menu or sheet can never outlive the window it belongs to.
-    /// Closing a popup's own id tears down only that popup — a popup has
-    /// no popups of its own.
+    /// Closing a top-level window also closes every transient hung from it,
+    /// so a menu, palette or dialog can never outlive the window it belongs
+    /// to. Closing a transient's own id tears down only that transient — a
+    /// transient has none of its own. An alert holding any window closed is
+    /// dismissed with it.
     fn close(
         &mut self,
         host: &mut dyn WindowHost,
@@ -2785,11 +2890,11 @@ impl<M: ShmMapper> WindowServer<M> {
         window_id: u64,
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
-        self.remove_with_transients(host, window_id);
+        let closed = self.remove_with_transients(host, window_id);
         let held: Vec<u64> = self
             .alerts
             .iter()
-            .filter(|(_, record)| record.window == Some(window_id))
+            .filter(|(_, record)| record.window.is_some_and(|held| closed.contains(&held)))
             .map(|(&id, _)| id)
             .collect();
         for alert_id in held {
@@ -2803,8 +2908,9 @@ impl<M: ShmMapper> WindowServer<M> {
     /// Accept an alert for `caller`, returning the id its one answer names.
     ///
     /// The owner, when named, must be one of the caller's own top-level
-    /// windows: a transient comes and goes with a gesture, and a layer
-    /// surface never takes the keyboard an answer is typed with. The host
+    /// windows or dialogs: a popup or tool window comes and goes with a
+    /// gesture, and a layer surface never takes the keyboard an answer is
+    /// typed with. The host
     /// must accept before anything is recorded, so a refusal spends no id.
     fn open_alert(
         &mut self,
@@ -2823,7 +2929,10 @@ impl<M: ShmMapper> WindowServer<M> {
             0 => None,
             id => {
                 let record = owned_window(&self.windows, caller, id)?;
-                if record.parent.is_some() || record.layer.is_some() {
+                let fleeting = record
+                    .transient
+                    .is_some_and(|transient| transient.kind != TransientKind::Dialog);
+                if fleeting || record.layer.is_some() {
                     return Err(Errno::OutOfRange);
                 }
                 Some(id)
@@ -2934,22 +3043,26 @@ impl<M: ShmMapper> WindowServer<M> {
         )
     }
 
-    /// Remove `window_id` and every transient keyed to it — its popups and
-    /// any attached menu panel — telling the host of each teardown. The
-    /// window is dropped first, then its transients.
-    fn remove_with_transients(&mut self, host: &mut dyn WindowHost, window_id: u64) {
-        let transients: alloc::vec::Vec<u64> = self
-            .windows
-            .iter()
-            .filter(|(_, record)| record.parent == Some(window_id))
-            .map(|(&id, _)| id)
-            .collect();
-        self.windows.remove(&window_id);
-        host.window_closed(window_id);
-        for transient in transients {
-            self.windows.remove(&transient);
-            host.window_closed(transient);
+    /// Remove `window_id` and every transient keyed to it, telling the host
+    /// of each teardown, and answer every id removed. The window is dropped
+    /// first, then its transients.
+    fn remove_with_transients(&mut self, host: &mut dyn WindowHost, window_id: u64) -> Vec<u64> {
+        let mut closed = Vec::from([window_id]);
+        closed.extend(
+            self.windows
+                .iter()
+                .filter(|(_, record)| {
+                    record
+                        .transient
+                        .is_some_and(|transient| transient.parent == window_id)
+                })
+                .map(|(&id, _)| id),
+        );
+        for &id in &closed {
+            self.windows.remove(&id);
+            host.window_closed(id);
         }
+        closed
     }
 
     /// Unmap window `window_id`'s frame region, keeping the window itself:
@@ -3713,6 +3826,7 @@ fn refused(
         WindowRequest::Create { .. }
         | WindowRequest::CreatePopup { .. }
         | WindowRequest::CreateTool { .. }
+        | WindowRequest::CreateDialog { .. }
         | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), server),
         WindowRequest::OpenMenu { .. } | WindowRequest::OpenAlert { .. } => {
             minted_id_reply(reply, Err(err))
@@ -3727,6 +3841,7 @@ const fn named_mailbox(request: &WindowRequest) -> Option<u64> {
         WindowRequest::Create { event_endpoint, .. }
         | WindowRequest::CreatePopup { event_endpoint, .. }
         | WindowRequest::CreateTool { event_endpoint, .. }
+        | WindowRequest::CreateDialog { event_endpoint, .. }
         | WindowRequest::OpenLayer { event_endpoint, .. }
         | WindowRequest::OpenAlert { event_endpoint, .. } => Some(*event_endpoint),
         _ => None,

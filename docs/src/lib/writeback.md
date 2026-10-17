@@ -18,8 +18,9 @@ are the same for every format.
   the share every mounted volume draws on, never below one coalesced
   transfer; a machine that cannot spare that much refuses the mount.
 - **`CommitScheduler`** keeps the transaction's age against the window
-  `writeback_window_ns` gives its device class (longer where a device
-  command costs more, halved per pressure band) and reports the deadline to
+  `writeback_window_ns` gives what one command to its device costs
+  (`BlkCommandCost`: 30 s bridged, 15 s seeking, 5 s cheap; halved per
+  pressure band) and reports the deadline to
   the host, whose timer flushes a volume that falls quiet. `defers` says
   whether a transaction left open will be published that way; without a
   host or a clock, a driver publishes every operation.

@@ -3,12 +3,11 @@
 //!
 //! This is the composition the **host-controller driver** runs at start-up: it
 //! brings the controller up over the device-resource grants the kernel minted
-//! for it (its already-assigned register BAR and a DMA constraint) and returns
-//! the [`UsbDevice`] enumeration engine. The engine is pointed at the attached
-//! device's slot when one is present, or left serving with its first-connect
-//! watch armed when none is (a keyboard absent at boot is a first-class state,
-//! not a failure).
-//! The HCD then serves that device's transfers over the URB transport seam
+//! for it (its already-assigned register BAR and a DMA constraint), powers its
+//! ports and returns the [`UsbHost`] with the walk of every port started. The
+//! HCD's serve loop runs that walk, as it runs everything the engine does; a
+//! keyboard absent at boot is a first-class state, not a failure. The HCD then
+//! serves each device's transfers over the URB transport seam
 //! (`tairix_usb::transport`) to the autoloaded class driver — it does **not**
 //! decode HID reports itself; that is the class driver's job.
 //!
@@ -34,20 +33,17 @@
 //! live controller bring-up is the on-metal acceptance item.
 
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
-use tairix_abi::{CapabilityId, Delay, DriverError, DriverHost, MmioMapper, RegisterWindow};
-use tairix_usb::device::{EnumStage, EventWait, UsbDevice};
+use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapper, RegisterWindow};
+use tairix_usb::device::UsbHost;
 use tairix_usb::{SlabBank, Xhci, XhciOpenStage, DEFAULT_POLL_BUDGET};
 
-/// The brought-up controller engine the HCD serves: a [`UsbDevice`] over the
-/// mapped register BAR and a growable [`SlabBank`] of DMA chunks minted from
-/// the host's DMA seam (so per-device memory is allocated on attach and
-/// released on detach, bounded by the controller's slots and genuine
-/// exhaustion — never a fixed carve). It is enumerated and pointed at the
-/// attached device's slot when a device is present, or left serving with its
-/// first-connect watch armed when none is yet attached. The `'h` lifetime is
-/// the borrow of the [`DriverHost`] whose DMA seam backs the bank and of the
-/// [`EventWait`] seam the engine's synchronous waits park on.
-pub type ControllerDevice<'h> = UsbDevice<'h, RegisterWindow, SlabBank<'h>>;
+/// The brought-up controller the HCD serves: the engine over the mapped
+/// register BAR and a growable [`SlabBank`] of DMA chunks minted from the
+/// host's DMA seam, so per-device memory is allocated on attach and released
+/// on detach, bounded by the controller's slots and genuine exhaustion. The
+/// `'h` lifetime is the borrow of the [`DriverHost`] whose DMA seam backs the
+/// bank.
+pub type ControllerHost<'h> = UsbHost<'h, RegisterWindow, SlabBank<'h>>;
 
 /// The concrete bring-up inputs the HCD derives from its kernel-issued
 /// device-resource grants to drive [`bring_up_controller`].
@@ -157,8 +153,8 @@ where
     })
 }
 
-/// Bring up the granted xHCI controller and enumerate the attached device,
-/// returning the [`ControllerDevice`] engine pointed at its slot.
+/// Bring up the granted xHCI controller and start the walk of its ports,
+/// returning the [`ControllerHost`] whose serve loop runs it.
 ///
 /// `host` is the HCD process's [`DriverHost`] over its kernel-issued
 /// device-resource grants. `bar_base`/`bar_len` name the controller's
@@ -167,10 +163,6 @@ where
 /// bridge lets the controller reach, or [`None`] where the platform imposes
 /// none. The carved region's device-visible end must lie wholly below it or
 /// the controller could not reach its own rings.
-/// `delay` supplies the hardware-dictated hub settle windows and `wait` the
-/// parked event-wait seam the engine's synchronous completion waits block
-/// through (on metal: a park on the controller's bound interrupt line, so the
-/// caller must have bound that line first); the caller owns the clock.
 ///
 /// The DMA region is carved and aperture-checked before any register is
 /// touched, so a region the controller could not reach is refused fail-closed
@@ -186,15 +178,13 @@ where
 /// Requires [`CapabilityId::MMIO_MAP`] (to map the register BAR); the DMA
 /// carve is gated on the host's own DMA capability (`CAP_MEM_DMA`) at
 /// allocation time. Both are re-checked kernel-side at each map/allocation.
-pub fn bring_up_controller<'h>(
-    host: &'h dyn DriverHost,
-    delay: &dyn Delay,
-    wait: &'h dyn EventWait,
+pub fn bring_up_controller(
+    host: &dyn DriverHost,
     bar_base: u64,
     bar_len: usize,
     dma_aperture_top: Option<u64>,
-) -> Result<ControllerDevice<'h>, DriverError> {
-    bring_up_controller_diagnostic(host, delay, wait, bar_base, bar_len, dma_aperture_top)
+) -> Result<ControllerHost<'_>, DriverError> {
+    bring_up_controller_diagnostic(host, bar_base, bar_len, dma_aperture_top)
         .map_err(|err| err.error)
 }
 
@@ -213,17 +203,15 @@ pub enum BringupPhase {
     /// Bringing the controller to the halted/reset state ([`Xhci::open`]).
     ControllerOpen,
     /// Growing and programming the controller's shared DMA structures and
-    /// starting the controller ([`UsbDevice::start`]). Covers the shared
+    /// starting the controller ([`UsbHost::start`]). Covers the shared
     /// chunk's allocation and its aperture/alignment refusals (the bank
     /// fails closed on a chunk the controller could not reach).
     ControllerStart,
-    /// Bringing the controller up to serve the attached devices
-    /// ([`UsbDevice::bring_up`]). Only a fault of the **controller** reaches
-    /// this phase: neither a device absent at boot nor one that will not
-    /// enumerate is a failure — the latter is a counted skip
-    /// ([`UsbDevice::skipped_port_count`]) and the controller is left
-    /// serving.
-    Enumerate,
+    /// Powering the root ports and starting their walk
+    /// ([`UsbHost::bring_up`]). Only a fault of the **controller** reaches
+    /// this phase: a device that will not enumerate is a counted skip the
+    /// serve loop reports, never a bring-up failure.
+    PortPower,
 }
 
 impl BringupPhase {
@@ -235,7 +223,7 @@ impl BringupPhase {
             Self::BarMap => "bar_map",
             Self::ControllerOpen => "controller_open",
             Self::ControllerStart => "controller_start",
-            Self::Enumerate => "enumerate",
+            Self::PortPower => "port_power",
         }
     }
 }
@@ -245,14 +233,10 @@ impl BringupPhase {
 /// step stalled. The engine itself holds no logging dependency; the HCD wraps
 /// the engine with its own diagnostics and emits this through `lib/log`.
 ///
-/// Which fields are populated depends on [`Self::phase`]:
-///
-/// * [`BringupPhase::ControllerOpen`] sets [`Self::open_stage`] and the
-///   [`Self::usbcmd`]/[`Self::usbsts`] snapshot the reset stage observed.
-/// * [`BringupPhase::Enumerate`] sets [`Self::enum_stage`],
-///   [`Self::last_completion`], [`Self::last_event_type`],
-///   [`Self::last_reject`] and the [`Self::port1_portsc`] snapshot.
-/// * The earlier phases carry only [`Self::phase`] and [`Self::error`].
+/// [`BringupPhase::ControllerOpen`] sets [`Self::open_stage`], and it and
+/// [`BringupPhase::PortPower`] the [`Self::usbcmd`]/[`Self::usbsts`] snapshot
+/// the failing stage observed; the other phases carry only [`Self::phase`]
+/// and [`Self::error`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ControllerBringupError {
     /// The phase that failed.
@@ -266,27 +250,10 @@ pub struct ControllerBringupError {
     pub usbcmd: Option<u32>,
     /// `USBSTS` observed at the failing stage, if readable.
     pub usbsts: Option<u32>,
-    /// The enumeration stage last entered, set only for
-    /// [`BringupPhase::Enumerate`].
-    pub enum_stage: Option<EnumStage>,
-    /// Raw xHCI completion code of the last event the failing transfer saw
-    /// (`0` = none/timeout), for [`BringupPhase::Enumerate`].
-    pub last_completion: u8,
-    /// Raw TRB-type of the last event the failing transfer saw, for
-    /// [`BringupPhase::Enumerate`].
-    pub last_event_type: u8,
-    /// Why the last event wait was rejected (see
-    /// [`UsbDevice::last_reject_reason`]), for [`BringupPhase::Enumerate`].
-    pub last_reject: u8,
-    /// Raw `PORTSC` of root-hub port 1, if readable, for
-    /// [`BringupPhase::Enumerate`].
-    pub port1_portsc: Option<u32>,
 }
 
 impl ControllerBringupError {
-    /// A bare fault at `phase` with no captured controller state — the early
-    /// phases (setup, DMA carve/aperture, BAR map) and a controller-start
-    /// stall, which carry only the coarse error.
+    /// A bare fault at `phase` with no captured controller state.
     const fn bare(phase: BringupPhase, error: DriverError) -> Self {
         Self {
             phase,
@@ -294,11 +261,6 @@ impl ControllerBringupError {
             open_stage: None,
             usbcmd: None,
             usbsts: None,
-            enum_stage: None,
-            last_completion: 0,
-            last_event_type: 0,
-            last_reject: 0,
-            port1_portsc: None,
         }
     }
 }
@@ -309,13 +271,10 @@ impl ControllerBringupError {
 ///
 /// The HCD calls this (rather than the plain [`bring_up_controller`]) so it can
 /// emit a one-shot diagnostic through `lib/log` when the controller does not
-/// come up. On a non-I/O-coherent platform a stall at
-/// [`BringupPhase::Enumerate`] with `enum_stage = EnableSlot` and
-/// `last_completion = 0` is the classic DMA-not-visible signature; a
-/// [`BringupPhase::ControllerOpen`] stall names the reset sub-stage and its
-/// `USBCMD`/`USBSTS`. A device that merely failed to enumerate never lands
+/// come up: a [`BringupPhase::ControllerOpen`] stall names the reset sub-stage
+/// and its `USBCMD`/`USBSTS`. A device that fails to enumerate never lands
 /// here — the walk skips it and the HCD warns with that port's own snapshot
-/// ([`UsbDevice::last_attach_fault`]) while the controller keeps serving.
+/// while the controller keeps serving.
 ///
 /// # Errors
 ///
@@ -324,14 +283,12 @@ impl ControllerBringupError {
 /// # Capabilities
 ///
 /// As [`bring_up_controller`].
-pub fn bring_up_controller_diagnostic<'h>(
-    host: &'h dyn DriverHost,
-    delay: &dyn Delay,
-    wait: &'h dyn EventWait,
+pub fn bring_up_controller_diagnostic(
+    host: &dyn DriverHost,
     bar_base: u64,
     bar_len: usize,
     dma_aperture_top: Option<u64>,
-) -> Result<ControllerDevice<'h>, ControllerBringupError> {
+) -> Result<ControllerHost<'_>, ControllerBringupError> {
     // Capability before state; the kernel re-checks at the map/allocation
     // traps regardless.
     if !host.has_capability(CapabilityId::MMIO_MAP) {
@@ -383,35 +340,21 @@ pub fn bring_up_controller_diagnostic<'h>(
 
     // Grow the shared chunk out of the bank, lay out and program the
     // device-shared structures, start the controller, and enable its
-    // completion interrupter (the engine's waits park on it).
-    let mut device = UsbDevice::start(xhci, dma, wait, DEFAULT_POLL_BUDGET)
+    // completion interrupter, which wakes the serve loop.
+    let mut controller = UsbHost::start(xhci, dma, DEFAULT_POLL_BUDGET)
         .map_err(|e| ControllerBringupError::bare(BringupPhase::ControllerStart, e))?;
 
-    // Bring the controller up to serve every reachable device, transparently
-    // descending through hubs — including a hub plugged into a hub. The
-    // arch-neutral root→hub→downstream orchestration lives once in
-    // `tairix_usb`, so each device is discovered, never a guessed port. A
-    // device absent at boot is
-    // **not** a failure: `bring_up` leaves the controller up with the
-    // first-connect watch armed (the onboard hub's status-change endpoint, or
-    // the root port), and the HCD publishes interface nodes only for the
-    // devices actually enumerated. On a real bring-up failure the engine's
-    // per-transfer breadcrumbs localise the stall.
-    match device.bring_up(delay) {
-        // The served devices — possibly none yet — are the live
-        // `device_live` indices; either way the controller is serving.
-        Ok(()) => {}
-        Err(error) => {
-            let mut e = ControllerBringupError::bare(BringupPhase::Enumerate, error);
-            e.enum_stage = Some(device.enum_stage());
-            e.last_completion = device.last_completion_code();
-            e.last_event_type = device.last_event_type();
-            e.last_reject = device.last_reject_reason();
-            e.port1_portsc = device.port_status_raw(1);
-            return Err(e);
+    // Power the ports and start their walk: each port, root or behind a hub,
+    // is reconciled by its own operation as the serve loop runs.
+    if let Err(error) = controller.bring_up() {
+        let mut e = ControllerBringupError::bare(BringupPhase::PortPower, error);
+        if let Ok(mut core) = controller.device() {
+            e.usbcmd = core.read_usbcmd();
+            e.usbsts = core.read_usbsts();
         }
+        return Err(e);
     }
-    Ok(device)
+    Ok(controller)
 }
 
 #[cfg(test)]

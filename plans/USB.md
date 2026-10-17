@@ -35,6 +35,7 @@ type today is allowed; it requires regenerating the C header
 | U11 | The host controller is class-neutral: raw interrupt-IN reports sized by the class driver, a one-page control data stage, a control-request policy scoped to the node's own interface, and the interface number on the node (`plans/HID.md` H4) | done |
 | U12 | A failed endpoint recovery — a device's interrupt-IN endpoint, or a hub's status-change watch — is decided by its settled port: recovered in place where the device is only disturbed, freed where the port is vacant, and the port reset and enumerated afresh where neither holds | done |
 | U13 | A bulk transfer is bounded and its pipe always recovered: every bulk URB carries a deadline the HCD abandons it at, every halting completion is recovered in place, and a class driver clears a pipe's halt through `ClearHalt` with both data toggles reset | done |
+| U14 | The engine never waits: every control transfer, command, port reset, enumeration and recovery is an operation driven by routed events and one-shot timers, so one device's slow pipe holds up no other | done |
 | UM | Live metal acceptance of attach, detach, re-attach, cold boot unplugged, a controller reset under a live keyboard, a transaction-translator glitch ridden out in place, and a stick whose transfer fails mid-command recovering in place, with `usb_hid` serving a keyboard, a mouse and a touchpad | blocked: the operator's Pi 4 run (QEMU models no Pi USB) |
 
 ---
@@ -133,18 +134,16 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 - It knows nothing of PCIe, the VL805, or any board: it received its register
   window and DMA constraint as grants on its matched node.
 - **It is a single asynchronous event loop, never a per-URB blocking server
-  (§2.23).** The HCD must service two independent event streams at once —
-  incoming URB-submit IPC calls on the per-interface endpoints it serves, and
-  its controller's completion/PORTSC interrupts on the event ring — for
-  arbitrarily many interfaces (the USB-mouse-alongside-keyboard case, §0).
-  Blocking inside one interface's URB handler would stall every other
-  interface, so the loop **multiplexes**: it parks on a kernel **wait-set**
-  (`U3a3`) holding its URB-submit endpoints *and* its controller IRQ line,
-  wakes on whichever is ready, and either accepts a new URB (queues it on the
-  ring, leaving the caller's URB call outstanding) or drains the event ring on
-  an interrupt and **replies to the now-complete URB calls** — completions are
-  delivered asynchronously, not synchronously per submit. One CPU-free park
-  covers all interfaces; an idle controller burns nothing.
+  (§2.23).** The HCD services two independent event streams — URB-submit
+  IPC calls on the per-interface endpoints it serves, and its controller's
+  interrupt — for arbitrarily many interfaces (the USB-mouse-alongside-keyboard
+  case, §0). It parks on a kernel **wait-set** (`U3a3`) holding both, and every
+  wake runs one service step of the engine (U14): every event the controller
+  posted is routed, and every operation an event or a due timer moved runs.
+  A call is answered at once only when it finishes at once; otherwise it is
+  held and answered when the engine finishes it. The park is bounded by the
+  earliest deadline an operation, a held URB or a retry owes, and is
+  unbounded when none is; an idle controller burns nothing.
 
 ### 1.2 The class driver
 
@@ -167,11 +166,15 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
   - a **URB** (USB request block) — endpoint address, transfer type
     (control/interrupt/bulk), direction and length, its data always in the
     node's shared buffer — answered with a typed completion: status, bytes
-    transferred;
+    transferred. Every bulk and control URB carries the class driver's
+    deadline; the HCD holds a control URB no longer than
+    `USB_CONTROL_TIMEOUT_MAX_MS` (5 s, USB 2.0 §9.2.6.4) whatever it asks, and
+    an interrupt URB may carry none, to wait for the next report;
   - an **interface operation** — select an alternate setting, which reserves
-    bus bandwidth and so is the HCD's alone, or claim a sibling interface the
-    device publishes no node for (a streaming interface a control interface
-    governs);
+    bus bandwidth and so is the HCD's alone, clear a pipe's halt, or claim a
+    sibling interface the device publishes no node for (a streaming interface
+    a control interface governs). One the engine runs over several commands
+    is held as a URB is;
   - an **isochronous stream** operation — start, queue a slot, stop — over a
     region of its own the HCD grants the caller, each finished slot reported
     to the notify port the caller's attested pid names (`plans/SOUND.md`
@@ -438,15 +441,14 @@ nothing of the VL805's own behaviour.
   - **Hub-downstream hot-plug is event-driven, not polled.** The `UsbDevice`
     engine, when it descends through a hub, configures and **arms the
     hub's interrupt-IN status-change endpoint** (USB 2.0 §11.12.3) and keeps
-    the hub addressed (the resting active control context) concurrently with
-    the downstream device. The shared xHCI event ring is **demultiplexed per
-    endpoint** (`hub_async_index`/`report_async_index` + the per-device and
-    per-hub parking slots), so a status-change report and a keyboard report
-    never collide and a synchronous EP0/command wait never faults on an async
-    completion. `next_hub_change` reads the changed downstream port: a
+    the hub addressed concurrently with the downstream device, each on its
+    own control pipe. The shared xHCI event ring is **routed per endpoint**
+    (`hub_async_index`/`report_async_index` + the per-device and per-hub
+    parking slots), so a status-change report and a keyboard report never
+    collide. A report wakes each port it names, whose operation reads it: a
     disconnect frees the device slot (Disable Slot) → `HubEvent::Detached`; a
     connect enumerates a **brand-new** device → `HubEvent::Attached`. No
-    busy-poll, no spin (§2.23) — it parks on the controller interrupt.
+    busy-poll, no spin (§2.23).
   - **Every port-change latch is drained, not just connect.** Resetting a
     downstream port during enumeration latches the hub's Reset-change (and may
     latch Enable-change) in `wPortChange` alongside Connect-change; a hub keeps
@@ -482,8 +484,8 @@ nothing of the VL805's own behaviour.
     ticket from the vanished instance. A freed device slot is retained as
     `UsbDevice::freed_slot` so a **trailing** transfer completion the controller
     still posts for the gone slot (a dropped in-flight transfer, or a Disable
-    Slot side-effect) is drained by the event-ring consumers
-    (`stash_async_event`/`drain_events`) rather than faulted — without
+    Slot side-effect) is dropped by the service step's routing rather than
+    faulted — without
     this such an event matched no live endpoint and faulted the hub watch,
     silencing it so a later re-plug went unseen. The tolerance is cleared once a
     fresh device enumerates.
@@ -516,12 +518,11 @@ nothing of the VL805's own behaviour.
       and the xHCI event ring queues the completions. Bounded by the ring (one
       slot stays free); in-flight-but-unretired transfers count against the
       depth, so retiring a completion is what re-opens a slot.
-    - **A consumer-independent pump on every controller interrupt.** The HCD
-      calls `UsbDevice::pump_reports` from its wait-set IRQ branch on *every*
-      controller completion interrupt, **before** it services any outstanding
-      class-driver URB. The pump arms every served interrupt-IN endpoint and
-      drains all posted completions off the shared event ring
-      (`UsbDevice::drain_events` → `capture_report_event`): each report is
+    - **Consumer-independent capture in every service step.** The service
+      step the HCD runs on *every* wake (`UsbHost::service`), **before** it
+      drives any held class-driver URB, arms every served interrupt-IN
+      endpoint and routes every posted completion off the shared event ring
+      (`capture_report_event`): each report is
       **copied out of its DMA slot into a bounded per-device software FIFO**
       (`DeviceState::reports`, `REPORT_QUEUE_CAP`) and the slot is re-armed at
       once. Capture therefore happens the instant the controller posts a
@@ -532,8 +533,8 @@ nothing of the VL805's own behaviour.
       adapted to the microkernel's user-space HCD: the re-arm is on the
       controller's interrupt, not on a starvable per-URB path.
     - **The HCD runs in the strict-priority real-time scheduling class.** The
-      pump above removes the dependency on the *class driver* being scheduled,
-      but the pump itself runs in the HCD task, which is woken by the
+      capture above removes the dependency on the *class driver* being
+      scheduled, but the capture itself runs in the HCD task, which is woken by the
       controller IRQ (`irq_wait`) and must be *dispatched* to run. Under
       `stress --cpu N` a fair-scheduled HCD would merely compete with the
       CPU-bound tasks, so the wake-to-run latency could stretch until the
@@ -566,9 +567,9 @@ nothing of the VL805's own behaviour.
     memory: the oldest buffered report is dropped so the newest device state is
     kept, and the loss is counted (`dropped_report_total`) and logged by the
     HCD — never silent. The single `pending_report` slot the old parking path
-    used is replaced by this FIFO, which also fixes a latent fault: with several
-    transfers armed, more than one report completion can now arrive during a
-    synchronous EP0/command wait, which the single slot would have faulted.
+    used is replaced by this FIFO: with several transfers armed, more than one
+    report completion can arrive in one service step, which the single slot
+    would have faulted.
     Regressions: `the_interrupt_pump_keeps_reports_flowing_past_the_armed_depth_with_no_class_urb`,
     `the_interrupt_pump_captures_a_mouse_the_same_way_as_a_keyboard`,
     `a_permanently_stalled_consumer_bounds_the_buffer_and_counts_dropped_reports`,
@@ -588,28 +589,22 @@ nothing of the VL805's own behaviour.
     still being brought up*, the reported on-metal defect (typing during boot
     killed the keyboard, and a transient mouse fault stormed a core).
     - **Recovery must not run from `capture_report_event`.** Report capture
-      runs from the shared drain *and re-entrantly from inside a synchronous
-      EP0/command wait* (`await_event_for` stashes an asynchronous report and
-      keeps waiting). Recovery
-      (`UsbDevice::recover_interrupt_endpoint`: Reset Endpoint → rebuild the
-      transfer ring at its base → Set TR Dequeue Pointer → device-side
-      `CLEAR_FEATURE(ENDPOINT_HALT)`) *itself* waits on the shared event ring,
+      runs inside the service step's routing. Recovery (Reset Endpoint →
+      rebuild the transfer ring at its base → Set TR Dequeue Pointer →
+      device-side `CLEAR_FEATURE(ENDPOINT_HALT)`) waits on routed completions,
       during which another interrupt fault for the same endpoint (a held key,
-      a moving mouse) lands back in capture — so recovering there recurses into
-      recovery and scrambles the ring recovery is rebuilding. On metal that
+      a moving mouse) lands back in capture — so recovering there would
+      re-enter recovery and scramble the ring it is rebuilding. On metal that
       recursion made recovery fault, which recorded a fatal report fault, which
       killed the class driver after a few consecutive pump errors (the
       "type during boot and the keyboard stops working" symptom), leaving the
       halted endpoint's later recovered reports with no consumer — the
       dropped-report storm.
-    - **So capture only flags** (`DeviceState::int_recovery_pending`); the
-      real recovery is performed by
-      `UsbDevice::recover_report_endpoint_if_pending`, called at top level from
-      `next_report` and `pump_reports` (the HCD's URB service and per-interrupt
-      pump), never from inside a synchronous wait. A guard
-      (`DeviceState::int_recovering`) makes any interrupt completion arriving
-      during recovery's own waits re-flag the endpoint instead of touching the
-      ring, so recovery can never re-enter itself. Recovered, the endpoint is
+    - **So capture only flags** the endpoint and asks for its recovery, which
+      runs as an operation of its own (`recover::recover_reports`, one per
+      device owner), never inside the routing. An interrupt completion arriving
+      during the recovery's own waits only re-flags the endpoint, so recovery
+      can never re-enter itself. Recovered, the endpoint is
       re-armed and the URB stays parked (`Ok(None)`), so a transient fault
       never reaches — and kills — the class driver.
     - **A failed recovery owes deferred retries that read the settled
@@ -637,8 +632,8 @@ nothing of the VL805's own behaviour.
       answers but that halts again before any report counts as failed, and a
       device the reset produced that fails the same way is given up, its port
       left unserved until a re-plug, rather than reset forever.
-      `detach_if_device_gone` leaves a device whose recovery is owed to the
-      retry, and otherwise frees one only on a port read that comes back
+      `UsbHost::confirm_departure` leaves a device whose recovery is owed to
+      the retry, and otherwise frees one only on a port read that comes back
       vacant. Every endpoint kind stops through the one idempotent
       `stop_endpoint` (the command its likely state needs first, the other on
       Context State Error) and restarts through `restart_ring`, so a recovery
@@ -705,52 +700,48 @@ nothing of the VL805's own behaviour.
     `IR_IMOD == IMODI_DEFAULT`.
   - **Root-port hot-plug is a per-port CSC scan, uniform for every port.**
     A connect or disconnect on any root port latches `PORTSC.CSC` (and
-    posts the Port Status Change Event that raises the interrupt);
-    `UsbDevice::next_root_change` — called by the HCD on each interrupt
-    wake, after the ring drain — reads each port's latch, consumes
-    it (`Xhci::clear_port_connect_change`, RW1C-masked), re-reads the live
-    connect state, and reconciles: a new connect on an unserved port is
-    attached in place (`UsbDevice::attach_root_port` — a hub tier
-    installed, descended, and watched, or a leaf served), and a disconnect
-    detaches exactly what that port carried (a hub tier cascades with
-    everything behind it). The controller is **never** reset for routine
+    posts the Port Status Change Event that raises the interrupt); the
+    service step's root-port scan hands each changed port to its own
+    operation (`port::serve_port`), which consumes the latches
+    (`Xhci::clear_port_changes`, RW1C-masked), re-reads the live connect
+    state, and reconciles: a new connect on an unserved port is attached in
+    place (a hub tier installed, descended, and watched, or a leaf served),
+    and a disconnect detaches exactly what that port carried (a hub tier
+    cascades with everything behind it). The controller is **never** reset for routine
     hot-plug, so sibling ports' devices are untouched; the latch scan is
-    register-confirmed, so a Port Status Change Event consumed by an
-    engine wait can never lose a plug. `reset_and_reenumerate` (full
+    register-confirmed, so no plug is lost to a coalesced event. `reset_and_reenumerate` (full
     HCRST + re-program + full re-walk) remains only as the latched
     controller-fault recovery. Fail-soft per port, mirroring the hub scan:
-    a failed attach consumes the latch (no re-fire storm), snapshots
-    `last_attach_fault` (with the root port number; `port_status` is `0` —
-    a root port has no hub-format `wPortStatus`), and the first failure is
-    surfaced for the HCD's breadcrumb log.
+    a failed attach consumes the latch (no re-fire storm), records its
+    `AttachFault` from the operation's own breadcrumb (with the root port
+    number; `port_status` is `0` — a root port has no hub-format
+    `wPortStatus`), and the first failure is taken by the HCD's log
+    (`UsbDevice::take_attach_fault`).
   - **The `PORTSC` walk is armed by a latched event, never run
-    unconditionally.** `next_root_change` returns immediately unless
+    unconditionally.** The scan returns immediately unless
     `root_change_pending` is set, because on a PCIe controller each `PORTSC`
     read is a non-posted round trip — the most expensive operation on the
     report path — and a mouse in motion makes that path run ~1000 times a
     second. Two independent xHCI-mandated latches arm it: a **Port Status
-    Change Event** recorded in `poll_event`, the one point every ring consumer
-    funnels through (so a plug whose event was swallowed by a synchronous
-    engine wait is still scanned for), and the **`USBSTS.PCD`** summary, read
+    Change Event** recorded in `poll_event`, the one point the service step
+    reads the ring through, and the **`USBSTS.PCD`** summary, read
     and cleared by the interrupt acknowledgement that had to write that
     register anyway. It starts armed and is re-armed by
     `reset_and_reenumerate`, so bring-up and post-reset re-enumeration scan
-    ports the firmware may already have left connected. Only a scan that walks
-    every port and finds nothing actionable disarms — an actionable event
-    returns mid-walk with later ports unvisited, and the HCD re-scans until it
-    sees a quiet pass. Regressions:
+    ports the firmware may already have left connected. A scan visits every
+    port and hands each changed one to its operation. Regressions:
     `a_drained_port_status_change_event_arms_the_root_scan`,
     `the_usbsts_port_change_summary_arms_the_root_scan`,
     `an_unarmed_root_scan_touches_no_port_register`,
-    `an_actionable_root_change_leaves_the_scan_armed_for_the_remaining_ports`,
+    `every_root_port_changed_under_one_arming_is_served`,
     `a_controller_reset_rearms_the_root_scan`.
   - **The event ring is drained once per interrupt, by one classifier, reading
-    one TRB per probe.** The HCD's interrupt service is *acknowledge → drain →
-    dispatch*: `pump_reports` makes the single pass that sorts every posted
-    event into its consumer's buffer (reports into per-device FIFOs with the
-    endpoint re-armed, each watched hub's status report into its parked slot,
-    bulk into its FIFO, a Port Status Change Event into the scan arming), and
-    hot-plug and the URB replies then read those buffers. The hub watch takes
+    one TRB per probe.** The interrupt is acknowledged, then the service step
+    makes the single pass that sorts every posted event into its consumer
+    (reports into per-device FIFOs with the endpoint re-armed, each watched
+    hub's status report into its parked slot, bulk into its FIFO, a command
+    completion to its poster by TRB address, a Port Status Change Event into
+    the scan arming), and hot-plug and the URB replies then read those. The hub watch takes
     what that drain parked rather than walking the ring with a second copy of
     the same dispatch decision, and `poll_event` reads the single 16-byte entry
     at the dequeue point rather than the whole segment out of non-cacheable
@@ -769,9 +760,9 @@ nothing of the VL805's own behaviour.
     both a root port and a downstream hub port, and confirm the CPU drop while
     moving a mouse.
   - **Every reachable device is served concurrently — on every root
-    port.** `UsbDevice::bring_up` powers all root ports, parks through the
-    connect-debounce window, then attaches **every** connected root port
-    (`attach_root_port`, fail-soft per port): a hub tier (the Pi 4's
+    port.** `UsbHost::bring_up` powers all root ports, waits out the
+    connect-debounce window on a timer, then hands **every** root port to its
+    own operation (fail-soft per port): a hub tier (the Pi 4's
     onboard USB2 hub) is installed, descended — every connected downstream
     port, nested tiers included — and watched, and a directly-attached
     device (the Pi 4's USB3 side of each jack is wired straight to a root
@@ -780,11 +771,9 @@ nothing of the VL805's own behaviour.
     single-root special case (the shared-chunk `enumerate_hid` path and
     the engine-level `root_port`/`root_speed`) is deleted; a hub records
     its root port in its `HubState` (children inherit it into their slot
-    contexts) and a leaf in its `DeviceState`, which also lets
-    `detach_if_device_gone` confirm a *direct* device's removal on its
-    root port's live `CCS`. The resting control cursor generalises with it
-    (`rest_active_context`: lowest live hub, else a live device, else the
-    no active control endpoint at all — never a released region). Devices
+    contexts) and a leaf in its `DeviceState`, so a *direct* device's
+    removal is confirmed on its root port's live `CCS`. Each slot has a
+    control pipe of its own (U14). Devices
     fill a
     growable table bounded only by the
     controller's reported slot count and genuine memory exhaustion — a
@@ -803,7 +792,7 @@ nothing of the VL805's own behaviour.
     root device is the onboard hub but no downstream device is connected yet,
     the hub's status-change watch is armed; when no root device is present at
     all, the controller waits for the first root-port connect, which the
-    `next_root_change` scan attaches with no reset. The HCD
+    root port's operation attaches with no controller reset. The HCD
     publishes an interface node per device actually enumerated
     (`device_live(index)`), so a cold boot with nothing plugged in works:
     plug a device in afterwards and it autoloads. `reset_and_reenumerate`
@@ -841,11 +830,11 @@ nothing of the VL805's own behaviour.
     the root port.** When a hub sits directly on a root port and is itself
     pulled, the unplug surfaces as that root port clearing its connect bit, not
     as a downstream hub-port status-change (the hub is gone, so it answers
-    neither its status-change endpoint nor a `GET_PORT_STATUS`). The
-    `next_root_change` scan sees the latched change, cascades the tier down
+    neither its status-change endpoint nor a `GET_PORT_STATUS`). The root
+    port's operation sees the latched change, cascades the tier down
     (`detach_hub`: every device and deeper tier behind it), and the HCD
     reconciles its nodes; the later re-plug is attached afresh by the same
-    scan — hub reinstalled, descended, watched — with no controller reset,
+    operation — hub reinstalled, descended, watched — with no controller reset,
     so sibling ports' devices are untouched.
   - **Downstream keyboard unplug behind a *persistent* hub.** The Pi 4
     keyboard hangs off a hub that stays plugged in, so on unplug the root
@@ -861,29 +850,24 @@ nothing of the VL805's own behaviour.
     completion code stays captured in `last_report_fault_code` for the
     diagnostics.
   - **The teardown is best-effort and never blocks on the controller.** The
-    metal capture then showed the *teardown itself* timing out (`reject_hex=4`):
-    `detach_downstream_device` issued a Disable Slot command and waited for its
-    completion, but the gone device's hub does not let the controller post that
-    completion in time, so the teardown returned `DeviceFault`, the slot was
-    never freed (its table entry stayed live), and `process_hub_change`
-    ignored the re-plug connect (it enumerates only when no device is tracked) —
-    the "no log on re-plug" symptom. `UsbDevice::disable_slot_best_effort` now
-    posts the Disable Slot, waits within budget, and **frees the local slot
-    state regardless of whether the controller confirms** — retiring the
-    command-ring slot either way so the ring stays consistent for the next
-    enumeration. A Disable Slot completion arriving after the wait is settled
-    by the event-ring consumers (`UsbDevice::settle_awaited_disable`) rather
-    than faulting the hub watch: a confirmation clears the slot's DCBAA entry
+    metal capture showed a teardown that waited for its Disable Slot
+    timing out: the gone device's hub does not let the controller post that
+    completion in time. A teardown therefore posts the Disable Slot and
+    **frees the local slot state at once**, whether or not the controller
+    confirms; a command it never completes is aborted at its deadline (U14),
+    so the ring stays consistent for the next enumeration. The completion,
+    whenever it lands, is settled by its routing
+    (`UsbDevice::settle_awaited_disable`): a confirmation clears the slot's DCBAA entry
     and returns the region withheld behind it, a refusal leaves it withheld
     until a controller reset. The hub's connect change then re-enumerates a
     fresh keyboard. Host regressions:
     `a_gone_device_whose_port_still_reads_connected_is_freed_once_its_retries_are_spent`,
     `a_gone_device_is_freed_even_when_its_disable_slot_is_never_confirmed`,
     `rejected_report_records_its_completion_code_surviving_a_later_control_transfer`.
-  - **A failed status-change service never silences the watch.**
-    `UsbDevice::next_hub_change` re-arms the hub's status-change interrupt-IN
-    endpoint (a fresh transfer + doorbell) **even when `process_hub_change`
-    returns an error**, then surfaces that error. Right after a downstream
+  - **A failed status-change service never silences the watch.** The
+    service step re-arms the hub's status-change interrupt-IN endpoint (a
+    fresh transfer + doorbell) **before** the ports the report names are
+    served, so no failure serving them can leave it unarmed. Right after a downstream
     disconnect the gone device's transaction translator can briefly fail a hub
     class control transfer (the `reject_hex=4` timeout), so servicing that
     report faults; previously the re-arm was skipped on that error, leaving the
@@ -898,8 +882,9 @@ nothing of the VL805's own behaviour.
     metal capture — halts the hub's status-change endpoint. Taken for a
     report and re-armed, it never completed again, so no later unplug or
     re-plug behind the hub was seen, which is how a keyboard dropped by a
-    glitch stayed gone even when re-plugged. `next_hub_change` recovers the
-    endpoint instead — stopped, its ring restarted, the hub's own
+    glitch stayed gone even when re-plugged. The service step asks for the
+    endpoint's recovery instead (`recover::recover_hub_watch`) — stopped, its
+    ring restarted, the hub's own
     `CLEAR_FEATURE(ENDPOINT_HALT)`, a fresh transfer armed — and reconciles
     every downstream port, since the lost report may have carried any change
     (`HubEvent::HubRecovered`). A hub that cannot be reached is owed the same
@@ -913,17 +898,15 @@ nothing of the VL805's own behaviour.
     `a_hub_watch_still_failing_once_its_retries_are_spent_resets_the_hub_tier`,
     `a_hub_whose_status_transfers_keep_failing_is_reset_then_given_up`,
     `a_stashed_hub_report_frees_a_gone_device_owed_a_recovery`.
-  - **Every engine wait parks, and downstream hot-plug is interrupt-driven
-    only — no periodic port sweep.** The engine's synchronous completion
-    waits (`await_event_for`) and the boot-time root-connect debounce park
-    on the `EventWait` seam — on metal the HCD's `irq_wait` on the
-    controller's bound interrupt line, which is bound **before** the
-    controller is started (`UsbDevice::start` itself enables the completion
-    interrupter, so cold boot and every post-reset re-program share one
-    definition) — and are bounded by **wall-clock** budgets
-    (`AWAIT_EVENT_BUDGET_US`, the USB 2.0 §9.2.6 request ceiling;
-    `CONNECT_WINDOW_US`, power-on-good + attach debounce), never by an
-    iteration-count spin. The hub's status-change interrupt-IN watch is the
+  - **Every engine wait is an operation's, and downstream hot-plug is
+    interrupt-driven only — no periodic port sweep.** An operation waits on a
+    routed completion or a one-shot timer, each bounded by **wall-clock**
+    budgets (the per-command budget, the USB 2.0 §9.2.6 request ceiling,
+    `CONNECT_WINDOW_US` for power-on-good + attach debounce), never an
+    iteration-count spin; the HCD parks on the controller's interrupt line,
+    bound **before** the controller is started (`UsbHost::start` enables the
+    completion interrupter, so cold boot and every post-reset re-program share
+    one definition). The hub's status-change interrupt-IN watch is the
     sole downstream hot-plug wake source; the HCD event loop's wait is
     unbounded with no periodic wakes. Every changed port still goes through
     the one `reconcile_hub_port` decision, keyed on the port's *live*
@@ -931,36 +914,33 @@ nothing of the VL805's own behaviour.
     untracked connected, free the tracked disconnected — hubs cascade — and
     drain stale latches). The earlier "the hub raises no interrupt for a
     downstream connect" metal observation is treated as **undiagnosed**
-    until re-captured against the parked-wait engine: a bring-up failure now
-    logs the whole breadcrumb (phase, error, open stage, `USBCMD`/`USBSTS`,
-    enumeration stage, completion/event-type/reject codes, `PORTSC`), a
-    successful bring-up logs a topology summary (devices served, hub watch,
-    root port), and a connected device that fails enumeration and is
+    until re-captured: a bring-up failure logs the whole breadcrumb (phase,
+    error, open stage, `USBCMD`/`USBSTS`), each settled walk logs a topology
+    summary (devices served, hub watch), and a connected device that fails
+    enumeration and is
     skipped logs a warning with the skip count
     (`UsbDevice::skipped_port_count`) instead of looking like an empty
     port. Host regressions:
-    `a_missing_completion_times_out_by_wall_clock_and_parks_instead_of_spinning`,
+    `a_command_that_never_completes_is_aborted_and_a_controller_that_will_not_abort_is_dead`,
     `an_empty_root_hub_parks_through_the_connect_window_and_serves_nothing`,
     `start_enables_the_interrupter`.
   - **Both port tiers run the one port-reset protocol step.** The reset
     figures live once (`PORT_RESET_POLL_US` 20 ms, `PORT_RESET_POLLS` 40 →
     800 ms, `PORT_RESET_SETTLE_US` = `TRSTRCY` 10 ms) and both tiers spend
-    them the same way: re-poll the port at parked intervals until the reset
-    signalling is done **and** the port is enabled, consume the reset's own
-    change latches, then settle `TRSTRCY` before the device is addressed. A
-    fast port costs one poll; a slow external hub, which legitimately takes
-    hundreds of milliseconds, is no longer refused as a `DeviceFault`.
-    - `await_hub_port_reset_complete` polls a downstream port's
-      `GET_PORT_STATUS` on the `Delay` seam (a hub raises no interrupt for
-      its own reset completion while its status-change report is being
-      serviced).
-    - `await_root_port_reset_complete` polls `PORTSC` parked on the
-      controller's **interrupt** (a completed reset posts a Port Status
-      Change Event, so a fast port wakes early), and
-      `Xhci::clear_port_reset_change` consumes `PRC`/`PEC`. `Xhci` owns only
-      `begin_port_reset`; awaiting it needs a clock and the interrupt, which
-      `UsbDevice` has. A `SuperSpeed` port, which trains and enables without
-      a reset, still gets the settle.
+    them the same way: wait for the port's change, re-reading it at the poll
+    interval at the latest, until the reset signalling is done **and** the
+    port is enabled; consume the reset's own change latches; then settle
+    `TRSTRCY` on a timer before the device is addressed. A fast port costs one
+    read; a slow external hub, which legitimately takes hundreds of
+    milliseconds, is not refused as a `DeviceFault`; a port that reads
+    disconnected ends the reset at once.
+    - A downstream port's reset completes on the hub's status-change report
+      (the watch is armed throughout, and its `C_PORT_RESET` is cleared the
+      moment the reset is seen done), the poll interval bounding it.
+    - A root port's reset completes on its Port Status Change Event, the poll
+      interval bounding it, and `Xhci::clear_port_reset_change` consumes
+      `PRC`/`PEC`. A `SuperSpeed` port, which trains and enables without a
+      reset, still gets the settle.
     Landing the polled-reset fix on the hub tier alone was the Pi 4B defect:
     the root port returned the instant `PORTSC.PR` read clear and addressed
     the device inside its recovery interval, which the VL805 answers with a
@@ -970,12 +950,11 @@ nothing of the VL805's own behaviour.
     service failed err_hex=a`) with nothing in the log to say why.
     - A failed attach snapshots its diagnostics before the best-effort
       latch drain overwrites the live state
-      (`UsbDevice::last_attach_fault`: port, error, enumeration stage,
-      completion/event-type/reject codes, the port's final observed
-      `wPortStatus`; first failure of a service kept, cleared on each
-      service/walk entry). The HCD's `hub status-change service failed`
-      warning logs that snapshot plus `USBSTS` (or the live diagnostics
-      for a non-attach failure), and every error URB reply is logged with
+      (`AttachFault`: port, error, enumeration stage, the completion code
+      and event type the failing step ended with or that its deadline did,
+      the port's final observed `wPortStatus`; the first failure of a walk
+      kept, taken by `UsbDevice::take_attach_fault`). The HCD's skipped-port
+      warning logs that snapshot, and every error URB reply is logged with
       its errno and the endpoint's latched raw completion code, so a
       collateral class-driver fault (the keyboard's warning beside the
       hub plug) is attributable to the controller's actual verdict.
@@ -1062,25 +1041,21 @@ nothing of the VL805's own behaviour.
     USB2 sockets sit behind an *integrated* hub (the engine reports
     `hub_watch=1` even with no external hub and the keyboard in a black port),
     so the keyboard is always a downstream-hub device and the hub-watch path is
-    correct. The decisive metal capture showed the `usb-hcd: hub status-change
-    service failed` warning with `reject_hex=0`, `evtype_hex=0x21`
-    (CommandCompletion), `compl_hex=0x1` (Success): since `control()`/`command()`
-    are the only callers of `reset_event_diagnostics`, those fields were
-    **stale** from the last successful command — proving the fault issued no
-    control/command transfer and so came from the hub watch's own ring poll, not
-    the `GET_PORT_STATUS` transfer earlier hypotheses blamed. That poll
-    failed closed (`_ => Err(DeviceFault)`) on an event it did not model, and
-    `next_hub_change` propagated that error at its `?` **before** the
-    status-change endpoint was re-armed — leaving it with no outstanding
-    transfer, so the hub could never post another report and every later
+    correct. The decisive metal capture showed the hub status-change service
+    failing with diagnostics left **stale** from the last successful command —
+    proving the fault issued no control/command transfer and so came from the
+    hub watch's own ring poll, not the `GET_PORT_STATUS` transfer earlier
+    hypotheses blamed. That poll
+    failed closed on an event it did not model **before** the status-change
+    endpoint was re-armed — leaving it with no outstanding transfer, so the
+    hub could never post another report and every later
     keystroke/unplug/replug produced no interrupt (the controller "went
-    silent"). The fix makes the shared drain (`drain_events`, now the watch's
-    only ring access) **drain** any event it does not model — an informational controller event (device notification,
-    host-controller event, MFINDEX wrap), a trailing freed-slot completion, or a
-    keyboard report arriving before the previous one is drained — and keep
-    scanning, never faulting (the shared event ring is not a security boundary;
-    a genuine fault still surfaces synchronously through the control/command
-    waits that follow). Host regression:
+    silent"). The service step's routing, the only ring access, **drops** any
+    event nothing owns — an informational controller event (device
+    notification, host-controller event, MFINDEX wrap), a trailing freed-slot
+    completion — and keeps routing, never faulting (the shared event ring is
+    not a security boundary; a genuine fault still reaches the operation whose
+    command or transfer it ends). Host regression:
     `a_stray_controller_event_during_a_hub_poll_never_silences_the_watch`.
   - **The event-ring drain is the *only* writer of `ERDP`; never a standalone
     Event-Handler-Busy clear (the "weird storm as soon as a key is pressed"
@@ -1207,8 +1182,8 @@ nothing of the VL805's own behaviour.
     and `stopping_retracts_every_node_and_answers_its_held_urb`), the
     recovering `UrbService` tests
     (`a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_controller`,
-    `a_transfer_during_recovery_is_answered_reissuably_without_touching_the_controller`,
-    `a_failed_reset_answers_a_held_transfer_reissuably`),
+    `a_transfer_during_recovery_is_held_without_touching_the_controller`,
+    `a_reset_answers_a_transfer_it_discarded_reissuably`),
     and `devmgr`'s
     `a_vanished_child_is_unloaded_at_once_even_while_its_owner_is_recovering`.
     The sequencing is host-tested in `interfaces`; the freestanding serve loop
@@ -1276,14 +1251,12 @@ nothing of the VL805's own behaviour.
     control-data buffer (`CTRL_DATA_LEN`, one page) holds a composite
     device's whole configuration in one read.
   - `finish_enumeration` plans one device-table entry per servable
-    interface: the primary at the caller's index (it owns the slot's parked
-    EP0 cursor via `active_device`), each sibling at its own free index and
-    ring region while **sharing the device's slot and EP0**. Every
-    Configure Endpoint carries Context Entries covering the highest served
-    DCI, and `SET_CONFIGURATION` runs once. A sibling's control transfers
-    route through the slot's EP0 owner
-    (`ep0_owner_index`); the (slot, DCI) event demux and the per-index
-    report/bulk paths are unchanged.
+    interface: the primary at the caller's index, each sibling at its own
+    free index and ring region while **sharing the device's slot and its
+    control pipe** by reference, never by copy. Every Configure Endpoint
+    carries Context Entries covering the highest served DCI, and
+    `SET_CONFIGURATION` runs once; the (slot, DCI) event routing and the
+    per-index report/bulk paths serve each sibling as their own.
   - `detach_device` frees **every** entry sharing the vanished device's
     slot, so one physical unplug retracts all of its interfaces; the HCD
     reconciles all published nodes against the live table by identity
@@ -1354,14 +1327,12 @@ nothing of the VL805's own behaviour.
     configured and armed on its own layout region
     (`Layout::hub_regions`). Its slot contexts stay on the device region it
     was enumerated on, which it claims for its lifetime
-    (`HubState::device_region`, excluded from `free_device_index`).
-  - **Every tier is watched concurrently.** The event-ring demux routes
+    (`HubState::device_region`), never handed to another device.
+  - **Every tier is watched concurrently.** The event-ring routing sends
     each status-change completion to its hub (`hub_async_index`, per-hub
-    parking slots); `next_hub_change` services whichever hub reported and
-    re-arms that hub's watch even on a failed service. Hub-class requests
-    target any hub through the generalised active-control-context
-    switching (`activate_hub_control`/`hub_control`; the resting context is
-    the root hub).
+    parking slots); the service step serves every hub that reported and
+    re-arms its watch first. Hub-class requests go on the hub's own control
+    pipe.
   - **Unplugging a hub cascades.** The parent's port disconnect tears down
     the hub and everything behind it — served devices and deeper hub tiers
     recursively (`detach_hub`) — as `HubEvent::HubDetached`; a hot-plugged
@@ -1435,11 +1406,17 @@ nothing of the VL805's own behaviour.
     `a_configuration_longer_than_512_bytes_is_read_whole`.
 - **U13 — a bulk transfer is bounded, and its pipe always recovered.**
   - **Every bulk URB carries a deadline** (`UrbRequest::timeout_ms`, refused at
-    decode when absent; a control transfer carries none and runs within the
-    controller's own bound; a report poll may carry one). The HCD holds a URB
-    no longer than it (`UrbService::expire`): its pipe is stopped and
-    restarted empty (`UsbDevice::abort_bulk`) and the URB answered
-    `TimedOut`. The serve loop's park includes the soonest deadline, and a
+    decode when absent, as a control transfer's is (U14); a report poll may
+    carry one). The HCD holds a URB no longer than it (`UrbService::expire`):
+    its pipe is stopped and restarted empty (`recover::abort_bulk`), and the
+    URB answered `TimedOut`, logged (event 27153) with the EP State its
+    endpoint had at the deadline. Where the controller stood against the TD
+    is read only once the stop has made the context's dequeue pointer the
+    controller's own, before the ring is rebuilt
+    (`device::AbandonedTransfer`, event 27154): still on its first TRB or a
+    later one — the device was working on it — on the TRB after it — the
+    host lost its completion — or elsewhere. A control transfer abandoned at
+    its deadline is read the same way. The serve loop's park includes the soonest deadline, and a
     timer wake drives every held URB before expiring any, so a completion the
     controller already has is delivered rather than abandoned.
   - **Every halting completion is recovered in place**, not only a STALL: a
@@ -1488,6 +1465,79 @@ max-packet discovery for full-speed devices — is host- and CI-proven; its live
 attach/detach/re-attach behaviour is metal-only (QEMU models no Pi USB, §0.4).
 
 ---
+
+- **U14 — the engine never waits.** Every procedure that spans a controller
+  round trip is an operation, so no device's slow pipe, hung command or
+  recovery delays another's report, bulk completion or URB deadline.
+  - **Operations.** Each multi-step procedure — a control transfer, a
+    command, a port reset, an enumeration, a hub descent, a pipe or endpoint
+    recovery, `SetInterface`, `ClearHalt`, a stream stop — is an `async`
+    procedure in `lib/usb` (`device_ops`, `device_port`, `device_recover`,
+    `device_iso`, `device_urb`) that `UsbHost` runs. Each has an owner (a
+    port, a slot's pipe, a device's task, a hub, the walk) and is cancelled by
+    owner; its guards give back what it holds — a slot's Disable Slot is
+    posted with its regions withheld until the controller confirms, a held
+    URB is answered. The engine is one `Rc<RefCell<UsbDevice>>` an operation
+    borrows only between waits (`clippy::await_holding_refcell_ref` denies the
+    rest), and a borrow that would overlap fails closed with `Busy`.
+  - **The service step** (`UsbHost::service`) routes every posted event,
+    fires due timers and command deadlines, hands each changed root port and
+    each hub-reported port to its operation (re-arming the hub's watch first),
+    polls every operation that moved, and repeats while one did, a bounded
+    number of rounds. It reports the topology changes, a walk's settle and the
+    earliest deadline, which bounds the HCD's park.
+  - **Routing, never awaiting.** Transfer events are routed by (slot, DCI),
+    command completions by command-TRB address to the posted-command table.
+    An event nothing owns is dropped.
+  - **Per-slot control pipes.** Each slot's EP0 ring, data buffer and input
+    context live in its own region; composite siblings share the slot's pipe
+    by reference. The pipe is a FIFO with one TD in flight (a message pipe,
+    USB 2.0 §5.3.2.2); a TD that fails is taken back (Reset or Stop Endpoint,
+    then Set TR Dequeue) before the next runs, and an operation's transfer is
+    bounded by the request ceiling.
+  - **Commands posted.** A command the controller has not completed within
+    its 5 s budget is aborted by Command Ring Abort (xHCI 1.2 §4.6.1.2),
+    failing only its owner; the abort writes the next command's address and
+    cycle state whole, so a ring that stops before the upper dword lands keeps
+    its place. A ring that does not stop within its abort budget is a
+    controller fault. The bus's default address and each slot's input context
+    are ticket locks, granted in the order asked.
+  - **A disconnect ends an attach at any step.** A port's attach watches for
+    its device leaving: a root port's connect change, or a hub port's status
+    read showing it gone, ends the attach with `DriverError::DeviceOffline`,
+    and the port's next pass reconciles what it carries. A reset on a port
+    that reads disconnected ends at once, and a hub abandoned mid-descent is
+    torn down rather than left half-walked.
+  - **Ring reuse is fenced.** A ring is rebuilt only after the controller has
+    confirmed its endpoint stopped or reset, so no completion for an old TD
+    lands in a slot of the new ring.
+  - **Calls are held, never answered inline.** A control URB carries its
+    class driver's deadline, held no longer than
+    `USB_CONTROL_TIMEOUT_MAX_MS` (`lib/usb` `CONTROL_BUDGET_MAX` for the
+    class side); at its deadline its TD is taken back and the pipe serves the
+    next. Each class driver states its budget: `usb_hid` and `usb_uac` the
+    ceiling, `usb_msd` what its command exchange has left. Interface
+    operations the engine runs are held as URBs are; a URB that faults is
+    held while the engine looks at whether its device left. While a
+    controller reset's walk runs every call is held, and answered once it
+    settles: reissuable where the engine had been asked for it, driven
+    afresh where it had not.
+  - Bounded hardware handshakes inside a controller reset (`HCRST`, `CNR`)
+    remain bounded MMIO polls that fail closed.
+  - Host regressions in `lib/usb` `tests/operations.rs`:
+    `a_control_urb_its_device_never_answers_holds_up_nothing_else`,
+    `one_device_stalled_mid_enumeration_holds_up_none_beside_it`,
+    `an_unplug_at_every_enumeration_step_leaks_nothing`,
+    `an_unplugged_hub_at_every_step_leaves_no_tier_behind`,
+    `a_hub_whose_connection_bounces_at_every_step_comes_back_whole`,
+    `an_unplug_behind_a_hub_ends_the_attach_at_once`,
+    `a_hung_command_is_aborted_failing_only_its_owner`,
+    `a_controller_reset_mid_enumeration_ends_every_operation_and_leaks_nothing`,
+    `a_late_answer_to_an_abandoned_control_td_never_completes_the_next`,
+    `an_unplugged_device_leaves_no_answer_behind_for_its_held_urb`; and in the
+    HCD, `a_control_urb_is_held_no_longer_than_any_device_may_take`,
+    `an_interface_operation_is_held_until_the_engine_finishes_it`,
+    `an_interface_operation_the_engine_runs_is_held_until_it_finishes`.
 
 ## 4. Out of scope (explicitly)
 

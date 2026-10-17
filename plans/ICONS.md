@@ -575,12 +575,15 @@ badge kind of its own too, never its category's borrowed.
 
 ## 15. I14 — every drive medium has its own picture
 
-A hard disk, a SATA or SAS SSD, an NVMe drive, a USB flash drive, a disk in a
-USB enclosure and an SD or eMMC card each draw their own master (`disk-hard`,
-`disk-solid-state`, `disk-nvme`, `disk-usb`, `disk-external`, `disk-sd`), and
-a paravirtual or unknown medium the generic `disk`. Each is a raster master in
-the existing drive style over the drive family's built-in glyph, so the rule
-stays total.
+`tairix_icon::disk_icon` draws only what a device's `BlkMedium` reported: a
+medium reported rotating is `disk-hard` on an ATA bus or behind a USB bridge
+alike, a non-rotating ATA one `disk-solid-state`, an NVMe namespace
+`disk-nvme`, an SD or eMMC card `disk-sd`, a USB unit `disk-usb` (the flash
+stick) once it reported a non-rotating medium and `disk-external`, which shows
+no medium, while it reported neither, and an undeclared, paravirtual, or
+unreported ATA medium the generic `disk`. Each
+is a raster master in the existing drive style over the drive family's built-in
+glyph, so the rule stays total.
 
 ## 16. What this plan deliberately does not cover
 

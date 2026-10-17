@@ -8,7 +8,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
@@ -24,6 +24,16 @@ use super::{
 };
 use crate::chrome::Chrome;
 use crate::test_fs::{browser, FakeFs};
+
+/// A disk on an ATA bus that reported its rotation.
+const HARD_DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata).with_rotation(
+    BlkRotation::from_rate_field(7200, BlkRotationEvidence::AtaIdentify),
+);
+
+/// A USB unit that reported a non-rotating medium: served as removable.
+const STICK: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
+    BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
+);
 
 /// The window the rail is laid out in for these tests.
 const WINDOW: Rect = Rect::new(0, 0, 480, 480);
@@ -53,7 +63,7 @@ fn places() -> Places {
         &[Volume {
             label: "Backup".to_string(),
             target: "/Storage/Backup".to_string(),
-            medium: Some(BlkMedium::HardDisk),
+            medium: Some(HARD_DISK),
         }],
     )
 }
@@ -633,13 +643,13 @@ fn a_refresh_re_reads_the_volumes_and_keeps_the_users_place_in_the_rail() {
             Volume {
                 label: "Backup".to_string(),
                 target: "/Storage/Backup".to_string(),
-                medium: Some(BlkMedium::HardDisk),
+                medium: Some(HARD_DISK),
             },
             // A stick the user just plugged in: it appears without a poll.
             Volume {
                 label: "Stick".to_string(),
                 target: "/Storage/Stick".to_string(),
-                medium: Some(BlkMedium::UsbFlash),
+                medium: Some(STICK),
             },
         ],
     );
@@ -959,7 +969,7 @@ fn a_rebuilt_rail_lights_the_row_now_under_a_still_pointer() {
             Volume {
                 label: "Backup".to_string(),
                 target: "/Storage/Backup".to_string(),
-                medium: Some(BlkMedium::HardDisk),
+                medium: Some(HARD_DISK),
             },
         ],
     );

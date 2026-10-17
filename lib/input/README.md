@@ -54,6 +54,11 @@ This crate owns the device-level input types the desktop routes:
   text surface that selects a word on the second press and a line on the
   third. `register(…, most)` answers the press's place in the run and starts a
   fresh run past `most`; `DoubleClickTracker` is this with `most = 2`.
+- **The wheel's distance** (`wheel`, `WHEEL_STEP`, `wheel_steps`): one detent
+  scrolls every view the same logical distance, and `wheel_steps` is the one
+  conversion from the seat's scroll units to a view's own steps, carrying a
+  fraction and dropping it on a reversal. `lib/controls` and the document host
+  both scroll through it.
 - The **subject** is an opaque `u64` the caller compares presses on: a listing
   row index in the file manager and the trusted picker, a window id on the
   window manager's title bars. It lives here rather than in any one of those

@@ -18,11 +18,17 @@
 //! events; root publication itself flows through the shared
 //! `publish_volume_identity` definition in `crate::system_mount`).
 //!
-//! Attach and detach are rare, whole-volume operations; they serialise on
-//! one sleeping lock (they park on device I/O), so two concurrent
-//! requests can never interleave a half-built volume. The attached-volume
-//! registry itself lives behind a spin lock so the surprise-removal path
-//! can walk it from the endpoint-teardown context without parking.
+//! An attach, recovery or detach parks on device I/O, so each runs under
+//! its *device's* own sleeping lock (`DeviceSlot`): the volumes of one disk
+//! take its one client in turn and never interleave a half-built volume,
+//! while a disk that stops answering holds up only the volumes that live on
+//! it. What concerns every device is settled atomically where it lives — a
+//! catalog name in the mount table, an identity in the volume forest, and a
+//! volume another operation is building, recovering or retracting by that
+//! operation's claim on its registry entry — never by one device's lock
+//! held over another's. The attached-volume registry itself lives behind a
+//! spin lock so the surprise-removal path can walk it from the
+//! endpoint-teardown context without parking.
 //!
 //! # Surprise removal (`plans/DEVICES.md` D4)
 //!
@@ -241,6 +247,10 @@ struct AttachedVolume {
     blocks: u64,
     /// Whether the serving driver is still live.
     availability: Availability,
+    /// An operation is building, recovering or retracting the volume: no
+    /// other acts on the entry until it ends, and a surprise removal of its
+    /// device is that operation's to apply as it does ([`VolumeClaim`]).
+    claimed: bool,
 }
 
 /// The fail-closed stand-in for a volume no operation may reach: registered
@@ -430,20 +440,102 @@ struct Wiring {
 pub struct RuntimeVolumeService {
     /// Set-once boot wiring; fail-closed `NotImplemented` before install.
     wiring: OnceCell<Wiring>,
-    /// The whole-operation serialisation lock: attach/detach park on
-    /// device I/O, so the lock sleeps, never spins.
-    op: SleepLock<()>,
     /// The attached-volume registry. A spin lock, so the surprise-removal
     /// path can walk it from the endpoint-teardown context without
     /// parking; guards are held only for lookups and brief mutations,
     /// never across device I/O.
     state: SpinLock<Vec<AttachedVolume>>,
-    /// The served block devices the attached volumes live on, one entry
-    /// per block-service endpoint ([`SharedDevice`]). Mutated only under
-    /// the operation lock; the guard is never held across device I/O.
-    devices: SpinLock<Vec<SharedDevice>>,
+    /// The served block devices operations reach, one entry per
+    /// block-service endpoint and window ([`DeviceSlot`]). The guard is held
+    /// only for lookups and brief mutations, never across device I/O.
+    devices: SpinLock<Vec<DeviceSlot>>,
     /// The next mount handle to mint.
     next_handle: AtomicU64,
+}
+
+/// One served block device's place in the registry: the lock every whole
+/// operation on it holds, and its client once the first one connected it.
+struct DeviceSlot {
+    endpoint: u64,
+    window: u64,
+    /// Held across each attach, recovery and detach on this device, which
+    /// all park on its I/O; an operation on another device never waits on it.
+    op: Arc<SleepLock<()>>,
+    /// The one client every volume on the device shares ([`SharedDevice`]).
+    connected: Option<SharedDevice>,
+    /// Operations holding the slot ([`DevicePin`]); a pinned slot is never
+    /// retired, so its client cannot close under an operation using it.
+    pins: usize,
+}
+
+/// An operation's hold on a [`DeviceSlot`], released on drop.
+struct DevicePin<'a> {
+    service: &'a RuntimeVolumeService,
+    endpoint: u64,
+    window: u64,
+    op: Arc<SleepLock<()>>,
+}
+
+impl Drop for DevicePin<'_> {
+    fn drop(&mut self) {
+        let mut devices = self.service.devices.lock();
+        if let Some(slot) = devices
+            .iter_mut()
+            .find(|slot| slot.endpoint == self.endpoint && slot.window == self.window)
+        {
+            slot.pins = slot.pins.saturating_sub(1);
+        }
+        drop(devices);
+        self.service.retire_unused_devices();
+    }
+}
+
+/// An operation's claim on one registry entry ([`AttachedVolume::claimed`]),
+/// released on drop. A surprise removal the claim deferred is applied then.
+struct VolumeClaim<'a> {
+    service: &'a RuntimeVolumeService,
+    id: [u8; 16],
+}
+
+impl Drop for VolumeClaim<'_> {
+    fn drop(&mut self) {
+        let present_on = {
+            let mut state = self.service.state.lock();
+            state.iter_mut().find(|v| v.id == self.id).and_then(|v| {
+                v.claimed = false;
+                v.availability.device_present().then_some(v.endpoint)
+            })
+        };
+        // Asked outside the registry guard: the endpoint registry calls the
+        // vanish observer, which takes that guard, under its own.
+        if let Some(endpoint) = present_on {
+            if !tairix_kernel_core::callreg::contains(EndpointId(endpoint)) {
+                self.service.handle_vanished(endpoint);
+            }
+        }
+    }
+}
+
+/// How a detach's claim on its volume went.
+enum DetachClaim<'a> {
+    /// Claimed, with the entry's facts.
+    Held(VolumeClaim<'a>, DetachTarget),
+    /// The volume left the registry while the detach waited for its device.
+    Gone,
+    /// Another operation holds the volume, or moved it to a device this
+    /// detach does not hold; the volume's name for the refusal.
+    Busy(String),
+}
+
+/// The facts of an attached volume a detach acts on, snapshotted out of the
+/// registry so its device I/O never runs under the registry guard.
+struct DetachTarget {
+    name: String,
+    handle: DriverHandle,
+    endpoint: u64,
+    window: u64,
+    journal: Arc<SpinLock<RetainedWrites>>,
+    availability: Availability,
 }
 
 /// The one production service instance the boot handover installs.
@@ -456,7 +548,6 @@ impl RuntimeVolumeService {
     pub const fn new() -> Self {
         Self {
             wiring: OnceCell::new(),
-            op: SleepLock::new(()),
             state: SpinLock::new(Vec::new()),
             devices: SpinLock::new(Vec::new()),
             next_handle: AtomicU64::new(VOLUME_HANDLE_BASE + 1),
@@ -487,67 +578,95 @@ impl RuntimeVolumeService {
         }
     }
 
-    /// The shared device serving `request`'s endpoint, connecting it on
-    /// first use.
+    /// Pin the slot of the device served over `endpoint` and `window`,
+    /// registering it on first use.
+    ///
+    /// Slots are keyed by the endpoint **and** the window: sharing a client
+    /// is only safe for consumers staging bytes in the same buffer, and a
+    /// device presenting a different window is a different staging buffer,
+    /// so it gets its own slot rather than being folded onto a stale one.
+    /// Window ids are never reused, so a torn-down endpoint's client can
+    /// never be handed to a device that later re-uses its id.
+    fn pin_device(&self, endpoint: u64, window: u64) -> Result<DevicePin<'_>, Errno> {
+        let mut devices = self.devices.lock();
+        let found = devices
+            .iter()
+            .position(|slot| slot.endpoint == endpoint && slot.window == window);
+        let at = if let Some(at) = found {
+            at
+        } else {
+            devices.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+            devices.push(DeviceSlot {
+                endpoint,
+                window,
+                op: Arc::new(SleepLock::new(())),
+                connected: None,
+                pins: 0,
+            });
+            devices.len() - 1
+        };
+        let slot = &mut devices[at];
+        slot.pins += 1;
+        Ok(DevicePin {
+            service: self,
+            endpoint,
+            window,
+            op: Arc::clone(&slot.op),
+        })
+    }
+
+    /// The pinned device's shared client, connecting it on first use.
     ///
     /// Every volume on one disk shares the single connected client, because
     /// they share the one staging window the transfers move bytes through
-    /// (see [`SharedDevice`]). Entries are keyed by the endpoint **and** the
-    /// window: sharing is only safe for consumers staging bytes in the same
-    /// buffer, and a device presenting a different window is a different
-    /// staging buffer, so it gets its own client rather than being folded
-    /// onto a stale one. Entries no attached volume names any more are
-    /// dropped first, so a torn-down endpoint's client can never be handed
-    /// to a device that later re-uses its id.
-    ///
-    /// Runs under the caller's operation lock; the registry guard is taken
-    /// only for the lookup and the insertion, never across the connect.
+    /// (see [`SharedDevice`]). The caller holds the device's operation lock,
+    /// so no second client is ever connected over the window; the registry
+    /// guard is never held across the connect.
     ///
     /// # Errors
     ///
     /// `(cause, errno)` pairs the attach path audits through its refusal
     /// helper.
-    fn shared_device(
+    fn connected(
         &self,
+        pin: &DevicePin<'_>,
         request: &VolumeAttachRequest<'_>,
         wiring: &Wiring,
     ) -> Result<SharedDevice, (&'static str, Errno)> {
-        self.retire_unused_devices();
-        let existing = {
-            let devices = self.devices.lock();
-            devices
-                .iter()
-                .find(|d| d.endpoint == request.endpoint && d.window == request.window)
-                .cloned()
-        };
-        if let Some(device) = existing {
+        if let Some(device) = self.device_for(pin.endpoint, pin.window) {
             return Ok(device);
         }
         let device = connect_device(request, wiring)?;
-        self.devices.lock().push(device.clone());
+        if let Some(slot) = self
+            .devices
+            .lock()
+            .iter_mut()
+            .find(|slot| slot.endpoint == pin.endpoint && slot.window == pin.window)
+        {
+            slot.connected = Some(device.clone());
+        }
         Ok(device)
     }
 
-    /// The registered shared device serving `endpoint` over `window`, if it
-    /// is still connected.
+    /// The connected shared device serving `endpoint` over `window`, if any.
     fn device_for(&self, endpoint: u64, window: u64) -> Option<SharedDevice> {
         let devices = self.devices.lock();
         devices
             .iter()
-            .find(|d| d.endpoint == endpoint && d.window == window)
-            .cloned()
+            .find(|slot| slot.endpoint == endpoint && slot.window == window)
+            .and_then(|slot| slot.connected.clone())
     }
 
-    /// Drop every shared device no volume on a present device names any
-    /// more, closing its client and releasing its window hold. A volume held
-    /// unavailable after its device vanished keeps its journal, never the
-    /// device.
+    /// Drop every device slot no operation holds and no volume on a present
+    /// device names, closing its client and releasing its window hold. A
+    /// volume held unavailable after its device vanished keeps its journal,
+    /// never the device.
     ///
-    /// Called at the head of an attach or detach, both of which hold the
-    /// operation lock: the surprise-removal path runs in endpoint-teardown
-    /// context and only marks volumes, so it never drops a client there.
+    /// The surprise-removal path runs in endpoint-teardown context and only
+    /// marks volumes, so it never drops a client there; the next operation,
+    /// or the last pin on the slot going, does.
     fn retire_unused_devices(&self) {
-        let live: Vec<(u64, u64)> = {
+        let mut live: Vec<(u64, u64)> = {
             let state = self.state.lock();
             state
                 .iter()
@@ -555,21 +674,129 @@ impl RuntimeVolumeService {
                 .map(|v| (v.endpoint, v.window))
                 .collect()
         };
-        // Each retired entry is dropped *outside* the registry guard:
+        live.sort_unstable();
+        // The retired slots are dropped *outside* the registry guard:
         // releasing the last reference closes the client and its window
         // hold, which must not run under a spin lock.
-        loop {
-            let retired = {
-                let mut devices = self.devices.lock();
-                devices
-                    .iter()
-                    .position(|d| !live.contains(&(d.endpoint, d.window)))
-                    .map(|index| devices.swap_remove(index))
-            };
-            if retired.is_none() {
-                break;
-            }
+        let retired: Vec<DeviceSlot> = self
+            .devices
+            .lock()
+            .extract_if(.., |slot| {
+                slot.pins == 0 && live.binary_search(&(slot.endpoint, slot.window)).is_err()
+            })
+            .collect();
+        drop(retired);
+    }
+
+    /// Enter `volume` into the registry claimed by the attach building it.
+    ///
+    /// # Errors
+    ///
+    /// `(cause, errno)` pairs the attach path audits: a volume of the same
+    /// identity is registered already (`Busy`, as a published one is), or
+    /// the registry cannot grow.
+    fn enter(&self, volume: AttachedVolume) -> Result<VolumeClaim<'_>, (&'static str, Errno)> {
+        let id = volume.id;
+        let mut state = self.state.lock();
+        if state.iter().any(|v| v.id == id) {
+            return Err(("identity_attached", Errno::Busy));
         }
+        state
+            .try_reserve(1)
+            .map_err(|_| ("registry_full", Errno::OutOfMemory))?;
+        state.push(AttachedVolume {
+            claimed: true,
+            ..volume
+        });
+        Ok(VolumeClaim { service: self, id })
+    }
+
+    /// Claim the volume `id` for a detach holding the device `held` (`None`
+    /// for one whose device is gone): it must still be on that device, or
+    /// have lost its device, and no other operation may hold it.
+    fn claim_for_detach(&self, id: &[u8; 16], held: Option<(u64, u64)>) -> DetachClaim<'_> {
+        let mut state = self.state.lock();
+        let Some(volume) = state.iter_mut().find(|v| v.id == *id) else {
+            return DetachClaim::Gone;
+        };
+        let on_held =
+            !volume.availability.device_present() || held == Some((volume.endpoint, volume.window));
+        if volume.claimed || !on_held {
+            return DetachClaim::Busy(volume.name.clone());
+        }
+        volume.claimed = true;
+        let target = DetachTarget {
+            name: volume.name.clone(),
+            handle: volume.handle,
+            endpoint: volume.endpoint,
+            window: volume.window,
+            journal: Arc::clone(&volume.journal),
+            availability: volume.availability,
+        };
+        DetachClaim::Held(
+            VolumeClaim {
+                service: self,
+                id: *id,
+            },
+            target,
+        )
+    }
+
+    /// The name of volume `id` and the device it is attached over: `None`
+    /// when no such volume is attached, and no device when its device is
+    /// gone.
+    fn attached_device(&self, id: &[u8; 16]) -> Option<(String, Option<(u64, u64)>)> {
+        let state = self.state.lock();
+        let volume = state.iter().find(|v| v.id == *id)?;
+        Some((
+            volume.name.clone(),
+            volume
+                .availability
+                .device_present()
+                .then_some((volume.endpoint, volume.window)),
+        ))
+    }
+
+    /// Register the live driver, enter `volume` into the registry claimed
+    /// by this attach, then publish its identity last; each failure unwinds
+    /// everything already done, so a refused attach leaves no trace. The
+    /// entry precedes the publication, so a detach that finds the published
+    /// volume finds it registered too, and waits on its device for the
+    /// attach to end.
+    ///
+    /// A volume whose identity is already published or registered is
+    /// attached already, under another name: that is `Busy`, never the name
+    /// conflict the volume manager answers by trying the volume again
+    /// elsewhere.
+    fn register_and_publish(
+        &self,
+        vfs: &Vfs,
+        opened: OpenedVolume,
+        volume: AttachedVolume,
+        health: VolumeIoSource,
+        audit: &'static (dyn Sink + Sync),
+    ) -> Result<VolumeClaim<'_>, (&'static str, Errno)> {
+        let (handle, id) = (volume.handle, volume.id);
+        let name = volume.name.clone();
+        if register_with_health(handle, opened, &name, id, health).is_err() {
+            let _ = vfs.mounts_write().detach(handle);
+            return Err(("handle_in_use", Errno::Busy));
+        }
+        let unwind = || {
+            let _ = LATE_FILESYSTEM.unregister(handle);
+            let _ = vfs.mounts_write().detach(handle);
+        };
+        let claim = self.enter(volume).inspect_err(|_| unwind())?;
+        if let Err(err) = publish_volume_identity(id, &["Storage", &name], &name, audit) {
+            self.state.lock().retain(|v| v.id != id);
+            unwind();
+            let errno = match err {
+                VolumePublishError::NilIdentity => Errno::OutOfRange,
+                VolumePublishError::AlreadyPublished => Errno::Busy,
+            };
+            return Err(("identity_unpublishable", errno));
+        }
+        Ok(claim)
     }
 
     /// Audit a refused attach and hand back its errno.
@@ -874,45 +1101,13 @@ fn reattach_then_serve(
     serve()
 }
 
-/// Register the live driver, then publish its identity last; each failure
-/// unwinds everything already done, so a refused attach leaves no trace.
-///
-/// A volume whose identity is already published is attached already, under
-/// another name: that is `Busy`, never the name conflict the volume manager
-/// answers by trying the volume again elsewhere.
-fn register_and_publish(
-    vfs: &Vfs,
-    handle: DriverHandle,
-    opened: OpenedVolume,
-    name: &str,
-    health: VolumeIoSource,
-    audit: &'static (dyn Sink + Sync),
-) -> Result<([u8; 16], &'static str), (&'static str, Errno)> {
-    let identity = opened.identity;
-    let fstype = opened.fstype;
-    if register_with_health(handle, opened, name, identity, health).is_err() {
-        let _ = vfs.mounts_write().detach(handle);
-        return Err(("handle_in_use", Errno::Busy));
-    }
-    if let Err(err) = publish_volume_identity(identity, &["Storage", name], name, audit) {
-        let _ = LATE_FILESYSTEM.unregister(handle);
-        let _ = vfs.mounts_write().detach(handle);
-        let errno = match err {
-            VolumePublishError::NilIdentity => Errno::OutOfRange,
-            VolumePublishError::AlreadyPublished => Errno::Busy,
-        };
-        return Err(("identity_unpublishable", errno));
-    }
-    Ok((identity, fstype))
-}
-
 /// Register `driver` under `handle` and attach the live block-health
 /// overlay the mount snapshot reads (`plans/FIX-IO.md` IO2/IO3), the one
 /// place both the attach and recover paths register a served volume so the
 /// health wiring cannot diverge between them. Returns `Err(())` when the
 /// handle is already registered (fail closed — the caller unwinds); the
-/// `set_io_source` cannot miss, the handle having just been registered
-/// under the operation lock.
+/// `set_io_source` cannot miss, the handle having just been registered by
+/// the one operation that holds it.
 fn register_with_health(
     handle: DriverHandle,
     opened: OpenedVolume,
@@ -951,11 +1146,9 @@ fn register_with_health(
 /// counters are properties of the device, not of a mount.
 #[derive(Clone)]
 struct SharedDevice {
-    /// The block-service endpoint the device is served over; the registry
-    /// key.
+    /// The block-service endpoint the device is served over, whose
+    /// registration tells a vanished device from a failing one.
     endpoint: u64,
-    /// The shared data window's region id, as the attach declared it.
-    window: u64,
     /// The one client, shared and serialised, behind the disk cache.
     device: Arc<SharedBlock<BlockCache<BlkClient>>>,
     /// The device's write policy, read once at connect.
@@ -1015,7 +1208,6 @@ fn connect_device(
     let device = SharedBlock::new(client).map_err(|err| ("geometry_unreadable", err.as_errno()))?;
     Ok(SharedDevice {
         endpoint: request.endpoint,
-        window: request.window,
         device: Arc::new(device),
         read_only,
         medium,
@@ -1196,19 +1388,21 @@ impl VolumeService for RuntimeVolumeService {
         let audit = wiring.audit;
         // The frame validated the name as short ASCII; re-derive the &str.
         let name = core::str::from_utf8(request.name).map_err(|_| Errno::OutOfRange)?;
-        // Serialise whole attach/detach operations (see the struct docs).
-        let _op = self.op.lock();
-
         let refused = |cause, errno| Self::refuse_attach(audit, name, cause, errno);
 
         // The live mount table must exist (the boot volumes are up).
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
+        self.retire_unused_devices();
         // Every volume on this disk drives the one shared client over the
-        // one staging window, serialised (see `SharedDevice`).
+        // one staging window, one operation at a time (see `DeviceSlot`).
+        let pin = self
+            .pin_device(request.endpoint, request.window)
+            .map_err(|errno| refused("registry_full", errno))?;
+        let _op = pin.op.lock();
         let device = self
-            .shared_device(request, wiring)
+            .connected(&pin, request, wiring)
             .map_err(|(cause, errno)| refused(cause, errno))?;
         validate_extent(request, &device).map_err(|(cause, errno)| refused(cause, errno))?;
         let block_size = device.block_size();
@@ -1225,7 +1419,7 @@ impl VolumeService for RuntimeVolumeService {
             block_size,
             tairix_fsprobe::PROBE_HEAD_LEN,
         );
-        if let Some(target) = self.reinsert_target(head.as_deref()) {
+        if let Some((target, _claim)) = self.claim_reinsert_target(head.as_deref()) {
             return self.recover(request, wiring, &device, &target);
         }
 
@@ -1273,22 +1467,25 @@ impl VolumeService for RuntimeVolumeService {
                 _ => refused(cause, errno),
             },
         )?;
-        let (identity, fstype) = register_and_publish(vfs, handle, opened, name, health, audit)
-            .map_err(|(cause, errno)| refused(cause, errno))?;
-
-        self.state.lock().push(AttachedVolume {
-            id: identity,
+        let volume = AttachedVolume {
+            id: opened.identity,
             name: String::from(name),
             path,
             handle,
             endpoint: request.endpoint,
             window: request.window,
             journal,
-            fstype,
+            fstype: opened.fstype,
             first_lba: request.first_lba,
             blocks: request.blocks,
             availability: Availability::Available,
-        });
+            claimed: true,
+        };
+        // Released as the attach returns, when a surprise removal that
+        // landed while the volume was built is applied.
+        let _claim = self
+            .register_and_publish(vfs, opened, volume, health, audit)
+            .map_err(|(cause, errno)| refused(cause, errno))?;
         RuntimeVolumeService::audit_event(
             audit,
             VOLUME_ATTACHED,
@@ -1297,58 +1494,54 @@ impl VolumeService for RuntimeVolumeService {
             None,
         );
         Self::audit_write_refusal(audit, name, write_refusal);
-        // Close the attach/unplug race: if the endpoint was torn down
-        // between the connect and the registration above, no vanish
-        // notification can be outstanding for this entry — run the same
-        // transition the observer would have.
-        if !tairix_kernel_core::callreg::contains(EndpointId(request.endpoint)) {
-            self.handle_vanished(request.endpoint);
-        }
         Ok(())
     }
 
     fn detach(&self, request: &VolumeDetachRequest) -> Result<(), Errno> {
         let wiring = self.wiring()?;
         let audit = wiring.audit;
-        // Serialise whole attach/detach operations (see the struct docs).
-        let _op = self.op.lock();
-        self.retire_unused_devices();
-
-        // Snapshot the entry's facts; the registry guard is never held
-        // across the device I/O below.
-        let snapshot = {
-            let state = self.state.lock();
-            state.iter().find(|v| v.id == request.volume_id).map(|v| {
-                (
-                    v.name.clone(),
-                    v.handle,
-                    v.endpoint,
-                    v.window,
-                    Arc::clone(&v.journal),
-                    v.availability,
-                )
-            })
-        };
-        let Some((name, handle, endpoint, window, journal, availability)) = snapshot else {
+        let refuse = |name: &str, cause: &'static str, errno: Errno| -> Errno {
             RuntimeVolumeService::audit_event(
                 audit,
                 VOLUME_DETACH_REFUSED,
                 "volume-service: runtime volume detach refused",
-                "unknown",
-                Some("identity_not_attached"),
-            );
-            return Err(Errno::NotFound);
-        };
-        let refused = |cause: &'static str, errno: Errno| -> Errno {
-            RuntimeVolumeService::audit_event(
-                audit,
-                VOLUME_DETACH_REFUSED,
-                "volume-service: runtime volume detach refused",
-                &name,
+                name,
                 Some(cause),
             );
             errno
         };
+        self.retire_unused_devices();
+        let Some((named, device)) = self.attached_device(&request.volume_id) else {
+            return Err(refuse("unknown", "identity_not_attached", Errno::NotFound));
+        };
+        // A volume still on its device is detached under that device's lock,
+        // so its final commit takes the disk's one client in turn with the
+        // other volumes on it; one whose device is gone has nothing to commit
+        // to.
+        let pin = match device {
+            Some((endpoint, window)) => Some(
+                self.pin_device(endpoint, window)
+                    .map_err(|errno| refuse(&named, "registry_full", errno))?,
+            ),
+            None => None,
+        };
+        let _op = pin.as_ref().map(|pin| pin.op.lock());
+        let (_claim, target) = match self.claim_for_detach(&request.volume_id, device) {
+            DetachClaim::Held(claim, target) => (claim, target),
+            // Detached, or retracted by a surprise removal, while this waited:
+            // the goal state is reached.
+            DetachClaim::Gone => return Ok(()),
+            DetachClaim::Busy(name) => return Err(refuse(&name, "volume_busy", Errno::Busy)),
+        };
+        let DetachTarget {
+            name,
+            handle,
+            endpoint,
+            window,
+            journal,
+            availability,
+        } = target;
+        let refused = |cause: &'static str, errno: Errno| -> Errno { refuse(&name, cause, errno) };
 
         // Held from the final commit to the retraction, so no write lands
         // between them: an operation that resolved the volume before it left
@@ -1397,19 +1590,12 @@ impl VolumeService for RuntimeVolumeService {
 
         // Retract: unmount (new resolutions fail closed), unregister (the
         // registry's driver reference drops), and withdraw the published
-        // identity. A concurrent surprise removal may have retracted the clean
-        // volume while the flush parked; the goal state is then already
-        // reached.
-        let retracted = {
-            let mut state = self.state.lock();
-            let index = state.iter().position(|v| v.id == request.volume_id);
-            index.map(|index| state.remove(index))
-        };
+        // identity. The claim kept a surprise removal off the entry, so it is
+        // still registered; the disk's client closes as the last pin on it
+        // goes.
+        self.state.lock().retain(|v| v.id != request.volume_id);
         if let Some(fs) = fs.as_deref_mut() {
             *fs = Box::new(UnavailableFs);
-        }
-        if retracted.is_none() {
-            return Ok(());
         }
         let vfs = LATE_FILESYSTEM
             .vfs()
@@ -1418,10 +1604,6 @@ impl VolumeService for RuntimeVolumeService {
         let _ = LATE_FILESYSTEM.unregister(handle);
         drop(fs);
         let _ = VOLUME_FOREST.unpublish(&request.volume_id);
-        // The disk's last volume just went: close the shared client and
-        // release its window hold rather than holding them until the next
-        // storage operation.
-        self.retire_unused_devices();
         audit_detach_outcome(audit, &name, discarded);
         Ok(())
     }
@@ -1588,39 +1770,43 @@ enum Pending {
 }
 
 impl RuntimeVolumeService {
-    /// The recovery target an attach's probed extent `head` re-inserts,
-    /// if any: the head must carry a supported signature whose identity
-    /// matches an unavailable volume.
-    fn reinsert_target(&self, head: Option<&[u8]>) -> Option<RecoveryTarget> {
+    /// Claim the volume an attach's probed extent `head` re-inserts, if
+    /// any: the head must carry a supported signature whose identity matches
+    /// an unavailable volume no other operation holds. Only a volume whose
+    /// serving driver is gone is a recovery target: a live volume with the
+    /// same identity is a duplicate, refused by the normal attach path.
+    fn claim_reinsert_target(
+        &self,
+        head: Option<&[u8]>,
+    ) -> Option<(RecoveryTarget, VolumeClaim<'_>)> {
         let identity = head.and_then(tairix_fsprobe::probe)?.identity;
-        self.unavailable_target(&identity)
-    }
-
-    /// The unavailable volume the probed `identity` re-inserts, if any.
-    /// Only a volume whose serving driver is gone is a recovery target: a
-    /// live volume with the same identity is a duplicate, refused by the
-    /// normal attach path's publish step.
-    fn unavailable_target(&self, identity: &[u8; 16]) -> Option<RecoveryTarget> {
-        let state = self.state.lock();
-        state
-            .iter()
-            .find(|v| {
-                v.id == *identity
-                    && matches!(
-                        v.availability,
-                        Availability::UnavailableDirty | Availability::UnavailableLost
-                    )
-            })
-            .map(|v| RecoveryTarget {
-                name: v.name.clone(),
-                path: v.path.clone(),
-                handle: v.handle,
-                id: v.id,
-                journal: Arc::clone(&v.journal),
-                first_lba: v.first_lba,
-                blocks: v.blocks,
-                lost: v.availability == Availability::UnavailableLost,
-            })
+        let mut state = self.state.lock();
+        let volume = state.iter_mut().find(|v| {
+            v.id == identity
+                && !v.claimed
+                && matches!(
+                    v.availability,
+                    Availability::UnavailableDirty | Availability::UnavailableLost
+                )
+        })?;
+        volume.claimed = true;
+        let target = RecoveryTarget {
+            name: volume.name.clone(),
+            path: volume.path.clone(),
+            handle: volume.handle,
+            id: volume.id,
+            journal: Arc::clone(&volume.journal),
+            first_lba: volume.first_lba,
+            blocks: volume.blocks,
+            lost: volume.availability == Availability::UnavailableLost,
+        };
+        Some((
+            target,
+            VolumeClaim {
+                service: self,
+                id: identity,
+            },
+        ))
     }
 
     /// Prove the re-inserted medium was not mutated elsewhere and replay
@@ -1685,8 +1871,9 @@ impl RuntimeVolumeService {
     /// device: verify and replay ([`Self::attempt_replay`]), then rebuild
     /// the volume in place — same handle, mount path, catalog name, and
     /// published root — live and writable when proven, read-only with the
-    /// retained set kept when not. Runs under the caller's operation
-    /// lock.
+    /// retained set kept when not. The caller holds the re-inserted device's
+    /// operation lock and the claim on `target`, whose release applies a
+    /// surprise removal that landed while the volume was rebuilt.
     fn recover(
         &self,
         request: &VolumeAttachRequest<'_>,
@@ -1734,8 +1921,9 @@ impl RuntimeVolumeService {
         }
 
         // A refusal here leaves the handle and path unresolved — fail closed,
-        // audited — and cannot occur under the operation lock (the handle was
-        // just freed, the path just unmounted).
+        // audited — and cannot occur while the claim is held: only this
+        // operation touches the handle, and the path is unmounted and mounted
+        // again under one mount-table guard.
         let fstype = opened.fstype;
         let write_refusal = opened.write_refusal;
         let read_only = read_only || write_refusal.is_some();
@@ -1779,27 +1967,23 @@ impl RuntimeVolumeService {
         }
         audit_recovery_outcome(audit, &target.name, &outcome, &target.journal);
         Self::audit_write_refusal(audit, &target.name, write_refusal);
-        // Close the recover/unplug race exactly as attach does: if the
-        // endpoint was torn down while the volume was rebuilt, run the
-        // transition the observer would have.
-        if !tairix_kernel_core::callreg::contains(EndpointId(request.endpoint)) {
-            self.handle_vanished(request.endpoint);
-        }
         Ok(())
     }
 
     /// Decide and apply the state transition for the volume served over
     /// the vanished `endpoint`, under the registry guard: a clean volume
     /// leaves the registry, a dirty/lost one is marked unavailable.
-    /// `None` when no available volume matches (idempotency).
+    /// `None` when no available volume matches (idempotency). A claimed
+    /// volume is left to the operation holding it, which applies the
+    /// transition as it releases the claim.
     fn vanish_outcome(&self, endpoint: u64) -> Option<VanishOutcome> {
         let mut state = self.state.lock();
         // A conflicted volume is served by a live driver too: when that
         // driver dies its cache-bearing stand-in must be replaced and the
         // (still-dirty) journal re-decides the unavailable state.
-        let index = state
-            .iter()
-            .position(|v| v.endpoint == endpoint && v.availability.device_present())?;
+        let index = state.iter().position(|v| {
+            v.endpoint == endpoint && v.availability.device_present() && !v.claimed
+        })?;
         // Writes the driver acknowledged but never gave the device are in no
         // journal, and go with the driver: a removal holding some is a loss.
         let unpublished = LATE_FILESYSTEM.holds_unpublished(state[index].handle);
@@ -1857,8 +2041,8 @@ impl RuntimeVolumeService {
             .devices
             .lock()
             .iter()
-            .filter(|device| device.endpoint == endpoint)
-            .cloned()
+            .filter(|slot| slot.endpoint == endpoint)
+            .filter_map(|slot| slot.connected.clone())
             .collect();
         for device in &vanished {
             device.device.try_with_device(BlockCache::drop_all);

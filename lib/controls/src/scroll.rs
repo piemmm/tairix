@@ -30,19 +30,11 @@
 
 use core::ops::Range;
 
-use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_geometry::{to_i32, Point, Rect, Region};
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
 
-/// How far one wheel detent scrolls a view, in logical pixels: about three
-/// lines of body text.
-///
-/// One distance for every view rather than a count of each view's own rows,
-/// so a detent moves a list of tall cards and a column of prose alike. The
-/// seat has already accelerated a fast spin into more than one detent's
-/// worth of scroll units.
-pub const WHEEL_STEP: u32 = 48;
+pub use tairix_input::wheel::{wheel_steps, WHEEL_STEP};
 
 /// How long a press is held before it starts repeating, in nanoseconds.
 ///
@@ -339,27 +331,6 @@ impl ScrollModel {
 /// distance at `i64::MAX` so negation and addition stay in range.
 fn signed_step(step: u64) -> i64 {
     i64::try_from(step).unwrap_or(i64::MAX)
-}
-
-/// The steps `units` of scroll move a view that moves `per_detent` steps a
-/// wheel detent — pixels for a scroll view, whole tools for a strip —
-/// carrying what is short of a whole step in `carry`.
-///
-/// The one conversion from the seat's scroll units, so a turn moves every
-/// view in proportion to it. A reversal drops the carry, so a turn back is
-/// never shortened by what the turn before it left over.
-pub fn wheel_steps(units: i32, per_detent: u64, carry: &mut i64) -> i64 {
-    if units == 0 {
-        return 0;
-    }
-    if (*carry < 0) != (units < 0) {
-        *carry = 0;
-    }
-    let per = i128::from(SCROLL_UNITS_PER_DETENT);
-    let total = i128::from(*carry) + i128::from(units) * i128::from(signed_step(per_detent));
-    let moved = total / per;
-    *carry = i64::try_from(total - moved * per).unwrap_or(0);
-    i64::try_from(moved).unwrap_or(if moved < 0 { i64::MIN } else { i64::MAX })
 }
 
 /// A viewport scrolled a pixel offset along one axis of its content: the one

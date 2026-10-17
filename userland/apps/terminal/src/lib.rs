@@ -84,7 +84,7 @@
 //! * [`render`](mod@render) — the retained [`Screen`] the grid is painted
 //!   into, and the cell diff that decides what a frame redraws.
 //! * [`menu`] — the window menu's rows and its keyboard shortcuts.
-//! * [`settings`] — the in-window settings sheet.
+//! * [`settings`] — the settings sheet, shown in a popup above the window.
 //! * [`swatch`] — the colour-well grid the custom scheme is edited with.
 //!
 //! # Layering & safety

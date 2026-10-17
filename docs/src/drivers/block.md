@@ -68,7 +68,8 @@ It is upheld structurally, never by convention:
   block-service endpoint** and shares that one client, read through one block
   cache, behind `SharedBlock`'s sleeping lock, so every volume on a disk — each partition's
   mount, and the detach-time device-cache flush — serialises whole operations
-  onto it. A mount holds an *owned* window (`OwnedBlockWindow`) because the
+  onto it. An attach, recovery or detach holds only its own device's lock, so
+  a disk that stops answering holds up no other disk's volumes. A mount holds an *owned* window (`OwnedBlockWindow`) because the
   filesystem driver long outlives the attach call that opened it; the last
   window dropped closes the client and releases its window hold. When the
   device vanishes, every volume on it goes through the removal transition,
@@ -87,80 +88,123 @@ A serving driver correspondingly resolves the window a request names and may
 refuse a request naming a window it was never granted (fail closed); it never
 assumes the requester is alone.
 
-## The declared device class
+## What a device is, and how patiently it is served
 
 How patient a consumer should be with a device is a property of the *device*: a
 spinning disk may legitimately take tens of seconds to spin up or finish an
 internal reset, while a paravirtual device that has not answered in seconds is
-wedged rather than busy. A consumer that assumed one envelope for every device
-would either fail a slow-but-healthy disk early or let a wedged fast device
-stall its callers far longer than policy intends, so the one component that
-knows what the hardware is — the driver that binds it — declares it:
+wedged rather than busy. Only the driver that binds the hardware knows what it
+is, so it declares it:
 
-- `Block::medium` reports what the device is, a `blkio::BlkMedium`
-  (`HardDisk`, `SolidState`, `Nvme`, `UsbFlash`, `UsbDisk`, `SdCard`,
-  `Virtual`), and its `blkio::BlkDeviceClass` (`Rotational`, `SolidState`,
-  `Removable`, `Virtual`) follows from it (`BlockClass::device_class`, a
-  blanket implementation over `BlkDeviceClass::of`), so what a device is said
-  to be and how patiently it is served cannot disagree. Reporting it is a pure
-  observation: it touches no hardware and cannot fail. The trait default is
-  `None`, served the *unclassified* envelope — bounded rather than maximally
-  patient, so a device whose driver says nothing about itself still fails
-  closed promptly when it wedges. A forwarding layer forwards its device's
-  medium, and a composition takes `BlkMedium::of_members`.
+- `Block::medium` reports a `blkio::BlkMedium`: the `BlkTransport` the device is
+  reached over (`Ata`, `Nvme`, `Usb`, `Sd`, `Virtual`) and, as separate facts,
+  whether its medium rotates (`BlkRotation`: `Unknown`, `NonRotating`, or
+  `Rotating` at a nominal rate) and whether it can leave the unit
+  (`BlkRemovability`: `Unknown`, `Fixed`, `Removable`). Each established fact
+  carries the evidence that established it: the transport itself
+  (`BlkMedium::of_transport` — an `NVMe` namespace neither rotates nor loses its
+  medium, an SD card does not rotate), the Block Device Characteristics VPD
+  page, IDENTIFY DEVICE word 217 through ATA PASS-THROUGH, INQUIRY's RMB bit,
+  or a medium-not-present answer. A fact nothing established stays `Unknown`;
+  nothing downstream is told more than the hardware reported. The trait default
+  is `None`, a driver that says nothing about its device. Reporting the medium
+  is a pure observation: it touches no hardware and cannot fail.
+- Two things follow from the medium, each reading an unknown fact in its own
+  conservative direction:
+  - **Patience**, `BlkMedium::class`: a `Virtual` transport is `Virtual`; a
+    medium that rotates, *or is not known not to*, is `Rotational`, the most
+    patient class, so a disk spinning up is never failed for a guess; a
+    non-rotating medium is `Removable` on USB and SD and `SolidState` on a
+    direct bus. `BlkDeviceClass::of` (behind `BlockClass::device_class`) serves
+    an undeclared device the bounded `Virtual` envelope, so a driver that says
+    nothing still fails closed promptly when it wedges.
+  - **Command cost**, `BlkMedium::command_cost`: what one command costs, which a
+    filesystem's write-back window amortises (`lib/writeback`). A USB or SD unit
+    is `Bridged` whatever its medium, because the bridge's fixed cost dominates
+    every command; a rotating or unknown medium on a direct bus is `Seek`; a
+    non-rotating one, or a paravirtual device, is `Cheap`. An undeclared device
+    is `Cheap`, the window holding the least unpublished work.
+- `BlkDeviceClass::budget` gives the class's `IoBudget`, the one policy the
+  serving driver and every consumer read. Only its `CommandBudget` — the
+  allowance of a media command, of a query the unit answers without its medium,
+  and of a flush, the time a unit may take to come ready, and the slowest
+  throughput a healthy device sustains — and its retry count and queue depth are
+  chosen. The rest derive from them: a driver bounds each exchange by
+  `CommandBudget::exchange_ns` (the command kind's allowance plus its transfer
+  at that throughput); the recovery grace window is twice the longest command,
+  so a command that fails and its reissue both fit; and a consumer's
+  per-request deadline is the ready budget plus one grace window for every
+  answer the request may wait behind — the whole queue for a class served one
+  request at a time, one for a class served in parallel.
+
+  | Class        | Media | Query | Flush | Ready | Throughput | Retries | Depth | Deadline |
+  |--------------|-------|-------|-------|-------|------------|---------|-------|----------|
+  | `Rotational` | 30 s  | 10 s  | 60 s  | 60 s  | 1 MiB/s    | 3       | 2 (serial)   | 300 s |
+  | `Removable`  | 10 s  | 5 s   | 20 s  | 10 s  | 1 MiB/s    | 3       | 2 (serial)   | 90 s  |
+  | `SolidState` | 5 s   | 2 s   | 10 s  | 10 s  | 32 MiB/s   | 2       | 32 (parallel) | 30 s |
+  | `Virtual`    | 10 s  | 10 s  | 10 s  | 10 s  | 8 MiB/s    | 2       | 16 (parallel) | ≈30 s |
+
 - The medium travels to the consumer in the **geometry completion**
-  (`BlkCompletion::medium`, an `Option<BlkMedium>` so "the driver named a
-  medium this ABI does not define" stays a state of its own), alongside the
-  device's size and write policy, and the consumer adopts it for every
-  subsequent request: its per-request deadline, reissue budget, and the
-  driver's grace window all derive from that one shared
-  `BlkDeviceClass::budget` policy for *this* device (`AGENTS.md` §2.2, §24.1),
-  reached for an unknown through the single `BlkDeviceClass::of`
-  patience policy. Until the device answers, the geometry probe itself runs on the
-  bounded unclassified envelope, so an endpoint that never answers fails closed
-  promptly rather than being granted a spinning disk's patience on nothing but
-  hope.
+  (`BlkCompletion::medium`) as one 8-byte record (`BlkMedium::encode`) — the
+  same record the mount table (`MountRecord::medium`) and the hardware tree
+  (`HwProperty::BlockMedium` on the node the driver publishes) carry — and the
+  consumer adopts it for every later request. Until the device answers, the
+  geometry probe runs on the bounded undeclared envelope, so an endpoint that
+  never answers is not granted a spinning disk's patience on hope.
+- The serving driver is untrusted, and the medium needs no trust: it selects
+  only how patient a consumer is with that one device and which picture a reader
+  is shown, grants no authority, and is bounded by the widest class budget. A
+  record this ABI does not define, or an inconsistent one (a rotation the
+  transport "established", a fixed medium an absent one "established"), decodes
+  to the one undeclared `None` rather than being believed, so a relaying layer
+  cannot be made to carry a value of the driver's choosing — and it never
+  discards an otherwise well-formed completion.
 - `Block::device_name` reports the device's own short name, declared by the
-  driver for the same reason the medium is: nothing above the driver knows what
-  the device *is*, and a surface listing storage devices has otherwise only
-  the volumes that happen to sit on one to name it by — which names a
-  filesystem, not a disk. It travels to the consumer in the same geometry
-  completion (`BlkCompletion::name`) and reaches a reader on the ungated
-  `VOLUME_IO_STATS` record. The trait default is the *unnamed* device, which
-  a reader states as such rather than inventing an identity; a wrapper (a
-  partition window, a cache, a retention journal, a client over the
-  block-service seam) forwards the inner name so the real hardware's name
-  survives every layer above it, while a composition with an identity of its
-  own declares that instead. A `BlkDeviceName` admits only printable
-  non-space ASCII, refuses an over-long declaration rather than truncating it
-  (a truncation could give two devices one name), and resolves anything else
-  to the unnamed device — so an untrusted driver can neither forge an
-  identity that means anything nor put an escape sequence on a reader's
-  screen.
-- The serving driver is untrusted, and this field needs no trust: the medium
-  selects only how patient the consumer is with this one device and which
-  picture a reader is shown, grants no authority, and is bounded by the widest
-  class budget either way. A driver that overstates its patience only delays
-  its own deadline; one that understates it only fails itself sooner. An
-  unrecognised medium word on the wire is served the bounded unclassified envelope rather than being trusted
-  with a wider one — and never discards an otherwise well-formed completion.
-  It is not rewritten to `Virtual` on the way in, though: the decode keeps it
-  unknown, so "the driver said something I cannot read" stays distinct from
-  "this is a paravirtual device" wherever a consumer *reports* the medium
-  rather than merely sizing patience with it. The mount table publishes that
-  unknown to userland as such (see [the System Information
-  API](../abi/sysinfo.md)) instead of naming a medium nobody declared.
+  driver for the same reason the medium is: a surface listing storage devices
+  otherwise has only the volumes on one to name it by, which names a
+  filesystem, not a disk. It travels in the same geometry completion
+  (`BlkCompletion::name`) and reaches a reader on the ungated
+  `VOLUME_IO_STATS` record. A `BlkDeviceName` admits only printable non-space
+  ASCII, refuses an over-long declaration rather than truncating it (a
+  truncation could give two devices one name), and resolves anything else to
+  the unnamed device, so an untrusted driver can neither forge an identity that
+  means anything nor put an escape sequence on a reader's screen.
 - **A device that wraps another reports what it wraps.** A partition window, a
-  block cache, the kernel's disk-sharing boundary, the retained-writes
-  journal, and the remote block clients all forward their inner device's
-  medium, so the real hardware's identity and envelope survive every layer
-  above it rather than being flattened to the default. A device *composed* of
-  several others (a RAID array) declares the medium of the live member it must
-  wait on longest (`BlkMedium::of_members`): the array can only answer as fast
-  as the member it is waiting on, so a mirror of an SSD and a spinning disk
-  reads as the spinning disk and is served its spin-up budget. An undeclared
-  member is waited on as a paravirtual device, and when it is the one the array
-  waits on the array reads as unknown rather than as a medium nobody declared.
+  block cache, the kernel's disk-sharing boundary, the retained-writes journal,
+  and the remote block clients forward their inner device's medium and name, so
+  the real hardware survives every layer above it. A device *composed* of
+  several (a RAID array) declares the medium of the live member it must wait on
+  longest (`BlkMedium::of_members`): a mirror of an SSD and a spinning disk
+  reads as the spinning disk and is served its spin-up budget, and when that
+  member declared nothing the array reads as undeclared rather than as a medium
+  nobody declared.
+
+### A unit coming ready is held, not failed
+
+A unit spinning up, or one that needs an initializing command, is neither
+faulty nor busy: it will serve once it is ready. A driver says so with
+`DriverError::NotReady`, and the shared serving engine
+(`serve_request_recovering`) answers `Answer::Hold` instead of framing a
+completion: no health is folded and no reissue is spent. The driver keeps the
+request, tests the unit on a one-shot timer, and serves the request once the
+unit is ready — or answers it through the unit's health when the unit is given
+up on. The consumer's deadline already covers the class's ready budget, so a
+held request is answered inside it. Wherever `NotReady` reaches a caller
+instead it reads as the reissuable `Errno::WouldBlock`.
+
+### A changed medium is never served to the old consumer
+
+A unit's endpoint outlives its medium: a card leaves a reader and another is
+inserted, and the unit's channel stays where it was. So every publication of a
+unit carries a **binding** (`BlkPublication::binding`), which the geometry
+completion hands the consumer (`BlkCompletion::binding`) and every later
+request repeats (`BlkRequest::binding`). The engine refuses every request but a
+geometry query whose binding is not the current publication's as
+`Errno::Stale`, before the device is touched, so a consumer of the old card can never be served the new
+card's blocks. A driver that publishes once uses the zero binding; one that
+re-publishes draws each binding from the monotonic clock, which no two
+publications on the machine share — not even across a reloaded driver. The
+retracted node also revokes the grants consumers inherited through it.
 
 ## What a device can promise a background consumer
 
@@ -235,6 +279,15 @@ consumer read (`blkio::BlkHealth`), never a per-driver copy (`AGENTS.md`
   reissuable *within its own per-request deadline* rather than parked, so one
   device's blip never stalls the serve loop's other units (head-of-line
   freedom, §26.1).
+- **The driver says when to reissue.** A reissuable answer carries its serving
+  driver's `BlkReissue`, which the engine asks of the device
+  (`Block::reissue`) right after the failure: `Now` once the device's own
+  recovery from it has completed and the unit answered ready, so the consumer
+  reissues at once; `Paced` otherwise, and the consumer waits out the class's
+  pacing. Both consumers make that one decision through
+  `IoBudget::reissue_wait_ns`. The word only brings a reissue forward — it
+  never lengthens a wait or buys one past the class's budget — so an untrusted
+  driver can neither stall a consumer with it nor make one storm its device.
 - **When the window elapses** without the device coming back the device goes
   `Faulted` and only *then* fails closed (`BlkStatus::Offline`). A device that
   has faulted stays quarantined until it *demonstrably* answers again, so a
@@ -325,7 +378,8 @@ that unit's `BlkHealth`:
   retry-until-it-works).
 - The ladder holds no clock or timer and never spins or parks: it advances one
   rung per reissued attempt, and reissued attempts are already spaced by the
-  consumer's own reissue cadence and per-request deadline. That is *stronger*
+  consumer's own reissue cadence — at once only after the driver found the unit
+  ready — and per-request deadline. That is *stronger*
   than a driver-side backoff timer for head-of-line freedom (`AGENTS.md` §26.1),
   since the serve loop never sleeps on one recovering device while its siblings
   wait, and it keeps the whole ladder provable host-side.
@@ -358,14 +412,20 @@ number of times before failing closed:
   closed (`AGENTS.md` §2.2). A device that keeps answering reissuably still
   fails closed deterministically at the budget rather than retrying forever
   (`AGENTS.md`'s ban on retry-until-it-works).
-- Each reissue is a fresh post → park-on-reply exchange — it is event-driven,
-  never a busy spin (`AGENTS.md` §2.23). The serving driver owns the recovery
-  grace window and its timers; the consumer only honours the reissuable reply.
+- Each reissue first parks the consumer out the class's pacing
+  (`IoBudget::reissue_pacing_ns`: the grace window spread evenly over the
+  class's reissues — `sleep::park_until` in the kernel, `tairix_rt::park_ns` in
+  a driver), so the device has its whole window to recover in rather than
+  answering every reissue at once, and is then a fresh post → park-on-reply
+  exchange: event-driven, never a busy spin. The serving driver owns the
+  recovery grace window and its timers; the consumer only honours the
+  reissuable reply.
 - A hard per-request deadline timeout (synthesised kernel-side when the driver
   never answers) and a torn-down endpoint fail closed with **no** reissue: a
   device that consumed its whole deadline without answering is treated as
   wedged, not retried. A non-retryable verdict — a `MediumError` bad sector, a
-  gone `Offline`/`Removed` device — is surfaced on the first attempt.
+  gone `Offline`/`Removed` device, a `Stale` refusal because the medium it was
+  reading has changed — is surfaced on the first attempt.
 
 ## Fault domains — one hub/controller blip is one recovery episode
 
@@ -788,34 +848,68 @@ assumed), then drives one transport-neutral SCSI command layer
   IUs, and SuperSpeed streams are the staged remainder (`plans/DEVICES.md`
   §3).
 
-Every exchange is bounded: its transfers carry what remains of a budget
-derived from the class's per-request deadline (a request's share with the
-class queue full, halved so the reset a broken exchange owes still fits), so a
-device that stops answering fails the command rather than holding the driver.
-A command a reset ended is answered reissuably — `TransientError` once the
-transport is back in step, `Timeout` when the device would not answer its own
-reset — so the unit's health rides it out in its grace window rather than
-failing it at once.
+Every exchange is bounded by its own command budget
+(`CommandBudget::exchange_ns`): a media command, a query, or a flush, plus its
+transfer at the unit's slowest throughput, for the class the unit has been
+learnt to be — so a disk spinning up on a read is given its spin-up, a TEST
+UNIT READY is not, and a device that stops answering fails the command rather
+than holding the driver. A command a reset ended is answered reissuably —
+`TransientError` once the transport is back in step, `Timeout` when the device
+would not answer its own reset — so the unit's health rides it out in its grace
+window rather than failing it at once.
 
-Per logical unit (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS, exactly
-one for CBI; up to 16) the bring-up runs `INQUIRY` (non-disk types are
-skipped), a bounded ready drain (the start-of-day not-ready / UNIT
-ATTENTION states drained, the sense consumed per failed attempt — in-band
-for UAS and CBI/UFI, via `REQUEST SENSE` for BOT),
-`READ CAPACITY(10)`/`(16)` with a fully validated geometry (power-of-two
-block size 512–4096; the 16-byte form covers units past the 32-bit LBA
-horizon), and the command set's write-protect bit — enforced driver-side
-(`DriverError::PermissionDenied` before any byte reaches the device), not
-merely reported.
+Per logical unit (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS, exactly one for
+CBI; up to 16) the driver runs `INQUIRY` (non-disk types are skipped), then
+brings the unit up on its own one-shot timers inside the serve loop, so one disk
+spinning up never holds back its siblings:
+
+- **Readiness.** TEST UNIT READY's answer is classified by its sense (key,
+  ASC, ASCQ): ready; coming ready (02/04/01, re-tested every second); needing
+  an initializing command (02/04/02, sent START STOP UNIT with IMMED once);
+  needing a person (02/04/03, given up on); no medium (02/3A); a medium change
+  (06/28) or another unit attention (consumed, re-tested at once, a few in a
+  row at most). A unit that does not come ready within its class's ready
+  budget is given up on and logged with its reason.
+- **What the unit is.** Once ready it is probed, each probe sent once per
+  medium and a refusal reporting nothing: the supported VPD pages, Block Limits
+  (which caps the bytes one command moves), the Block Device Characteristics
+  page's rotation rate, else IDENTIFY DEVICE word 217 through ATA
+  PASS-THROUGH(16). INQUIRY's RMB bit says only whether the medium can leave
+  the unit — many bridges set it for a fixed disk — so it never decides how
+  patiently the unit is served. The unit's command budget follows the medium
+  learnt.
+- **Geometry and write policy.** `READ CAPACITY(10)`/`(16)` with a fully
+  validated geometry (power-of-two block size 512–4096; the 16-byte form
+  covers units past the 32-bit LBA horizon), and the command set's
+  write-protect bit — enforced driver-side (`DriverError::PermissionDenied`
+  before any byte reaches the device), not merely reported. A unit ready to a
+  test whose geometry or write policy cannot be read is re-tried within its
+  ready budget, then given up on.
+- **Empty and rejected units.** A unit with no medium — a card reader's empty
+  slot — is present, not failed: it is tested for a medium every two seconds
+  and published the moment one arrives. A removable unit whose medium was
+  given up on is not brought up again until that medium leaves or changes;
+  a fixed one is refused. A device none of whose units answers INQUIRY as a
+  disk fails its bring-up.
+
+A media command the unit answers with a unit attention is sent once more. One
+it answers "coming ready" is held (see above) while the unit is tested on its
+timer: its endpoint leaves the serve set, so the calls queued behind it wait in
+the kernel rather than waking the loop. One it answers with no medium, or a
+changed one, retracts the unit's node — revoking the grants its consumers
+inherited — and the next medium is published afresh under a new binding.
 
 Each ready LUN is published as a **storage-class hardware-tree node**
-(compatible `tairix,usb-msd-lun`) carrying two grants: a block-service
-call endpoint and a 32 KiB shared data window. Consumers drive the unit
+(compatible `tairix,usb-msd-lun`) carrying two grants — a block-service
+call endpoint and a 32 KiB shared data window — and its medium record.
+Once every unit present at attach has been published, found empty, or given
+up on, the driver settles its subtree, so a unit published later is a hot
+arrival on a running machine. Consumers drive the unit
 with the fixed-frame `tairix_abi::blkio` protocol (`BlkRequest`:
 geometry / read / write / flush; completions carry the geometry and the
 read-only flag) — the same request-reply IPC shape as the URB transport,
 served by the driver's wait-set loop (never a busy-poll). Each LUN carries a
-per-unit `blkio::BlkHealth` (the `Removable` device class), so a transient
+per-unit `blkio::BlkHealth` of its medium's class, so a transient
 device stall or bus reset is ridden out through its recovery grace window —
 answered reissuably while the unit is `Recovering` — and only a unit that
 stays unwell past the window is failed closed to its consumers, while the
@@ -843,11 +937,15 @@ client (hostile geometry refused at connect, `write_blocks` refuses by
 construction), the layout probe (whole-device filesystem signature first
 — a superfloppy — else the GPT/MBR table via `lib/partition`, each
 present partition's head probed by content through `lib/fsprobe`;
-declared partition types are hints the probe ignores), and the
-deterministic naming policy (the volume's own label sanitised through
-the alias character rules, else `<fstype><n>`; a name collision appends
-the volume-identity fingerprint, lengthened per retry, so re-inserting
-the same volume re-derives the same name).
+declared partition types are hints the probe ignores), and the naming
+policy, which names a volume from itself: its own label in kebab case
+(`My Backup Disk` is `my-backup-disk`; FAT32's read from the root-directory
+label entry), else `<transport>_<fingerprint>` (`usb_25cm`); a label
+already in use, or one spelling a root-view entry, a storage resolver or a
+resource namespace, takes `_<fingerprint>` of the volume's own identity,
+lengthened while taken. A label never yields `_`, so it cannot spell
+another volume's generated name, and unlabelled volumes take the same names
+whatever order they arrive in.
 
 It runs in **two ordered phases**, because the probe and the mounts it
 creates would otherwise be two concurrent users of the device's one staging

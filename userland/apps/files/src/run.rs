@@ -124,9 +124,9 @@ mod program {
     };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
-        AlertOutcome, AlertSpec, DocumentName, DragAt, DragItems, DropOperation, DropSite,
-        HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
-        WindowSizeState, WindowSizing,
+        AlertOutcome, AlertSpec, DialogModality, DocumentName, DragAt, DragItems, DropOperation,
+        DropSite, HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent,
+        WindowRegion, WindowSizeState, WindowSizing,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
@@ -137,9 +137,9 @@ mod program {
     use tairix_browse::document;
     use tairix_browse::marquee::{self, report_band};
     use tairix_browse::render::{
-        delete_alert, draw_open_with_chooser, draw_progress_dialog, draw_properties_window,
+        delete_alert, draw_open_with_chooser, draw_progress_window, draw_properties_window,
         draw_rename_field, drop_folder_at, manager_tool_at, open_with_action_at, open_with_reveal,
-        open_with_row_at, open_with_scroll_pointer, open_with_scroll_wheel, progress_dialog_rect,
+        open_with_row_at, open_with_scroll_pointer, open_with_scroll_wheel, progress_window_extent,
         properties_drive_damage, properties_reveal, properties_scroll_pointer,
         properties_scroll_wheel, render_into, scroll_pointer, scroll_wheel, AttrAction, Frame,
         Identity, OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls,
@@ -204,8 +204,8 @@ mod program {
     use crate::notice::{next_alert, NextAlert, NoticeSource, Notices};
     use crate::operation::{
         change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
-        mode_flip_allowed, move_refusal, operation_control, progress_due, read_refusal,
-        remove_refusal, trash_read_refusal, OperationControl,
+        item_refusal, mode_flip_allowed, move_refusal, progress_control, progress_due,
+        read_refusal, remove_refusal, trash_read_refusal, ProgressControl,
     };
     use crate::operations::{run_slice, Ending, Finished, OperationDesk, Refusal, Standing, Step};
     use crate::rename::RenameEdit;
@@ -365,7 +365,7 @@ mod program {
                     .open_with
                     .as_ref()
                     .map(|chooser| chooser.pane.id()),
-                WindowKind::Properties(_) => None,
+                WindowKind::Properties(_) | WindowKind::Progress(_) => None,
             }
         }
     }
@@ -384,6 +384,17 @@ mod program {
         Browser(Box<BrowserWindow>),
         /// One node's Properties.
         Properties(Box<PropertiesWindow>),
+        /// One operation's own progress.
+        Progress(Box<ProgressWindow>),
+    }
+
+    /// An operation's progress window: modeless, a dialog of the folder window
+    /// that started it, which it closes with, whose listing it reads again as
+    /// it ends, and in which a refusal that stopped it is stated.
+    struct ProgressWindow {
+        /// The session's id for the folder window that started it.
+        owner: u64,
+        operation: Operation,
     }
 
     /// A browser window's own state.
@@ -692,7 +703,14 @@ mod program {
         fn browser(&mut self) -> Option<&mut BrowserWindow> {
             match &mut self.kind {
                 WindowKind::Browser(win) => Some(win),
-                WindowKind::Properties(_) => None,
+                WindowKind::Properties(_) | WindowKind::Progress(_) => None,
+            }
+        }
+
+        fn progress(&mut self) -> Option<&mut ProgressWindow> {
+            match &mut self.kind {
+                WindowKind::Progress(win) => Some(win),
+                WindowKind::Browser(_) | WindowKind::Properties(_) => None,
             }
         }
 
@@ -701,7 +719,7 @@ mod program {
         fn shows(&self, location: &[String]) -> bool {
             match &self.kind {
                 WindowKind::Browser(win) => lists(&win.browser, location),
-                WindowKind::Properties(_) => false,
+                WindowKind::Properties(_) | WindowKind::Progress(_) => false,
             }
         }
     }
@@ -747,7 +765,6 @@ mod program {
             self.listing_is_held()
                 || overlays.delete.is_some()
                 || overlays.open_with.is_some()
-                || overlays.operation.is_some()
                 || overlays.notices.is_showing()
         }
 
@@ -799,12 +816,7 @@ mod program {
                 _ => None,
             };
             let rename = self.overlays.rename_arm.and_then(|arm| arm.due());
-            let progress = self
-                .overlays
-                .operation
-                .as_ref()
-                .and_then(|operation| operation.due_ns);
-            band.into_iter().chain(rename).chain(progress).min()
+            band.into_iter().chain(rename).min()
         }
 
         /// Open the rename a click on a name armed once it is due at `now`,
@@ -828,7 +840,6 @@ mod program {
                 .is_none_or(|target| target == self.browser.components());
             let free = !self.listing_is_held()
                 && self.overlays.delete.is_none()
-                && self.overlays.operation.is_none()
                 && !self.overlays.notices.is_showing();
             if !settled || !free || self.browser.chosen_index() != Some(arm.index()) {
                 return Repaint::Nothing;
@@ -943,7 +954,7 @@ mod program {
             match self.browser.refresh() {
                 Ok(()) => self.landed(),
                 Err(err) => {
-                    report_error(&alloc::format!("listing refused ({err})"));
+                    self.listing_refused(err);
                     Repaint::Nothing
                 }
             }
@@ -1028,7 +1039,7 @@ mod program {
                 }
                 Err(err) => {
                     self.lost = false;
-                    report_error(&alloc::format!("listing refused ({err})"));
+                    self.listing_refused(err);
                     Repaint::Nothing
                 }
             }
@@ -1127,7 +1138,46 @@ mod program {
             WindowKind::Properties(props) => {
                 present_properties(props, grounds.popups, &mut target, icons, scale)
             }
+            WindowKind::Progress(progress) => {
+                present_progress(progress, grounds.popups, &mut target, scale)
+            }
         }
+    }
+
+    /// Paint a progress window's client and present it, retitling it as the
+    /// operation turns to cancelling.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the present refuses.
+    fn present_progress<T: WindowTransport>(
+        win: &ProgressWindow,
+        theme: &Theme,
+        target: &mut FrameTarget<'_, T>,
+        scale: Scale,
+    ) -> Result<(), Errno> {
+        let mode = *target.pane.mode();
+        let client = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let progress = &win.operation.progress;
+        let surface = &mut *target.surface;
+        for part in target.parts.rects() {
+            surface.with_clip(part.x, part.y, part.width_px, part.height_px, |surface| {
+                draw_progress_window(surface, progress, scale, theme, client);
+            });
+        }
+        target
+            .pane
+            .present_list(target.client, surface, &target.parts)?;
+        // A refused retitle keeps the title remembered, so the next frame asks
+        // again.
+        let title = progress.title();
+        if target.title.as_str() != title
+            && target.client.set_title(target.pane.id(), title).is_ok()
+        {
+            target.title.clear();
+            target.title.push_str(title);
+        }
+        Ok(())
     }
 
     /// Paint a Properties window's whole client and present it.
@@ -1391,7 +1441,8 @@ mod program {
                 .min(mode.height_px.max(state.fit.opening))
                 .max(sizing.min_height_px());
             if height != mode.height_px {
-                resized = pane.resize_with(client, &app::mode_for(mode.width_px, height), surface);
+                resized = pane.resize_with(client, &app::mode_for(mode.width_px, height), surface)
+                    == app::Fitted::Adopted;
             }
         }
         if sizing != state.fit.sizing {
@@ -1455,24 +1506,35 @@ mod program {
         match &mut closed.kind {
             WindowKind::Browser(win) => {
                 reads.forget_listing(win.listing);
-                reads.forget_operation(id);
-                // One carried out on this loop ends with its window, the file
-                // it was writing removed.
-                if let Some(job) = win
-                    .overlays
-                    .operation
-                    .as_mut()
-                    .and_then(|op| op.here.as_mut())
-                {
-                    job.abandon();
+                // Its progress windows are its dialogs, which the desktop
+                // closes with it: their operations stop with them.
+                while let Some(at) = windows.iter().position(|win| {
+                    matches!(&win.kind, WindowKind::Progress(progress) if progress.owner == id)
+                }) {
+                    let mut owned = windows.remove(at);
+                    let owned_id = owned.pane.id();
+                    if let Some(progress) = owned.progress() {
+                        stop_operation(owned_id, &mut progress.operation, reads);
+                    }
                 }
             }
             WindowKind::Properties(_) => {
                 reads.forget_properties(id);
                 reads.forget_drive(id);
             }
+            WindowKind::Progress(progress) => stop_operation(id, &mut progress.operation, reads),
         }
         let _ = closed.pane.close(client);
+    }
+
+    /// Operation `id` stops with the window showing it: it never runs if it
+    /// waits, stops at its next unit if it runs, and one carried out on this
+    /// loop ends here, the file it was writing removed.
+    fn stop_operation(id: u64, operation: &mut Operation, reads: &Reads) {
+        reads.forget_operation(id);
+        if let Some(job) = operation.here.as_mut() {
+            job.abandon();
+        }
     }
 
     /// A one-shot write a browser window asked for, and what its answer does.
@@ -1588,6 +1650,53 @@ mod program {
         }
     }
 
+    /// Act on the answer to a New ▸ entry, answering whether the window
+    /// changed: the made entry is named in place, a refusal stated naming it.
+    fn finish_new_entry(
+        state: &mut BrowserWindow,
+        pending: &tairix_browse::PendingEntry,
+        made: Result<(), Errno>,
+        frame: Frame<'_>,
+    ) -> bool {
+        match state.browser.finish_entry(pending, made) {
+            Ok(true) if state.browser.focus_pending().is_some() => {
+                state.overlays.rename_on_arrival = Some((
+                    state.browser.components().to_vec(),
+                    String::from(pending.name()),
+                ));
+                false
+            }
+            Ok(true) => {
+                begin_rename(
+                    &mut state.browser,
+                    &mut state.overlays.rename,
+                    frame.scale,
+                    frame.theme,
+                    frame.viewport,
+                    frame.toolbar,
+                )
+                .0
+            }
+            Ok(false) => false,
+            Err(err) => {
+                let reason = match err {
+                    tairix_browse::CreateError::Refused(errno) => {
+                        item_refusal("make", &[pending.name()], create_refusal(errno))
+                    }
+                    other => {
+                        alloc::format!("\u{201c}{}\u{201d}: {}", pending.name(), other.message())
+                    }
+                };
+                report_error(&reason);
+                state
+                    .overlays
+                    .notices
+                    .refuse(NoticeSource::Write, NOT_MADE, &reason);
+                true
+            }
+        }
+    }
+
     /// Act on a browser window's write answer, answering whether the window
     /// changed.
     fn apply_browser_write(
@@ -1611,42 +1720,7 @@ mod program {
                 true
             }
             BrowserWrite::Entry(pending) => {
-                match state.browser.finish_entry(&pending, answer.status()) {
-                    Ok(true) if state.browser.focus_pending().is_some() => {
-                        state.overlays.rename_on_arrival = Some((
-                            state.browser.components().to_vec(),
-                            String::from(pending.name()),
-                        ));
-                        false
-                    }
-                    Ok(true) => {
-                        begin_rename(
-                            &mut state.browser,
-                            &mut state.overlays.rename,
-                            frame.scale,
-                            frame.theme,
-                            frame.viewport,
-                            frame.toolbar,
-                        )
-                        .0
-                    }
-                    Ok(false) => false,
-                    Err(tairix_browse::CreateError::Refused(errno)) => {
-                        let reason = alloc::format!("the volume refused it: {errno}");
-                        state
-                            .overlays
-                            .notices
-                            .refuse(NoticeSource::Write, NOT_MADE, &reason);
-                        true
-                    }
-                    Err(err) => {
-                        state
-                            .overlays
-                            .notices
-                            .refuse(NoticeSource::Write, NOT_MADE, err.message());
-                        true
-                    }
-                }
+                finish_new_entry(state, &pending, answer.status(), frame)
             }
             BrowserWrite::EmptyTrash(trash) => {
                 let WriteAnswer::TrashPlanned(planned) = answer else {
@@ -1701,22 +1775,26 @@ mod program {
         }
     }
 
-    /// What one window's operation came to this turn.
+    /// What one operation came to this turn.
     enum Moved {
         /// It ended so.
         Ended(Finished),
-        /// It has done more, to show now.
+        /// It has done more, or begun, to show now.
         Shown(Standing),
     }
 
-    /// Hand each window's newly asked operation to the operations worker, and
-    /// fold what the worker reports into the windows that asked: a panel's
-    /// count, at most once a frame, and an operation's end.
+    /// Hand each newly asked operation to the operations worker, and fold
+    /// what the worker reports into the progress windows: a count, at most
+    /// once a frame, and an operation's end.
     ///
     /// The desk is read in one critical section and acted on once the lock is
-    /// let go, because ending an operation reads the listing again through
-    /// that same lock.
-    fn adopt_operations(windows: &mut [OpenWindow], reads: &Reads, theme: &Theme, scale: Scale) {
+    /// let go, because ending an operation reads its folder's listing again
+    /// through that same lock.
+    fn adopt_operations(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+    ) {
         let now = tairix_rt::clock_get();
         let mut asked = false;
         let mut moved = alloc::vec::Vec::new();
@@ -1727,20 +1805,18 @@ mod program {
             // owes a wake.
             desk.acknowledge();
             let mut holding = false;
-            for (index, win) in windows.iter_mut().enumerate() {
+            for win in windows.iter_mut() {
                 let id = win.pane.id();
-                let Some(operation) = win
-                    .browser()
-                    .and_then(|state| state.overlays.operation.as_mut())
-                else {
+                let Some(progress) = win.progress() else {
                     continue;
                 };
+                let operation = &mut progress.operation;
                 if let Some(job) = operation.job.take() {
                     match desk.submit(id, job) {
                         Ok(()) => asked = true,
                         Err((job, Refusal::Stopping)) => operation.here = Some(job),
                         Err((_, Refusal::Busy | Refusal::Full)) => moved.push((
-                            index,
+                            id,
                             Moved::Ended(Finished {
                                 done: 0,
                                 ending: Ending::Stopped(String::from(
@@ -1752,20 +1828,24 @@ mod program {
                     continue;
                 }
                 if let Some(finished) = desk.take(id) {
-                    moved.push((index, Moved::Ended(finished)));
+                    moved.push((id, Moved::Ended(finished)));
                     continue;
                 }
                 let Some(standing) = desk.standing(id) else {
                     continue;
                 };
-                let shown = operation.progress.is_cancel_requested();
-                if standing.done == operation.progress.done() && (shown || !standing.cancelling) {
+                let progress = &operation.progress;
+                let shown = progress.is_cancel_requested();
+                if standing.done == progress.done()
+                    && standing.waiting == progress.is_waiting()
+                    && (shown || !standing.cancelling)
+                {
                     // Nothing new by the frame: the next report wakes the loop.
                     operation.due_ns = None;
                     continue;
                 }
                 if progress_due(now, operation.shown_ns) {
-                    moved.push((index, Moved::Shown(standing)));
+                    moved.push((id, Moved::Shown(standing)));
                 } else {
                     operation.due_ns = Some(operation.shown_ns.saturating_add(Timeline::FRAME_NS));
                 }
@@ -1780,66 +1860,151 @@ mod program {
         if asked {
             reads.operation_signal.notify_one();
         }
-        for (index, change) in moved {
-            let Some(win) = windows.get_mut(index) else {
-                continue;
-            };
-            let Some(state) = win.browser() else {
+        for (id, change) in moved {
+            let Some(index) = windows.iter().position(|win| win.pane.id() == id) else {
                 continue;
             };
             match change {
-                Moved::Ended(finished) => {
-                    end_operation(state, finished);
-                    win.owed.owe_whole();
-                }
+                Moved::Ended(finished) => end_operation(windows, index, client, reads, finished),
                 Moved::Shown(standing) => {
-                    let Some(operation) = state.overlays.operation.as_mut() else {
+                    let win = &mut windows[index];
+                    let Some(progress) = win.progress() else {
                         continue;
                     };
+                    let operation = &mut progress.operation;
                     operation.progress.set_done(standing.done);
+                    operation.progress.set_waiting(standing.waiting);
                     if standing.cancelling {
                         operation.progress.request_cancel();
                     }
                     operation.shown_ns = now;
                     operation.due_ns = Some(now.saturating_add(Timeline::FRAME_NS));
-                    owe_progress(win, theme, scale);
+                    win.owed.owe_whole();
                 }
             }
         }
     }
 
-    /// Owe `win` its progress panel alone: a new count changes nothing else.
-    fn owe_progress(win: &mut OpenWindow, theme: &Theme, scale: Scale) {
-        let mode = *win.pane.mode();
-        let Some(state) = win.browser() else {
+    /// End the operation the progress window at `index` shows, on its answer:
+    /// the window closes, the folder that started it is read again where
+    /// nothing follows it, so a partial run shows what actually remains, and
+    /// a refusal is stated in that folder's window, and on `stderr` for the
+    /// record.
+    fn end_operation(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+        finished: Finished,
+    ) {
+        let Some(progress) = windows.get_mut(index).and_then(OpenWindow::progress) else {
             return;
         };
-        let viewport = frame_of(state, &mode, theme, scale).viewport;
-        let mut damage = damage::sink();
-        damage.add(progress_dialog_rect(viewport, scale, theme));
-        owe(win, Repaint::Reported, &damage);
-    }
-
-    /// Close a window's operation on its answer. Where nothing follows the
-    /// folder it is read again, so a partial run shows what actually remains,
-    /// and a refusal is stated in the window, and on `stderr` for the record.
-    fn end_operation(state: &mut BrowserWindow, finished: Finished) {
-        let Some(operation) = state.overlays.operation.take() else {
+        let (owner, stopped) = (progress.owner, progress.operation.progress.stopped_title());
+        close_window(windows, index, client, reads);
+        let Some(win) = windows.iter_mut().find(|win| win.pane.id() == owner) else {
+            if let Ending::Stopped(reason) = &finished.ending {
+                report_error(reason);
+            }
+            return;
+        };
+        let Some(state) = win.browser() else {
             return;
         };
         if !state.browser.follows() {
             if let Err(err) = state.browser.refresh() {
-                report_error(&alloc::format!("listing refused ({err})"));
+                state.listing_refused(err);
             }
         }
         if let Ending::Stopped(reason) = finished.ending {
             report_error(&reason);
-            state.overlays.notices.refuse(
-                NoticeSource::Operation,
-                operation.progress.stopped_title(),
-                &reason,
-            );
+            state
+                .overlays
+                .notices
+                .refuse(NoticeSource::Operation, stopped, &reason);
         }
+        win.owed.owe_whole();
+    }
+
+    /// Give each operation a folder window asked for this round a progress
+    /// window of its own — modeless, a dialog of that folder's window — and
+    /// present it. One the desktop will not open is not run: an operation
+    /// with no Cancel to press is not one to start, and the refusal is stated
+    /// in the folder's window.
+    fn open_started_operations(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (desktop, grounds, icons): (&Desktop, Grounds<'_>, &RefCell<IconPipeline>),
+        event_endpoint: u64,
+    ) {
+        let mut index = 0;
+        while index < windows.len() {
+            let owner = windows[index].pane.id();
+            let Some(operation) = windows[index]
+                .browser()
+                .and_then(|state| state.overlays.starting.take())
+            else {
+                index += 1;
+                continue;
+            };
+            match open_progress(operation, owner, client, (desktop, grounds), event_endpoint) {
+                Ok(mut win) => {
+                    if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
+                        report_error("an operation's progress window could not be painted");
+                    }
+                    windows.push(win);
+                }
+                Err((title, why)) => {
+                    report_error(&alloc::format!("{title} not begun: {why}"));
+                    if let Some(state) = windows[index].browser() {
+                        let reason = alloc::format!("its progress could not be shown ({why})");
+                        state
+                            .overlays
+                            .notices
+                            .refuse(NoticeSource::Operation, title, &reason);
+                    }
+                    windows[index].owed.owe_whole();
+                }
+            }
+            index += 1;
+        }
+    }
+
+    /// Open `operation`'s progress window as a modeless dialog of window
+    /// `owner`, or say why it could not be, with what the operation is called.
+    fn open_progress(
+        operation: Operation,
+        owner: u64,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        (desktop, grounds): (&Desktop, Grounds<'_>),
+        event_endpoint: u64,
+    ) -> Result<OpenWindow, (&'static str, String)> {
+        let title = operation.progress.title();
+        let stopped = operation.progress.stopped_title();
+        let (width, height) = progress_window_extent(desktop.scale(), grounds.popups);
+        let mode = app::mode_for(width, height);
+        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+            return Err((stopped, String::from("no memory to draw it")));
+        };
+        let Some(server) = client.session() else {
+            return Err((stopped, String::from("the desktop session is unknown")));
+        };
+        let pane = WindowPane::open_dialog(
+            client,
+            (owner, server),
+            event_endpoint,
+            &mode,
+            DialogModality::Modeless,
+            title,
+        )
+        .map_err(|err| (stopped, alloc::format!("{err}")))?;
+        Ok(OpenWindow {
+            pane,
+            title: String::from(title),
+            surface,
+            owed: Owed::new(),
+            kind: WindowKind::Progress(Box::new(ProgressWindow { owner, operation })),
+        })
     }
 
     /// Serve what falls due with no event to bring it, answering whether any
@@ -1870,6 +2035,8 @@ mod program {
                     }
                     Repaint::Nothing
                 }
+                // A count is shown as it is adopted, never on a timer here.
+                WindowKind::Progress(_) => Repaint::Nothing,
             };
             moved |= repaint != Repaint::Nothing;
             owe(win, repaint, &damage);
@@ -1877,63 +2044,43 @@ mod program {
         moved
     }
 
-    /// Serve one event addressed to a window whose operation runs, answering
-    /// whether it was one: the panel's Cancel asks the operation to stop
-    /// before its next unit, and a close closes the window. Nothing else
-    /// reaches the window while it is modal.
-    fn serve_operation_event(
+    /// Serve one event addressed to the progress window at `index`: its
+    /// Cancel or Escape asks the operation to stop before its next unit — one
+    /// not yet handed to the worker ends at once, having done nothing — and a
+    /// redraw request is answered.
+    fn serve_progress_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
-        busy: usize,
+        index: usize,
         client: &mut WindowClient<app::RtWindowTransport>,
-        theme: &Theme,
-        scale: Scale,
+        (theme, scale): (&Theme, Scale),
         reads: &Reads,
         event: &WindowEvent,
-    ) -> bool {
-        let Some(win) = windows.get_mut(busy) else {
-            return false;
+    ) {
+        let Some(win) = windows.get_mut(index) else {
+            return;
         };
         let mode = *win.pane.mode();
-        let window_id = win.pane.id();
-        let Some(state) = win
-            .browser()
-            .filter(|state| state.overlays.operation.is_some())
-        else {
-            return false;
+        let id = win.pane.id();
+        let client_rect = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let Some(progress) = win.progress() else {
+            return;
         };
-        state.note_pointer(event);
-        state.keyboard = state.keyboard.step(event).1;
-        let canvas = Canvas {
-            theme,
-            mode: &mode,
-            scale,
-            chrome: state.chrome,
-        };
-        match operation_control(
-            canvas.chrome.rail(&state.places),
-            scale,
-            theme,
-            canvas.window(),
-            canvas.chrome.toolbar,
-            event,
-        ) {
-            OperationControl::Cancel => {
-                match state.overlays.operation.as_mut() {
-                    // Not yet handed over, so nothing has been done to stop.
-                    Some(operation) if operation.job.is_some() => state.overlays.operation = None,
-                    Some(operation) => {
-                        operation.progress.request_cancel();
-                        reads.cancel_operation(window_id);
-                    }
-                    None => {}
-                }
+        match progress_control(client_rect, scale, theme, event) {
+            ProgressControl::Cancel if progress.operation.job.is_some() => {
+                let cancelled = Finished {
+                    done: 0,
+                    ending: Ending::Cancelled,
+                };
+                end_operation(windows, index, client, reads, cancelled);
+            }
+            ProgressControl::Cancel => {
+                progress.operation.progress.request_cancel();
+                reads.cancel_operation(id);
                 win.owed.owe_whole();
             }
-            OperationControl::Close => close_window(windows, busy, client, reads),
-            OperationControl::Redraw => win.owed.owe_whole(),
-            OperationControl::Ignore => {}
+            ProgressControl::Redraw => win.owed.owe_whole(),
+            ProgressControl::Ignore => {}
         }
-        true
     }
 
     /// What routing an icon-bar event did.
@@ -2123,8 +2270,9 @@ mod program {
             );
             return None;
         }
-        let (popups, scale) = (grounds.popups, desktop.scale());
-        if serve_operation_event(windows, index, client, popups, scale, reads, event) {
+        if matches!(windows[index].kind, WindowKind::Progress(_)) {
+            let place = (grounds.popups, desktop.scale());
+            serve_progress_event(windows, index, client, place, reads, event);
             return None;
         }
         route_browser_event(
@@ -2609,7 +2757,7 @@ mod program {
         height_px: u32,
     ) {
         let new_mode = app::mode_for(width_px, height_px);
-        if win.pane.resize_with(client, &new_mode, &mut win.surface) {
+        if win.pane.resize_with(client, &new_mode, &mut win.surface) == app::Fitted::Adopted {
             win.owed.owe_whole();
         }
     }
@@ -4203,19 +4351,20 @@ mod program {
             self.work.lock().operations.stop();
         }
 
-        /// Cancel `window`'s operation.
-        fn cancel_operation(&self, window: u64) {
-            self.work.lock().operations.cancel(window);
+        /// Cancel operation `id`: the one its progress window shows.
+        fn cancel_operation(&self, id: u64) {
+            self.work.lock().operations.cancel(id);
         }
 
-        /// `window` has closed: its operation stops and its answer is dropped.
-        fn forget_operation(&self, window: u64) {
-            self.work.lock().operations.forget(window);
+        /// Operation `id`'s progress window has closed: the operation stops
+        /// and its answer is dropped.
+        fn forget_operation(&self, id: u64) {
+            self.work.lock().operations.forget(id);
         }
 
-        /// The operations worker's whole life: park until a window asks for
-        /// one, carry it out a unit at a time, and answer the window that
-        /// asked. A cancel is seen between units, never mid-unit.
+        /// The operations worker's whole life: park until an operation is
+        /// asked for, carry it out a unit at a time, and answer it by its own
+        /// id. A cancel is seen between units, never mid-unit.
         fn serve_operations(&self) {
             loop {
                 let (_, mut job) = {
@@ -4779,21 +4928,19 @@ mod program {
 
     /// A long file operation a window asked for (`plans/NEW-FILEMANAGER.md`
     /// `FM7b`): its job until the loop hands it to the operations worker, and
-    /// what the window's modal progress panel shows while it runs.
-    ///
-    /// The window is modal while it is set: a cancel or a close reaches it,
-    /// and nothing navigates behind the panel.
+    /// what its own progress window shows while it runs. The folder window
+    /// goes on being used meanwhile.
     struct Operation {
         /// The job, until it is handed over.
         job: Option<Job>,
         /// The job carried out on this loop, a slice a turn, when no worker
         /// takes it.
         here: Option<Job>,
-        /// The count done and a latched cancel, as the panel shows them.
+        /// The count done and a latched cancel, as its window shows them.
         progress: ProgressModel,
-        /// When the panel last showed a new count, so it moves once a frame.
+        /// When its window last showed a new count, so it moves once a frame.
         shown_ns: u64,
-        /// A count landed too soon after the last to show yet: the panel is
+        /// A count landed too soon after the last to show yet: its window is
         /// drawn again at this instant.
         due_ns: Option<u64>,
     }
@@ -4974,8 +5121,9 @@ mod program {
         /// borrows this window's extent. The right-click menu itself is the
         /// desktop's chain and appears nowhere here.
         open_with: Option<ChooserOverlay>,
-        /// The long file operation this window asked for, while it runs.
-        operation: Option<Operation>,
+        /// An operation this window asked for, until the loop gives it a
+        /// progress window of its own.
+        starting: Option<Operation>,
         /// The refusals stated in the window, one at a time until dismissed.
         notices: Notices,
         /// The one-shot write this window waits on.
@@ -5333,13 +5481,10 @@ mod program {
                     if let Some(field) = rename {
                         draw_rename_field(surface, field, browser, scale, theme, viewport, toolbar);
                     }
-                    // The "Open With…" chooser has its own popup window, and the
+                    // The "Open With…" chooser has its own popup window, the
                     // right-click menu and every question are the desktop's own
-                    // windows, so none is drawn here. A running operation's
-                    // progress panel is modal, so it is drawn last.
-                    if let Some(operation) = overlays.operation.as_ref() {
-                        draw_progress_dialog(surface, &operation.progress, scale, theme, viewport);
-                    }
+                    // windows, and each operation's progress is a window of its
+                    // own, so none is drawn here.
                 });
             }
         }
@@ -5565,6 +5710,9 @@ mod program {
             ) {
                 if let Some(reason) = &outcome.refused {
                     report_error(reason);
+                    overlays
+                        .notices
+                        .refuse(NoticeSource::Listing, NOT_OPENED, reason);
                 }
                 return (outcome.repaint.merged(hover), false);
             }
@@ -5719,6 +5867,9 @@ mod program {
                 Leave::Closed => (Repaint::Nothing, true),
                 Leave::Refused(reason) => {
                     report_error(&reason);
+                    overlays
+                        .notices
+                        .refuse(NoticeSource::Listing, NOT_OPENED, &reason);
                     (Repaint::Nothing, false)
                 }
             },
@@ -6403,6 +6554,8 @@ mod program {
                 WindowKind::Properties(props) => {
                     *full = raise_notice(&mut props.notices, client, endpoint, window_id);
                 }
+                // A refusal that stops an operation is its folder's to state.
+                WindowKind::Progress(_) => {}
             }
         }
     }
@@ -6450,6 +6603,7 @@ mod program {
                     }
                     false
                 }
+                WindowKind::Progress(_) => false,
             };
             if removal {
                 win.owed.owe_whole();
@@ -6473,7 +6627,15 @@ mod program {
         if !chosen {
             return;
         }
-        overlays.operation = Some(match confirm.trash_moves {
+        if overlays.starting.is_some() {
+            overlays.notices.refuse(
+                NoticeSource::Operation,
+                "Nothing was removed",
+                "the operation asked for just before it is still being started",
+            );
+            return;
+        }
+        overlays.starting = Some(match confirm.trash_moves {
             Some(moves) => Operation::new(Job::Trash(TrashRun::new(moves)), ProgressOp::Trash),
             None => Operation::new(
                 Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
@@ -6517,16 +6679,19 @@ mod program {
     /// a desktop frame's worth of units, so input is served between slices and
     /// Cancel still stops it at a unit's end. Answers whether one is still
     /// working, which keeps the loop turning.
-    fn step_here_operations(windows: &mut [OpenWindow], theme: &Theme, scale: Scale) -> bool {
+    fn step_here_operations(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+    ) -> bool {
         let mut working = false;
+        let mut ended = alloc::vec::Vec::new();
         for win in windows.iter_mut() {
-            let Some(state) = win.browser() else {
+            let id = win.pane.id();
+            let Some(progress) = win.progress() else {
                 continue;
             };
-            let Some(operation) = state.overlays.operation.as_mut() else {
-                continue;
-            };
-            let Operation { here, progress, .. } = operation;
+            let Operation { here, progress, .. } = &mut progress.operation;
             let Some(job) = here.as_mut() else {
                 continue;
             };
@@ -6540,16 +6705,20 @@ mod program {
                 job.abandon();
             }
             let done = job.done();
-            let counted = done != operation.progress.done();
-            operation.progress.set_done(done);
+            let counted = done != progress.done();
+            progress.set_done(done);
             if let Some(ending) = ending {
-                end_operation(state, Finished { done, ending });
-                win.owed.owe_whole();
+                ended.push((id, Finished { done, ending }));
             } else {
                 working = true;
                 if counted {
-                    owe_progress(win, theme, scale);
+                    win.owed.owe_whole();
                 }
+            }
+        }
+        for (id, finished) in ended {
+            if let Some(index) = windows.iter().position(|win| win.pane.id() == id) {
+                end_operation(windows, index, client, reads, finished);
             }
         }
         working
@@ -6632,14 +6801,6 @@ mod program {
     /// with the step it just took: going on would act on a guess.
     const LOST_TRACK: &str =
         "the file manager lost track of its progress and stopped rather than guess";
-
-    /// The words a refusal that stopped an operation is stated in, naming the
-    /// item by the leaf the user sees: "could not delete “Notes”: its volume
-    /// is read-only".
-    fn item_refusal(verb: &str, path: &[String], reason: &str) -> String {
-        let name = path.last().map_or("", String::as_str);
-        alloc::format!("could not {verb} \u{201c}{name}\u{201d}: {reason}")
-    }
 
     /// Read the children of the directory at `path`: each child's leaf name
     /// and the browser's own classification of it, through the same
@@ -6801,7 +6962,8 @@ mod program {
     /// perform themselves — or say why it cannot begin.
     ///
     /// It does not begin while the window waits on a one-shot change, whose
-    /// answer would otherwise act on the listing behind the operation's panel.
+    /// answer would otherwise act on the listing it is planned from, nor
+    /// while an operation asked for just before it is still being started.
     /// Pasting a folder into itself is refused outright ([`plan_paste`]). The
     /// operations worker reads the destination's volume once, then decides
     /// each item's move-vs-copy by [`paste_strategy`] as it runs — a
@@ -6814,8 +6976,10 @@ mod program {
         target: &[String],
         overlays: &mut Overlays,
     ) -> Result<(), String> {
-        if overlays.operation.is_some() {
-            return Err(String::from("the window is already running an operation"));
+        if overlays.starting.is_some() {
+            return Err(String::from(
+                "the operation asked for just before it is still being started",
+            ));
         }
         if overlays.writing.is_some() {
             return Err(String::from(STILL_WRITING));
@@ -6826,7 +6990,7 @@ mod program {
             ClipboardOp::Cut => ProgressOp::Move,
         };
         let paste = Paste::new(plan.op(), target.to_vec(), plan.items().to_vec());
-        overlays.operation = Some(Operation::new(Job::Paste(Box::new(paste)), op));
+        overlays.starting = Some(Operation::new(Job::Paste(Box::new(paste)), op));
         Ok(())
     }
 
@@ -8501,6 +8665,9 @@ mod program {
     /// The title of the notice a refused New ▸ is stated in.
     const NOT_MADE: &str = "Not made";
 
+    /// The title of the notice a place that cannot be opened is stated in.
+    const NOT_OPENED: &str = "Not opened";
+
     /// The title of the notice a Trash that cannot be shown is stated in.
     const NO_TRASH: &str = "No Trash";
 
@@ -9757,7 +9924,7 @@ mod program {
             rename_on_arrival: None,
             delete: None,
             open_with: None,
-            operation: None,
+            starting: None,
             notices: Notices::default(),
             writing: None,
             clipboard: None,
@@ -10189,6 +10356,10 @@ mod program {
                     // A malformed frame from the authenticated session is
                     // refused and the drain carries on (never guessed at).
                     Err(EventError::Undecodable(_)) => continue,
+                    Err(EventError::Refused(refused)) => {
+                        report_error(&alloc::format!("{refused}"));
+                        continue;
+                    }
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                     }
@@ -10235,8 +10406,14 @@ mod program {
             moved |= collect_writes(&mut windows, &reads, themes.active(), desktop.scale());
             submit_writes(&mut windows, &reads, themes.active(), desktop.scale());
             state_rename_refusals(&mut windows);
-            adopt_operations(&mut windows, &reads, themes.active(), desktop.scale());
-            moved |= step_here_operations(&mut windows, themes.active(), desktop.scale());
+            open_started_operations(
+                &mut windows,
+                &mut client,
+                (&desktop, themes.grounds(MANAGER_WINDOW_GROUND), &icons),
+                event_endpoint,
+            );
+            adopt_operations(&mut windows, &mut client, &reads);
+            moved |= step_here_operations(&mut windows, &mut client, &reads);
             if let Some(code) = open_landed_windows(
                 &mut windows,
                 &opening,
@@ -10470,6 +10647,7 @@ mod program {
                     .filter_map(|win| match &win.kind {
                         WindowKind::Browser(state) => state.due(),
                         WindowKind::Properties(props) => props.due(),
+                        WindowKind::Progress(progress) => progress.operation.due_ns,
                     })
                     .min(),
             );
@@ -10480,6 +10658,7 @@ mod program {
                 // A malformed frame from the authenticated session is refused
                 // and the app keeps waiting (never guessed at).
                 Err(EventError::Undecodable(_)) => {}
+                Err(EventError::Refused(refused)) => report_error(&alloc::format!("{refused}")),
                 Err(EventError::Mailbox(_)) => {
                     return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                 }

@@ -213,31 +213,6 @@ impl Dialog {
     /// in it: wide enough for its sentence and three answers in a row.
     pub const QUESTION_WIDTH: u32 = 420;
 
-    /// Where the dialog sits over `window` as a question of it: `width`
-    /// physical pixels wide, as tall as it is with `content` in its band —
-    /// neither past the window — centred across it a third of the way down.
-    #[must_use]
-    pub fn placed_over(
-        &self,
-        window: Rect,
-        width: u32,
-        content: u32,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Rect {
-        let width = width.min(window.width);
-        let height = self
-            .height_for_content(content, width, scale, theme)
-            .min(window.height);
-        let x = window
-            .left()
-            .saturating_add_unsigned((window.width - width) / 2);
-        let y = window
-            .top()
-            .saturating_add_unsigned((window.height - height) / 3);
-        Rect::new(x, y, width, height)
-    }
-
     /// The dialog's title.
     #[must_use]
     pub fn title(&self) -> &str {

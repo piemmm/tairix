@@ -77,8 +77,8 @@ Examples:
 sys:random
 info:cpu/vendor
 stats:net/wan/rx.pps?window=1s
-disk:backup@7K2M
-disk:slot/front-usb@P91Q::raw
+disk:backup@7k2m
+disk:slot/front-usb@p91q::raw
 tty:debug
 vol:home
 ```
@@ -95,7 +95,7 @@ that owns the selector. Examples: `sys`, `disk`, `vol`, `tty`, `info`, `stats`.
 The namespace-specific text after `:` and before any identity guard, facet, or
 query parameters.
 
-In `disk:backup@7K2M::raw`, the selector is `backup`.
+In `disk:backup@7k2m::raw`, the selector is `backup`.
 
 ### 3.4 Alias
 
@@ -125,9 +125,9 @@ matches a specific identity.
 Examples:
 
 ```text
-disk:backup@7K2M
-disk:slot/front-usb@P91Q
-vol:home@H41V
+disk:backup@7k2m
+disk:slot/front-usb@p91q
+vol:home@h41v
 ```
 
 The guard is a check, not a separate resource name.
@@ -144,8 +144,9 @@ The canonical identity is machine-readable. Humans should not normally type it.
 
 ### 3.8 Short fingerprint
 
-A compact display digest derived from the canonical identity and resource kind.
-It is used as an identity guard. It is not itself the full identity.
+A compact display rendering of the canonical identity (§10). It is used as an
+identity guard, and to tell apart volumes whose labels alone would name them
+alike. A prefix of it is not itself the full identity.
 
 The resolver must require enough characters to make the fingerprint unique among
 currently known resources of that kind and among pinned aliases in scope.
@@ -271,9 +272,9 @@ A selector beginning with `@` selects by short fingerprint within the namespace.
 Examples:
 
 ```text
-disk:@7K2M
-vol:@H41V
-tty:@L44R
+disk:@7k2m
+vol:@h41v
+tty:@l44r
 ```
 
 The shorthand must resolve uniquely. If it does not, the resolver returns
@@ -499,11 +500,11 @@ Examples:
 ```text
 disk:system
 disk:backup
-disk:backup@7K2M
-disk:@7K2M
+disk:backup@7k2m
+disk:@7k2m
 disk:id/wwn/5002538f00000000
 disk:slot/front-usb
-disk:slot/front-usb@P91Q
+disk:slot/front-usb@p91q
 disk:?removable=true,size>=16GiB
 ```
 
@@ -570,7 +571,7 @@ Examples:
 ```text
 vol:home
 vol:backup
-vol:backup@H41V
+vol:backup@h41v
 vol:id/fsuuid/b6f1e6d9-42a7-4c0e-8b26-0ac61f2d91b7
 vol:label/Backup
 ```
@@ -592,8 +593,8 @@ Examples:
 ```text
 tty:console
 tty:debug
-tty:debug@L44R
-tty:@L44R
+tty:debug@l44r
+tty:@l44r
 tty:?usbvid=0403,pid=6001
 ```
 
@@ -838,13 +839,13 @@ Example shell flow:
 
 ```text
 disk list
-disk pin @7K2M as backup
+disk pin @7k2m as backup
 ```
 
 The command must show a resource card before committing the alias:
 
 ```text
-@7K2M  disk candidate
+@7k2m  disk candidate
   kind: disk
   model: Samsung SSD 870 EVO
   serial: S6XYZ...
@@ -863,7 +864,7 @@ Re-pinning changes an alias to a different identity.
 Example:
 
 ```text
-disk repin backup @9A4F
+disk repin backup @9a4f
 ```
 
 Rules:
@@ -880,15 +881,15 @@ If an alias does not match its pinned identity, it fails closed.
 Required diagnostic shape:
 
 ```text
-Refusing: disk:backup currently resolves to @9A4F, not @7K2M.
+Refusing: disk:backup currently resolves to @9a4f, not @7k2m.
 
 Expected:
-  disk:backup@7K2M
+  disk:backup@7k2m
   model: Samsung SSD 870 EVO
   capacity: 4 TiB
 
 Found:
-  disk:@9A4F
+  disk:@9a4f
   model: Crucial MX500
   capacity: 2 TiB
 ```
@@ -897,14 +898,12 @@ Found:
 
 ### 10.1 Derivation
 
-The fingerprint input is:
-
-```text
-resource_kind || canonical_identity || identity_version
-```
-
-The display encoding should avoid ambiguous characters. Crockford-style base32
-or another documented unambiguous uppercase alphabet is acceptable.
+The fingerprint renders the canonical identity itself, most significant bit
+first, in lowercase Crockford base32: `0-9` and `a-z` without the look-alikes
+`i`, `l`, `o` and `u` (`tairix_fsprobe::fingerprint`). Nothing is hashed, so
+the full rendering — 26 characters for a 128-bit identity — encodes every bit,
+and two resources of one kind never share a full fingerprint; the namespace
+already says which kind a fingerprint belongs to.
 
 ### 10.2 Length
 
@@ -915,9 +914,9 @@ The resolver must request a longer prefix when needed for uniqueness.
 Examples:
 
 ```text
-@7K2M
-@7K2M-Q8
-@7K2M-Q8D3
+@7k2m
+@7k2m-q8
+@7k2m-q8d3
 ```
 
 The dash is display sugar and must be ignored by fingerprint comparison.
@@ -952,7 +951,7 @@ not be accepted for `RawWrite`, `DestructiveWrite`, or
 Example accepted:
 
 ```text
-image-write os.iso -> disk:slot/front-usb@P91Q::raw
+image-write os.iso -> disk:slot/front-usb@p91q::raw
 ```
 
 Example rejected:
@@ -965,7 +964,7 @@ Required diagnostic:
 
 ```text
 Refusing destructive write through weak selector disk:slot/front-usb.
-Current match is disk:slot/front-usb@P91Q.
+Current match is disk:slot/front-usb@p91q.
 Use the guarded form after checking the displayed identity.
 ```
 
@@ -1027,7 +1026,7 @@ Examples:
 
 ```text
 head -c 32 < sys:random
-copy image.bin -> disk:installer@P91Q::raw
+copy image.bin -> disk:installer@p91q::raw
 tty set tty:debug baud=115200 parity=none
 show info:cpu/vendor
 watch stats:net/wan/rx.pps?window=1s
@@ -1039,7 +1038,7 @@ Required diagnostic:
 
 ```text
 disk:backup is a BlockDevice, not a default byte stream.
-For raw block access use disk:backup@7K2M::raw with the required capability.
+For raw block access use disk:backup@7k2m::raw with the required capability.
 ```
 
 ## 14. `info:` and `stats:` data model
@@ -1193,14 +1192,14 @@ disk info disk:backup
 For destructive commands, completion must insert guarded references:
 
 ```text
-format disk:backup@7K2M
+format disk:backup@7k2m
 ```
 
 Completion display should show resource cards:
 
 ```text
-disk:backup@7K2M      Samsung SSD 870 EVO   4 TiB   pinned, non-removable
-disk:installer@P91Q   SanDisk Ultra USB     32 GiB  removable, empty
+disk:backup@7k2m      Samsung SSD 870 EVO   4 TiB   pinned, non-removable
+disk:installer@p91q   SanDisk Ultra USB     32 GiB  removable, empty
 ```
 
 Completion must not hide identity mismatches.
@@ -1469,7 +1468,7 @@ not the primary programmatic interface.
 
 ```text
 disk list
-disk pin @7K2M as backup
+disk pin @7k2m as backup
 backup run --target disk:backup
 disk health disk:backup
 ```
@@ -1483,24 +1482,24 @@ format disk:backup
 Non-interactive result:
 
 ```text
-UnsafeUnguardedSelector: destructive operation requires disk:backup@7K2M
+UnsafeUnguardedSelector: destructive operation requires disk:backup@7k2m
 ```
 
 Accepted:
 
 ```text
-format disk:backup@7K2M
+format disk:backup@7k2m
 ```
 
 ### 20.2 Write an installer image to USB
 
 ```text
 disk list removable
-image-write tairix.img -> disk:slot/front-usb@P91Q::raw
+image-write tairix.img -> disk:slot/front-usb@p91q::raw
 ```
 
 This means: use the device currently in the front USB slot only if it is still
-the device whose identity fingerprint is `P91Q`, and use the privileged raw
+the device whose identity fingerprint is `p91q`, and use the privileged raw
 block facet.
 
 ### 20.3 Read random bytes
@@ -1536,7 +1535,7 @@ The metric result must include units, timestamp, source, and window.
 
 ```text
 tty list
-tty pin @L44R as debug
+tty pin @l44r as debug
 tty set tty:debug baud=115200 parity=none
 tty monitor tty:debug
 ```
@@ -1597,8 +1596,8 @@ Accepted:
 sys:random
 info:cpu/vendor
 stats:net/wan/rx.pps?window=1s
-disk:backup@7K2M
-disk:slot/front-usb@P91Q::raw
+disk:backup@7k2m
+disk:slot/front-usb@p91q::raw
 tty:debug
 vol:id/fsuuid/b6f1e6d9-42a7-4c0e-8b26-0ac61f2d91b7
 ```
@@ -1611,7 +1610,7 @@ Rejected:
 /sys/class/net
 Disk:Backup
 disk:back up
-disk:backup@@7K2M
+disk:backup@@7k2m
 disk:backup::
 stats:net/wan/rx.pps?window
 ```
@@ -1622,8 +1621,8 @@ stats:net/wan/rx.pps?window
 - `format disk:backup@wrong` fails with `IdentityMismatch`.
 - `image-write x -> disk:slot/front-usb::raw` fails with
   `WeakSelectorRequiresGuard`.
-- `image-write x -> disk:slot/front-usb@P91Q::raw` succeeds only if the current
-  resource still matches `P91Q` and the caller has the required capability.
+- `image-write x -> disk:slot/front-usb@p91q::raw` succeeds only if the current
+  resource still matches `p91q` and the caller has the required capability.
 - `tty set disk:backup baud=115200` fails with `WrongKind`.
 - `disk info tty:debug` fails with `WrongKind`.
 - `show info:disk/backup/serial` fails without the required information
@@ -1673,7 +1672,7 @@ capabilities or typed information responses. They are not files.
 
 Human-friendly aliases such as `disk:backup` are allowed, but they are not
 identity. Dangerous operations require an identity guard such as
-`disk:backup@7K2M`. `info:` and `stats:` are shell-facing selector namespaces
+`disk:backup@7k2m`. `info:` and `stats:` are shell-facing selector namespaces
 backed by the System Information API. Device resources come from the hardware
 tree and driver manager. The resolver is capability-checked, fail-closed, and
 structured from the shell boundary down to the ABI.

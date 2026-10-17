@@ -1143,6 +1143,7 @@ mod program {
                     if self
                         .pane
                         .resize_with(&mut self.client, &mode, &mut self.surface)
+                        == app::Fitted::Adopted
                     {
                         self.layout = self.layout_for(theme, scale);
                         self.player.relayout(&self.layout);
@@ -1525,6 +1526,7 @@ mod program {
                     Err(EventError::Undecodable(_)) => {
                         app::report(APP_NAME, "a malformed window event was refused");
                     }
+                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
                 }
             }
             app_state.raise_notices(endpoint);
@@ -1556,6 +1558,7 @@ mod program {
                 Err(EventError::Undecodable(_)) => {
                     app::report(APP_NAME, "a malformed window event was refused");
                 }
+                Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
             }
         }
     }

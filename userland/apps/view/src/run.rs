@@ -1076,6 +1076,10 @@ mod program {
                     app::report(APP_NAME, "a malformed window event was refused");
                     continue;
                 }
+                Err(EventError::Refused(refused)) => {
+                    app::report(APP_NAME, refused);
+                    continue;
+                }
             };
             match route(
                 &mut App {
@@ -1322,16 +1326,12 @@ mod program {
             } => {
                 let mode = app::mode_for(*width_px, *height_px);
                 let window = &mut app.windows[index];
-                if !window
+                if window
                     .pane
                     .resize_with(app.client, &mode, &mut window.surface)
+                    == app::Fitted::Kept
                 {
-                    // A refused resize leaves the old geometry standing, so
-                    // the window is still drawable at the size it had.
-                    app::report(
-                        APP_NAME,
-                        "the desktop refused a resize; the window keeps its size",
-                    );
+                    app::report(APP_NAME, app::SIZE_KEPT);
                 }
                 // The reported client size is what the layout follows either
                 // way, so the whole window is redrawn regardless.
@@ -1518,7 +1518,7 @@ mod program {
         if held.width_px == mode.width_px && held.height_px == mode.height_px {
             return false;
         }
-        window.pane.resize_with(client, &mode, &mut window.surface)
+        window.pane.resize_with(client, &mode, &mut window.surface) == app::Fitted::Adopted
     }
 
     /// Carry out whatever an engine outcome asked the embedder for.

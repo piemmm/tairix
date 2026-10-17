@@ -18,8 +18,8 @@
 //!
 //! [`ControllerHealth`] is the pure, allocation-free coordinator wrapping that
 //! [`FaultDomain`]: it is driven by the freestanding serve loop
-//! (`src/main.rs`, metal-only — QEMU models no Pi USB) around the existing
-//! synchronous controller reset, and every transition it makes is proven
+//! (`src/main.rs`, metal-only — QEMU models no Pi USB) around each controller
+//! reset and the walk that follows it, and every transition it makes is proven
 //! host-side here. It classifies each edge through the **shared**
 //! [`BlkHealthTransition`] vocabulary (the same the leaf devices, their shared
 //! transports, and the mount overlay use, `plans/FIX-IO.md` IO5), so a
@@ -215,7 +215,7 @@ impl ControllerHealth {
 const SKIPPED_PORT_RETRY_NS: u64 = 1_000_000_000;
 
 /// How long a path whose endpoint recovery failed is left to settle before
-/// its recovery is retried (`UsbDevice::retry_owed_recoveries`).
+/// its recovery is retried (`UsbHost::retry_owed_recoveries`).
 ///
 /// A transaction translator disturbed for a moment recovers within
 /// milliseconds; half a second covers that and a device riding out a brownout,
@@ -315,25 +315,66 @@ impl SkippedPortRetry {
     }
 }
 
-/// Whether the serve loop owes its timer work after a wake: the wait timed
-/// out, or one of the timers is due though an event woke the loop. A loop
-/// kept busy by interrupts never times out, so timers left for a quiet wake
-/// would never be spent under load.
-#[must_use]
-pub fn timer_work_due(
-    timed_out: bool,
-    now_ns: u64,
-    (health, port_retry, recovery_retry): (&ControllerHealth, &SkippedPortRetry, &OneShot),
-) -> bool {
-    timed_out
-        || [
-            health.wait_timeout(now_ns),
-            port_retry.wait_timeout(now_ns),
-            recovery_retry.wait_timeout(now_ns),
+/// The deferred work the serve loop runs off timers: the one re-attach the
+/// bring-up owes a port it could not serve, and the retry of a failed
+/// endpoint recovery.
+#[derive(Default)]
+pub struct Retries {
+    port: SkippedPortRetry,
+    recovery: OneShot,
+}
+
+/// The retries one pass of the serve loop owes.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct DueRetries {
+    /// The skipped ports' re-attach.
+    pub port: bool,
+    /// The failed endpoint recoveries' retry.
+    pub recovery: bool,
+}
+
+impl Retries {
+    /// Owe the skipped ports their one re-attach, due a second or so after
+    /// `now_ns`.
+    pub fn arm_port(&mut self, now_ns: u64) {
+        self.port.arm(now_ns);
+    }
+
+    /// Owe the failed endpoint recoveries a retry once the path has settled,
+    /// answering whether this armed one; an armed retry is never postponed.
+    pub fn arm_recovery(&mut self, now_ns: u64) -> bool {
+        let fresh = !self.recovery.is_armed();
+        self.recovery.arm(now_ns, RECOVERY_SETTLE_NS);
+        fresh
+    }
+
+    /// Whether the skipped ports' re-attach is still owed.
+    #[must_use]
+    pub const fn port_pending(&self) -> bool {
+        self.port.is_pending()
+    }
+
+    /// Take every retry due at `now_ns`, whatever woke the loop: one left
+    /// armed past its deadline would bound every later park at zero.
+    pub fn take_due(&mut self, now_ns: u64) -> DueRetries {
+        DueRetries {
+            port: self.port.take_if_due(now_ns),
+            recovery: self.recovery.take_if_due(now_ns),
+        }
+    }
+
+    /// The relative timeout to the nearest retry, as
+    /// [`OneShot::wait_timeout`].
+    #[must_use]
+    pub fn wait_timeout(&self, now_ns: u64) -> Option<u64> {
+        [
+            self.port.wait_timeout(now_ns),
+            self.recovery.wait_timeout(now_ns),
         ]
         .into_iter()
         .flatten()
-        .any(|left| left == 0)
+        .min()
+    }
 }
 
 #[cfg(test)]
@@ -341,25 +382,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_due_timer_is_spent_after_an_event_wake_as_after_a_quiet_one() {
-        let health = ControllerHealth::new(0);
-        let port_retry = SkippedPortRetry::default();
-        let mut recovery_retry = OneShot::default();
-        let timers = |retry: &OneShot| timer_work_due(false, 1_000, (&health, &port_retry, retry));
-        assert!(!timers(&recovery_retry), "nothing armed, nothing owed");
-        recovery_retry.arm(0, 2_000);
-        assert!(!timers(&recovery_retry), "armed, not yet due");
-        let mut due = OneShot::default();
-        due.arm(0, 500);
+    fn a_due_retry_is_taken_on_the_first_pass_past_its_deadline() {
+        let mut retries = Retries::default();
+        retries.arm_port(0);
+        assert!(retries.arm_recovery(0));
         assert!(
-            timers(&due),
-            "an event wake past the deadline still spends the timer"
+            !retries.arm_recovery(400_000_000),
+            "an armed retry is never postponed"
         );
-        assert!(timer_work_due(
-            true,
-            0,
-            (&health, &port_retry, &recovery_retry)
-        ));
+        assert_eq!(
+            retries.take_due(1),
+            DueRetries::default(),
+            "nothing due yet"
+        );
+        assert_eq!(retries.wait_timeout(0), Some(RECOVERY_SETTLE_NS));
+        assert_eq!(
+            retries.take_due(RECOVERY_SETTLE_NS),
+            DueRetries {
+                port: false,
+                recovery: true
+            }
+        );
+        assert_eq!(
+            retries.take_due(SKIPPED_PORT_RETRY_NS),
+            DueRetries {
+                port: true,
+                recovery: false
+            },
+            "taken on whichever pass first reaches it"
+        );
+        assert_eq!(
+            retries.take_due(u64::MAX),
+            DueRetries::default(),
+            "each once"
+        );
+        assert_eq!(retries.wait_timeout(u64::MAX), None);
+        assert!(!retries.port_pending());
+        retries.arm_port(0);
+        assert!(!retries.port_pending(), "the re-attach is owed once ever");
     }
 
     /// The grace window's midpoint and just past its end, for driving the

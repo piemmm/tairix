@@ -1680,6 +1680,19 @@ impl Compositor {
         self.add_transient(parent, origin, surface, true, true)
     }
 
+    /// Add `surface` as a floating transient of `parent` at `origin`, stacked
+    /// above its family **where that family stands**, as
+    /// [`add_transient_window_in_place`](Self::add_transient_window_in_place)
+    /// stacks a held one. `None` for an unknown `parent`.
+    pub fn add_floating_window_in_place(
+        &mut self,
+        parent: WindowId,
+        origin: Point,
+        surface: Surface,
+    ) -> Option<WindowId> {
+        self.add_transient(parent, origin, surface, true, false)
+    }
+
     /// Add a transient of `parent`, floating beside it when `floating`, and
     /// bring the family to the front when `raise`.
     ///

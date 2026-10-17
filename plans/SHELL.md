@@ -1304,7 +1304,7 @@ zsh-like but use schema metadata where available.
    unavailable.
 8. Completion of a resource reference (`plans/ALIAS.md`) MUST be
    namespace-aware and command-intent-aware: for a destructive command it
-   MUST insert an identity-guarded reference (e.g. `format disk:backup@7K2M`),
+   MUST insert an identity-guarded reference (e.g. `format disk:backup@7k2m`),
    and it MUST NOT hide an identity mismatch (`ALIAS.md` §15.1). Resolving a
    guard or listing candidates for display is a read-only step that obeys
    principles 1–3.
@@ -1530,7 +1530,7 @@ intents, complete to a guarded reference and show resource cards rather than
 bare names (`ALIAS.md` §15.1):
 
 ```text
-disk:backup@7K2M      Samsung SSD 870 EVO   4 TiB   pinned, non-removable
+disk:backup@7k2m      Samsung SSD 870 EVO   4 TiB   pinned, non-removable
 disk:installer@P91Q   SanDisk Ultra USB     32 GiB  removable, empty
 ```
 
@@ -2055,7 +2055,7 @@ files and a single root tree:
 cd Home:/Projects/TAIRiX         # alias path into a named root (DRIVES.md)
 cat Backup:/snapshots/latest/log
 head -c 64 < sys:random          # a resource reference's stream facet (ALIAS.md)
-disk info disk:backup@7K2M       # an identity-guarded resource reference
+disk info disk:backup@7k2m       # an identity-guarded resource reference
 ```
 
 `stdout` carries primary data. `stderr` carries diagnostics. `stdinfo` on fd 3

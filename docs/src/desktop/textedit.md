@@ -61,6 +61,12 @@ desktop-drawn chain like every application's
 band's fields open the format, mode, line-ending and indentation menus on a
 primary press.
 
+**Go to line** asks in a dialog window of its own, centred over the document's
+window and named by TextEdit's attested identity. It holds nothing: the
+document goes on being edited while it is up, and the line is found when Go is
+pressed. Its keys and presses reach it alone, and the window's never wait on
+it.
+
 A settings store is checked by the parser the system reads it with once its
 edits pause (`CHECK_SETTLE_NS`); a problem is marked in the gutter beside its
 line and stated in the status band, and `F8` walks them. The editor knows a

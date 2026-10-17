@@ -259,5 +259,5 @@ const _: () = {
 };
 pub use volume::{
     availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
-    VolumeBytes,
+    write_medium_facts, VolumeBytes,
 };

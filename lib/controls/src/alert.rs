@@ -4,15 +4,16 @@
 //! The control lays out and paints an alert window's client area — its
 //! severity mark on the left, the headline and detail beside it, the buttons
 //! along the foot at the right — and answers which button was chosen. It
-//! measures the client extent that makes the whole window, frame included,
-//! exactly 4:3 and large enough that nothing it says is cut. Where even the
-//! largest such window the screen holds is too small, the detail scrolls.
+//! measures the client extent its content needs: as wide as its text, up to
+//! a readable measure, and exactly as tall as what it says, so nothing is
+//! elided. Past the screen's share the whole text, headline included,
+//! scrolls, and the buttons stay at the foot.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{
-    AlertButton, AlertButtonRole, AlertSeverity, AlertSpec, ALERT_DETAIL_MAX,
+    AlertButton, AlertButtonRole, AlertSeverity, AlertSpec, ALERT_DETAIL_MAX, ALERT_HEADLINE_MAX,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
@@ -43,9 +44,10 @@ pub const ALERT_BUTTON_MIN_WIDTH: u32 = 88;
 /// per-mille: room is left round it to see what it is about.
 const SCREEN_SHARE_PERMILLE: u32 = 900;
 
-/// The most lines a headline wraps to. It is one sentence of at most
-/// [`ALERT_HEADLINE_MAX`](tairix_abi::window_ipc::ALERT_HEADLINE_MAX) bytes.
-const HEADLINE_LINES: usize = 6;
+/// The longest line an alert's text is set to, in ems of its body face:
+/// about sixty characters, the length a line is read at without losing the
+/// eye's place.
+const MEASURE_EMS: u32 = 30;
 
 /// How an alert was answered.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -67,8 +69,8 @@ pub struct Alert {
     buttons: Vec<Button>,
     roles: Vec<AlertButtonRole>,
     focus: usize,
-    /// How many of the detail's lines are scrolled past; zero unless it
-    /// overflows.
+    /// How many of the text's lines, the headline's first, are scrolled
+    /// past; zero unless it overflows.
     scroll: usize,
     pointer: RenderInvariant<Point>,
     hovered: RenderInvariant<Option<usize>>,
@@ -78,19 +80,103 @@ pub struct Alert {
 /// Where each part of an alert sits within its client area.
 struct Layout {
     mark: Rect,
-    headline: Rect,
-    /// The part of the detail on screen: a whole number of its lines.
-    detail: Rect,
-    /// How many lines the whole detail takes, and how many are on screen.
-    detail_lines: usize,
-    shown_lines: usize,
+    /// Where the text is drawn, from its first line in view.
+    text: Rect,
+    lines: TextLines,
+    /// How far the text can scroll, in lines; zero when it all fits.
+    scroll_room: usize,
     buttons: Vec<Rect>,
 }
 
-impl Layout {
-    /// How far the detail can scroll, in lines.
-    const fn scroll_room(&self) -> usize {
-        self.detail_lines.saturating_sub(self.shown_lines)
+/// An alert's text as the lines it takes at one width: the headline's, then
+/// the detail's, each in its own face, with a gap between them.
+struct TextLines {
+    headline: TextBlock,
+    detail: TextBlock,
+    headline_lines: usize,
+    detail_lines: usize,
+    gap: u32,
+}
+
+impl TextLines {
+    fn of(alert: &Alert, width: u32, metrics: &Metrics, scale: Scale, theme: &Theme) -> Self {
+        let headline = Alert::headline_block(width, scale, theme);
+        let detail = Alert::detail_block(width, scale, theme);
+        let headline_lines = headline.line_count(&alert.headline);
+        let detail_lines = detail.line_count(&alert.detail);
+        let gap = if headline_lines > 0 && detail_lines > 0 {
+            metrics.gap
+        } else {
+            0
+        };
+        Self {
+            headline,
+            detail,
+            headline_lines,
+            detail_lines,
+            gap,
+        }
+    }
+
+    const fn total(&self) -> usize {
+        self.headline_lines + self.detail_lines
+    }
+
+    /// What line `index` adds to a view whose first line is `first`: its own
+    /// height, and the gap before the detail's first line when headline
+    /// lines stand above it.
+    fn height_of(&self, index: usize, first: usize) -> u32 {
+        if index < self.headline_lines {
+            return self.headline.font.line_height();
+        }
+        let gap = if index == self.headline_lines && first < self.headline_lines {
+            self.gap
+        } else {
+            0
+        };
+        self.detail.font.line_height().saturating_add(gap)
+    }
+
+    /// The height of the whole text.
+    fn height(&self) -> u32 {
+        (0..self.total()).fold(0, |sum, index| sum.saturating_add(self.height_of(index, 0)))
+    }
+
+    /// How many of the headline's and the detail's lines fit `room` pixels
+    /// with line `first` at the top.
+    fn fitting(&self, first: usize, room: u32) -> (usize, usize) {
+        let mut used = 0u32;
+        let mut shown = (0, 0);
+        for index in first..self.total() {
+            used = used.saturating_add(self.height_of(index, first));
+            if used > room {
+                break;
+            }
+            if index < self.headline_lines {
+                shown.0 += 1;
+            } else {
+                shown.1 += 1;
+            }
+        }
+        shown
+    }
+
+    /// The lowest first line that still shows the text through its end in
+    /// `room` pixels: how far it scrolls.
+    fn scroll_room(&self, room: u32) -> usize {
+        let mut used = 0u32;
+        let mut first = self.total();
+        while let Some(index) = first.checked_sub(1) {
+            used = used.saturating_add(self.height_of(index, index));
+            if index + 1 == self.headline_lines && self.detail_lines > 0 {
+                used = used.saturating_add(self.gap);
+            }
+            if used > room {
+                break;
+            }
+            first = index;
+        }
+        first
     }
 }
 
@@ -120,6 +206,13 @@ impl Metrics {
         width
             .saturating_sub(self.pad.saturating_mul(3))
             .saturating_sub(self.mark)
+    }
+
+    /// The client width whose text column is `text_w` pixels wide.
+    fn client_for_text(&self, text_w: u32) -> u32 {
+        text_w
+            .saturating_add(self.pad.saturating_mul(3))
+            .saturating_add(self.mark)
     }
 }
 
@@ -220,9 +313,10 @@ impl Alert {
     }
 
     /// The client extent of an alert window whose frame adds `frame` pixels
-    /// across and down, on a screen `screen` pixels across and down: the
-    /// smallest that makes the whole window exactly 4:3 and seats everything
-    /// the alert says, never wider or taller than its share of the screen.
+    /// across and down, on a screen `screen` pixels across and down: as wide
+    /// as its text needs up to a readable measure, never narrower than
+    /// [`ALERT_MIN_WIDTH`] or its button row, and exactly as tall as its
+    /// content, each within its share of the screen.
     #[must_use]
     pub fn client_extent(
         &self,
@@ -235,32 +329,39 @@ impl Alert {
         let share = |side: u32| {
             u32::try_from(u64::from(side) * u64::from(SCREEN_SHARE_PERMILLE) / 1000).unwrap_or(side)
         };
-        let widest = share(screen.0).min(four_thirds(share(screen.1))).max(1);
-        let narrowest = scale
-            .scale_length(ALERT_MIN_WIDTH)
+        let text_w = self.text_width(Self::measure(scale, theme), scale, theme);
+        let width = metrics
+            .client_for_text(text_w)
+            .saturating_add(frame.0)
+            .max(scale.scale_length(ALERT_MIN_WIDTH))
             .max(
                 self.row_width(&metrics, scale, theme)
                     .saturating_add(metrics.pad.saturating_mul(2))
                     .saturating_add(frame.0),
             )
-            .min(widest);
-        let fits = |width: u32| {
-            let (client_w, client_h) = client_of(width, frame);
-            self.needed_height(client_w, &metrics, scale, theme) <= client_h
-        };
-        let (mut low, mut high) = (narrowest, widest);
-        if !fits(high) {
-            return client_of(high, frame);
-        }
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if fits(mid) {
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
-        }
-        client_of(low, frame)
+            .min(share(screen.0));
+        let client_w = width.saturating_sub(frame.0).max(1);
+        let tallest = share(screen.1).saturating_sub(frame.1);
+        let client_h = self
+            .needed_height(client_w, &metrics, scale, theme)
+            .min(tallest)
+            .max(1);
+        (client_w, client_h)
+    }
+
+    /// The readable measure: the longest line the text is set to.
+    fn measure(scale: Scale, theme: &Theme) -> u32 {
+        role_font(theme, scale, TextRole::Body)
+            .pixel_height()
+            .saturating_mul(MEASURE_EMS)
+    }
+
+    /// The width the text column needs when no line is longer than
+    /// `measure`: its widest line.
+    fn text_width(&self, measure: u32, scale: Scale, theme: &Theme) -> u32 {
+        Self::headline_block(measure, scale, theme)
+            .measured_width(&self.headline)
+            .max(Self::detail_block(measure, scale, theme).measured_width(&self.detail))
     }
 
     /// Paint the alert's client area into `surface` at `bounds`, with `mark`
@@ -285,26 +386,28 @@ impl Alert {
         if let Some(mark) = mark {
             surface.blit(layout.mark.left(), layout.mark.top(), mark);
         }
-        if let Some((hx, hy, hw, _)) = surface_rect(layout.headline) {
-            TextBlock::prose(
-                role_font(theme, scale, TextRole::ItemTitle),
-                hw,
-                HEADLINE_LINES,
-                Color::from(palette.on_surface),
-            )
-            .paint(surface, &self.headline, (hx, hy));
-        }
-        if let Some((dx, dy, dw, _)) = surface_rect(layout.detail) {
-            Self::detail_block(dw, scale, theme).paint_window(
+        if let Some((x, y, _, h)) = surface_rect(layout.text) {
+            let lines = &layout.lines;
+            let first = self.scroll.min(layout.scroll_room);
+            let (headline, detail) = lines.fitting(first, h);
+            lines
+                .headline
+                .paint_window(surface, &self.headline, (x, y), first, headline);
+            let below = u32::try_from(headline)
+                .unwrap_or(u32::MAX)
+                .saturating_mul(lines.headline.font.line_height());
+            let gap = if headline > 0 { lines.gap } else { 0 };
+            lines.detail.paint_window(
                 surface,
                 &self.detail,
-                (dx, dy),
-                self.scroll,
-                layout.shown_lines,
+                (x, y.saturating_add(below).saturating_add(gap)),
+                first.saturating_sub(lines.headline_lines),
+                detail,
             );
-            if layout.scroll_room() > 0 {
+            if layout.scroll_room > 0 {
                 let bar = Self::scrollbar_rect(&layout, scale, theme);
-                self.scrollbar(&layout).render(surface, bar, scale, theme);
+                self.scrollbar(&layout, headline + detail)
+                    .render(surface, bar, scale, theme);
             }
         }
         for (button, rect) in self.buttons.iter().zip(&layout.buttons) {
@@ -313,7 +416,7 @@ impl Alert {
     }
 
     /// Route a pointer event, with `bounds` the client area. A completed
-    /// click on a button chooses it, and a wheel turn scrolls a detail that
+    /// click on a button chooses it, and a wheel turn scrolls text that
     /// overflows. What changed is reported into `damage`.
     pub fn on_pointer(
         &mut self,
@@ -361,7 +464,7 @@ impl Alert {
     /// Feed a key press. `Enter` and `Space` press the focused button, and
     /// `Escape` the cancel one — or the only button there is, which the spec
     /// guarantees destroys nothing; `Tab`, `Shift+Tab` and the arrows move the
-    /// focus along the row; the paging keys scroll a detail that overflows.
+    /// focus along the row; the paging keys scroll text that overflows.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -395,8 +498,11 @@ impl Alert {
             }
             Key::Named(named) => {
                 let layout = self.layout(bounds, scale, theme);
-                let page = i64::try_from(layout.shown_lines.max(1)).unwrap_or(1);
-                let all = i64::try_from(layout.detail_lines).unwrap_or(i64::MAX);
+                let (headline, detail) = layout
+                    .lines
+                    .fitting(self.scroll.min(layout.scroll_room), layout.text.height);
+                let page = i64::try_from((headline + detail).max(1)).unwrap_or(1);
+                let all = i64::try_from(layout.lines.total()).unwrap_or(i64::MAX);
                 let by = match named {
                     NamedKey::Up => -1,
                     NamedKey::Down => 1,
@@ -436,34 +542,22 @@ impl Alert {
     /// The client height a client `width` pixels wide needs to seat the
     /// whole alert without scrolling.
     fn needed_height(&self, width: u32, metrics: &Metrics, scale: Scale, theme: &Theme) -> u32 {
-        let text_w = metrics.text_width(width);
+        let text = TextLines::of(self, metrics.text_width(width), metrics, scale, theme);
         metrics
             .pad
             .saturating_mul(3)
-            .saturating_add(
-                self.text_height(text_w, metrics, scale, theme)
-                    .max(metrics.mark),
-            )
+            .saturating_add(text.height().max(metrics.mark))
             .saturating_add(self.rows_height(width, metrics, scale, theme))
     }
 
-    /// The headline and the whole detail, with the gap between them.
-    fn text_height(&self, text_w: u32, metrics: &Metrics, scale: Scale, theme: &Theme) -> u32 {
-        let detail = Self::detail_block(text_w, scale, theme).height(&self.detail);
-        let gap = if detail == 0 { 0 } else { metrics.gap };
-        self.headline_height(text_w, scale, theme)
-            .saturating_add(gap)
-            .saturating_add(detail)
-    }
-
-    fn headline_height(&self, text_w: u32, scale: Scale, theme: &Theme) -> u32 {
+    /// The block the whole headline is laid out in: every line it takes.
+    fn headline_block(width: u32, scale: Scale, theme: &Theme) -> TextBlock {
         TextBlock::prose(
             role_font(theme, scale, TextRole::ItemTitle),
-            text_w,
-            HEADLINE_LINES,
+            width,
+            ALERT_HEADLINE_MAX,
             Color::from(theme.palette().on_surface),
         )
-        .height(&self.headline)
     }
 
     /// The block the whole detail is laid out in: every line it has, since
@@ -491,44 +585,30 @@ impl Alert {
         let content_top = bounds.top() + pad;
         let content_h = to_u32(button_top - pad - content_top);
         let text_w = metrics.text_width(bounds.width);
-        let headline_h = self.headline_height(text_w, scale, theme);
-        let block = Self::detail_block(text_w, scale, theme);
-        let line = block.font.line_height().max(1);
-        let detail_lines = block.line_count(&self.detail);
-        let gap = if detail_lines == 0 { 0 } else { metrics.gap };
-        let full_h = line.saturating_mul(u32::try_from(detail_lines).unwrap_or(u32::MAX));
-        let text_h = headline_h.saturating_add(gap).saturating_add(full_h);
+        let lines = TextLines::of(self, text_w, &metrics, scale, theme);
+        let text_h = lines.height();
         let block_h = text_h.max(metrics.mark);
-        // A block that fits is centred in the room above the buttons; one that
-        // does not starts at the top and its detail scrolls a line at a time.
-        let (block_top, shown_lines) = if block_h <= content_h {
-            (
-                content_top + to_i32((content_h - block_h) / 2),
-                detail_lines,
-            )
+        let text_left = bounds.left() + pad + to_i32(metrics.mark) + pad;
+        // A block that fits is centred in the room above the buttons, and text
+        // shorter than the mark is centred on it, so a one-line alert reads
+        // level with its mark; one that does not fit fills the room and
+        // scrolls a line at a time.
+        let (mark_top, text, scroll_room) = if block_h <= content_h {
+            let block_top = content_top + to_i32((content_h - block_h) / 2);
+            let text_top = block_top + to_i32(metrics.mark.saturating_sub(text_h) / 2);
+            (block_top, Rect::new(text_left, text_top, text_w, text_h), 0)
         } else {
-            let room = content_h.saturating_sub(headline_h).saturating_sub(gap);
             (
                 content_top,
-                usize::try_from(room / line).unwrap_or(0).min(detail_lines),
+                Rect::new(text_left, content_top, text_w, content_h),
+                lines.scroll_room(content_h),
             )
         };
-        // Text shorter than the mark is centred on it, so a one-line alert
-        // reads level with its mark rather than hanging from its top.
-        let text_top = block_top + to_i32(metrics.mark.saturating_sub(text_h) / 2);
-        let text_left = bounds.left() + pad + to_i32(metrics.mark) + pad;
-        let shown_h = line.saturating_mul(u32::try_from(shown_lines).unwrap_or(u32::MAX));
         Layout {
-            mark: Rect::new(bounds.left() + pad, block_top, metrics.mark, metrics.mark),
-            headline: Rect::new(text_left, text_top, text_w, headline_h),
-            detail: Rect::new(
-                text_left,
-                text_top + to_i32(headline_h) + to_i32(gap),
-                text_w,
-                shown_h,
-            ),
-            detail_lines,
-            shown_lines,
+            mark: Rect::new(bounds.left() + pad, mark_top, metrics.mark, metrics.mark),
+            text,
+            lines,
+            scroll_room,
             buttons,
         }
     }
@@ -573,42 +653,38 @@ impl Alert {
         to_u32(-highest - to_i32(metrics.pad))
     }
 
-    /// The bar beside a detail that overflows, as a reading of where it is.
-    fn scrollbar(&self, layout: &Layout) -> ScrollBar {
+    /// The bar beside text that overflows, `shown` of its lines in view, as
+    /// a reading of where it is.
+    fn scrollbar(&self, layout: &Layout, shown: usize) -> ScrollBar {
         let as_u64 = |lines: usize| u64::try_from(lines).unwrap_or(u64::MAX);
         let range = ScrollRange::new(
-            as_u64(layout.detail_lines),
-            as_u64(layout.shown_lines),
-            as_u64(self.scroll),
+            as_u64(layout.scroll_room.saturating_add(shown)),
+            as_u64(shown),
+            as_u64(self.scroll.min(layout.scroll_room)),
         );
         ScrollBar::new(ScrollOrientation::Vertical, ScrollModel::new(range, 1, 1))
     }
 
-    /// Where the bar sits: just past the detail's right edge, inside the pad.
+    /// Where the bar sits: just past the text's right edge, inside the pad.
     fn scrollbar_rect(layout: &Layout, scale: Scale, theme: &Theme) -> Rect {
         let breadth = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
         Rect::new(
-            layout.detail.right() + to_i32(Metrics::of(scale, theme).gap / 2),
-            layout.detail.top(),
+            layout.text.right() + to_i32(Metrics::of(scale, theme).gap / 2),
+            layout.text.top(),
             breadth,
-            layout.detail.height,
+            layout.text.height,
         )
     }
 
-    /// Scroll the detail by `by` lines, held within what it holds, damaging
-    /// the detail and its bar `bar`.
+    /// Scroll the text by `by` lines, held within what it holds, damaging
+    /// the text and its bar `bar`.
     fn scroll_by(&mut self, by: i64, layout: &Layout, bar: Rect, damage: &mut Region) {
-        let most = i64::try_from(layout.scroll_room()).unwrap_or(i64::MAX);
+        let most = i64::try_from(layout.scroll_room).unwrap_or(i64::MAX);
         let held = i64::try_from(self.scroll).unwrap_or(i64::MAX);
         let next = usize::try_from(held.saturating_add(by).clamp(0, most)).unwrap_or(0);
         if next != self.scroll {
             self.scroll = next;
-            damage.add(Rect::new(
-                layout.detail.left(),
-                layout.detail.top(),
-                layout.detail.width,
-                layout.detail.height,
-            ));
+            damage.add(layout.text);
             damage.add(bar);
         }
     }
@@ -647,21 +723,6 @@ impl Alert {
             button.set_focused(index == self.focus);
         }
     }
-}
-
-/// Four thirds of `height`: the width of the 4:3 box that tall.
-fn four_thirds(height: u32) -> u32 {
-    u32::try_from(u64::from(height) * 4 / 3).unwrap_or(u32::MAX)
-}
-
-/// The client extent of a 4:3 window `width` pixels wide whose frame adds
-/// `frame` across and down.
-fn client_of(width: u32, frame: (u32, u32)) -> (u32, u32) {
-    let height = u32::try_from(u64::from(width) * 3 / 4).unwrap_or(u32::MAX);
-    (
-        width.saturating_sub(frame.0).max(1),
-        height.saturating_sub(frame.1).max(1),
-    )
 }
 
 fn to_u32(value: i32) -> u32 {

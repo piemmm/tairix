@@ -41,9 +41,6 @@ use crate::text::TextEntry;
 use crate::view::{landing_mark, Marking, View};
 use crate::viewport::{screen_rect, Viewport};
 
-/// How much a modal question darkens the window behind it, in 255ths.
-const VEIL_ALPHA: u8 = 110;
-
 /// How strongly the grid between pixels is drawn, in 255ths.
 const GRID_ALPHA: u8 = 70;
 
@@ -143,14 +140,7 @@ pub fn render_into(
         (faces, scale, theme),
     );
     if let Some(form) = view.modal() {
-        let window = layout.window();
-        // The form takes the whole window, its floating panes with it.
-        let veil = palette.drop_shadow.with_alpha(VEIL_ALPHA);
-        blend_area(surface, window, veil);
-        for slot in layout.floating() {
-            blend_area(surface, slot.frame, veil);
-        }
-        form.render(surface, window, scale, theme);
+        form.render(surface, layout.dialog_origin(), scale, theme);
     }
 }
 

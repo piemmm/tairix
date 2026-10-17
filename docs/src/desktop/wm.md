@@ -1789,7 +1789,7 @@ parent, which any app can open for any transient overlay
 - **One new request.** `WindowRequest::CreatePopup { parent_window_id,
   shm_handle, event_endpoint, frame_count, width_px, height_px,
   stride_bytes, format, offset_x, offset_y }`, reached from
-  `WindowClient::create_popup` with one `tairix_window::TransientSpec`. It
+  `WindowClient::create_popup` with one `tairix_window::PopupSpec`. It
   carries no title (a popup is not a taskbar entry) and no `resizable`
   flag (the app sizes it, the user does not drag it). A popup's semantics
   differ from a top-level window's, so it is its own variant rather than
@@ -1881,7 +1881,7 @@ window**: the decorated sibling of a popup (`plans/APPWIN.md` AW7).
   shm_handle, event_endpoint, frame_count, width_px, height_px, stride_bytes,
   format, offset_x, offset_y, carry, title }`, reached from
   `WindowClient::create_tool` with a `tairix_window::ToolSpec` — a
-  `TransientSpec` plus the carry and the title. It is validated, owned and
+  `TransientSpec` plus the offset, the carry and the title. It is validated, owned and
   budgeted exactly as a popup is, and its offset places its *client* from the
   parent's client origin.
 - **Framed by the window manager.** `ShellWindowHost::tool_opened` opens it
@@ -1913,6 +1913,53 @@ window**: the decorated sibling of a popup (`plans/APPWIN.md` AW7).
   nothing about the screen. The hold-back folds a run of samples to the
   newest and sheds them as input; a move's end withdraws the window's earlier
   move reports and is never shed.
+
+## Dialog windows
+
+A form, a question, or the progress of an operation is a **dialog window**: a
+transient its application draws and the desktop frames, places and names
+(`plans/APPWIN.md`). No application draws a dialog inside its own window.
+
+- **Its own request.** `WindowRequest::CreateDialog { owner_window_id,
+  shm_handle, event_endpoint, frame_count, width_px, height_px, stride_bytes,
+  format, modality, title }`, from `WindowClient::create_dialog` or
+  `WindowPane::open_dialog` with a `tairix_window::DialogSpec`: a
+  `TransientSpec`, the `DialogModality` and the title. It is validated, owned
+  and budgeted as a popup is. Its owner is one of the caller's own top-level
+  windows, never a transient, and it closes with it. It names no place.
+- **Placed and named by the session.** `ShellWindowHost::dialog_opened` opens
+  it through `DesktopShell::open_dialog_window` in `WindowFrame::dialog()`,
+  centred over its owner, held within the work area, and off the taskbar and
+  the window picker. A client larger than the work area holds is fitted to it
+  and told so with `WindowEvent::Resized`, and its content scrolls inside. The
+  band reads the bundle's attested name and then the application's title
+  ("TextEdit — Go to line"), and `SetTitle` keeps the name first. The name
+  leads so that a title too long for the band elides itself, not the name.
+- **Modality is the window manager's.** An `OwnerModal` dialog holds its owner
+  through the hold rule alerts use (`hold::Holds`, `SessionWindows::holder_of`):
+  only a release reaches the owner or a popup or tool window of it — both act
+  on its content — a press on any of them raises the dialog with the keyboard,
+  and the owner takes no drop. It is its family's front, so raising the family focuses it. A
+  `Modeless` dialog holds nothing: it floats with its family and takes the
+  keyboard only when pressed. An alert may hold a dialog, so a question about
+  one copy holds that copy's window, not its folder.
+- **Earned focus, armed presses.** It takes the keyboard on opening only when
+  its application has earned the front, as an alert does, and spends the
+  activation that earned it. Otherwise it waits where its family stands, and
+  while the seat is held it opens beneath the window holding the keyboard. No
+  press reaches it until `ALERT_ARM_NS` after the frame that first shows its
+  content. As it closes it hands the keyboard to the front of its owner: the
+  holder behind it, else the owner.
+- **An application's dialog never passes for the system's.** The desktop's
+  own credential and confirmation prompts are undecorated, centred on the
+  screen, and hold the whole seat: nothing an application opens comes over one
+  or takes the keyboard while it is up. An application's dialog, its
+  credential sheet included, is always a framed window whose band begins with
+  that application's attested name, sits over the application's own window,
+  and never holds the seat. An application titled as the desktop, or whose
+  title carries a character that draws nothing yet can hide or reorder the
+  text beside it, is named by its bundle path; every title a band shows has
+  such characters drawn as the gap they are.
 
 ## Desktop layer surfaces (`CAP_DESKTOP_LAYER`)
 
@@ -2196,7 +2243,14 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   (`CallerIdentity::caller_mailbox`) — so no application's events are
   aimed at another's mailbox; any other is refused `PermissionDenied`.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
-  (`ipc_call`) and the mailbox seam (the app's own event endpoint). The
+  (`ipc_call`, and `call_post`/`call_reap` for the requests an app makes as
+  input moves — a resize, a pointer shape, a tooltip, a drop answer, a title,
+  a resize range — which are posted, one of a kind per window in flight with
+  the newest held behind it, and answered through the event drain:
+  a refusal as `EventError::Refused`, and a refused resize followed by the
+  size the session kept) and the mailbox seam (the app's own event endpoint).
+  The endpoint serves a client's requests in the order posted or called, so a
+  posted resize reaches the session before the present at its size. The
   client remembers each window's last presented frame index and extent, so
   `WindowEvents::wait` answers a `RedrawRequested` by re-presenting that
   frame with full-window damage before returning the event to the app —
@@ -2318,25 +2372,30 @@ id. The answer is one `WindowEvent::AlertClosed { alert_id, outcome }`: the
 button chosen, or `Dismissed` when it was withdrawn (`CloseAlert`), its owner
 closed, or the session took it down. The request needs no capability — its
 scope is the caller's attested identity — and an owner, when named, must be
-the caller's own window. Text, buttons and the alerts one client may have up
+one of the caller's own top-level windows or dialogs. Text, buttons and the alerts one client may have up
 (`ALERT_MAX_OPEN`) are bounded, and a spec breaking any rule is refused whole;
 `AlertSpec::fitted` shortens a quoted name rather than refusing it.
 
-The window is laid out at exactly 4:3, its frame included, the smallest such
-extent that seats the severity mark, the headline, the wrapped detail and the
-buttons along its foot, the default one warm; past the largest the screen
-holds, the detail scrolls. Its frame is the dialog frame: a title band holding
+The window is sized to its content: as wide as its text needs up to a
+readable measure — about sixty characters, set from the body face at the
+current density — never narrower than `ALERT_MIN_WIDTH` or its row of buttons,
+and exactly as tall as the severity mark, the wrapped headline and detail and
+the buttons along its foot need, the default one warm. Each axis stays within
+the screen's share; past it the whole text, headline included, scrolls a line
+at a time and the buttons stay at the foot. Nothing is elided. Its frame is the dialog frame: a title band holding
 only put-to-back, no close, minimise or size control, and no resize edge. The
 title is the session's — "Error from *App*", "Warning from *App*", "Message
 from *App*", the bundle's attested name, or its bundle path for one titled as
-the desktop. An alert with an owner holds it modal and rises with it: nothing
-but a release reaches the owner, and it takes no drop. One without is a window
+the desktop or with a character that could hide or reorder its name. An alert with an owner holds it modal and rises with it: nothing
+but a release reaches the owner or its popups and tool windows, and it takes no
+drop. One without is a window
 of its own. It takes the keyboard only when its owner or application holds it,
 or when it answers the user's own gesture — otherwise it opens beneath the
 window holding the keyboard — and its buttons arm `ALERT_ARM_NS` after it is
 first on screen, so a click meant for what was there cannot answer it. As it
-comes down it hands the keyboard to the alert behind it holding the same
-window, else that window, else the window it took it from. Buttons that do not
+comes down it hands the keyboard to the holder behind it — an alert or an
+owner-modal dialog holding the same window — else that window, else the window
+it took it from. Buttons that do not
 fit across wrap to a row above; every spec offers one button that destroys
 nothing. The keyboard
 starts on the default button, else the cancel one, else the first that destroys

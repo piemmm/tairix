@@ -1,262 +1,303 @@
-//! The deterministic catalog-naming policy (`plans/DEVICES.md` D3c).
+//! The catalog-naming policy (`docs/src/drivers/block.md`).
 //!
-//! A recognised volume is published under `/Storage/<name>`. The name is
-//! derived from the volume's own facts, so re-inserting the same volume
-//! re-derives the same name and a user's scripts keep working:
+//! A recognised volume is published under `/Storage/<name>`, a name derived
+//! from the volume itself, never from its format or from what else is
+//! attached:
 //!
-//! 1. the volume's recorded **label**, sanitised through the alias
-//!    character rules (`plans/ALIAS.md` §5.2): lowercased ASCII letters,
-//!    digits, `-`, and `_`, everything else dropped, leading separators
-//!    stripped — an empty result falls through;
-//! 2. else the **filesystem-type fallback** `<fstype><n>` (`fat1`,
-//!    `ext1`, `arxfs1`), where `n` is the volume's 1-based ordinal among
-//!    its type's volumes on the probed device;
-//! 3. a name the kernel reports already in use gets the volume-identity
-//!    **fingerprint** appended (`plans/ALIAS.md` §3.8, rendered by
-//!    `tairix_fsprobe::fingerprint`), lengthened on each further
-//!    collision — distinct identities have distinct full fingerprints, so
-//!    the sequence terminates deterministically, never by coin-flip.
+//! 1. its **label**, read where its format keeps it, in kebab case: ASCII
+//!    letters lowercased, digits kept, each run of anything else one `-`,
+//!    and `-` trimmed from both ends, so `My Backup Disk` is
+//!    `my-backup-disk`;
+//! 2. with no usable label, `<transport>_<fingerprint>`: the bus its device
+//!    is reached over and the start of its identity's fingerprint
+//!    (`usb_25cm`), so no unlabelled volume's name depends on another's;
+//! 3. a label already in use, or one spelling a name the storage namespace
+//!    or the resource grammar already defines, takes `_<fingerprint>` of the
+//!    volume's own identity (`backup_k3x9`), and a generated name still in
+//!    use is lengthened to more of the fingerprint.
 //!
-//! Every produced candidate satisfies the structural volume-name grammar
-//! (`tairix_abi::volume::validate_volume_name`) by construction; the
-//! kernel still re-validates it (never a trusted caller).
+//! A label never yields `_`, so no label can spell a name generated for
+//! another volume. Every candidate satisfies the kernel's volume-name grammar
+//! (`tairix_abi::volume::validate_volume_name`) by construction; the kernel
+//! still re-validates it.
 
-use tairix_abi::volume::{VolumeFsType, VOLUME_NAME_MAX};
+use tairix_abi::blkio::BlkTransport;
+use tairix_abi::fs::ROOT_VIEW;
+use tairix_abi::volume::VOLUME_NAME_MAX;
 use tairix_fsprobe::{fingerprint, FINGERPRINT_CHARS};
+use tairix_path::RESOLVER_NAMES;
+use tairix_resref::KnownNamespace;
 
-/// A catalog name candidate: a short ASCII string in the volume-name
-/// grammar, held inline (the policy is allocation-free).
+/// A catalog name: a short ASCII string in the volume-name grammar, held
+/// inline, so the policy allocates nothing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeName {
     bytes: [u8; VOLUME_NAME_MAX],
-    len: u8,
+    len: usize,
 }
 
 impl VolumeName {
-    /// The name's bytes (ASCII, non-empty).
+    const EMPTY: Self = Self {
+        bytes: [0; VOLUME_NAME_MAX],
+        len: 0,
+    };
+
+    /// The name's bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..usize::from(self.len)]
+        &self.bytes[..self.len]
     }
 
-    /// Append `byte`, silently ignored once full (callers bound their
-    /// input; truncation at the grammar bound is the documented policy).
+    /// Append `byte`, dropped once the name is at the grammar's bound.
     fn push(&mut self, byte: u8) {
-        if usize::from(self.len) < VOLUME_NAME_MAX {
-            self.bytes[usize::from(self.len)] = byte;
+        if let Some(slot) = self.bytes.get_mut(self.len) {
+            *slot = byte;
             self.len += 1;
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-/// Sanitise a volume label into a base name under the alias character
-/// rules: ASCII letters lowercased, digits kept, `-`/`_` kept, everything
-/// else dropped; leading separators stripped so the name starts with a
-/// letter or digit; bounded by the name grammar. `None` when nothing
-/// renderable remains (the fallback name is used instead).
-#[must_use]
-pub fn sanitise_label(label: &[u8]) -> Option<VolumeName> {
-    let mut name = VolumeName {
-        bytes: [0; VOLUME_NAME_MAX],
-        len: 0,
-    };
-    for &byte in label {
-        let mapped = match byte {
-            b'A'..=b'Z' => Some(byte + (b'a' - b'A')),
-            b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => Some(byte),
-            _ => None,
-        };
-        let Some(mapped) = mapped else { continue };
-        // A leading separator would violate the alias rules; drop it
-        // until a letter or digit anchors the name.
-        if name.is_empty() && (mapped == b'-' || mapped == b'_') {
-            continue;
+    /// Cut the name back to its first `len` bytes, and then to its last
+    /// letter or digit, so a cut never leaves it ending in a separator.
+    fn truncate(&mut self, len: usize) {
+        let mut kept = len.min(self.len);
+        while kept > 0 && !self.bytes[kept - 1].is_ascii_alphanumeric() {
+            kept -= 1;
         }
-        name.push(mapped);
-    }
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
+        self.len = kept;
     }
 }
 
-/// The `<fstype><n>` fallback name for a volume with no usable label:
-/// `fat1`, `ext1`, `arxfs1`, … `ordinal` is 1-based among the device's
-/// volumes of that type, so the derivation is stable per device layout.
-#[must_use]
-pub fn fallback_name(fstype: VolumeFsType, ordinal: u32) -> VolumeName {
-    let prefix: &[u8] = match fstype {
-        VolumeFsType::ARXFS => b"arxfs",
-        VolumeFsType::Ext4 => b"ext",
-        VolumeFsType::Fat32 => b"fat",
+/// What a volume's name is made from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NameBase {
+    /// Its label, in kebab case.
+    Label(VolumeName),
+    /// It has no usable label; its device is reached over this transport,
+    /// or declared none.
+    Unlabelled(Option<BlkTransport>),
+}
+
+impl NameBase {
+    /// The base of a volume labelled `label` on a device reached over
+    /// `transport`.
+    #[must_use]
+    pub fn of(label: &[u8], transport: Option<BlkTransport>) -> Self {
+        kebab(label).map_or(Self::Unlabelled(transport), Self::Label)
+    }
+}
+
+/// Fingerprint characters a generated name carries, shortest first; the last
+/// is the whole fingerprint, which no two identities share.
+const SUFFIX_LENGTHS: [usize; 3] = [4, 8, FINGERPRINT_CHARS];
+
+/// The names a volume of `base` and `identity` may be published under, in
+/// the order they are tried: its bare label, unless that is reserved, then
+/// its stem with ever more of its fingerprint.
+pub fn candidates(base: NameBase, identity: [u8; 16]) -> impl Iterator<Item = VolumeName> {
+    let (plain, stem) = match base {
+        NameBase::Label(label) => ((!reserved(label.as_bytes())).then_some(label), label),
+        NameBase::Unlabelled(transport) => (None, word(transport_word(transport))),
     };
-    let mut name = VolumeName {
-        bytes: [0; VOLUME_NAME_MAX],
-        len: 0,
-    };
-    for &byte in prefix {
+    let print = fingerprint(&identity);
+    plain.into_iter().chain(
+        SUFFIX_LENGTHS
+            .into_iter()
+            .map(move |take| suffixed(stem, &print[..take])),
+    )
+}
+
+/// `label` in kebab case, or `None` when no ASCII letter or digit survives.
+fn kebab(label: &[u8]) -> Option<VolumeName> {
+    let mut name = VolumeName::EMPTY;
+    let mut gap = false;
+    for byte in label.iter().map(u8::to_ascii_lowercase) {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            if gap && name.len > 0 {
+                name.push(b'-');
+            }
+            gap = false;
+            name.push(byte);
+        } else {
+            gap = true;
+        }
+    }
+    name.truncate(VOLUME_NAME_MAX);
+    (name.len > 0).then_some(name)
+}
+
+/// `stem` cut to leave room for `_` and `print`, then both appended.
+fn suffixed(mut stem: VolumeName, print: &[u8]) -> VolumeName {
+    stem.truncate(VOLUME_NAME_MAX - 1 - print.len());
+    stem.push(b'_');
+    for &byte in print {
+        stem.push(byte);
+    }
+    stem
+}
+
+/// The word an unlabelled volume's name begins with: the bus its device is
+/// reached over.
+const fn transport_word(transport: Option<BlkTransport>) -> &'static [u8] {
+    match transport {
+        Some(BlkTransport::Ata) => b"ata",
+        Some(BlkTransport::Nvme) => b"nvme",
+        Some(BlkTransport::Usb) => b"usb",
+        Some(BlkTransport::Sd) => b"sd",
+        Some(BlkTransport::Virtual) => b"virtual",
+        None => b"disk",
+    }
+}
+
+fn word(bytes: &[u8]) -> VolumeName {
+    let mut name = VolumeName::EMPTY;
+    for &byte in bytes {
         name.push(byte);
-    }
-    // Render the ordinal in decimal, most-significant digit first.
-    let mut digits = [0u8; 10];
-    let mut value = ordinal.max(1);
-    let mut count = 0;
-    while value > 0 {
-        #[allow(clippy::cast_possible_truncation)] // A decimal digit.
-        {
-            digits[count] = b'0' + (value % 10) as u8;
-        }
-        value /= 10;
-        count += 1;
-    }
-    for i in (0..count).rev() {
-        name.push(digits[i]);
     }
     name
 }
 
-/// How many collision retries the candidate sequence offers beyond the
-/// base name. The final candidate carries the full fingerprint, which is
-/// unique per identity, so a longer sequence would add nothing.
-pub const CANDIDATE_ATTEMPTS: usize = 4;
-
-/// Fingerprint characters appended per retry step (4, 8, then the full
-/// [`FINGERPRINT_CHARS`]).
-const FINGERPRINT_STEP: usize = 4;
-
-/// The `attempt`-th catalog-name candidate for a volume: the base name
-/// (attempt 0), then the base with `-<fingerprint prefix>` appended,
-/// lengthening per attempt up to the full fingerprint. The base is
-/// truncated as needed so the suffix always fits the name grammar.
-/// `None` once the sequence is exhausted (`attempt >=`
-/// [`CANDIDATE_ATTEMPTS`]).
-#[must_use]
-pub fn candidate(base: &VolumeName, identity: &[u8; 16], attempt: usize) -> Option<VolumeName> {
-    if attempt == 0 {
-        return Some(*base);
-    }
-    if attempt >= CANDIDATE_ATTEMPTS {
-        return None;
-    }
-    let fp = fingerprint(identity);
-    let take = if attempt == CANDIDATE_ATTEMPTS - 1 {
-        FINGERPRINT_CHARS
-    } else {
-        attempt * FINGERPRINT_STEP
+/// Whether `name` already names something a reader would take it for: a
+/// root-view entry and the machine alias of the same name, a storage
+/// resolver, or a resource namespace.
+fn reserved(name: &[u8]) -> bool {
+    let Ok(name) = core::str::from_utf8(name) else {
+        return false;
     };
-    // Keep as much of the base as leaves room for `-` + the suffix.
-    let keep = VOLUME_NAME_MAX
-        .saturating_sub(take + 1)
-        .min(base.as_bytes().len());
-    let mut name = VolumeName {
-        bytes: [0; VOLUME_NAME_MAX],
-        len: 0,
-    };
-    for &byte in &base.as_bytes()[..keep] {
-        name.push(byte);
-    }
-    name.push(b'-');
-    for &byte in &fp[..take] {
-        name.push(byte);
-    }
-    Some(name)
+    ROOT_VIEW
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(name))
+        || RESOLVER_NAMES.contains(&name)
+        || KnownNamespace::from_name(name).is_some()
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use tairix_abi::volume::validate_volume_name;
 
     use super::*;
 
+    fn names(base: NameBase, identity: [u8; 16]) -> Vec<Vec<u8>> {
+        candidates(base, identity)
+            .map(|name| name.as_bytes().to_vec())
+            .collect()
+    }
+
+    fn label(text: &[u8]) -> NameBase {
+        NameBase::of(text, Some(BlkTransport::Usb))
+    }
+
+    fn print(identity: [u8; 16], take: usize) -> Vec<u8> {
+        fingerprint(&identity)[..take].to_vec()
+    }
+
     #[test]
-    fn labels_are_lowercased_and_stripped_to_the_alias_rules() {
-        let name = sanitise_label(b"My Backup Disk!").expect("renderable");
-        assert_eq!(name.as_bytes(), b"mybackupdisk");
-        let name = sanitise_label(b"__Data-2024__").expect("renderable");
-        assert_eq!(
-            name.as_bytes(),
-            b"data-2024__",
-            "leading separators are stripped, interior and trailing kept"
+    fn a_label_is_named_in_kebab_case_with_its_word_boundaries() {
+        for (text, name) in [
+            (&b"My Backup Disk"[..], &b"my-backup-disk"[..]),
+            (b"__Data-2024__", b"data-2024"),
+            (b"a - b", b"a-b"),
+            (b"Photos 2024!", b"photos-2024"),
+            (b"caf\xC3\xA9 menu", b"caf-menu"),
+            (b"MY_DISK", b"my-disk"),
+        ] {
+            assert_eq!(names(label(text), [1; 16])[0], name, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_label_with_no_letter_or_digit_is_no_label() {
+        for text in [&b""[..], b"!!! ***", b"----", "διακοπές".as_bytes()] {
+            assert_eq!(label(text), NameBase::Unlabelled(Some(BlkTransport::Usb)));
+        }
+    }
+
+    #[test]
+    fn an_unlabelled_volume_is_named_by_its_transport_and_identity_alone() {
+        let first = [0x11; 16];
+        let second = [0x22; 16];
+        let unlabelled = NameBase::Unlabelled(Some(BlkTransport::Usb));
+        let mut expected = b"usb_".to_vec();
+        expected.extend(print(first, 4));
+        assert_eq!(names(unlabelled, first)[0], expected);
+        assert_ne!(
+            names(unlabelled, first)[0],
+            names(unlabelled, second)[0],
+            "neither waits on the other's name, in either order"
         );
-        assert!(validate_volume_name(name.as_bytes()).is_ok());
+        assert!(names(NameBase::Unlabelled(None), first)[0].starts_with(b"disk_"));
+        assert!(names(NameBase::Unlabelled(Some(BlkTransport::Sd)), first)[0].starts_with(b"sd_"));
     }
 
     #[test]
-    fn an_unrenderable_label_falls_through() {
-        assert_eq!(sanitise_label(b""), None);
-        assert_eq!(sanitise_label(b"!!! ***"), None);
-        assert_eq!(sanitise_label(b"----"), None);
-        assert_eq!(sanitise_label("διακοπές".as_bytes()), None);
+    fn a_taken_label_takes_its_own_fingerprint_lengthening_while_taken() {
+        let identity = [7; 16];
+        let tried = names(label(b"Backup"), identity);
+        assert_eq!(tried.len(), 1 + SUFFIX_LENGTHS.len());
+        assert_eq!(tried[0], b"backup");
+        for (name, take) in tried[1..].iter().zip(SUFFIX_LENGTHS) {
+            assert!(name.ends_with(&print(identity, take)), "{name:?}");
+            assert!(name.starts_with(b"back"));
+            assert_eq!(name[name.len() - take - 1], b'_');
+        }
+        assert_eq!(names(label(b"Backup"), identity), tried, "always the same");
+        assert_ne!(names(label(b"Backup"), [8; 16])[1], tried[1]);
     }
 
     #[test]
-    fn an_overlong_label_is_bounded_by_the_name_grammar() {
+    fn a_reserved_label_is_never_published_bare() {
+        for text in [
+            &b"System"[..],
+            b"STORAGE",
+            b"users",
+            b"id",
+            b"alias",
+            b"dev",
+            b"view",
+            b"disk",
+            b"vol",
+            b"cap",
+        ] {
+            let tried = names(label(text), [3; 16]);
+            assert_eq!(tried.len(), SUFFIX_LENGTHS.len(), "{text:?}");
+            assert!(tried.iter().all(|name| name.contains(&b'_')), "{text:?}");
+        }
+        assert_eq!(names(label(b"Systems"), [3; 16])[0], b"systems");
+    }
+
+    #[test]
+    fn a_hostile_label_cannot_spell_a_generated_name_or_escape() {
+        let victim = [0x5C; 16];
+        let generated = names(NameBase::Unlabelled(Some(BlkTransport::Usb)), victim);
+        for name in &generated {
+            let forged = names(label(name), [0x99; 16]);
+            assert!(!forged.contains(name), "{name:?}");
+        }
+        for text in [&b"../../System"[..], b"a/b", b"x\x1b[2Jy", b"\0\0"] {
+            for name in names(label(text), [1; 16]) {
+                assert!(validate_volume_name(&name).is_ok(), "{name:?}");
+                assert!(!name.contains(&b'/') && !name.contains(&b'.'));
+            }
+        }
+    }
+
+    #[test]
+    fn every_candidate_meets_the_kernel_grammar_even_at_the_bound() {
         let long = [b'a'; 100];
-        let name = sanitise_label(&long).expect("renderable");
-        assert_eq!(name.as_bytes().len(), VOLUME_NAME_MAX);
-        assert!(validate_volume_name(name.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn fallback_names_are_fstype_and_ordinal() {
-        assert_eq!(fallback_name(VolumeFsType::Fat32, 1).as_bytes(), b"fat1");
-        assert_eq!(fallback_name(VolumeFsType::Ext4, 2).as_bytes(), b"ext2");
-        assert_eq!(
-            fallback_name(VolumeFsType::ARXFS, 12).as_bytes(),
-            b"arxfs12"
-        );
-        // A zero ordinal is a caller bug; it is clamped, never rendered
-        // as an empty suffix.
-        assert_eq!(fallback_name(VolumeFsType::Fat32, 0).as_bytes(), b"fat1");
-    }
-
-    #[test]
-    fn candidates_lengthen_the_fingerprint_deterministically() {
-        let base = sanitise_label(b"backup").expect("renderable");
-        let identity = [7u8; 16];
-        let c0 = candidate(&base, &identity, 0).expect("base");
-        assert_eq!(c0.as_bytes(), b"backup");
-        let c1 = candidate(&base, &identity, 1).expect("short suffix");
-        assert_eq!(&c1.as_bytes()[..7], b"backup-");
-        assert_eq!(c1.as_bytes().len(), 7 + 4);
-        let c2 = candidate(&base, &identity, 2).expect("longer suffix");
-        assert_eq!(c2.as_bytes().len(), 7 + 8);
-        let c3 = candidate(&base, &identity, 3).expect("full fingerprint");
-        assert_eq!(
-            c3.as_bytes().len(),
-            (7 + FINGERPRINT_CHARS).min(VOLUME_NAME_MAX)
-        );
-        assert_eq!(candidate(&base, &identity, 4), None, "sequence exhausts");
-
-        // Deterministic: the same volume derives the same candidates.
-        assert_eq!(candidate(&base, &identity, 1), Some(c1));
-        // Distinct identities diverge.
-        let other = candidate(&base, &[8u8; 16], 1).expect("other");
-        assert_ne!(c1, other);
-        for c in [c1, c2, c3] {
-            assert!(validate_volume_name(c.as_bytes()).is_ok());
+        let separated: Vec<u8> = (0..40).flat_map(|_| *b"ab ").collect();
+        for base in [
+            label(&long),
+            label(&separated),
+            label(b"x"),
+            NameBase::Unlabelled(Some(BlkTransport::Virtual)),
+            NameBase::Unlabelled(None),
+        ] {
+            for name in names(base, [0xA5; 16]) {
+                assert!(validate_volume_name(&name).is_ok(), "{name:?}");
+            }
         }
-    }
-
-    #[test]
-    fn a_long_base_is_truncated_so_the_suffix_fits() {
-        let base = sanitise_label(&[b'x'; VOLUME_NAME_MAX]).expect("renderable");
-        let identity = [3u8; 16];
-        for attempt in 1..CANDIDATE_ATTEMPTS {
-            let c = candidate(&base, &identity, attempt).expect("candidate");
-            assert!(c.as_bytes().len() <= VOLUME_NAME_MAX);
-            assert!(validate_volume_name(c.as_bytes()).is_ok());
-            assert!(c.as_bytes().contains(&b'-'), "suffix survives truncation");
-        }
-        // The full-fingerprint candidate still ends with the whole
-        // fingerprint (uniqueness is preserved even for maximal bases).
-        let last = candidate(&base, &identity, CANDIDATE_ATTEMPTS - 1).expect("last");
-        let fp = fingerprint(&identity);
-        assert!(last.as_bytes().ends_with(&fp));
+        let last = names(label(&long), [0xA5; 16]).pop().expect("a candidate");
+        assert!(last.ends_with(&print([0xA5; 16], FINGERPRINT_CHARS)));
     }
 }

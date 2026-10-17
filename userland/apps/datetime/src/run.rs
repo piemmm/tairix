@@ -323,6 +323,10 @@ mod program {
                     }
                     continue;
                 }
+                Err(EventError::Refused(refused)) => {
+                    app::report(APP_NAME, refused);
+                    continue;
+                }
                 Err(EventError::Mailbox(_)) => {
                     return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }

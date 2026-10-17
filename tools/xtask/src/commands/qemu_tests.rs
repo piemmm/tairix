@@ -5197,8 +5197,8 @@ static TESTS: &[QemuTest] = &[
     // `TimedOut`. PASS once the chassis reaps a fixture exit of 0; every
     // failure site carries a distinct finisher (the fixture's diagnostic exit
     // code is folded in). Single CPU; the 60-second budget is the usual
-    // inactivity ceiling — the run itself is dominated by the fixture's own
-    // 300 ms wedged deadline.
+    // inactivity ceiling — the run itself is dominated by the consumer's
+    // reissue pacing, a third of the class's grace window per reissue.
     QemuTest {
         package: "tairix-test-blkio-fault-qemu-aarch64",
         binary: "tairix-test-blkio-fault-qemu-aarch64",

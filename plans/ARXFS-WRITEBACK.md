@@ -163,8 +163,8 @@ stage 20), FEC commit witnesses (stage 21) — is now unblocked.
   re-reads nodes it has just written; the dirty set is authoritative for its
   handle for every block it holds.
 - **Every capacity is derived, never a hand-picked constant** (`AGENTS.md`
-  §24.1): the byte ceiling comes from discovered RAM, the deadline from the
-  device class the block seam reports. The staging-window *bound* is a fixed
+  §24.1): the byte ceiling comes from discovered RAM, the deadline from what a
+  command costs the medium the block seam reports. The staging-window *bound* is a fixed
   transfer bound shared with the read path, not a capacity.
 - **The ceiling is the machine's, and its volumes share it.** A figure derived
   per volume is a multiple of the machine as soon as the machine has several
@@ -280,15 +280,17 @@ root. Every teardown does reach an explicit close: the volume-detach path
 flushes the filesystem before the device (`commit_for_detach`) and the
 `system_power` syscall syncs every mounted volume before the platform stops.
 
-The window is one policy function over the device class the seam reports
-(`BlockClass::device_class`, derived from the medium the driver declares),
-which the driver once ignored:
+The window is one policy function over what one command to the device costs
+(`BlockClass::command_cost`, derived from the medium the driver declares). It
+is kept apart from the patience class, which reads an unknown rotation as the
+slowest medium: a USB unit that reported nothing of its medium is still behind
+a bridge, and the bridge, not the medium, is what batching amortises.
 
-| Declared class | Rationale | Window |
-|---|---|---|
-| `Removable` (SD, eMMC, USB) | highest per-command cost, the measured bottleneck, and the class that gains most | 30 s |
-| `Rotational` | seek-bound; batching converts scattered metadata into sequential runs | 15 s |
-| `SolidState`, `Virtual` | already cheap per command; a long window buys little and risks more | 5 s |
+| Command cost | Medium | Rationale | Window |
+|---|---|---|---|
+| `Bridged` | any USB or SD/eMMC unit | the bridge or card protocol's fixed per-command cost dominates, the measured bottleneck and the cost that gains most | 30 s |
+| `Seek` | an ATA or NVMe medium that rotates, or is not known not to | seek-bound; batching converts scattered metadata into sequential runs | 15 s |
+| `Cheap` | a non-rotating medium on a direct bus, a paravirtual device, or one that declared nothing | already cheap per command; a long window buys little and risks more | 5 s |
 
 Ageing a transaction needs a **monotonic clock** and something that will come
 back for it, and the host supplies both together

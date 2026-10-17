@@ -11,7 +11,11 @@
 //! * the stable 16-byte **identity** each format carries (the `ARXFS`
 //!   metadata-header UUID, the ext4 `s_uuid`, and the FAT32
 //!   serial+label+tag derivation the FAT32 driver publishes), and
-//! * the human-facing **volume label** where the format records one.
+//! * the human-facing **volume label**, read where the format keeps it
+//!   authoritatively, with a format's "no label" placeholder read as none,
+//!   and
+//! * the FAT32 parameter-block reading ([`Fat32Bpb`]) that places a FAT32
+//!   volume's regions.
 //!
 //! The filesystem drivers import their shared constants and derivations
 //! from here (`ARXFS_HEADER_MAGIC`, `EXT4_SUPERBLOCK_MAGIC`,
@@ -61,6 +65,26 @@ pub const LABEL_MAX: usize = 16;
 /// bits, at five bits per base32 character, rounded up.
 pub const FINGERPRINT_CHARS: usize = 26;
 
+/// Bytes of one FAT directory entry, fixed by the format.
+pub const FAT_DIR_ENTRY_LEN: usize = 32;
+/// FAT attribute bit: the entry is the volume label, not a file.
+pub const FAT_ATTR_VOLUME_ID: u8 = 0x08;
+/// FAT attribute value of a long-file-name fragment.
+pub const FAT_ATTR_LONG_NAME: u8 = 0x0F;
+/// FAT first name byte: the directory ends here.
+pub const FAT_END_OF_DIR: u8 = 0x00;
+/// FAT first name byte: the entry was deleted.
+pub const FAT_DELETED_ENTRY: u8 = 0xE5;
+
+/// What FAT formatters write for a volume given no label: a placeholder, not
+/// a label.
+const FAT_NO_LABEL: &[u8] = b"NO NAME";
+
+/// How much of a FAT32 root directory a caller reads for its label entry,
+/// which formatters write first: [`fat32_directory_label`] scans what it is
+/// given, so this bounds the read, not the format.
+pub const FAT32_LABEL_SCAN_LEN: usize = 4096;
+
 /// The result of recognising a supported filesystem at an extent head.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ProbedVolume {
@@ -75,12 +99,155 @@ pub struct ProbedVolume {
 
 impl ProbedVolume {
     /// The volume's recorded human-facing label, trimmed of the format's
-    /// padding; empty when the format records none (`ARXFS`) or the field
-    /// is blank.
+    /// padding; empty when the format records none (`ARXFS`), the field is
+    /// blank, or it holds the format's "no label" placeholder.
     #[must_use]
     pub fn label(&self) -> &[u8] {
         &self.label[..usize::from(self.label_len)]
     }
+
+    /// This FAT32 volume as labelled by `entries`, the head of its root
+    /// directory ([`fat32_root_dir_byte`]): the label entry there is what a
+    /// relabel rewrites, so it outranks the boot sector's copy. Unchanged
+    /// when the directory records no label.
+    #[must_use]
+    pub fn with_fat32_directory_label(self, entries: &[u8]) -> Self {
+        match fat32_directory_label(entries) {
+            Some((label, label_len)) => Self {
+                label,
+                label_len,
+                ..self
+            },
+            None => self,
+        }
+    }
+}
+
+/// The fields of a FAT32 BIOS parameter block that place the volume's
+/// regions, validated as the format bounds them: the one reading the probe
+/// and the FAT32 driver share, so they cannot disagree about where a
+/// volume's data lies.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Fat32Bpb {
+    /// Bytes per sector: a power of two in `512..=4096`.
+    pub bytes_per_sector: u32,
+    /// Sectors per cluster: a power of two in `1..=128`.
+    pub sectors_per_cluster: u32,
+    /// Sectors before the first FAT, never zero.
+    pub reserved_sectors: u64,
+    /// Copies of the FAT: one or two.
+    pub fat_count: u64,
+    /// Sectors of one FAT, never zero.
+    pub fat_sectors: u64,
+    /// The root directory's first cluster, at least 2.
+    pub root_cluster: u32,
+}
+
+impl Fat32Bpb {
+    /// The parameter block `boot` records, or `None` for a boot sector no
+    /// FAT32 volume carries: no `0x55AA` signature, a sector or cluster size
+    /// outside the format, no reserved sectors, a FAT count other than one or
+    /// two, the FAT12/16 root-entry or FAT-size fields set, an empty FAT, or
+    /// a root below cluster 2.
+    #[must_use]
+    pub fn parse(boot: &[u8; 512]) -> Option<Self> {
+        if boot[510] != 0x55 || boot[511] != 0xAA {
+            return None;
+        }
+        let bytes_per_sector = u32::from(le_u16(boot, 11)?);
+        let sectors_per_cluster = u32::from(boot[13]);
+        let reserved_sectors = u64::from(le_u16(boot, 14)?);
+        let fat_count = u64::from(boot[16]);
+        let root_entries = le_u16(boot, 17)?;
+        let fat_sectors_16 = le_u16(boot, 22)?;
+        let fat_sectors = u64::from(le_u32(boot, 36)?);
+        let root_cluster = le_u32(boot, 44)?;
+        let valid = bytes_per_sector.is_power_of_two()
+            && (512..=4096).contains(&bytes_per_sector)
+            && sectors_per_cluster.is_power_of_two()
+            && reserved_sectors != 0
+            && (1..=2).contains(&fat_count)
+            && root_entries == 0
+            && fat_sectors_16 == 0
+            && fat_sectors != 0
+            && root_cluster >= 2;
+        valid.then_some(Self {
+            bytes_per_sector,
+            sectors_per_cluster,
+            reserved_sectors,
+            fat_count,
+            fat_sectors,
+            root_cluster,
+        })
+    }
+
+    /// Bytes of one cluster.
+    #[must_use]
+    pub const fn cluster_bytes(&self) -> u64 {
+        self.sectors_per_cluster as u64 * self.bytes_per_sector as u64
+    }
+
+    /// The byte offset of the first FAT.
+    #[must_use]
+    pub const fn fat_start_byte(&self) -> u64 {
+        self.reserved_sectors * self.bytes_per_sector as u64
+    }
+
+    /// The byte offset of the data region, where cluster 2 begins, or `None`
+    /// when it overflows.
+    #[must_use]
+    pub fn data_start_byte(&self) -> Option<u64> {
+        self.fat_count
+            .checked_mul(self.fat_sectors)?
+            .checked_add(self.reserved_sectors)?
+            .checked_mul(u64::from(self.bytes_per_sector))
+    }
+
+    /// The byte offset of data cluster `cluster`, or `None` for a number
+    /// below 2 or an offset that overflows.
+    #[must_use]
+    pub fn cluster_byte(&self, cluster: u32) -> Option<u64> {
+        u64::from(cluster.checked_sub(2)?)
+            .checked_mul(self.cluster_bytes())?
+            .checked_add(self.data_start_byte()?)
+    }
+}
+
+/// Where a FAT32 volume's root directory begins, in bytes from the start of
+/// the volume, read from its boot sector: where its label entry lives.
+#[must_use]
+pub fn fat32_root_dir_byte(head: &[u8]) -> Option<u64> {
+    let boot: &[u8; 512] = head.get(..512)?.try_into().ok()?;
+    let bpb = Fat32Bpb::parse(boot)?;
+    bpb.cluster_byte(bpb.root_cluster)
+}
+
+/// The label a FAT directory's `entries` record: the first live volume-label
+/// entry before the directory's end, trimmed of padding, or `None` when there
+/// is none or it holds the "no label" placeholder.
+#[must_use]
+pub fn fat32_directory_label(entries: &[u8]) -> Option<([u8; LABEL_MAX], u8)> {
+    for entry in entries.as_chunks::<FAT_DIR_ENTRY_LEN>().0 {
+        match entry[0] {
+            FAT_END_OF_DIR => return None,
+            FAT_DELETED_ENTRY => continue,
+            _ => {}
+        }
+        let attributes = entry[11];
+        if attributes & FAT_ATTR_LONG_NAME != FAT_ATTR_LONG_NAME
+            && attributes & FAT_ATTR_VOLUME_ID != 0
+        {
+            return fat_label(&entry[..11]);
+        }
+    }
+    None
+}
+
+/// A FAT label field, trimmed, unless it is blank or the placeholder.
+fn fat_label(field: &[u8]) -> Option<([u8; LABEL_MAX], u8)> {
+    let (label, len) = take_label(field);
+    let text = &label[..usize::from(len)];
+    (!text.is_empty() && text != FAT_NO_LABEL).then_some((label, len))
 }
 
 /// Recognise a supported filesystem from the first bytes of an extent.
@@ -332,34 +499,14 @@ fn probe_ext4(head: &[u8]) -> Option<ProbedVolume> {
 /// is advisory, so the BPB is validated before the match is accepted.
 fn probe_fat32(head: &[u8]) -> Option<ProbedVolume> {
     let boot: &[u8; 512] = head.get(..512)?.try_into().ok()?;
-    if boot[510] != 0x55 || boot[511] != 0xAA {
-        return None;
-    }
     if &boot[82..90] != b"FAT32   " {
         return None;
     }
-    let bytes_per_sector = le_u16(boot, 11)?;
-    if !bytes_per_sector.is_power_of_two() || !(512..=4096).contains(&bytes_per_sector) {
-        return None;
-    }
-    let sectors_per_cluster = boot[13];
-    if !sectors_per_cluster.is_power_of_two() {
-        return None;
-    }
-    let reserved_sectors = le_u16(boot, 14)?;
-    let fat_count = boot[16];
-    let fat_sectors = le_u32(boot, 36)?;
-    let root_cluster = le_u32(boot, 44)?;
-    if reserved_sectors == 0 || !(1..=2).contains(&fat_count) || fat_sectors == 0 {
-        return None;
-    }
-    if root_cluster < 2 {
-        return None;
-    }
+    Fat32Bpb::parse(boot)?;
     let identity = fat32_identity_from_boot(boot);
     // The label field exists only under the 0x29 extended boot signature.
     let (label, label_len) = if boot[66] == 0x29 {
-        take_label(&boot[71..82])
+        fat_label(&boot[71..82]).unwrap_or(([0u8; LABEL_MAX], 0))
     } else {
         ([0u8; LABEL_MAX], 0)
     };
@@ -486,6 +633,106 @@ mod tests {
         expected[4..15].copy_from_slice(b"MYDISK     ");
         expected[15] = 0xF3;
         assert_eq!(probed.identity, expected);
+    }
+
+    #[test]
+    fn a_fat_label_placeholder_is_no_label() {
+        let probed = probe(&fat32_boot(*b"SRLN", b"NO NAME    ")).expect("matches");
+        assert_eq!(probed.label(), b"");
+        let blank = probe(&fat32_boot(*b"SRLN", b"           ")).expect("matches");
+        assert_eq!(blank.label(), b"");
+    }
+
+    /// One 32-byte FAT directory entry named `name` with `attributes`.
+    fn dir_entry(name: &[u8; 11], attributes: u8) -> [u8; FAT_DIR_ENTRY_LEN] {
+        let mut entry = [0u8; FAT_DIR_ENTRY_LEN];
+        entry[..11].copy_from_slice(name);
+        entry[11] = attributes;
+        entry
+    }
+
+    fn directory(entries: &[[u8; FAT_DIR_ENTRY_LEN]]) -> [u8; 512] {
+        let mut sector = [0u8; 512];
+        for (slot, entry) in sector
+            .as_chunks_mut::<FAT_DIR_ENTRY_LEN>()
+            .0
+            .iter_mut()
+            .zip(entries)
+        {
+            slot.copy_from_slice(entry);
+        }
+        sector
+    }
+
+    #[test]
+    fn the_root_directory_label_outranks_the_boot_sector_copy() {
+        let mut deleted = dir_entry(b"OLDLABEL   ", FAT_ATTR_VOLUME_ID);
+        deleted[0] = FAT_DELETED_ENTRY;
+        let entries = directory(&[
+            deleted,
+            dir_entry(b"LONGNAMEPRT", FAT_ATTR_LONG_NAME),
+            dir_entry(b"README  TXT", 0x20),
+            dir_entry(b"HOLIDAYS   ", FAT_ATTR_VOLUME_ID | 0x20),
+        ]);
+        let probed = probe(&fat32_boot(*b"SRLN", b"NO NAME    ")).expect("matches");
+        let identity = probed.identity;
+        let relabelled = probed.with_fat32_directory_label(&entries);
+        assert_eq!(relabelled.label(), b"HOLIDAYS");
+        assert_eq!(relabelled.identity, identity, "a label is not an identity");
+    }
+
+    #[test]
+    fn a_directory_without_a_label_entry_keeps_the_boot_label() {
+        let after_end = directory(&[
+            dir_entry(b"README  TXT", 0x20),
+            [0u8; FAT_DIR_ENTRY_LEN],
+            dir_entry(b"STALE      ", FAT_ATTR_VOLUME_ID),
+        ]);
+        let placeholder = directory(&[dir_entry(b"NO NAME    ", FAT_ATTR_VOLUME_ID)]);
+        let probed = probe(&fat32_boot(*b"SRLN", b"MYDISK     ")).expect("matches");
+        for entries in [after_end, placeholder] {
+            assert_eq!(
+                probed.with_fat32_directory_label(&entries).label(),
+                b"MYDISK"
+            );
+        }
+        assert_eq!(
+            fat32_directory_label(&[0u8; 7]),
+            None,
+            "a partial entry is not one"
+        );
+    }
+
+    #[test]
+    fn the_root_directory_is_located_from_the_parameter_block() {
+        let mut head = fat32_boot(*b"SRLN", b"MYDISK     ");
+        // 32 reserved + 2 × 1024 FAT sectors of 512 bytes, then cluster 2.
+        assert_eq!(fat32_root_dir_byte(&head), Some((32 + 2 * 1024) * 512));
+        head[44..48].copy_from_slice(&5u32.to_le_bytes());
+        assert_eq!(
+            fat32_root_dir_byte(&head),
+            Some((32 + 2 * 1024) * 512 + 3 * 8 * 512),
+            "three clusters of eight sectors past cluster 2"
+        );
+        let boot: &[u8; 512] = head[..512].try_into().expect("a sector");
+        let bpb = Fat32Bpb::parse(boot).expect("valid");
+        assert_eq!(bpb.cluster_byte(1), None, "clusters are numbered from 2");
+        assert_eq!(fat32_root_dir_byte(&head[..100]), None);
+    }
+
+    #[test]
+    fn the_parameter_block_refuses_a_fat12_or_fat16_layout() {
+        for corrupt in [
+            &mut |h: &mut [u8]| h[17..19].copy_from_slice(&512u16.to_le_bytes()),
+            &mut |h: &mut [u8]| h[22..24].copy_from_slice(&9u16.to_le_bytes()),
+            &mut |h: &mut [u8]| h[14..16].copy_from_slice(&0u16.to_le_bytes()),
+        ] as [&mut dyn FnMut(&mut [u8]); 3]
+        {
+            let mut head = fat32_boot(*b"SRLN", b"MYDISK     ");
+            corrupt(&mut head);
+            assert_eq!(probe(&head), None);
+            assert_eq!(fat32_root_dir_byte(&head), None);
+        }
     }
 
     #[test]

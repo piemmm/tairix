@@ -15,9 +15,12 @@
 //! CSW, or a phase error runs the spec's reset recovery and fails the
 //! command rather than trusting the frame.
 
+use tairix_abi::blkio::CommandKind;
 use tairix_abi::Errno;
 
-use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
+use crate::scsi::{
+    unknown_unit_budget, CommandOutcome, DataPhase, ResetRecord, ScsiTransport, Sense, MAX_LUNS,
+};
 
 /// One logical USB transfer seam the wire transports drive.
 ///
@@ -30,9 +33,9 @@ use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense, 
 /// so the engine may transfer again immediately. BOT uses the control and
 /// bulk operations; CBI ([`crate::cbi`]) additionally uses the control-OUT
 /// data stage (its command channel) and the interrupt-IN endpoint (its
-/// status channel). Every bulk and interrupt transfer is bounded by the
-/// exchange [`begin_exchange`](Self::begin_exchange) last started, failing
-/// [`Errno::TimedOut`] once it is spent.
+/// status channel). Every transfer — control, bulk and interrupt — is
+/// bounded by the exchange [`begin_exchange`](Self::begin_exchange) last
+/// started, failing [`Errno::TimedOut`] once it is spent.
 pub trait MsdTransport {
     /// Run a control-IN transfer (SETUP + IN data stage) into `data`,
     /// returning the bytes the device delivered.
@@ -94,10 +97,10 @@ pub trait MsdTransport {
     /// An [`Errno`] from the transport.
     fn discard_interrupts(&mut self) -> Result<(), Errno>;
 
-    /// Start one command exchange: every transfer until the next begins is
-    /// bounded by what remains of the exchange's budget, so a device that
-    /// stops answering mid-command fails the command rather than holding it.
-    fn begin_exchange(&mut self);
+    /// Start one command exchange of `exchange_ns`: every transfer until the
+    /// next begins is bounded by what remains of it, so a device that stops
+    /// answering mid-command fails the command rather than holding it.
+    fn begin_exchange(&mut self, exchange_ns: u64);
 
     /// Clear the halt of both bulk endpoints — bulk-IN, then bulk-OUT — on
     /// the device and in the controller, so both pipes restart empty at
@@ -140,6 +143,11 @@ pub struct Bot<T: MsdTransport> {
     /// The next CBW tag; incremented per command so a stale CSW can never
     /// match the command in flight.
     next_tag: u32,
+    /// The exchange a reset recovery runs in: the last command's, so a
+    /// command that spent its own still gets the reset it owes.
+    recovery_ns: u64,
+    /// How the last broken exchange's reset recovery went.
+    reset: ResetRecord,
 }
 
 impl<T: MsdTransport> Bot<T> {
@@ -149,6 +157,8 @@ impl<T: MsdTransport> Bot<T> {
             transport,
             interface_number,
             next_tag: 1,
+            recovery_ns: unknown_unit_budget().exchange_ns(CommandKind::Query, 0),
+            reset: ResetRecord::default(),
         }
     }
 
@@ -164,6 +174,7 @@ impl<T: MsdTransport> Bot<T> {
     /// both pipes' halts and data toggles as they were, so the next CBW would
     /// still meet a pipe out of step.
     fn reset_recovery(&mut self) -> Result<(), Errno> {
+        self.transport.begin_exchange(self.recovery_ns);
         // Class-specific OUT, bRequest 0xFF, no data.
         let setup = [0x21, 0xFF, 0, 0, self.interface_number, 0, 0, 0];
         self.transport.control_no_data(setup)?;
@@ -176,7 +187,8 @@ impl<T: MsdTransport> Bot<T> {
         if cause == Errno::NotFound {
             return cause;
         }
-        after_reset(cause, self.reset_recovery())
+        let reset = self.reset_recovery();
+        self.reset.after(cause, reset)
     }
 }
 
@@ -188,14 +200,17 @@ impl<T: MsdTransport> ScsiTransport for Bot<T> {
         lun: u8,
         cb: &[u8],
         mut data: DataPhase<'_>,
+        exchange_ns: u64,
     ) -> Result<CommandOutcome, Errno> {
+        self.reset.begin();
         if cb.is_empty() || cb.len() > 16 || lun as usize >= MAX_LUNS {
             return Err(Errno::OutOfRange);
         }
         let data_len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
         let tag = self.next_tag;
         self.next_tag = self.next_tag.wrapping_add(1);
-        self.transport.begin_exchange();
+        self.transport.begin_exchange(exchange_ns);
+        self.recovery_ns = exchange_ns;
 
         // Build and send the CBW. Any failure here, a STALL included, means
         // the device did not take the wrapper: reset the transport and fail.
@@ -277,6 +292,8 @@ impl<T: MsdTransport> ScsiTransport for Bot<T> {
         // GET MAX LUN: class-specific IN, bRequest 0xFE, one data byte.
         let setup = [0xA1, 0xFE, 0, 0, self.interface_number, 0, 1, 0];
         let mut data = [0u8; 1];
+        self.transport
+            .begin_exchange(unknown_unit_budget().exchange_ns(CommandKind::Query, data.len()));
         match self.transport.control_in(setup, &mut data) {
             Ok(1) => {
                 if data[0] as usize >= MAX_LUNS {
@@ -298,6 +315,10 @@ impl<T: MsdTransport> ScsiTransport for Bot<T> {
 
     fn scrub(&mut self) {
         self.transport.scrub();
+    }
+
+    fn take_resynced(&mut self) -> bool {
+        self.reset.take()
     }
 }
 

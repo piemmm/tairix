@@ -86,9 +86,6 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 /// 4096 bytes, and no Tier-1 block device exceeds it either.
 const MAX_BLOCK_SIZE: u32 = 4096;
 
-/// On-disk directory-entry size, frozen by the FAT specification.
-const DIR_ENTRY_LEN: usize = 32;
-
 /// The most 32-byte entries a FAT directory may hold (the specification's
 /// 65,536-entry limit). A walk that would read past it is on a corrupt or
 /// cyclic chain and fails closed rather than looping; a create that would
@@ -101,15 +98,6 @@ const TAIL_WINDOW: u32 = 1024;
 
 /// Attribute byte: the entry describes a subdirectory.
 const ATTR_DIRECTORY: u8 = 0x10;
-/// Attribute byte: the entry is the volume label, not a file.
-const ATTR_VOLUME_ID: u8 = 0x08;
-/// Attribute byte value marking a long-file-name fragment (skipped).
-const ATTR_LONG_NAME: u8 = 0x0F;
-
-/// First name byte marking the end of the directory.
-const END_OF_DIR: u8 = 0x00;
-/// First name byte marking a deleted (free) directory entry.
-const DELETED_ENTRY: u8 = 0xE5;
 /// First name byte `0x05` stands in for a leading `0xE5` (Kanji).
 const KANJI_LEAD: u8 = 0x05;
 
@@ -410,6 +398,11 @@ pub struct Fat32<B: Block> {
 /// manager's signature probe shares, so a probe-side fingerprint always
 /// names the identity this driver publishes.
 use tairix_fsprobe::fat32_identity_from_boot as identity_from_boot;
+use tairix_fsprobe::{
+    Fat32Bpb, FAT_ATTR_LONG_NAME as ATTR_LONG_NAME, FAT_ATTR_VOLUME_ID as ATTR_VOLUME_ID,
+    FAT_DELETED_ENTRY as DELETED_ENTRY, FAT_DIR_ENTRY_LEN as DIR_ENTRY_LEN,
+    FAT_END_OF_DIR as END_OF_DIR,
+};
 
 /// One linear FAT scan counting the free data clusters, run once at open;
 /// the allocator and the chain-free path maintain the count from there,
@@ -1041,54 +1034,20 @@ impl<B: Block> Fat32<B> {
 
         let mut boot = [0u8; 512];
         device_read(&mut block, block_size, block_count, 0, &mut boot)?;
+        let bpb = Fat32Bpb::parse(&boot).ok_or(DriverError::BadMagic)?;
 
-        if le16(&boot, 510) != 0xAA55 {
-            return Err(DriverError::BadMagic);
-        }
-        let bytes_per_sector = u32::from(le16(&boot, 11));
-        let sectors_per_cluster = u32::from(boot[13]);
-        let reserved_sectors = u64::from(le16(&boot, 14));
-        let num_fats = u64::from(boot[16]);
-        let root_entry_count = le16(&boot, 17);
-        let fat_size_16 = le16(&boot, 22);
-        let fat_size_32 = u64::from(le32(&boot, 36));
-        let root_cluster = le32(&boot, 44);
-
-        let sector_ok = (512..=MAX_BLOCK_SIZE).contains(&bytes_per_sector)
-            && bytes_per_sector.is_power_of_two();
-        let cluster_ok =
-            (1..=128).contains(&sectors_per_cluster) && sectors_per_cluster.is_power_of_two();
-        let fat32_markers = root_entry_count == 0 && fat_size_16 == 0;
-        if !sector_ok
-            || !cluster_ok
-            || num_fats < 1
-            || !fat32_markers
-            || fat_size_32 == 0
-            || root_cluster < 2
-        {
-            return Err(DriverError::BadMagic);
-        }
-
-        let fat_start_byte = reserved_sectors
-            .checked_mul(u64::from(bytes_per_sector))
-            .ok_or(DriverError::BadMagic)?;
-        let data_start_sectors = reserved_sectors
-            .checked_add(
-                num_fats
-                    .checked_mul(fat_size_32)
-                    .ok_or(DriverError::BadMagic)?,
-            )
-            .ok_or(DriverError::BadMagic)?;
-        let data_start_byte = data_start_sectors
-            .checked_mul(u64::from(bytes_per_sector))
-            .ok_or(DriverError::BadMagic)?;
-        let bytes_per_cluster = u64::from(sectors_per_cluster) * u64::from(bytes_per_sector);
+        let fat_start_byte = bpb.fat_start_byte();
+        let data_start_byte = bpb.data_start_byte().ok_or(DriverError::BadMagic)?;
+        let bytes_per_cluster = bpb.cluster_bytes();
         if data_start_byte >= total_bytes {
             return Err(DriverError::BadMagic);
         }
-        let fat_size_bytes = fat_size_32
-            .checked_mul(u64::from(bytes_per_sector))
+        let fat_size_bytes = bpb
+            .fat_sectors
+            .checked_mul(u64::from(bpb.bytes_per_sector))
             .ok_or(DriverError::BadMagic)?;
+        let root_cluster = bpb.root_cluster;
+        let num_fats = bpb.fat_count;
         let data_clusters = (total_bytes - data_start_byte) / bytes_per_cluster;
         // Data clusters are numbered from 2, so the last valid number is
         // `data_clusters + 1`. Clamp to the 28-bit cluster space.
@@ -1229,9 +1188,19 @@ impl<B: Block> Fat32<B> {
         }
         let fat_size_32 = u32::try_from(fat_sectors).map_err(|_| DriverError::OutOfRange)?;
 
-        let fat_start_byte = reserved * bps64;
+        let bpb = Fat32Bpb {
+            bytes_per_sector: bps,
+            sectors_per_cluster: u32::from(spc_u8),
+            reserved_sectors: reserved,
+            fat_count: num_fats,
+            fat_sectors,
+            root_cluster: 2,
+        };
+        let fat_start_byte = bpb.fat_start_byte();
         let fat_size_bytes = fat_sectors * bps64;
-        let data_start_byte = (reserved + num_fats * fat_sectors) * bps64;
+        let root_byte = bpb
+            .cluster_byte(bpb.root_cluster)
+            .ok_or(DriverError::OutOfRange)?;
 
         // Boot sector / BIOS parameter block.
         let mut boot = [0u8; 512];
@@ -1250,7 +1219,7 @@ impl<B: Block> Fat32<B> {
         put_le16(&mut boot, 22, 0); // 16-bit FAT size (0 for FAT32)
         put_le32(&mut boot, 32, total_sectors);
         put_le32(&mut boot, 36, fat_size_32);
-        put_le32(&mut boot, 44, 2); // root directory first cluster
+        put_le32(&mut boot, 44, bpb.root_cluster);
         put_le16(&mut boot, 48, FSINFO_SECTOR);
         put_le16(&mut boot, 50, BACKUP_BOOT_SECTOR);
         boot[66] = 0x29; // extended boot signature
@@ -1274,13 +1243,7 @@ impl<B: Block> Fat32<B> {
         }
 
         // Empty root directory: a zeroed cluster reads as end-of-directory.
-        write_zeros(
-            &mut block,
-            bps,
-            block_count,
-            data_start_byte,
-            bytes_per_cluster,
-        )?;
+        write_zeros(&mut block, bps, block_count, root_byte, bytes_per_cluster)?;
 
         Self::open(block)
     }

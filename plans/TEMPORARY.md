@@ -4,29 +4,30 @@
 
 | ID | Item | Status |
 |---|---|---|
-| TMP-0 | Decisions D-1, D-2 and D-4 put to the user, answered and recorded under each; D-3 is answered | blocked: the user's answers to D-1, D-2 and D-4 |
-| TMP-1 | The USB host controller's serve loop never waits: every control transfer, controller command, port reset and recovery is an operation driven by events and one-shot timers (`plans/OPEN-DEFECTS.md` D1125) | planned |
-| TMP-1.1 | Each device's EP0 ring, control buffer and input context are resident in its own region; the engine-wide active/resting control cursor is deleted | planned |
-| TMP-1.2 | Control transfers are queued and reaped as bulk TDs are; a control URB carries a deadline and is held, never answered inline | planned |
-| TMP-1.3 | Controller commands are posted and routed by command-TRB address; a hung command is aborted, failing only its owner | planned |
-| TMP-1.4 | Endpoint recovery, deadline abandonment, `ClearHalt`, `SetInterface` and stream stop are operations | planned |
-| TMP-1.5 | Enumeration, hub port service, root-port reset, slot teardown and the boot walk are one per-port operation | planned |
-| TMP-1.6 | The engine's synchronous primitives are deleted and a host test proves the loop never waits | planned |
-| TMP-2 | Mass-storage readiness and deadlines follow the detected medium | planned |
-| TMP-2.1 | The medium is detected, with an explicit Unknown that every consumer reads conservatively; first, since every budget derives from it | planned |
-| TMP-2.2 | Readiness is a timed state machine: spin-up, `START STOP UNIT`, no medium | planned |
-| TMP-2.3 | Budgets derive from the medium and the transfer; a spin-up in service is ridden out | planned |
-| TMP-2.4 | Consumers pace their reissue on the unit's health | planned |
-| TMP-2.5 | An abandoned transfer's log names the endpoint's state | planned |
-| TMP-3 | Attached-volume names are a stable property of the volume and never read as a format | blocked: D-1 |
-| TMP-4 | Removable media are owned according to a per-volume policy | blocked: D-2 |
-| TMP-5 | DESK-21 — window-channel requests are posted, never awaited (`plans/FIX-DESKTOP.md`) | planned |
-| TMP-6 | Raspberry Pi 4 acceptance of TMP-1 to TMP-5, TMP-7 and TMP-8 on metal | blocked: TMP-1 to TMP-5, TMP-7, TMP-8 |
-| TMP-7 | Dialogs, forms and progress are owned windows of their own; a modal panel drawn inside an application's window is forbidden | planned |
-| TMP-7.1 | The owned dialog window: protocol, session placement, owner modality shared with alerts, earned focus | planned |
-| TMP-7.2 | TextEdit's Go to line, Paint's forms and Settings' credential sheet become dialog windows; the in-window placement helpers are deleted | planned |
-| TMP-7.3 | The file manager's operation progress is its own window | blocked: D-4 |
-| TMP-8 | Alerts and dialog windows size to their content; nothing is elided (`plans/OPEN-DEFECTS.md` D1129) | planned |
+| TMP-0 | Decisions D-1 to D-4 put to the user, answered and recorded under each | done |
+| TMP-9 | A reissuable answer carries its driver's word on when to reissue (D-5): at once when the device's own recovery has made the unit ready | done |
+| TMP-1 | The USB host controller's serve loop never waits: every control transfer, controller command, port reset and recovery is an operation driven by events and one-shot timers (`plans/OPEN-DEFECTS.md` D1125) | done |
+| TMP-1.1 | Each device's EP0 ring, control buffer and input context are resident in its own region; the engine-wide active/resting control cursor is deleted | done |
+| TMP-1.2 | Control transfers are queued and reaped as bulk TDs are; a control URB carries a deadline and is held, never answered inline | done |
+| TMP-1.3 | Controller commands are posted and routed by command-TRB address; a hung command is aborted, failing only its owner | done |
+| TMP-1.4 | Endpoint recovery, deadline abandonment, `ClearHalt`, `SetInterface` and stream stop are operations | done |
+| TMP-1.5 | Enumeration, hub port service, root-port reset, slot teardown and the boot walk are one per-port operation | done |
+| TMP-1.6 | The engine's synchronous primitives are deleted and a host test proves the loop never waits | done |
+| TMP-2 | Mass-storage readiness and deadlines follow the detected medium | done |
+| TMP-2.1 | The medium is detected, with an explicit Unknown that every consumer reads conservatively; first, since every budget derives from it | done |
+| TMP-2.2 | Readiness is a timed state machine: spin-up, `START STOP UNIT`, no medium | done |
+| TMP-2.3 | Budgets derive from the medium and the transfer; a spin-up in service is ridden out | done |
+| TMP-2.4 | Consumers pace their reissue on the unit's health | done |
+| TMP-2.5 | An abandoned transfer's log names the endpoint's state | done |
+| TMP-3 | Attached-volume names come from the volume's own label, never read as a format, and resolve collisions deterministically | done |
+| TMP-4 | Removable media honour their on-disk ownership, and a refusal is stated to the user | done |
+| TMP-5 | DESK-21 — window-channel requests are posted, never awaited (`plans/FIX-DESKTOP.md`) | done |
+| TMP-6 | Raspberry Pi 4 acceptance of TMP-1 to TMP-5 and TMP-7 to TMP-9 on metal | blocked: the operator's Pi 4 run |
+| TMP-7 | Dialogs, forms and progress are owned windows of their own; a modal panel drawn inside an application's window is forbidden | done |
+| TMP-7.1 | The owned dialog window: protocol, session placement, owner modality shared with alerts, earned focus | done |
+| TMP-7.2 | TextEdit's Go to line, Paint's forms and Settings' credential sheet become dialog windows; the in-window placement helpers are deleted | done |
+| TMP-7.3 | Each file operation's progress is a modeless window of its own; the file manager runs a bounded, ordered set of operations | done |
+| TMP-8 | Alerts and dialog windows size to their content; nothing is elided (`plans/OPEN-DEFECTS.md` D1129) | done |
 
 Binding under `AGENTS.md`. This plan collects the decisions and the work the
 Raspberry Pi 4 USB-storage logs of 2026-10-16 and 2026-10-17 left open once
@@ -81,8 +82,8 @@ TMP-2.1 comes first (the user, 2026-10-17): every mass-storage budget
 derives from the detected medium, so nothing in TMP-2 can be sized correctly
 before it. The rest of TMP-2 follows it in order. TMP-1 and TMP-5 depend on
 nothing here. TMP-8's layout is the one TMP-7's dialogs size themselves by, so
-it lands before or with TMP-7.1. TMP-3, TMP-4 and TMP-7.3 wait for D-1, D-2
-and D-4, and TMP-6 comes last.
+it lands before or with TMP-7.1, and TMP-7.3 follows TMP-7.1. TMP-6 comes
+last.
 
 ## TMP-0 — Decisions for the user
 
@@ -136,7 +137,26 @@ desktop shortcuts and recent-file lists depend on, and only a persistent
 record makes it independent of attach order. Whatever is chosen, the code and
 ALIAS.md §10, DEVICES.md D3c and DRIVES.md are brought into agreement.
 
-*Answer:* —
+*Answer (the user, 2026-10-17):* the volume's own label is the primary name
+source, as on other systems, and collisions are handled sensibly.
+
+What the answer means for the design (TMP-3):
+
+- **The label is the name**, read where each format keeps it
+  authoritatively, and sanitised so it stays recognisable: a run of characters
+  the alias grammar refuses becomes one `-` rather than vanishing, so
+  `My Backup Disk` is `my-backup-disk`. A format's placeholder for "no label"
+  is not a label.
+- **An unlabelled volume is named from the volume alone**, never from its
+  format or its ordinal: the device's transport and the volume's short
+  fingerprint (`usb_25cm`). No two unlabelled volumes collide by construction,
+  so their names do not depend on attach order.
+- **A collision is resolved deterministically.** A label already in use takes
+  `_<fingerprint>` of the volume's own identity, lengthened per further
+  collision. A given volume always derives the same suffix; the bare label
+  belongs to whichever volume holds it. There is no persistent record.
+- **Generated names are unforgeable.** A label never yields `_`, so no label
+  can spell a name generated for another volume.
 
 ### D-2 — Who owns the files on removable media (gates TMP-4)
 
@@ -177,7 +197,23 @@ Recommendation: **(b).** One rule then covers every removable format, access
 depends on local group membership rather than on ids minted on another
 machine, and the uid-coincidence hole is closed.
 
-*Answer:* —
+*Answer (the user, 2026-10-17):* honour the on-disk ownership. A node owned
+by a privileged user is simply unreachable to a lesser one, so honouring it
+loses access and grants none. What a medium yields when moved to another
+system is that system's concern, not TAIRiX's.
+
+What the answer means for the design (TMP-4):
+
+- **Formats that record ownership** (ext2/3/4, ARXFS) are served with their
+  on-disk uid, gid, mode and ACL unchanged, removable or not. There is no
+  ownership mapping, no per-volume ownership policy and no "take ownership"
+  operation; changing an owner is `chown` under the authority it already
+  needs on any volume.
+- **Formats that record none** (FAT32) keep the `storage`-group mapping,
+  since there is no on-disk owner to honour.
+- **A refusal is an answer** (§2.24): the file manager tells the user that
+  the volume's owner refuses the operation, rather than failing silently.
+- No capability is introduced, since there is no policy to gate.
 
 ### D-3 — Mass-storage time budgets (gates TMP-2)
 
@@ -251,508 +287,195 @@ Recommendation: **(b).** A copy is not a question, and nothing about it needs
 the folder window held; holding it is the older pattern that every current
 desktop has left.
 
-*Answer:* —
+*Answer (the user, 2026-10-17):* modeless, one window per operation; owner
+modality stays settable, not preferred, for where it is absolutely required.
+
+What the answer means for the design (TMP-7.1, TMP-7.3):
+
+- **Modality is the dialog's own property**, stated by the application when
+  it opens one: modeless is the preferred form, and owner-modal is used only
+  where the dialog's content absolutely requires the owner held (a form that
+  edits the owner's document, a credential prompt).
+- **Each file operation opens its own modeless progress window**, and the
+  folder window stays usable while it runs.
+- **The file manager runs a bounded set of operations** and orders those that
+  touch the same tree, queueing a later one behind an earlier one it
+  conflicts with.
+
+### D-5 — How soon a consumer reissues after a recovered reset (gates TMP-9)
+
+What the code does: a request a stalling unit answers reissuably is reissued
+after `IoBudget::reissue_pacing_ns`, the grace window spread evenly over the
+class's retries — 30 s for a rotating disk (120 s ÷ 4). The driver's
+escalation ladder (`RecoveryLadder`) climbs one rung per reissue it receives:
+a plain retry, then transport resets. The pacing is therefore also what keeps
+a disk still spinning up from being reset again too soon.
+
+The witness is the 2026-10-17 boot: one disk's exchange went unanswered for
+its 30 s budget, the transport reset at 50.163 s worked, and the reissue that
+succeeded came at 80.176 s — 30 s spent waiting on a device that was ready.
+Linux retries a command at once after a successful reset.
+
+Options:
+
+- **(a) Keep the even spread.** Simple, and no reissue can catch a disk still
+  spinning up; every recovered blip costs a full pacing interval.
+- **(b) Back off from short.** The first reissue goes almost at once, each
+  later one waits twice as long, the sum still spanning the grace window, and
+  the ladder's first reset waits for the second reissue rather than the
+  first.
+- **(c) The driver says when to reissue.** A reissuable answer carries the
+  driver's own readiness: once its reset has completed and the unit answers
+  `TEST UNIT READY`, the next reissue is served at once; until then the
+  consumer waits the paced interval. Most precise, and a change to the
+  `blkio` answer the driver and both consumers read.
+
+Recommendation: **(c)**, since only the driver knows whether its recovery has
+worked; (b) if a protocol change is not wanted.
+
+*Answer (the user, 2026-10-17):* (c), the driver says when to reissue.
+
+What the answer means for the design (TMP-9):
+
+- **The word is the driver's, and only brings a reissue forward.** A
+  reissuable completion carries `BlkReissue::Now` or `Paced`; the consumer
+  reissues at once on `Now` and waits out its pacing otherwise, and its retry
+  budget bounds both, so an untrusted driver can neither stall nor storm it.
+- **`Now` means the unit answered ready after the recovery.** A transport whose
+  reset recovery resynced it says so; only then is the unit asked `TEST UNIT
+  READY`. One coming ready is held as any not-ready unit is, and one without
+  its medium is retracted.
 
 ## TMP-1 — The USB host controller's serve loop never waits (D1125)
 
-### Problem
-
-The xHCI HCD (`drivers/bus/usb/xhci/src/main.rs` `serve_events`) is a single
-loop serving every interface on its controller. Many paths reachable from it
-after bring-up wait synchronously, on `await_event_for` (up to
-`AWAIT_EVENT_BUDGET_US`, 5 s each) or on a parked `Delay`:
-
-- a class driver's control URB (`drive_urb` → `DeviceEngine::control_*` →
-  `device_control`);
-- every pipe recovery: `recover_bulk_endpoint`, `clear_bulk_halt`,
-  `reset_bulk_endpoint` and `readd_bulk_endpoint`, `resynchronise_bulk_pipe`,
-  `abort_bulk` at a deadline, `recover_interrupt_endpoint`;
-- `SetInterface` and `IsoStop`;
-- hub status-change service: `GET_STATUS` per port, then `PORT_RESET` with up
-  to `PORT_RESET_POLLS` × `PORT_RESET_POLL_US` (40 × 20 ms) of polls plus a
-  settle, then `enumerate_on_port`, which issues 3–5 commands and 5–9 control
-  transfers per device, up to 4 attempts;
-- a root-port reset parked up to 800 ms;
-- fault-detach and slot teardown;
-- controller recovery, which re-runs the whole `bring_up`, connect window
-  included.
-
-During any of these waits the loop serves no other interface's submit,
-delivers no captured report, honours no URB deadline and services no
-hot-plug. A device that NAKs its control endpoint, a slow hub or a recovering
-pipe on one device therefore freezes every device on the controller,
-keyboard included: a halted bulk transfer's clear followed by its class reset
-can hold input for 10 s. This contradicts `plans/USB.md` §1.1 ("never a
-per-URB blocking server").
-
-The limit is in software, not hardware. Every device already has its own EP0
-ring and a 4 KiB control buffer in its own region (`DeviceRegion`), but the
-engine keeps one `ControlCursor` and drives one control transfer at a time:
-`activate_device_control`, `rest_active_context`, `active_device`,
-`active_hub`. It also uses one engine-wide input context for every Address
-Device, Evaluate Context and Configure Endpoint command.
-
-### Design
-
-The engine becomes an event-driven state machine; this is the same model the
-bulk path already uses (`queue_bulk` / `poll_bulk`).
-
-1. **Operations.** Every multi-step procedure is an explicit operation. Each
-   operation has a typed state, an owner (a slot, a hub port, a root port or
-   the controller), a deadline, and a cancellation path that releases every
-   ring, chunk, slot and URB it holds. Operations advance only when a routed
-   completion or a due timer arrives, and never wait inside a step.
-2. **Routing, never awaiting.** Transfer events are routed by (slot, DCI) to
-   the endpoint's owner, and command completions by command-TRB address to
-   the pending-command table. An event nothing owns is dropped as stale, as
-   today; the shared ring is not a security boundary.
-3. **Per-device control.** Each device's EP0 ring, control buffer and input
-   context live in its region. The pending control operations form a bounded
-   per-device FIFO with one TD in flight, since the control pipe carries one
-   message at a time (a message pipe, USB 2.0 §5.3.2.2). Its capacity is one slot per interface,
-   because each interface holds at most one URB, plus a fixed internal
-   reserve; overflow fails closed with `Busy`. A hub-downstream device needs
-   no activation: each slot's EP0 context already carries its route.
-4. **Commands posted.** Commands are posted to the command ring and their
-   completions routed by TRB address. A per-command deadline aborts a hung
-   command through the Command Ring Abort of xHCI 1.2 §4.6.1.2, which fails
-   only that command's owner. A controller that will not abort is a
-   `ControllerHealth` fault, recovered as today.
-5. **Ring reuse is fenced.** A ring is rebuilt only after the controller has
-   confirmed the endpoint stopped or reset, so no completion for an old TD
-   can land in a slot of the new ring. This generalises the bulk rule that
-   `abandon_bulk_tds` documents.
-6. **Time is a timer.** The connect debounce, port-reset settle, `TRSTRCY`
-   and the hub reset poll become one-shot timers. The hub's status-change
-   endpoint is re-armed before a port reset is issued, so its `C_PORT_RESET`
-   change (USB 2.0 §11.24.2.7.2) arrives as an event, with a timer bounding
-   it. The comment above `await_hub_port_reset_complete` says a hub raises no
-   interrupt for its own reset; that is true only because the engine services
-   the hub synchronously. The root port's reset completes on its Port Status
-   Change event, also with a bounding timer. The loop parks until the
-   earliest operation, URB or timer deadline, so it stays tickless.
-7. **Control URBs are held.** `UrbRequest.timeout_ms` becomes required for
-   control transfers. The class driver states its budget and the HCD clamps
-   it to the USB request ceiling: 5 s (USB 2.0 §9.2.6.4 and §9.2.6.5), a
-   protocol bound defined once. `UrbService` holds a control URB as it holds a
-   bulk one. At the deadline the TD is abandoned (Stop Endpoint, then the ring
-   repositioned past it), and the device's control pipe recovers at its next
-   SETUP (USB 2.0 §8.5.3.4). The ABI rule "a control transfer carries none"
-   and the `transport.rs` claim that a control transfer "completes
-   synchronously within the call" are deleted.
-8. **One definition.** The boot walk, hot-plug and controller recovery all
-   drive the same per-port operation, so there is no second enumeration.
-   Bounded hardware handshakes inside a controller reset (`HCRST`, `CNR`)
-   remain bounded MMIO polls that fail closed, the documented exception in
-   §2.23.
-
-### Stages
-
-Each stage converts whole procedures and deletes what it replaces. No stage
-adds a synchronous wait, a second implementation of a procedure, or a
-synchronous wrapper over an asynchronous primitive. The old synchronous
-primitives (`await_event_for`, `issue_command`, `control_transfer`,
-`EventWait`, `Delay` in the engine) survive only while an unconverted
-procedure still calls them, and 1.6 deletes them.
-
-- **1.1** Per-device EP0 ring, control buffer and input context;
-  `ControlCursor`, `active_device`, `active_hub`, `activate_device_control`,
-  `rest_active_context` and `ep0_owner_index` deleted. A composite sibling
-  shares its slot's EP0 state by reference, never by copy.
-- **1.2** Control transfers are queued and reaped. The URB ABI, `UrbLink` and
-  `UrbClient` control calls take a deadline. Every class driver states its
-  control budget: `usb_hid`, `usb_msd` (its reset recovery is bounded by the
-  exchange), `usb_uac` and any other `UrbClient` user. `UrbService` holds and
-  expires control URBs.
-- **1.3** The pending-command table, posted commands, Command Ring Abort, and
-  per-command deadlines.
-- **1.4** Pipe and endpoint recovery as operations: the bulk-halt path that
-  `decode_bulk_event` runs today (Reset Endpoint, or Stop and a Configure
-  Endpoint drop and add; Set TR Dequeue; `CLEAR_FEATURE(ENDPOINT_HALT)`),
-  interrupt recovery and its `Ladder`, `abort_bulk`, `ClearHalt`,
-  `SetInterface` and `IsoStop`. A URB whose pipe is recovering stays held,
-  and is answered when the recovery finishes or its deadline passes.
-- **1.5** The per-port operation: connect debounce, reset, Enable Slot,
-  Address Device, the descriptor and EP0 max-packet sequence, configuration,
-  hub configuration and port power, publication, detach and Disable Slot,
-  with hot-unplug cancelling it at any step. The boot walk and controller
-  recovery drive it.
-- **1.6** Delete the synchronous primitives, so the engine has no `EventWait`
-  or `Delay` and no path to block. Update `plans/USB.md` §1.1, §1.3 and the
-  active/resting-context passages, `docs/src/lib/usb.md`,
-  `docs/src/drivers/bus.md` and `lib/usb/README.md`. Move this design into
-  USB.md as a done item and close D1125.
-
-### Acceptance
-
-- **The loop never waits.** A mock-controller host test shows that a device
-  whose EP0 never completes (it NAKs for ever) has its control URB held
-  without delaying another device's report delivery, bulk completion or URB
-  deadline in the same step. The held URB expires at its deadline, and that
-  device's EP0 serves its next request.
-- **Enumeration interleaves and cancels.** Two devices enumerate at once and
-  both publish. An unplug at every enumeration step leaks no slot, chunk,
-  ring or held URB.
-- **Hung commands are contained.** A hung command is aborted and fails only
-  its owner. A controller reset mid-operation cancels every operation, and
-  held URBs are answered as they are today.
-- **Ring reuse is fenced.** A completion for an abandoned TD can never
-  complete a later transfer, for every endpoint type.
-- **Existing tests survive.** Every existing `lib/usb`, xHCI and class-driver
-  test passes, rewritten where a synchronous assumption was the thing under
-  test, never weakened. Every QEMU USB vertical passes.
-- **Metal.** On the Pi, a mass-storage stick that stalls or NAKs does not
-  freeze the keyboard (TMP-6).
+Done. The design and what the engine now guarantees are `plans/USB.md` U14;
+the engine and the HCD loop are described in `docs/src/lib/usb.md`,
+`docs/src/drivers/bus.md` and `lib/usb/README.md`. The metal acceptance — a
+mass-storage stick that stalls, halts or NAKs never freezes the keyboard — is
+TMP-6's.
 
 ## TMP-2 — Mass-storage readiness and deadlines follow the detected medium
 
-### Problem
+Done. The medium record and the budgets derived from it are
+`docs/src/drivers/block.md` and `plans/FIX-IO.md`; readiness, spin-up and the
+held request are `drivers/storage/usb_msd/README.md` and `plans/DEVICES.md`;
+the abandoned transfer's endpoint state in the HCD's log is `plans/USB.md`
+U13. The metal acceptance is TMP-6's.
 
-See D-3 above: what the code does, the 2026-10-17 witness and the user's
-answer. In addition, `ScsiDevice::ready_after_drain` makes its attempts back to
-back, so a disk that reports its spin-up can be skipped in milliseconds. A
-command that meets a disk spinning up, whether at its first access or back
-from standby, is treated as a transport fault and reset.
+## TMP-9 — The driver says when a reissue may come back (D-5)
 
-### TMP-2.1 — The medium is detected, first
+Done. The completion's reissue word, the engine asking the device
+(`Block::reissue`) and the consumers' one decision
+(`IoBudget::reissue_wait_ns`) are `docs/src/drivers/block.md` and
+`plans/FIX-IO.md` IO3; the readiness test after a resynced reset is
+`drivers/storage/usb_msd/README.md`. The metal witness is TMP-6's.
 
-Everything else in TMP-2 sizes itself from the medium, so this comes first.
+## TMP-3 — Attached-volume names come from the volume's label (D-1)
 
-1. **A discovered property with an explicit Unknown.** Rotation (rotating,
-   with its rate when reported; non-rotating; unknown) and removability
-   (removable medium; fixed; unknown) are separate facts, each recorded with
-   the source that established it. `BlkMedium` is reshaped in place to carry
-   them; `abi-v1` is not frozen, so no variants are added beside the old
-   ones.
-2. **Sources, strongest first.** Each probe is bounded by its exchange
-   deadline, and a refusal means "not reported".
-   - VPD page B1h, MEDIUM ROTATION RATE (SBC-4), once VPD page 00h lists it. A
-     SAT bridge (SAT-3) derives B1h from the disk's IDENTIFY DEVICE word 217,
-     so an enclosure usually reports its disk's rate.
-   - ATA PASS-THROUGH IDENTIFY DEVICE (SAT-4), word 217, when B1h is absent
-     and the bridge accepts pass-through.
-   - INQUIRY RMB describes removability only, never rotation. A card reader's
-     "medium not present" (02/3A) confirms a removable medium.
-   Many USB bridges mishandle VPD requests, which is why Linux's usb-storage
-   skips them by default. So probing is fail-safe: a bridge that hangs or
-   resets on a probe is recovered by the transport's reset recovery, recorded
-   as not reporting, and still served. Each probe runs once per attach and is
-   never retried in a loop.
-3. **Each consumer reads Unknown in its own conservative direction**, decided
-   explicitly for that consumer rather than inherited from one shared class:
-   - *Time budgets:* Unknown means the slowest media (D-3), and only positive
-     non-rotating evidence tightens them.
-   - *Write-back window:* `lib/writeback`'s `writeback_window_ns` keys on the
-     same class but reads it as command cost ("widest where a device command
-     is dearest"), and a removable medium can also be pulled mid-window.
-     Separate the facts the window needs (command cost, exposure to surprise
-     removal) from the budget class, and decide Unknown's window with
-     `plans/ARXFS-WRITEBACK.md`; stop and ask if the two disagree.
-   - *Description and icon:* Unknown is neither "flash drive" nor "disk"
-     (`lib/procinfo/src/volume.rs`, `lib/icon/src/glyph.rs`). It gets a
-     generic USB-drive picture and wording, never a claim the system cannot
-     back.
-4. **Visible.** The detected medium and its source are reported through the
-   System Information API, so a misdetection is diagnosed from `sysinfo`
-   rather than inferred from timing.
+The volume manager names a volume from itself (`drivers/storage/volmgr/src/name.rs`):
 
-### TMP-2.2 — Readiness is a timed state machine, not a loop
+- **The label**, read where the format keeps it (`lib/fsprobe`): ext's
+  `s_volume_name`; FAT32's root-directory label entry, located through the
+  shared `Fat32Bpb` reading the FAT32 driver also uses, else the boot
+  sector's copy; `NO NAME` is no label. It is kebab-cased: ASCII letters
+  lowercased, digits kept, each run of anything else one `-`, trimmed.
+- **Unlabelled**: `<transport>_<fp4>` from the device's declared medium
+  (`disk_` when it declared none).
+- **Collisions and reserved names**: a label in use, or one spelling a
+  root-view entry, a storage resolver (`tairix_path::RESOLVER_NAMES`) or a
+  resource namespace (`tairix_resref::KnownNamespace`), takes `_<fp4>`, then
+  `_<fp8>`, then the whole fingerprint.
+- **Kernel grammar**: `validate_volume_name` admits lowercase `a-z0-9-_`,
+  beginning and ending with a letter or digit, and nothing else.
+- **Specs**: ALIAS.md §3.8/§10.1 now state the code's fingerprint (lowercase
+  Crockford base32 of the raw identity, every bit encoded), and `lib/resref`
+  accepts the grouping dash §10.2 describes; DEVICES.md D3c, DRIVES.md §7.5
+  and `docs/src/filesystem/drives.md` §7 and §10 describe the catalog names
+  the code produces, a catalog entry being distinct from an alias.
 
-- **Readiness is not readable from `TEST UNIT READY` alone.** A bridge may
-  answer ready while its disk is stopped and spin it up on the first media
-  access, so readiness is never the only defence against a spin-up (TMP-2.3).
-- **Bring-up forces no spin-up.** Nine disks starting at once at boot is a
-  power surge the system must not choose; a unit spins up when it is first
-  used.
-- **Paced and bounded.** `TEST UNIT READY` is paced by one-shot timers and
-  bounded by the spin-up budget, as DEVICES.md already stages
-  ("one-shot-timed, never a spin"). The sense is classified by (key, ASC,
-  ASCQ):
+## TMP-4 — Removable media honour their on-disk ownership (D-2)
 
-  | Sense (key / ASC / ASCQ) | Meaning | Response |
-  |---|---|---|
-  | 02/04/01 | becoming ready | wait and retest |
-  | 02/04/02 | initializing command required | `START STOP UNIT` with START set, its own budget, then retest |
-  | 02/04/03 | manual intervention required | fail closed, stating why |
-  | 02/3A | medium not present | the unit is present with no medium, which is not a fault (the media-change pacing DEVICES.md stages) |
-  | 06/28 | medium changed | re-read capacity |
-  | 06/29 | power-on or reset | retest |
-
-### TMP-2.3 — Budgets derive from the medium and the transfer
-
-- **Every command to a rotating or Unknown unit carries a budget that covers a
-  spin-up.**
-- **Spin-up in service is ridden out.** A command that meets 02/04/01 is held
-  and retried on a timer within the spin-up budget. The unit reports a
-  distinct becoming-ready health state rather than a transport fault, so no
-  reset recovery runs and no retry is spent.
-- **One exchange budget per command, not one constant.** A command's exchange
-  budget is the class base latency plus its transfer length at the class's
-  minimum throughput, replacing the single `exchange_budget_ns`.
-  `SYNCHRONIZE CACHE` has its own budget. The maximum transfer honours VPD
-  B0h (Block Limits) when it is reported.
-
-### TMP-2.4 — Consumers pace their reissue
-
-- **Reissue waits for the unit.** A reissuable answer from a recovering unit
-  is reissued only on the unit's health edge, which is event-driven (the
-  block health notices), or after the pacing interval the driver states. It
-  is never reissued at once until the retries are gone.
-- **`IoBudget::grace_ns` is used or removed.** Either the consumer reads it
-  or the field goes; it is never left unread.
-- **Designed with FIX-IO.** This touches the consumer contract that FIX-IO's
-  IO3 and IO4 own, so design it with that plan, and stop and ask if the two
-  disagree.
-
-### TMP-2.5 — An abandoned transfer's log names the endpoint's state
-
-When the HCD abandons a transfer at its deadline, its log also carries the
-endpoint's EP State and the TD's progress, read from the output context before
-the stop. A device still working (NAKing) can then be told from a completion
-the host lost from the log alone, without guessing.
-
-### Acceptance
-
-The scripted-device tests use the fake clock.
-
-- **Medium (TMP-2.1).** Each case resolves to the medium shown:
-
-  | Unit reports | Detected medium |
-  |---|---|
-  | RMB set, B1h rate 7200 | rotating, not a stick |
-  | RMB set, no VPD, SAT word 217 = 7200 | rotating |
-  | B1h rate 0001h | non-rotating |
-  | VPD and SAT both refused | Unknown, with the slowest budgets |
-  | a probe that hangs | recovered and recorded as not reporting; the unit is still served |
-
-  The budgets, the write-back window, the description and the icon each
-  follow their stated reading of Unknown.
-- **Readiness (TMP-2.2).**
-  - A unit becoming ready after 20 s is served, with timer-paced retests and
-    no back-to-back attempts.
-  - 04/02 issues `START STOP UNIT`.
-  - 04/03 fails closed with its reason.
-  - 3A presents a unit with no medium.
-- **Budgets (TMP-2.3).**
-  - A unit that answers `TEST UNIT READY` at once but whose first read
-    answers only after 8 s (spinning up on first access) is served with no
-    reset and no retry spent.
-  - A mid-service spin-up is ridden out the same way.
-  - The flush budget is used for `SYNCHRONIZE CACHE`.
-  - Per-command budgets scale with transfer length.
-- **Consumers (TMP-2.4).** A recovering unit's reissue waits for its health
-  edge.
-- **Diagnostics (TMP-2.5).** An abandoned transfer's log carries its endpoint
-  state.
-- **Metal (TMP-6).**
-  - The nine enclosure disks are detected as rotating, or Unknown, and none
-    reads as a USB flash drive.
-  - A disk spun down by its own standby timer serves its next read.
-
-## TMP-3 — Attached-volume names are a stable property of the volume (D-1)
-
-Implement the scheme D-1 settles, in `drivers/storage/volmgr`
-(`name.rs`, `plan.rs`, `program.rs`) and wherever the kernel volume service
-must take part (`kernel/tairix-kernel/src/volume_service.rs`).
-
-- **A persistent record, if D-1 chooses one.** It needs an owner with
-  authority to write it, a bounded size, eviction, and an audit trail. Design
-  it with `plans/NEW-NAMESPACE.md` and the settings write path, introducing
-  no capability without a live holder and an enforcement point (§5.2).
-- **Labels are hostile input.** Sanitise as today, refuse names that are
-  reserved or confusable in the alias grammar (ALIAS.md §5), and never let a
-  label choose a path outside `/Storage`.
-- **Code and specs agree.** ALIAS.md §10 (fingerprint input and alphabet),
-  DEVICES.md D3c and DRIVES.md's examples match the code, whichever side
-  D-1 says is wrong.
-
-Acceptance:
-
-- Two unlabelled sticks attached in either order get the same names each
-  time.
-- A re-plug keeps its name while other volumes come and go.
-- A label collision resolves as specified.
-- A hostile label cannot escape or spoof a name.
-- Every name matches the alias grammar and the kernel's `VolumeName` checks.
-
-## TMP-4 — Removable media are owned according to a per-volume policy (D-2)
-
-Implement D-2's policy in the volume service and
-`kernel/tairix-kernel/src/volume_policy.rs`, generalising `GroupMappedFs`
-from FAT32 to every removable format rather than adding a second wrapper.
-The policy is recorded per volume identity, and changing it is gated by the
-mount-policy authority. Prefer `CAP_FS_MOUNT`; add `CAP_FS_MOUNT_RELAX` only
-if §5.2's three tests demand it, with its holder and enforcement point in the
-same change. Policy decisions are audited.
-
-Acceptance:
-
-- Under the default policy, a `storage` member can create at the root of an
-  ext stick made elsewhere.
-- A volume honouring ownership presents its on-disk ids unchanged.
-- A local uid that matches a foreign one gains nothing under mapping.
-- `chmod` and `chown` behave as the policy states: refused under mapping, as
-  for FAT32 today, unless D-2 decides otherwise.
-- New nodes are stored with the owner the policy names.
-- The file manager surfaces a refusal to the user rather than failing
-  silently (§2.24).
-- DRIVES.md, `docs/src/filesystem/drives.md` and DEVICES.md D3/D4 describe
-  the policy.
+- **Proven.** `an_ext_volume_keeps_its_on_disk_ownership_scenario`
+  (`kernel/tairix-kernel/src/volume_service_tests.rs`) attaches an e2fsprogs
+  volume served as a removable USB unit: its root (`0:0 0755`) and an ACL'd
+  file present their records unchanged and the ACL decides; a non-owner is
+  refused at the top level; a node made there carries its creator; `chmod`
+  and `chown` follow the owner and `CAP_FS_CHOWN` rules, and the medium
+  stores the result. FAT32 still refuses both
+  (`assert_a_member_creates_on_the_volume`). Proving it found D1130: the
+  delegated VFS authorised a file's bytes against its directory, now the
+  node itself.
+- **Visible.** A refused New ▸ names the item and the reason
+  (`item_refusal`, `create_refusal`); a listing refused on a rescan, a
+  climb, after an operation, from the places rail or from Close's folder
+  climb is stated in the window as well as on `stderr`.
+- **Stated.** `docs/src/filesystem/drives.md` §20, DRIVES.md §20 and
+  DEVICES.md D3d state the rule; no document claims the mount-relax
+  capability exists.
 
 ## TMP-5 — DESK-21: window-channel requests are posted, never awaited
 
-The design, witness and acceptance live in `plans/FIX-DESKTOP.md` DESK-21; the
-Pi 4 witness is the file manager blocked in `WindowClient::resize` →
-`ipc_call` during a resize. Deliver DESK-21 there; this row closes when that
-one does. Nothing here supersedes it.
+Delivered as `plans/FIX-DESKTOP.md` DESK-21, which records what it now
+guarantees; the Pi 4 drag-resize witness is TMP-6.
 
 ## TMP-7 — Dialogs, forms and progress are owned windows of their own
 
-### Problem
+Done. The durable statement is `plans/APPWIN.md` §0 and
+`docs/src/desktop/wm.md` (Dialog windows); what each surface became is in its
+own page.
 
-Four surfaces are modal panels that an application paints inside its own
-window. Each has its modality enforced by that application:
-
-- the file manager's operation progress (`lib/browse/src/render.rs`
-  `draw_progress_dialog`, painted last into the window's surface;
-  `userland/apps/files/src/operation.rs` filters the input);
-- TextEdit's Go to line (`userland/apps/textedit/src/view.rs`, a `Dialog`
-  over a veiled window);
-- Paint's `Modal::Form` family: New Picture, Page and Sprite, Scale, Canvas,
-  Convert, Save As and Layer (`userland/apps/paint/src/{view.rs,dialog.rs,render.rs}`);
-- Settings' `CredentialSheet` (`userland/apps/settings/src/shell.rs`).
-
-`lib/controls` supports this through `Dialog::placed_over` and
-`CredentialSheet::centred_in`. Such a panel is clipped to its window: the
-progress panel in a small window "simply shows what fits". It cannot be moved,
-or raised apart from its window. Every application re-implements modality.
-`plans/APPWIN.md` AW8 permitted all of this ("Forms stay in their windows");
-on 2026-10-17 the user reversed that rule, and APPWIN.md §0 now forbids it.
-
-The only framed window a desktop app can own today is an alert, which the
-session draws from a fixed spec. A form or a progress window needs content the
-application draws itself, and the protocol has no such kind: `Create` has no
-owner, `CreatePopup` is undecorated, and `CreateTool` is a floating palette.
-
-### Design
-
-1. **An owned dialog window.** A new transient kind in the AW6/AW7 family
-   (`TransientSpec`, `WindowServer::open_transient`). It is framed by
-   `WindowFrame::dialog()` and is a transient of one of the caller's own
-   top-level windows, one level only. It stays off the taskbar and the
-   window picker, rises and hides with its owner's family, and closes with
-   its owner. The session places it, centred over its owner and clamped on
-   screen.
-2. **Modality is the window manager's, one implementation for alerts and
-   dialogs.** An owner-modal dialog holds its owner exactly as an AW8 alert
-   does: only a release reaches the owner's client, a press there focuses the
-   dialog, and the owner takes no drop. A modeless dialog holds nothing. The
-   per-application input filters and veils are deleted.
-3. **Identity.** The frame names the owning application from its attested
-   identity, as alerts are titled, so no application's dialog can pass for
-   the desktop's own prompts (the session's elevation prompt among them). A
-   credential form is phishing-sensitive; the design states how a user tells
-   an application's credential sheet from the system's, and the review
-   checks it.
-4. **Focus and keys follow AW8:** focus is earned, buttons arm after
-   `ALERT_ARM_NS`, `Enter`/`Escape` take the default and cancel, and the
-   focus hands back as the dialog closes.
-5. **Sized from content (TMP-8), never clipped.** The application states its
-   client extent from its content, and the session caps it to the screen. Past
-   the cap, the content scrolls inside the dialog.
-6. **The in-window path is removed, not left beside.** `Dialog::placed_over`,
-   `CredentialSheet::centred_in` and the veils are deleted with their last
-   caller. The shared controls then offer no way to place a dialog over an
-   application's own content, so the APPWIN.md rule is enforced structurally,
-   not only by review.
-
-Stages:
-
-- **TMP-7.1:** the protocol (with a round-trip test and a fuzzed fail-closed
-  decode), the engine, session placement, shared modality and earned focus.
-- **TMP-7.2:** TextEdit, Paint and Settings move to dialog windows, and the
-  helpers are deleted.
-- **TMP-7.3:** the file manager's operation progress, as D-4 decides.
-
-Each stage updates the docs it touches: `docs/src/desktop/apps.md` (the
-in-window description) and `wm.md`. Two descriptions are already stale and are
-corrected in passing:
-
-- the terminal settings rustdoc still says "in-window", though it is a popup
-  (`userland/apps/terminal/src/{settings.rs,lib.rs}`);
-- `plans/NEW-FILEMANAGER.md` still describes Delete as a `Dialog`, though it
-  is an alert.
-
-### Acceptance
-
-- **Library (`lib/window` loopback).** The owner must be the caller's own
-  top-level window. A transient of a transient is refused. Dialogs share the
-  per-client budget, close with their owner, and a refused request commits
-  nothing.
-- **Session.**
-  - The dialog is framed, off the taskbar, and titled with the application's
-    attested name.
-  - It is placed over its owner and clamped on screen.
-  - Owner modality behaves exactly as for an alert, and a modeless dialog
-    holds nothing.
-  - Focus is earned and buttons arm.
-  - It is sized from its content.
-- **Per application.** Each migrated surface opens its window. No veil
-  remains. The application no longer filters its own input for modality.
-- **Metal.** A copy's progress is its own window (TMP-6).
+- **The owned dialog window.** `WindowRequest::CreateDialog` (round-trip test,
+  fuzzed fail-closed decode) opens a transient of one of the caller's own
+  top-level windows through the engine's one transient path
+  (`TransientKind::Dialog`): one level only, the per-client budget shared, a
+  refused open committing nothing, closed with its owner. An alert may hold a
+  dialog, and closing a window dismisses every alert holding it or a transient
+  that closed with it. `WindowClient::create_dialog`, `WindowPane::open_dialog`.
+- **Placed, named and fitted by the session.** `WindowFrame::dialog()`,
+  centred over its owner within the work area, off the taskbar and picker; its
+  band reads the bundle's attested name and then the application's title, and
+  a retitle keeps the name first. One past the work area is fitted and told by
+  `Resized`, on opening and on every resize.
+- **One hold rule.** `hold::Holds` is the session's single record of which
+  window is held by what, shared by alerts and owner-modal dialogs: only a
+  release reaches a held window, a press on it raises and focuses its front
+  holder, it takes no drop, and as a holder closes the keyboard goes to the
+  holder behind it, else the window. Focus is earned as an alert's, spending
+  the activation that earned it; a dialog takes no press until `ALERT_ARM_NS`
+  after the frame that first shows its content.
+- **Telling the system's prompts apart.** The session's credential and
+  confirmation prompts are undecorated, centred on the screen and hold the
+  whole seat; an application's dialog is framed, names its application first,
+  sits over its own window and never holds the seat.
+- **The surfaces moved.** TextEdit's Go to line (modeless) and Paint's forms
+  (owner-modal: their rows are filled from the picture they act on) are drawn
+  beside the document's area and shown in a dialog through the document host
+  (`DocumentView::dialog_window`, `dialog_input`), which fits and scrolls a
+  dialog the desktop shrank. Settings' credential question (owner-modal) has
+  its own window in the settings loop. Each file operation has a modeless
+  progress window of its own; a folder window may run several, bounded by the
+  operations desk and run in the order asked, so one touching a tree an earlier
+  one works in waits behind it and says so. None of the applications filters
+  its own input for modality.
+- **Deleted.** `Dialog::placed_over`, `CredentialSheet::centred_in`, the
+  TextEdit and Paint veils, the file manager's `operation_control` and
+  in-window progress panel, and the settings shell's modality filters.
 
 ## TMP-8 — Alerts and dialog windows size to their content; nothing is elided
 
-### Problem
+`lib/controls/src/alert.rs` lays an alert out from its content (D1129 closed):
 
-`lib/controls/src/alert.rs` forces every alert to 4:3:
-
-- `client_extent` searches for the narrowest 4:3 width that fits;
-  `four_thirds` and `client_of` force the height to three quarters of the
-  width.
-- A short message is padded out to that height.
-- A headline past `HEADLINE_LINES` (6) lines is cut with an ellipsis
-  (`lib/controls/src/paint.rs`), and `needed_height` measures that capped
-  height. This contradicts APPWIN.md AW8's own "nothing is elided": a defect,
-  `plans/OPEN-DEFECTS.md` D1129.
-
-On 2026-10-17 the user asked that alerts and progress windows size vertically
-to their content, with nothing hidden.
-
-### Design
-
-One content-sized layout serves alerts and TMP-7's dialogs (one definition,
-§2.2):
-
-- **Width.** The narrowest width at or above `ALERT_MIN_WIDTH` that keeps the
-  text within a readable measure and seats the button row in as few rows as
-  possible, capped at the screen's share. The measure is a line length set
-  from the font's metrics and scale, not a pixel constant.
-- **Height.** Exactly what the laid-out content needs, frame included,
-  capped at the screen's usable height.
-- **Past the cap.** The whole text area scrolls, headline included, and the
-  button row stays at the foot. The headline cap and its ellipsis are
-  deleted.
-- **Bounds.** The protocol's containment bounds (headline, detail and label
-  bytes) stay, since they are security bounds (§24.4). Within them, nothing
-  is elided.
-- **Scale.** Everything is laid out in logical pixels through
-  `tairix_geometry::Scale`. A density change re-lays the window out.
-
-### Acceptance
-
-The `lib/controls` tests (`alert_tests.rs` asserts 4:3 today and is rewritten,
-not weakened) cover:
-
-- the height equals the content height;
-- a one-line alert is short;
-- a long headline wraps whole, with no ellipsis;
-- past the screen cap the text scrolls and the buttons stay;
-- the width honours the measure and the minimum;
-- a density change re-lays the window out.
-
-The session suite places the window by its new extent. APPWIN.md AW8,
-`docs/src/desktop/wm.md` and the `lib/controls` rustdoc state the layout.
+- **Width**: the text's widest line at a readable measure (`MEASURE_EMS`, 30
+  ems of the body face, so it follows the density), plus the mark and pads,
+  never below `ALERT_MIN_WIDTH` or the single-row button width, capped at the
+  screen's share.
+- **Height**: exactly the content — mark or text, whichever is taller, and the
+  button rows — capped at the screen's share.
+- **Past the cap**: the whole text, headline first, scrolls by line
+  (`TextLines`), and the buttons stay at the foot. The headline cap and the
+  4:3 shape are gone; the protocol's byte bounds stay.
+- **Dialog windows** (TMP-7) take the same rule: their content states its
+  extent, the session fits it to the screen, and what does not fit scrolls.
 
 ## TMP-6 — Raspberry Pi 4 acceptance on metal
 
@@ -760,11 +483,17 @@ The operator's run on the Pi 4, with the system log captured:
 
 - a stick that stalls, halts or NAKs does not freeze the keyboard (TMP-1);
 - a spun-down USB hard disk serves its next read without failing closed, and
-  the nine USB-enclosure disks of the 2026-10-17 boot are published and
-  probed with no exchange timing out and no transport reset (TMP-2);
+  the nine USB-enclosure disks of the 2026-10-17 boot are detected as rotating
+  or Unknown, none reading as a USB flash drive, each reported rotating drawn
+  as a hard disk, and are published and probed with no exchange timing out
+  and no transport reset (TMP-2);
+- a disk whose exchange stalls holds up no other disk's volumes: the others
+  publish while it recovers (`plans/OPEN-DEFECTS.md` D1134), and it is served
+  again as soon as its reset finds it ready, not after a paced wait (TMP-9);
 - unplugging and replugging several sticks in a different order keeps every
   name (TMP-3);
-- an ext stick made on another system is writable as D-2 decided (TMP-4);
+- an ext stick made on another system presents its own ownership, and a
+  refused write is stated to the user (TMP-4);
 - a drag-resize of a file window produces no stall report (TMP-5);
 - a copy's progress, Go to line, a Paint form and the Settings credential
   sheet each open as a window of their own (TMP-7);

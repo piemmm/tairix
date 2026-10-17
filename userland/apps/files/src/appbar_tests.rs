@@ -7,7 +7,7 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 
 use tairix_abi::window_ipc::{
     AppBar, AppMenuIconView, AppMenuItemId, AppMenuRowView, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
@@ -15,6 +15,11 @@ use tairix_abi::window_ipc::{
 use tairix_browse::{Places, Volume};
 
 use super::{component_declaration, place_of, DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK};
+
+/// A USB unit that reported a non-rotating medium: served as removable.
+const STICK: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
+    BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
+);
 
 /// A home whose three derived places (Home, Desktop, `UserFiles`) join the two
 /// machine roots, so the fixed rail is five rows long.
@@ -135,7 +140,7 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
 #[test]
 fn each_row_draws_its_places_own_picture() {
     let mut usb = volume("Stick");
-    usb.medium = Some(BlkMedium::UsbFlash);
+    usb.medium = Some(STICK);
     let places = Places::new(&home(), &[usb]);
     let (bar, _) = component_declaration(7, &places).expect("the rows fit");
     let pictures: Vec<(String, AppMenuIconView<'_>)> = bar

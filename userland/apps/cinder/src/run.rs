@@ -688,7 +688,8 @@ mod program {
                         height_px,
                         ..
                     } => {
-                        if window.resize(app::mode_for(width_px, height_px)) {
+                        if window.resize(app::mode_for(width_px, height_px)) == app::Fitted::Adopted
+                        {
                             *pen_layout = layout::pen(
                                 Rect::new(0, 0, width_px, height_px),
                                 desktop.scale(),

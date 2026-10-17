@@ -3,7 +3,9 @@
 use super::{MemberRole, MirrorArray, MirrorError, MirrorMember};
 use crate::superblock::ArrayProgress;
 use core::cell::Cell;
-use tairix_abi::blkio::{BlkDeviceClass, BlkMedium};
+use tairix_abi::blkio::{
+    BlkDeviceClass, BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport,
+};
 use tairix_abi::driver::block::{Block, BlockClass, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState, SlotDisposition};
@@ -11,6 +13,16 @@ use tairix_abi::sysinfo::MountAvailability;
 
 const BS: u32 = 512;
 const NBLK: u64 = 8;
+
+/// A disk on an ATA bus not known to rotate or not: served as rotational.
+const DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata);
+
+/// A solid-state disk on an ATA bus.
+const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
+    .with_rotation(BlkRotation::NonRotating(BlkRotationEvidence::AtaIdentify));
+
+/// An `NVMe` namespace.
+const NVME: BlkMedium = BlkMedium::of_transport(BlkTransport::Nvme);
 // The device's byte capacity: block size times block count (`NBLK`), written
 // with a literal count so the constant needs no `u64`->`usize` cast.
 const CAP: usize = BS as usize * 8;
@@ -47,7 +59,7 @@ impl FaultBlock {
             flush_fault: Cell::new(false),
             health: Cell::new(DeviceHealth::Unavailable),
             health_fault: Cell::new(false),
-            medium: Cell::new(Some(BlkMedium::SolidState)),
+            medium: Cell::new(Some(SSD)),
             promise: Cell::new(MountAvailability::Available),
             reads: Cell::new(0),
             writes: Cell::new(0),
@@ -1360,16 +1372,16 @@ fn device_class_is_the_most_patient_live_member() {
     // disk's spin-up budget — reporting the SSD's would have a consumer time
     // out a perfectly healthy array whenever the slow copy answered.
     let mut members = [
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::SolidState)),
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::HardDisk)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(SSD)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(DISK)),
     ];
     let array = MirrorArray::assemble(&mut members).expect("assembles");
     assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
 
     // Member order cannot change the answer.
     let mut reversed = [
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::HardDisk)),
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::SolidState)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(DISK)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(SSD)),
     ];
     let array = MirrorArray::assemble(&mut reversed).expect("assembles");
     assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
@@ -1381,7 +1393,7 @@ fn an_undeclared_copy_is_waited_on_as_paravirtual() {
     // NVMe sibling's, so the array waits as long as that copy may and reads as
     // unknown, which it is.
     let mut members = [
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::Nvme)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(NVME)),
         MirrorMember::new(FaultBlock::new(0).undeclared()),
     ];
     let array = MirrorArray::assemble(&mut members).expect("assembles");
@@ -1394,8 +1406,8 @@ fn a_dropped_member_no_longer_speaks_for_the_arrays_class() {
     // The slow copy faults out: the array is no longer waiting on it, so it
     // stops buying its patience and reports the surviving SSD's envelope.
     let mut members = [
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::SolidState)),
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::HardDisk)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(SSD)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(DISK)),
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles");
     assert_eq!(array.device_class(), BlkDeviceClass::Rotational);
@@ -1422,7 +1434,7 @@ fn an_array_with_no_live_member_declares_the_bounded_envelope() {
     assert!(MirrorArray::assemble(&mut members).is_err());
 
     let mut members = [
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::HardDisk)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(DISK)),
         MirrorMember::<FaultBlock>::absent(),
     ];
     let mut array = MirrorArray::assemble(&mut members).expect("assembles degraded");

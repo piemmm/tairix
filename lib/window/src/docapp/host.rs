@@ -34,8 +34,8 @@ use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
 use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
     AlertOutcome, AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    CursorShape, DocumentName, MenuOutcome, PickPurpose, ToolOver, WindowEvent, WindowRegion,
-    WindowSizing,
+    CursorShape, DialogModality, DocumentName, MenuOutcome, PickPurpose, ToolOver, WindowEvent,
+    WindowRegion, WindowSizing,
 };
 use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, DOCUMENT_WRITABLE_ROLE_ARG, STDIN};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -404,8 +404,8 @@ pub struct DocWindow<A: DocumentApp> {
     /// The menu open over it, so an outcome is matched to the gesture that
     /// asked for it.
     menu: Option<u64>,
-    /// The tool windows it has open, as its view last asked.
-    tools: Vec<ToolPane>,
+    /// The tool windows and the dialog it has open, as its view last asked.
+    owned: Vec<OwnedPane>,
     /// Whether its view was last told it has the keyboard: it has while the
     /// window or one of its tool windows does.
     focus_told: bool,
@@ -430,37 +430,132 @@ enum Reading {
     Alone,
 }
 
-/// A tool window a document window has open: one more pane and surface,
-/// showing `rect` of the window's drawing.
-struct ToolPane {
-    /// The view's name for it.
-    id: u32,
+/// A window a document window has open beside it — a torn-out palette or its
+/// dialog — showing `rect` of the window's drawing: one more pane and surface.
+struct OwnedPane {
+    kind: Owned,
     /// The part of the view's drawing it shows.
     rect: Rect,
-    /// What the view reported changed inside `rect`, in the tool window's own
-    /// pixels.
+    /// How far into `rect` its client starts: past nothing unless the desktop
+    /// fitted the window smaller than `rect`, whose rest is then scrolled to.
+    scroll: Point,
+    /// What a wheel turn has moved it short of a whole pixel, across then
+    /// down.
+    wheel_carry: (i64, i64),
+    /// What the view reported changed in what it shows, in its own pixels.
     damage: Region,
     chrome: Chrome,
 }
 
-impl ToolPane {
-    /// `at` in the tool window's pixels, in the view's drawing.
-    fn to_view(&self, at: Point) -> Point {
-        Point::new(
-            self.rect.left().saturating_add(at.x),
-            self.rect.top().saturating_add(at.y),
+/// Which of a document window's views an input is fed to: the window's own,
+/// or its dialog's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fed {
+    Window,
+    Dialog,
+}
+
+impl Fed {
+    /// Where input landing on an owned window of `kind` goes: a tool window's
+    /// is the window's own.
+    const fn of(kind: Owned) -> Self {
+        match kind {
+            Owned::Tool(_) => Self::Window,
+            Owned::Dialog(_) => Self::Dialog,
+        }
+    }
+}
+
+/// What an owned window is to its document window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Owned {
+    /// The tool window the view calls by this id.
+    Tool(u32),
+    /// The window's dialog, holding the window as this says.
+    Dialog(DialogModality),
+}
+
+impl OwnedPane {
+    fn new(kind: Owned, rect: Rect, chrome: Chrome, damage: Region) -> Self {
+        Self {
+            kind,
+            rect,
+            scroll: Point::ORIGIN,
+            wheel_carry: (0, 0),
+            damage,
+            chrome,
+        }
+    }
+
+    /// Show `rect` of the drawing, its band reading `title`: resized where
+    /// the size moved, repainted where it moved or was retitled.
+    fn fit(&mut self, client: &mut Client, rect: Rect, title: &str, name: &str) {
+        if (self.rect.width, self.rect.height) != (rect.width, rect.height) {
+            self.chrome.resize(client, rect.width, rect.height, name);
+            self.scroll = Point::ORIGIN;
+            self.chrome.owe(Repaint::Whole);
+        } else if self.rect.origin != rect.origin {
+            self.chrome.owe(Repaint::Whole);
+        }
+        self.rect = rect;
+        if self.chrome.title.draft != title {
+            self.chrome.title.read(title);
+            self.chrome.owe(Repaint::Whole);
+        }
+    }
+
+    /// Scroll what it shows by a wheel turn of `(dx, dy)` scroll units at
+    /// `scale`, kept within what the desktop fitted it smaller than, and
+    /// answer whether it moved. One that shows the whole of `rect` takes no
+    /// scroll, so the turn is its view's.
+    fn scroll_by(&mut self, units: (i32, i32), scale: Scale) -> bool {
+        let mode = *self.chrome.pane.mode();
+        let room = (
+            self.rect.width.saturating_sub(mode.width_px),
+            self.rect.height.saturating_sub(mode.height_px),
+        );
+        let before = self.scroll;
+        self.scroll = super::scroll::scrolled(before, room, units, &mut self.wheel_carry, scale);
+        room != (0, 0) && self.scroll != before
+    }
+
+    const fn tool(&self) -> Option<u32> {
+        match self.kind {
+            Owned::Tool(id) => Some(id),
+            Owned::Dialog(_) => None,
+        }
+    }
+
+    /// The part of the view's drawing its client shows now.
+    fn shown(&self) -> Rect {
+        let mode = self.chrome.pane.mode();
+        Rect::new(
+            self.rect.left().saturating_add(self.scroll.x),
+            self.rect.top().saturating_add(self.scroll.y),
+            mode.width_px.min(self.rect.width),
+            mode.height_px.min(self.rect.height),
         )
     }
 
-    /// Take the part of `damage`, in the view's drawing, that lies in this
-    /// tool window, owing a paint of it.
+    /// `at` in the window's own pixels, in the view's drawing.
+    fn to_view(&self, at: Point) -> Point {
+        let shown = self.shown();
+        Point::new(
+            shown.left().saturating_add(at.x),
+            shown.top().saturating_add(at.y),
+        )
+    }
+
+    /// Take the part of `damage`, in the view's drawing, that it shows,
+    /// owing a paint of it.
     fn take_damage(&mut self, damage: &Region) {
+        let shown = self.shown();
         for rect in damage.rects() {
-            let inside = rect.intersection(&self.rect);
+            let inside = rect.intersection(&shown);
             if !inside.is_empty() {
                 self.damage.add(Rect::new(
-                    inside.left() - self.rect.left(),
-                    inside.top() - self.rect.top(),
+                    inside.left() - shown.left(),
+                    inside.top() - shown.top(),
                     inside.width,
                     inside.height,
                 ));
@@ -549,14 +644,11 @@ impl Chrome {
     }
 
     /// Fit the pane to a size the session reported, saying so where the
-    /// desktop refuses.
+    /// window keeps its size.
     fn resize(&mut self, client: &mut Client, width_px: u32, height_px: u32, name: &str) {
         let mode = app::mode_for(width_px, height_px);
-        if !self.pane.resize_with(client, &mode, &mut self.surface) {
-            report(
-                name,
-                "the desktop refused a resize; the window keeps its size",
-            );
+        if self.pane.resize_with(client, &mode, &mut self.surface) == app::Fitted::Kept {
+            report(name, app::SIZE_KEPT);
         }
     }
 
@@ -713,7 +805,11 @@ impl<A: DocumentApp> DocWindow<A> {
     /// Whether it has the keyboard: it, or one of its tool windows.
     #[must_use]
     pub fn focused(&self) -> bool {
-        self.chrome.focused || self.tools.iter().any(|tool| tool.chrome.focused)
+        self.chrome.focused
+            || self
+                .owned
+                .iter()
+                .any(|pane| pane.tool().is_some() && pane.chrome.focused)
     }
 
     /// Whether a document opened now may take its place.
@@ -776,8 +872,8 @@ impl<A: DocumentApp> DocWindow<A> {
     fn relayout(&mut self, theme: &Theme, scale: Scale, faces: FacesOf<A>) {
         self.lay_out(theme, scale, faces);
         self.owe(Repaint::Whole);
-        for tool in &mut self.tools {
-            tool.chrome.owe(Repaint::Whole);
+        for pane in &mut self.owned {
+            pane.chrome.owe(Repaint::Whole);
         }
     }
 
@@ -793,12 +889,12 @@ impl<A: DocumentApp> DocWindow<A> {
         self.owe_pointer_checks();
     }
 
-    /// Owe the pointer's shape and tip a check over the window and each of
-    /// its tool windows.
+    /// Owe the pointer's shape and tip a check over the window and each
+    /// window it owns.
     fn owe_pointer_checks(&mut self) {
         self.chrome.pointing.owed = true;
-        for tool in &mut self.tools {
-            tool.chrome.pointing.owed = true;
+        for pane in &mut self.owned {
+            pane.chrome.pointing.owed = true;
         }
     }
 
@@ -814,7 +910,7 @@ impl<A: DocumentApp> DocWindow<A> {
     /// A tip is declared on whichever of them the control it explains is in.
     fn settle_pointer(&mut self, client: &mut Client, scale: Scale, theme: &Theme) {
         let owed =
-            self.chrome.pointing.owed || self.tools.iter().any(|tool| tool.chrome.pointing.owed);
+            self.chrome.pointing.owed || self.owned.iter().any(|pane| pane.chrome.pointing.owed);
         if !owed {
             return;
         }
@@ -833,28 +929,23 @@ impl<A: DocumentApp> DocWindow<A> {
             let tip = wanted.filter(|(rect, _)| within(*rect, area));
             self.chrome.settle_pointer(client, shape, tip);
         }
-        for tool in &mut self.tools {
-            if mem::take(&mut tool.chrome.pointing.owed) {
-                let shape = match tool.chrome.pointing.at {
+        for pane in &mut self.owned {
+            if mem::take(&mut pane.chrome.pointing.owed) {
+                let shape = match pane.chrome.pointing.at {
                     Some(at) => self.view.cursor(&self.layout, at),
-                    None => tool.chrome.pointing.shape,
+                    None => pane.chrome.pointing.shape,
                 };
-                let tip =
-                    wanted
-                        .filter(|(rect, _)| within(*rect, tool.rect))
-                        .map(|(rect, text)| {
-                            let left = rect.left() - tool.rect.left();
-                            (
-                                Rect::new(
-                                    left,
-                                    rect.top() - tool.rect.top(),
-                                    rect.width,
-                                    rect.height,
-                                ),
-                                text,
-                            )
-                        });
-                tool.chrome.settle_pointer(client, shape, tip);
+                let shown = pane.shown();
+                let tip = wanted
+                    .filter(|(rect, _)| within(*rect, shown))
+                    .map(|(rect, text)| {
+                        let left = rect.left() - shown.left();
+                        (
+                            Rect::new(left, rect.top() - shown.top(), rect.width, rect.height),
+                            text,
+                        )
+                    });
+                pane.chrome.settle_pointer(client, shape, tip);
             }
         }
     }
@@ -871,9 +962,9 @@ impl<A: DocumentApp> DocWindow<A> {
         client: &mut Client,
         mut render: impl FnMut(&mut Surface, &A::View, &LayoutOf<A>, bool),
     ) {
-        if !self.tools.is_empty() {
-            for tool in &mut self.tools {
-                tool.take_damage(&self.damage);
+        if !self.owned.is_empty() {
+            for pane in &mut self.owned {
+                pane.take_damage(&self.damage);
             }
             self.damage.clip(self.area());
             if self.chrome.owed == Repaint::Reported && self.damage.is_empty() {
@@ -889,14 +980,14 @@ impl<A: DocumentApp> DocWindow<A> {
             render(surface, view, layout, focused);
         });
         self.chrome.presented(painted, A::NAME, view.name());
-        for tool in &mut self.tools {
-            let Some((x, y)) = tool.rect.surface_origin() else {
+        for pane in &mut self.owned {
+            let Some((x, y)) = pane.shown().surface_origin() else {
                 continue;
             };
-            let painted = tool.chrome.present(client, &mut tool.damage, |surface, _| {
+            let painted = pane.chrome.present(client, &mut pane.damage, |surface, _| {
                 surface.with_origin(x, y, |surface| render(surface, view, layout, focused));
             });
-            tool.chrome.presented(painted, A::NAME, view.name());
+            pane.chrome.presented(painted, A::NAME, view.name());
         }
     }
 
@@ -1281,7 +1372,7 @@ impl<A: DocumentApp> Host<A> {
             epoch: 0,
             own_held: 0,
             menu: None,
-            tools: Vec::new(),
+            owned: Vec::new(),
             focus_told: true,
             closing: None,
             quit_asked: false,
@@ -1504,8 +1595,8 @@ impl<A: DocumentApp> Host<A> {
                 ));
             }
         }
-        for tool in window.tools.drain(..) {
-            let _ = tool.chrome.pane.close(&mut self.client);
+        for pane in window.owned.drain(..) {
+            let _ = pane.chrome.pane.close(&mut self.client);
         }
         let _ = window.chrome.pane.close(&mut self.client);
     }
@@ -1787,21 +1878,22 @@ impl<A: DocumentApp> Host<A> {
     }
 
     /// Window `index`'s pointer is at `at` in its view's drawing — over the
-    /// window, or over its tool window `tool` — with `modifiers` held, and
-    /// `inputs` are what it did there: note where it is, owe the tip and
+    /// window, or over the window it owns at `owned` — with `modifiers` held,
+    /// and `inputs` are what it did there: note where it is, owe the tip and
     /// cursor beneath it a check, and feed the view the modifiers and then
-    /// `inputs` unless the window is still loading.
+    /// `inputs` unless the window is still loading. What lands on its dialog
+    /// is the dialog's.
     fn point(
         &mut self,
-        (index, tool): (usize, Option<usize>),
+        (index, owned): (usize, Option<usize>),
         at: Point,
         modifiers: AbiModifiers,
         inputs: impl Iterator<Item = InputEvent>,
     ) {
         let window = &mut self.windows[index];
-        let pointing = match tool.and_then(|tool| window.tools.get_mut(tool)) {
-            Some(tool) => &mut tool.chrome.pointing,
-            None => &mut window.chrome.pointing,
+        let (pointing, fed) = match owned.and_then(|owned| window.owned.get_mut(owned)) {
+            Some(pane) => (&mut pane.chrome.pointing, Fed::of(pane.kind)),
+            None => (&mut window.chrome.pointing, Fed::Window),
         };
         pointing.at = Some(at);
         pointing.owed = true;
@@ -1809,10 +1901,10 @@ impl<A: DocumentApp> Host<A> {
             return;
         }
         let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
-        self.feed(index, core::iter::once(held).chain(inputs));
+        self.feed(index, fed, core::iter::once(held).chain(inputs));
     }
 
-    fn feed(&mut self, index: usize, inputs: impl Iterator<Item = InputEvent>) {
+    fn feed(&mut self, index: usize, fed: Fed, inputs: impl Iterator<Item = InputEvent>) {
         let id = self.windows[index].id();
         let now = tairix_rt::clock_get();
         for input in inputs {
@@ -1821,14 +1913,11 @@ impl<A: DocumentApp> Host<A> {
             };
             let (theme, scale) = (self.themes.active(), self.desktop.scale());
             let window = &mut self.windows[index];
-            let outcome = window.view.input(
-                &input,
-                now,
-                &window.layout,
-                scale,
-                theme,
-                &mut window.damage,
-            );
+            let (view, layout, damage) = (&mut window.view, &window.layout, &mut window.damage);
+            let outcome = match fed {
+                Fed::Window => view.input(&input, now, layout, scale, theme, damage),
+                Fed::Dialog => view.dialog_input(&input, now, layout, scale, theme, damage),
+            };
             self.apply(index, outcome);
         }
     }
@@ -1892,8 +1981,8 @@ impl<A: DocumentApp> Host<A> {
         let Some(index) = id.and_then(|id| self.index_of(id)) else {
             if let Some(index) = id.and_then(|id| self.app_index_of(id)) {
                 self.act_app(index, event);
-            } else if let Some(tool) = id.and_then(|id| self.tool_of(id)) {
-                self.act_tool(tool, event);
+            } else if let Some(owned) = id.and_then(|id| self.owned_of(id)) {
+                self.act_owned(owned, event);
             } else if let WindowEvent::FilePicked { handle, .. } = event {
                 // A file chosen for a window since closed is let go at once,
                 // not left held for the life of the process.
@@ -1949,7 +2038,7 @@ impl<A: DocumentApp> Host<A> {
             } => self.menu_closed(index, *open_id, *outcome),
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
-                    self.feed(index, core::iter::once(key_input_event(*key)));
+                    self.feed(index, Fed::Window, core::iter::once(key_input_event(*key)));
                 }
             }
             WindowEvent::Pointer {
@@ -2093,61 +2182,71 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// The document window and the place among its tool windows of the tool
-    /// window the session calls `id`.
-    fn tool_of(&self, id: u64) -> Option<(usize, usize)> {
+    /// The document window and the place among the windows it owns of the
+    /// one the session calls `id`.
+    fn owned_of(&self, id: u64) -> Option<(usize, usize)> {
         self.windows.iter().enumerate().find_map(|(index, window)| {
             window
-                .tools
+                .owned
                 .iter()
-                .position(|tool| tool.chrome.id() == id)
-                .map(|tool| (index, tool))
+                .position(|pane| pane.chrome.id() == id)
+                .map(|owned| (index, owned))
         })
     }
 
-    /// Route one window-scoped event to tool window `tool` of document window
-    /// `index`: its input is the window's own, in the window's drawing; its
-    /// close mark and its moves are its view's to answer.
-    fn act_tool(&mut self, (index, tool): (usize, usize), event: &WindowEvent) {
+    /// Route one window-scoped event to the window at `owned` that document
+    /// window `index` owns: a tool window's input is the window's own and its
+    /// close mark and moves are its view's to answer; a dialog's input is the
+    /// dialog's, and a dialog the desktop fitted to the screen scrolls by the
+    /// wheel.
+    fn act_owned(&mut self, (index, owned): (usize, usize), event: &WindowEvent) {
         let window = &mut self.windows[index];
-        let pane = &mut window.tools[tool];
-        let id = pane.id;
+        let pane = &mut window.owned[owned];
+        let fed = Fed::of(pane.kind);
         match event {
-            WindowEvent::CloseRequested { .. } | WindowEvent::AlternateCloseRequested { .. } => {
-                let outcome =
-                    window
-                        .view
-                        .tool_gone(id, ToolGone::Closed, &window.layout, &mut window.damage);
-                self.apply(index, outcome);
-            }
-            WindowEvent::ToolMoved { over, ended, .. } => {
-                let over = match *over {
-                    ToolOver::Parent { x, y } => Some(pointer_point(x, y)),
-                    ToolOver::Elsewhere => None,
-                };
-                let (theme, scale) = (self.themes.active(), self.desktop.scale());
-                let moved = ToolMove {
-                    id,
-                    over,
-                    ended: *ended,
-                };
-                let outcome =
-                    window
-                        .view
-                        .tool_moved(moved, &window.layout, scale, theme, &mut window.damage);
-                self.apply(index, outcome);
+            WindowEvent::CloseRequested { .. }
+            | WindowEvent::AlternateCloseRequested { .. }
+            | WindowEvent::ToolMoved { .. } => {
+                if let Owned::Tool(id) = pane.kind {
+                    self.act_tool(index, id, event);
+                }
             }
             WindowEvent::Focus { focused, .. } => {
                 pane.chrome.focused = *focused;
-                window.note_focus();
+                match pane.kind {
+                    Owned::Tool(_) => window.note_focus(),
+                    // Its look follows the keyboard, and it is small: repainted
+                    // whole.
+                    Owned::Dialog(_) => {
+                        window.view.dialog_focus_changed(
+                            *focused,
+                            &window.layout,
+                            &mut window.damage,
+                        );
+                        pane.chrome.owe(Repaint::Whole);
+                        window.owe_reported();
+                    }
+                }
             }
             WindowEvent::RedrawRequested { .. } => pane.chrome.owe(Repaint::Whole),
             WindowEvent::ContentReleased { .. } => pane.chrome.pane.release_frames(),
+            // Only a dialog is resized but by its view: the desktop fitted it
+            // to the screen, and what no longer shows is scrolled to.
+            WindowEvent::Resized {
+                width_px,
+                height_px,
+                ..
+            } if matches!(pane.kind, Owned::Dialog(_)) => {
+                pane.chrome
+                    .resize(&mut self.client, *width_px, *height_px, A::NAME);
+                let _ = pane.scroll_by((0, 0), self.desktop.scale());
+                pane.chrome.owe(Repaint::Whole);
+            }
             // It asks for no file; one handed to it anyway is let go.
             WindowEvent::FilePicked { handle, .. } => release(*handle),
             WindowEvent::Key { key, .. } => {
                 if !window.loading() {
-                    self.feed(index, core::iter::once(key_input_event(*key)));
+                    self.feed(index, fed, core::iter::once(key_input_event(*key)));
                 }
             }
             WindowEvent::Pointer {
@@ -2159,7 +2258,7 @@ impl<A: DocumentApp> Host<A> {
             } => {
                 let at = pane.to_view(pointer_point(*x, *y));
                 let inputs = pointer_input_events(*action, at);
-                self.point((index, Some(tool)), at, *modifiers, inputs);
+                self.point((index, Some(owned)), at, *modifiers, inputs);
             }
             WindowEvent::Scrolled {
                 x,
@@ -2169,9 +2268,14 @@ impl<A: DocumentApp> Host<A> {
                 modifiers,
                 ..
             } => {
+                if pane.scroll_by((*dx, *dy), self.desktop.scale()) {
+                    pane.chrome.owe(Repaint::Whole);
+                    pane.chrome.pointing.owed = true;
+                    return;
+                }
                 let at = pane.to_view(pointer_point(*x, *y));
                 let inputs = scroll_input_events(at, *dx, *dy);
-                self.point((index, Some(tool)), at, *modifiers, inputs);
+                self.point((index, Some(owned)), at, *modifiers, inputs);
             }
             WindowEvent::Pinch {
                 x,
@@ -2183,10 +2287,10 @@ impl<A: DocumentApp> Host<A> {
             } => {
                 let at = pane.to_view(pointer_point(*x, *y));
                 let pinch = pinch_input_events(at, *phase, *scale);
-                self.point((index, Some(tool)), at, *modifiers, pinch);
+                self.point((index, Some(owned)), at, *modifiers, pinch);
             }
-            // A tool window is never resized but by its view, never minimised
-            // but with its window, and asks for no picker, menu or preview.
+            // Never minimised but with its window, and asking for no picker,
+            // menu or preview.
             WindowEvent::Resized { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::PickCancelled { .. }
@@ -2204,12 +2308,34 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
+    /// Tool window `id` of document window `index` was closed by its mark or
+    /// moved by its band, as `event` says: its view's to answer.
+    fn act_tool(&mut self, index: usize, id: u32, event: &WindowEvent) {
+        let (theme, scale) = (self.themes.active(), self.desktop.scale());
+        let window = &mut self.windows[index];
+        let (view, layout, damage) = (&mut window.view, &window.layout, &mut window.damage);
+        let outcome = match *event {
+            WindowEvent::ToolMoved { over, ended, .. } => {
+                let over = match over {
+                    ToolOver::Parent { x, y } => Some(pointer_point(x, y)),
+                    ToolOver::Elsewhere => None,
+                };
+                view.tool_moved(ToolMove { id, over, ended }, layout, scale, theme, damage)
+            }
+            _ => view.tool_gone(id, ToolGone::Closed, layout, damage),
+        };
+        self.apply(index, outcome);
+    }
+
     /// Open, resize, retitle and close every document window's tool windows
-    /// to match what its view now asks for.
-    fn settle_tools(&mut self) {
+    /// and dialog to match what its view now asks for.
+    fn settle_owned(&mut self) {
         let mut index = 0;
         while index < self.windows.len() {
             self.settle_window_tools(index);
+            if index < self.windows.len() {
+                self.settle_window_dialog(index);
+            }
             index += 1;
         }
     }
@@ -2221,15 +2347,17 @@ impl<A: DocumentApp> Host<A> {
     fn settle_window_tools(&mut self, index: usize) {
         let window = &mut self.windows[index];
         let area = window.area();
-        let mut at = window.tools.len();
+        let mut at = window.owned.len();
         while let Some(back) = at.checked_sub(1) {
             at = back;
-            let id = window.tools[at].id;
+            let Some(id) = window.owned[at].tool() else {
+                continue;
+            };
             let wanted = (0..)
                 .map_while(|place| window.view.tool_window(&window.layout, place))
                 .any(|wanted| wanted.id == id && wanted.fits_beside(area));
             if !wanted {
-                let _ = window.tools.remove(at).chrome.pane.close(&mut self.client);
+                let _ = window.owned.remove(at).chrome.pane.close(&mut self.client);
             }
         }
         let window_id = window.id();
@@ -2245,19 +2373,12 @@ impl<A: DocumentApp> Host<A> {
             if !wanted.fits_beside(area) || refused.contains(&id) {
                 continue;
             }
-            if let Some(tool) = window.tools.iter_mut().find(|tool| tool.id == id) {
-                if (tool.rect.width, tool.rect.height) != (rect.width, rect.height) {
-                    tool.chrome
-                        .resize(&mut self.client, rect.width, rect.height, A::NAME);
-                    tool.chrome.owe(Repaint::Whole);
-                } else if tool.rect.origin != rect.origin {
-                    tool.chrome.owe(Repaint::Whole);
-                }
-                tool.rect = rect;
-                if tool.chrome.title.draft != wanted.title {
-                    tool.chrome.title.read(wanted.title);
-                    tool.chrome.owe(Repaint::Whole);
-                }
+            if let Some(tool) = window
+                .owned
+                .iter_mut()
+                .find(|pane| pane.kind == Owned::Tool(id))
+            {
+                tool.fit(&mut self.client, rect, wanted.title, A::NAME);
                 continue;
             }
             let title = String::from(wanted.title);
@@ -2272,19 +2393,19 @@ impl<A: DocumentApp> Host<A> {
                 title,
             )
             .and_then(|chrome| {
-                if window.tools.try_reserve(1).is_ok() {
+                if window.owned.try_reserve(1).is_ok() {
                     return Ok(chrome);
                 }
                 let _ = chrome.pane.close(&mut self.client);
                 Err(String::from("no room to hold another palette"))
             });
             match opened {
-                Ok(chrome) => window.tools.push(ToolPane {
-                    id,
+                Ok(chrome) => window.owned.push(OwnedPane::new(
+                    Owned::Tool(id),
                     rect,
-                    damage: A::damage_sink(),
                     chrome,
-                }),
+                    A::damage_sink(),
+                )),
                 Err(why) => {
                     if refused.try_reserve(1).is_err() {
                         return;
@@ -2299,6 +2420,82 @@ impl<A: DocumentApp> Host<A> {
                 }
             }
         }
+    }
+
+    /// Bring window `index`'s dialog into line with its view: close one it no
+    /// longer wants or that now holds the window differently, fit one it
+    /// still does, and open one it newly asks for. One the desktop refuses is
+    /// said and handed back to the view.
+    fn settle_window_dialog(&mut self, index: usize) {
+        let (theme, scale) = (self.themes.active(), self.desktop.scale());
+        let window = &mut self.windows[index];
+        let area = window.area();
+        let wanted = window.view.dialog_window(&window.layout, scale, theme);
+        let misplaced = wanted.is_some_and(|wanted| {
+            !super::fits_beside(wanted.rect, area)
+                || window.owned.iter().any(|pane| {
+                    pane.tool().is_some() && !pane.rect.intersection(&wanted.rect).is_empty()
+                })
+        });
+        let wanted = wanted.filter(|_| !misplaced);
+        let open = window
+            .owned
+            .iter()
+            .position(|pane| matches!(pane.kind, Owned::Dialog(_)));
+        if let Some(at) = open {
+            match wanted {
+                Some(wanted) if window.owned[at].kind == Owned::Dialog(wanted.modality) => {
+                    window.owned[at].fit(&mut self.client, wanted.rect, wanted.title, A::NAME);
+                    return;
+                }
+                _ => {
+                    let _ = window.owned.remove(at).chrome.pane.close(&mut self.client);
+                }
+            }
+        }
+        if misplaced {
+            self.dialog_refused(index, "it is drawn over the window's own content");
+            return;
+        }
+        let Some(wanted) = wanted else {
+            return;
+        };
+        let owner = (window.id(), self.server);
+        let (rect, modality) = (wanted.rect, wanted.modality);
+        let opened = open_dialog(
+            &mut self.client,
+            owner,
+            self.event_endpoint,
+            (rect, modality),
+            String::from(wanted.title),
+        )
+        .and_then(|chrome| {
+            if window.owned.try_reserve(1).is_ok() {
+                return Ok(chrome);
+            }
+            let _ = chrome.pane.close(&mut self.client);
+            Err(String::from("no room to hold a dialog"))
+        });
+        match opened {
+            Ok(chrome) => window.owned.push(OwnedPane::new(
+                Owned::Dialog(modality),
+                rect,
+                chrome,
+                A::damage_sink(),
+            )),
+            Err(why) => self.dialog_refused(index, &why),
+        }
+    }
+
+    /// Window `index`'s dialog could not be shown, for `why`: say so, and hand
+    /// it back to the view, which stops wanting it.
+    fn dialog_refused(&mut self, index: usize, why: &str) {
+        self.report(format!("a dialog could not be shown ({why})"));
+        let window = &mut self.windows[index];
+        let outcome = window
+            .view
+            .dialog_refused(why, &window.layout, &mut window.damage);
+        self.apply(index, outcome);
     }
 
     /// The desktop would not open window `index`'s tool window `id`, for
@@ -2650,6 +2847,27 @@ fn open_tool(
     Ok(chrome)
 }
 
+/// Open the dialog of window `owner` showing a `rect` of its drawing and holding
+/// it as `modality` says, titled `title`, its events sent to `endpoint` and its
+/// reply taken from the session alone.
+fn open_dialog(
+    client: &mut Client,
+    owner: (u64, ProcId),
+    endpoint: u64,
+    (rect, modality): (Rect, DialogModality),
+    title: String,
+) -> Result<Chrome, String> {
+    let mode = app::mode_for(rect.width, rect.height);
+    let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+        return Err(String::from("no drawing surface"));
+    };
+    let pane = WindowPane::open_dialog(client, owner, endpoint, &mode, modality, &title)
+        .map_err(|err| format!("{err}"))?;
+    let mut chrome = Chrome::new(pane, surface, title);
+    chrome.focused = false;
+    Ok(chrome)
+}
+
 /// Let go of file grant `grant` the application has no use for, so it is not
 /// held for the life of the process.
 fn release(grant: u64) {
@@ -2829,7 +3047,7 @@ impl<A: DocumentApp> Host<A> {
         let now = tairix_rt::clock_get();
         let answered = A::turn(self, now) | self.answered;
         self.carry_quit_on(None);
-        self.settle_tools();
+        self.settle_owned();
         self.settle_focus();
         self.settle_pointers();
         self.paint_all();
@@ -2866,6 +3084,7 @@ impl<A: DocumentApp> Host<A> {
             Err(EventError::Undecodable(_)) => {
                 self.report("a malformed window event was refused");
             }
+            Err(EventError::Refused(refused)) => self.report(refused),
         }
         ControlFlow::Continue(())
     }

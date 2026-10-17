@@ -45,7 +45,6 @@ use tairix_abi::account::{
     MAX_DISPLAY_NAME_LEN, MAX_GROUPNAME_LEN, MAX_PASSWORD_LEN, MAX_PATH_LEN,
     MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
 };
-use tairix_abi::blkio::BlkMedium;
 
 use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
@@ -93,22 +92,6 @@ use tairix_abi::{
     SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
     THREAD_STACK_DEFAULT, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
 };
-
-/// The mount-medium constants the sysinfo header publishes, each one's value
-/// read off the `lib/abi` encoder rather than re-typed.
-const MOUNT_MEDIA: [(&str, Option<BlkMedium>); 8] = [
-    ("TAIRIX_MOUNT_MEDIUM_UNKNOWN", None),
-    ("TAIRIX_MOUNT_MEDIUM_HARD_DISK", Some(BlkMedium::HardDisk)),
-    (
-        "TAIRIX_MOUNT_MEDIUM_SOLID_STATE",
-        Some(BlkMedium::SolidState),
-    ),
-    ("TAIRIX_MOUNT_MEDIUM_NVME", Some(BlkMedium::Nvme)),
-    ("TAIRIX_MOUNT_MEDIUM_USB_FLASH", Some(BlkMedium::UsbFlash)),
-    ("TAIRIX_MOUNT_MEDIUM_USB_DISK", Some(BlkMedium::UsbDisk)),
-    ("TAIRIX_MOUNT_MEDIUM_SD_CARD", Some(BlkMedium::SdCard)),
-    ("TAIRIX_MOUNT_MEDIUM_VIRTUAL", Some(BlkMedium::Virtual)),
-];
 
 /// Default on-disk location of the generated C ABI header set, relative to
 /// the workspace root. The umbrella header is `tairix_abi.h` inside it.
@@ -216,6 +199,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("STALE", DriverError::Stale),
     ("READ_ONLY", DriverError::ReadOnly),
     ("TIMED_OUT", DriverError::TimedOut),
+    ("NOT_READY", DriverError::NotReady),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -831,6 +815,7 @@ fn property_name(key: HwProperty) -> &'static str {
         HwProperty::BusSpeed => "BUS_SPEED",
         HwProperty::RadioCoexistence => "RADIO_COEXISTENCE",
         HwProperty::BootConsole => "BOOT_CONSOLE",
+        HwProperty::BlockMedium => "BLOCK_MEDIUM",
     }
 }
 
@@ -1870,24 +1855,62 @@ fn sysinfo_emit_query_ids(out: &mut String) {
     out.push('\n');
 }
 
-/// Emit the storage-medium discriminants a mount record carries.
-///
-/// Each value is read from the ABI's own encoder rather than re-typed here,
-/// so the C view cannot drift from the Rust definition it publishes.
+/// Emit the bytes of a storage-medium record (`tairix_blk_medium_t`), every
+/// value read from the `lib/abi` definitions rather than re-typed, so the C
+/// view cannot drift from the Rust encoder it publishes.
 fn sysinfo_emit_mount_media(out: &mut String) {
     use std::fmt::Write as _;
+    use tairix_abi::blkio::{
+        BlkRemovabilityEvidence, BlkRotationEvidence, BlkTransport, BLK_EVIDENCE_NONE,
+        BLK_FACT_UNKNOWN, BLK_REMOVABILITY_FIXED, BLK_REMOVABILITY_REMOVABLE,
+        BLK_ROTATION_NON_ROTATING, BLK_ROTATION_ROTATING, BLK_TRANSPORT_UNDECLARED,
+    };
     out.push_str(
-        "/* Storage medium of the block device backing a mount (uint8_t).\n\
-         \x20  UNKNOWN covers both a mount with no declared medium and a medium\n\
-         \x20  this ABI does not define: the record never guesses one. */\n",
+        "/* The bytes of a tairix_blk_medium_t. A fact nothing established is\n\
+         \x20  TAIRIX_BLK_FACT_UNKNOWN with TAIRIX_BLK_EVIDENCE_NONE; a device that\n\
+         \x20  declared nothing has TAIRIX_BLK_TRANSPORT_UNDECLARED. */\n",
     );
-    for (name, medium) in MOUNT_MEDIA {
-        let _ = writeln!(
-            out,
-            "#define {name} ((uint8_t){}u)",
-            MountRecord::medium_to_wire(medium)
-        );
+    emit_u8_discriminants(out, "TAIRIX_BLK_TRANSPORT", |raw| {
+        BlkTransport::from_u8(raw).map(|transport| match transport {
+            BlkTransport::Ata => "ATA",
+            BlkTransport::Nvme => "NVME",
+            BlkTransport::Usb => "USB",
+            BlkTransport::Sd => "SD",
+            BlkTransport::Virtual => "VIRTUAL",
+        })
+    });
+    let facts = [
+        ("TAIRIX_BLK_TRANSPORT_UNDECLARED", BLK_TRANSPORT_UNDECLARED),
+        ("TAIRIX_BLK_FACT_UNKNOWN", BLK_FACT_UNKNOWN),
+        (
+            "TAIRIX_BLK_ROTATION_NON_ROTATING",
+            BLK_ROTATION_NON_ROTATING,
+        ),
+        ("TAIRIX_BLK_ROTATION_ROTATING", BLK_ROTATION_ROTATING),
+        ("TAIRIX_BLK_REMOVABILITY_FIXED", BLK_REMOVABILITY_FIXED),
+        (
+            "TAIRIX_BLK_REMOVABILITY_REMOVABLE",
+            BLK_REMOVABILITY_REMOVABLE,
+        ),
+        ("TAIRIX_BLK_EVIDENCE_NONE", BLK_EVIDENCE_NONE),
+    ];
+    for (name, value) in facts {
+        let _ = writeln!(out, "#define {name} ((uint8_t){value}u)");
     }
+    emit_u8_discriminants(out, "TAIRIX_BLK_ROTATION_EVIDENCE", |raw| {
+        BlkRotationEvidence::from_u8(raw).map(|evidence| match evidence {
+            BlkRotationEvidence::Transport => "TRANSPORT",
+            BlkRotationEvidence::RotationRateVpd => "ROTATION_RATE_VPD",
+            BlkRotationEvidence::AtaIdentify => "ATA_IDENTIFY",
+        })
+    });
+    emit_u8_discriminants(out, "TAIRIX_BLK_REMOVABILITY_EVIDENCE", |raw| {
+        BlkRemovabilityEvidence::from_u8(raw).map(|evidence| match evidence {
+            BlkRemovabilityEvidence::Transport => "TRANSPORT",
+            BlkRemovabilityEvidence::Inquiry => "INQUIRY",
+            BlkRemovabilityEvidence::MediumAbsent => "MEDIUM_ABSENT",
+        })
+    });
 }
 
 /// Emit the discriminants the DMA translation records carry: every value each
@@ -2191,12 +2214,26 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t hostname_len;\n\
          \x20   uint8_t hostname[TAIRIX_HOSTNAME_MAX];\n\
          } tairix_system_identity_t;\n\n",
+    "/* What a block device is: its transport (TAIRIX_BLK_TRANSPORT_*), then\n\
+         * whether its medium rotates and whether it can leave the unit\n\
+         * (TAIRIX_BLK_ROTATION_*, TAIRIX_BLK_REMOVABILITY_*), each with the\n\
+         * evidence that established it. `rpm` is the nominal rotation rate of a\n\
+         * rotating medium and zero otherwise. */\n\
+         typedef struct tairix_blk_medium {\n\
+         \x20   uint8_t transport;\n\
+         \x20   uint8_t rotation;\n\
+         \x20   uint8_t rotation_evidence;\n\
+         \x20   uint8_t removability;\n\
+         \x20   uint8_t removability_evidence;\n\
+         \x20   uint8_t reserved;\n\
+         \x20   uint16_t rpm;\n\
+         } tairix_blk_medium_t;\n\n",
     "/* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);\n\
          * its flag bits are defined by the filesystem driver ABI. `availability` is\n\
          * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).\n\
-         * `medium` is the storage medium of the block device backing the mount, a\n\
-         * TAIRIX_MOUNT_MEDIUM_* value; TAIRIX_MOUNT_MEDIUM_UNKNOWN means no block\n\
-         * device backs it or its medium was not recognised -- never a guess.\n\
+         * `medium` is the storage medium of the block device backing the mount;\n\
+         * its transport is TAIRIX_BLK_TRANSPORT_UNDECLARED when no block device\n\
+         * backs it or its medium was not recognised -- never a guess.\n\
          * `usage` is the backing volume's space accounting (all-zero when none is\n\
          * known). `volume_id` is the volume's stable published identity (all-zero\n\
          * when the mount has none), the identity a volume_detach request names.\n\
@@ -2208,8 +2245,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t target_len;\n\
          \x20   uint8_t fstype_len;\n\
          \x20   uint8_t availability;\n\
-         \x20   uint8_t medium;\n\
-         \x20   uint8_t reserved0[7];\n\
+         \x20   tairix_blk_medium_t medium;\n\
          \x20   tairix_volume_stats_t usage;\n\
          \x20   uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];\n\
          \x20   uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];\n\
@@ -5368,56 +5404,65 @@ mod tests {
         );
     }
 
-    /// A mount record's storage-medium byte is only readable from C if the
-    /// header publishes its encoding, so every value is pinned against the
-    /// `lib/abi` encoder the generator reads — including the unknown a
-    /// backing-less mount and an unrecognised medium both take — and the byte
-    /// is pinned to its place between the availability state and the usage
-    /// block.
-    /// `camel` as a C macro word: an underscore before each later capital,
-    /// all in upper case (`UsbFlash` is `USB_FLASH`).
-    fn screaming(camel: &str) -> String {
-        let mut word = String::new();
-        for (at, letter) in camel.char_indices() {
-            if at > 0 && letter.is_ascii_uppercase() {
-                word.push('_');
-            }
-            word.push(letter.to_ascii_uppercase());
-        }
-        word
-    }
-
+    /// A mount record's medium is only readable from C if the header
+    /// publishes the record's layout, so each `tairix_blk_medium_t` field is
+    /// pinned to the byte the `lib/abi` encoder writes it at, every published
+    /// value to the encoder's, and the record to its place between the
+    /// availability state and the usage block.
     #[test]
-    fn sysinfo_header_publishes_the_mount_medium_encoding() {
+    fn sysinfo_header_publishes_the_medium_record() {
+        use tairix_abi::blkio::{
+            BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation, BlkRotationEvidence,
+            BlkTransport, BLK_MEDIUM_LEN,
+        };
         let h = body("tairix_sysinfo.h");
-        for (macro_name, medium) in MOUNT_MEDIA {
-            let line = format!(
-                "#define {macro_name} ((uint8_t){}u)",
-                MountRecord::medium_to_wire(medium)
-            );
+        assert!(
+            h.contains(concat!(
+                "typedef struct tairix_blk_medium {\n",
+                "    uint8_t transport;\n",
+                "    uint8_t rotation;\n",
+                "    uint8_t rotation_evidence;\n",
+                "    uint8_t removability;\n",
+                "    uint8_t removability_evidence;\n",
+                "    uint8_t reserved;\n",
+                "    uint16_t rpm;\n",
+                "} tairix_blk_medium_t;\n",
+            )),
+            "medium record layout: {h}"
+        );
+        assert_eq!(BLK_MEDIUM_LEN, 8, "the C view is eight bytes");
+        let medium = BlkMedium::of_transport(BlkTransport::Usb)
+            .with_rotation(BlkRotation::from_rate_field(
+                0x1C20,
+                BlkRotationEvidence::AtaIdentify,
+            ))
+            .with_removability(BlkRemovability::Fixed(BlkRemovabilityEvidence::Inquiry));
+        let record = BlkMedium::encode(Some(medium));
+        let field = |name: &str, value: u8| {
+            let line = format!("#define TAIRIX_{name} ((uint8_t){value}u)");
             assert!(h.contains(&line), "missing `{line}` in:\n{h}");
-            let spelled =
-                medium.map_or_else(|| String::from("UNKNOWN"), |m| screaming(&format!("{m:?}")));
-            assert_eq!(
-                macro_name,
-                format!("TAIRIX_MOUNT_MEDIUM_{spelled}"),
-                "{medium:?}"
-            );
-        }
-        let every = (0..=u8::MAX).filter_map(|word| BlkMedium::from_u32(u32::from(word)).ok());
-        for medium in every {
+        };
+        field("BLK_TRANSPORT_USB", record[0]);
+        field("BLK_ROTATION_ROTATING", record[1]);
+        field("BLK_ROTATION_EVIDENCE_ATA_IDENTIFY", record[2]);
+        field("BLK_REMOVABILITY_FIXED", record[3]);
+        field("BLK_REMOVABILITY_EVIDENCE_INQUIRY", record[4]);
+        assert_eq!(record[5], 0, "reserved");
+        assert_eq!(u16::from_le_bytes([record[6], record[7]]), 0x1C20, "rpm");
+        field("BLK_TRANSPORT_UNDECLARED", BlkMedium::encode(None)[0]);
+        for transport in BlkTransport::ALL {
             assert!(
-                MOUNT_MEDIA
-                    .iter()
-                    .any(|(_, published)| *published == Some(medium)),
-                "{medium:?} has no TAIRIX_MOUNT_MEDIUM_* constant"
+                h.contains(&format!(
+                    "TAIRIX_BLK_TRANSPORT_{}",
+                    format!("{transport:?}").to_ascii_uppercase()
+                )),
+                "{transport:?} has no constant"
             );
         }
         assert!(
             h.contains(concat!(
                 "    uint8_t availability;\n",
-                "    uint8_t medium;\n",
-                "    uint8_t reserved0[7];\n",
+                "    tairix_blk_medium_t medium;\n",
                 "    tairix_volume_stats_t usage;\n",
             )),
             "mount record medium placement: {h}"

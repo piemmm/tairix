@@ -194,6 +194,7 @@ pub mod effects;
 pub mod elevate;
 pub mod fade;
 pub mod frames;
+pub mod hold;
 pub mod holdback;
 pub mod idle;
 pub mod input;

@@ -18,6 +18,10 @@ pub(crate) enum InStep {
     /// Fail the transfer other than by a STALL: a wire fault, or a deadline
     /// the controller abandoned it at.
     Fail(Errno),
+    /// Deliver these bytes this many nanoseconds into the exchange: a device
+    /// working (a disk spinning up on the access), which the exchange either
+    /// outlasts or abandons as [`Errno::TimedOut`].
+    After(u64, Vec<u8>),
 }
 
 /// A scripted mass-storage device behind the [`MsdTransport`] seam.
@@ -54,6 +58,8 @@ pub(crate) struct ScriptedDevice {
     pub trail: Vec<&'static str>,
     /// Exchanges begun.
     pub exchanges: usize,
+    /// The budget each exchange was begun with, in order.
+    pub budgets: Vec<u64>,
 }
 
 impl ScriptedDevice {
@@ -73,6 +79,7 @@ impl ScriptedDevice {
             reset_failure: None,
             trail: Vec::new(),
             exchanges: 0,
+            budgets: Vec::new(),
         }
     }
 
@@ -128,6 +135,14 @@ impl MsdTransport for ScriptedDevice {
             }
             Some(InStep::Stall) => Err(Errno::EndpointStalled),
             Some(InStep::Fail(errno)) => Err(errno),
+            Some(InStep::After(delay_ns, bytes)) => {
+                if self.budgets.last().is_some_and(|&budget| delay_ns > budget) {
+                    return Err(Errno::TimedOut);
+                }
+                let n = bytes.len().min(data.len());
+                data[..n].copy_from_slice(&bytes[..n]);
+                Ok(n)
+            }
             None => Err(Errno::NotFound),
         }
     }
@@ -164,8 +179,9 @@ impl MsdTransport for ScriptedDevice {
         Ok(())
     }
 
-    fn begin_exchange(&mut self) {
+    fn begin_exchange(&mut self, exchange_ns: u64) {
         self.exchanges += 1;
+        self.budgets.push(exchange_ns);
     }
 
     fn clear_halts(&mut self) -> Result<(), Errno> {

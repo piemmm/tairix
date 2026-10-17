@@ -41,6 +41,10 @@ use crate::{Errno, ProcId, PROC_ID_LEN};
 /// bound on an untrusted field, not a scalable capacity.
 pub const MAX_ENDPOINT: u8 = 15;
 
+/// The longest a device may take to complete a control request, in
+/// milliseconds (USB 2.0 §9.2.6.4): no control transfer is held past it.
+pub const USB_CONTROL_TIMEOUT_MAX_MS: u32 = 5_000;
+
 /// Direction of a URB's data stage, from the host's point of view.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -155,11 +159,12 @@ pub struct UrbRequest {
     /// [`UsbTransferType::Control`] transfer (zero-filled otherwise).
     pub setup: [u8; 8],
     /// How long, in milliseconds, the controller may hold the transfer before
-    /// abandoning it and answering [`Errno::TimedOut`]. Every bulk transfer
-    /// carries one, so no silent device holds its class driver forever. An
-    /// interrupt transfer may carry none, to wait for the device's next
-    /// report whenever it comes; a control transfer carries none, running
-    /// within the controller's own bound on a request.
+    /// abandoning it and answering [`Errno::TimedOut`]. Every bulk and
+    /// control transfer carries one, so no silent device holds its class
+    /// driver forever; a control transfer is held no longer than
+    /// [`USB_CONTROL_TIMEOUT_MAX_MS`] whatever it asks. An interrupt transfer
+    /// may carry none, to wait for the device's next report whenever it
+    /// comes.
     pub timeout_ms: Option<NonZeroU32>,
 }
 
@@ -391,8 +396,7 @@ impl UsbRequest {
                 let transfer_type = UsbTransferType::from_u8(bytes[2])?;
                 let timeout_ms = NonZeroU32::new(read_u32(bytes, 16));
                 let bounded = match transfer_type {
-                    UsbTransferType::Control => timeout_ms.is_none(),
-                    UsbTransferType::Bulk => timeout_ms.is_some(),
+                    UsbTransferType::Control | UsbTransferType::Bulk => timeout_ms.is_some(),
                     UsbTransferType::Interrupt => true,
                 };
                 if !bounded {

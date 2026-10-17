@@ -1923,6 +1923,37 @@ impl WindowSizeState {
     }
 }
 
+/// Whether a dialog window holds its owner until it closes
+/// ([`WindowRequest::CreateDialog`]).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum DialogModality {
+    /// It holds nothing: its owner goes on being used while it is up, as a
+    /// copy's progress window lets the folder go on being browsed.
+    #[default]
+    Modeless,
+    /// It holds its owner as an alert does: only a release reaches the
+    /// owner, a press there raises the dialog, and the owner takes no drop.
+    /// For an answer the owner cannot go on without.
+    OwnerModal,
+}
+
+impl DialogModality {
+    const fn wire(self) -> u8 {
+        match self {
+            Self::Modeless => 0,
+            Self::OwnerModal => 1,
+        }
+    }
+
+    const fn from_wire(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            0 => Ok(Self::Modeless),
+            1 => Ok(Self::OwnerModal),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 const SIZE_STATE_RESTORED: u8 = 0;
 const SIZE_STATE_MAXIMIZED: u8 = 1;
 const SIZE_STATE_FULLSCREEN: u8 = 2;
@@ -2268,6 +2299,43 @@ pub enum WindowRequest {
         /// opens it at the offset. Less than `width_px`.
         carry: Option<u32>,
         /// What its mini title bar reads.
+        title: WindowTitle,
+    },
+    /// Open a dialog window: a form, a question or the progress of an
+    /// operation, drawn by the caller and owned by one of its top-level
+    /// windows (`plans/APPWIN.md`).
+    ///
+    /// A transient as a tool window is — above its owner, off the taskbar and
+    /// the window picker, closed and hidden with it — but placed by the
+    /// session, centred over its owner and held on screen, and framed as a
+    /// dialog: a title band reading `title` beside the application's
+    /// attested name, and no resize edge. The geometry is the client area's,
+    /// sized by the caller to its content. It counts against the same budget
+    /// and answers with the same reply as [`Self::Create`].
+    CreateDialog {
+        /// The caller's own top-level window the dialog belongs to; never
+        /// zero, and never a transient itself.
+        owner_window_id: u64,
+        /// The `shm_grant` handle minted to the session's serving task,
+        /// naming the region that holds the dialog's frames.
+        shm_handle: u64,
+        /// The caller's own endpoint the session delivers this dialog's
+        /// [`WindowEvent`]s to. Never a reserved endpoint.
+        event_endpoint: u64,
+        /// Frames laid out back-to-back in the region
+        /// (`1..=WINDOW_MAX_FRAMES`).
+        frame_count: u32,
+        /// Client width in pixels; never zero.
+        width_px: u32,
+        /// Client height in pixels; never zero.
+        height_px: u32,
+        /// Bytes between consecutive scanlines; at least one scanline.
+        stride_bytes: u32,
+        /// Pixel encoding of the frames.
+        format: DisplayFormat,
+        /// Whether it holds its owner until it closes.
+        modality: DialogModality,
+        /// What its title band reads beside the application's name.
         title: WindowTitle,
     },
     /// Show frame `frame_index` of window `window_id`, of which only
@@ -2932,8 +3000,9 @@ pub enum WindowRequest {
     ///
     /// Application-scoped, so an application with no window open may still
     /// say why it refused what it was given. `owner_window_id`, when not
-    /// zero, must be one of the caller's own top-level windows: the alert
-    /// then holds that window until it is answered and goes down with it.
+    /// zero, must be one of the caller's own top-level windows or dialogs:
+    /// the alert then holds that window until it is answered and goes down
+    /// with it.
     /// The window's title is the desktop's, from the caller's attested
     /// identity, so the request carries none.
     ///
@@ -2944,7 +3013,8 @@ pub enum WindowRequest {
         /// The caller's own endpoint the answer is delivered to. Never a
         /// reserved endpoint.
         event_endpoint: u64,
-        /// The caller's own window the alert holds, or zero for none.
+        /// The caller's own top-level window or dialog the alert holds, or
+        /// zero for none.
         owner_window_id: u64,
         /// What the alert says and the answers it offers.
         alert: AlertSpec,
@@ -3035,6 +3105,8 @@ const OP_CREATE_TOOL: u16 = 36;
 const OP_OPEN_ALERT: u16 = 38;
 /// Wire operation discriminant of [`WindowRequest::CloseAlert`].
 const OP_CLOSE_ALERT: u16 = 39;
+/// Wire operation discriminant of [`WindowRequest::CreateDialog`].
+const OP_CREATE_DIALOG: u16 = 40;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3234,6 +3306,16 @@ const TOOL_CARRY_OFFSET: usize = TOOL_CARRY_FLAG_OFFSET + 1;
 const TOOL_TITLE_LEN_OFFSET: usize = TOOL_CARRY_OFFSET + 4;
 /// Encoded size of a [`WindowRequest::CreateTool`].
 const CREATE_TOOL_WIRE_LEN: usize = TOOL_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
+
+/// Byte offset of a [`WindowRequest::CreateDialog`]'s owner window id, after
+/// the shared frame-layout block.
+const DIALOG_OWNER_OFFSET: usize = FRAME_LAYOUT_END;
+/// Byte offset of its modality.
+const DIALOG_MODALITY_OFFSET: usize = DIALOG_OWNER_OFFSET + 8;
+/// Byte offset of its title length.
+const DIALOG_TITLE_LEN_OFFSET: usize = DIALOG_MODALITY_OFFSET + 1;
+/// Encoded size of a [`WindowRequest::CreateDialog`].
+const CREATE_DIALOG_WIRE_LEN: usize = DIALOG_TITLE_LEN_OFFSET + 1 + WINDOW_TITLE_MAX;
 
 /// Byte offset of [`WindowRequest::OpenLayer::x`], the first operand after
 /// the shared frame-layout block.
@@ -3481,7 +3563,10 @@ impl WindowRequest {
     pub const MAX_WIRE_LEN: usize = longer(
         longer(
             longer(
-                longer(CREATE_WIRE_LEN, CREATE_TOOL_WIRE_LEN),
+                longer(
+                    longer(CREATE_WIRE_LEN, CREATE_TOOL_WIRE_LEN),
+                    CREATE_DIALOG_WIRE_LEN,
+                ),
                 HAND_OVER_MAX_WIRE_LEN,
             ),
             longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
@@ -3501,6 +3586,7 @@ impl WindowRequest {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
             Self::CreateTool { .. } => CREATE_TOOL_WIRE_LEN,
+            Self::CreateDialog { .. } => CREATE_DIALOG_WIRE_LEN,
             Self::Present { ref damage, .. } => PRESENT_WIRE_LEN + damage.len() * PRESENT_RECT_LEN,
             Self::Close { .. }
             | Self::TakePickedName { .. }
@@ -3624,6 +3710,7 @@ impl WindowRequest {
             Self::Create { .. } => OP_CREATE,
             Self::CreatePopup { .. } => OP_CREATE_POPUP,
             Self::CreateTool { .. } => OP_CREATE_TOOL,
+            Self::CreateDialog { .. } => OP_CREATE_DIALOG,
             Self::Present { .. } => OP_PRESENT,
             Self::Close { .. } => OP_CLOSE,
             Self::PickFile { .. } => OP_PICK_FILE,
@@ -3735,6 +3822,30 @@ impl WindowRequest {
             Self::Create { .. } => self.write_create_operands(out),
             Self::CreatePopup { .. } | Self::CreateTool { .. } => {
                 self.write_transient_operands(out);
+            }
+            Self::CreateDialog {
+                owner_window_id,
+                shm_handle,
+                event_endpoint,
+                frame_count,
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                modality,
+                title,
+            } => {
+                let layout = FrameLayout {
+                    frame_count,
+                    width_px,
+                    height_px,
+                    stride_bytes,
+                    format,
+                };
+                write_surface_operands(out, shm_handle, event_endpoint, &layout);
+                put_u64(out, DIALOG_OWNER_OFFSET, owner_window_id);
+                out[DIALOG_MODALITY_OFFSET] = modality.wire();
+                encode_title(out, DIALOG_TITLE_LEN_OFFSET, &title);
             }
             Self::Resize { .. } => self.write_resize_operands(out),
             Self::Present { .. } => self.write_present_operands(out),
@@ -4065,6 +4176,7 @@ impl WindowRequest {
             OP_CREATE => read_create(bytes),
             OP_CREATE_POPUP => read_create_popup(bytes),
             OP_CREATE_TOOL => read_create_tool(bytes),
+            OP_CREATE_DIALOG => read_create_dialog(bytes),
             OP_PRESENT => read_present(bytes),
             OP_CLOSE => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
@@ -5083,6 +5195,31 @@ fn read_create_tool(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         offset_y,
         carry,
         title: decode_title(bytes, TOOL_TITLE_LEN_OFFSET)?,
+    })
+}
+
+/// Decode the operands of a [`WindowRequest::CreateDialog`]: the shared
+/// surface prologue and frame layout, failing closed as `Create` does, then a
+/// non-zero owner, a modality in the closed set, and the title.
+fn read_create_dialog(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, CREATE_DIALOG_WIRE_LEN)?;
+    let shm_handle = read_u64(bytes, 8);
+    let event_endpoint = read_u64(bytes, 16);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    let layout = read_frame_layout(bytes)?;
+    Ok(WindowRequest::CreateDialog {
+        owner_window_id: nonzero_id(read_u64(bytes, DIALOG_OWNER_OFFSET))?,
+        shm_handle,
+        event_endpoint,
+        frame_count: layout.frame_count,
+        width_px: layout.width_px,
+        height_px: layout.height_px,
+        stride_bytes: layout.stride_bytes,
+        format: layout.format,
+        modality: DialogModality::from_wire(bytes[DIALOG_MODALITY_OFFSET])?,
+        title: decode_title(bytes, DIALOG_TITLE_LEN_OFFSET)?,
     })
 }
 
@@ -8572,12 +8709,29 @@ mod tests {
         });
     }
 
+    fn sample_create_dialog(modality: super::DialogModality) -> WindowRequest {
+        WindowRequest::CreateDialog {
+            owner_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 2,
+            width_px: 420,
+            height_px: 180,
+            stride_bytes: 1680,
+            format: DisplayFormat::Bgra8888,
+            modality,
+            title: WindowTitle::new("Go to Line").expect("a title"),
+        }
+    }
+
     /// Visit one of every operation that opens a window or a transient.
     fn each_opening_request(visit: &mut impl FnMut(WindowRequest)) {
         visit(sample_create());
         visit(sample_create_popup());
         visit(sample_create_tool(None));
         visit(sample_create_tool(Some(179)));
+        visit(sample_create_dialog(super::DialogModality::Modeless));
+        visit(sample_create_dialog(super::DialogModality::OwnerModal));
     }
 
     /// Visit one of every operation the request codec encodes, including the
@@ -11110,6 +11264,56 @@ mod tests {
             -12
         );
         assert_eq!(WindowRequest::from_bytes(&bytes), Ok(request));
+    }
+
+    #[test]
+    fn a_dialog_round_trips_either_modality() {
+        for modality in [
+            super::DialogModality::Modeless,
+            super::DialogModality::OwnerModal,
+        ] {
+            let request = sample_create_dialog(modality);
+            let frame = request.frame();
+            assert_eq!(frame.len(), super::CREATE_DIALOG_WIRE_LEN);
+            assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+        }
+    }
+
+    #[test]
+    fn a_dialog_refuses_a_reserved_endpoint_no_owner_a_bad_modality_or_title() {
+        let base = sample_create_dialog(super::DialogModality::OwnerModal);
+        let refused = |edit: &dyn Fn(&mut [u8])| {
+            let mut frame = base.frame();
+            edit(&mut frame);
+            WindowRequest::from_bytes(&frame)
+        };
+        assert_eq!(
+            refused(&|frame| frame[16..24].copy_from_slice(&SEATMGR_ENDPOINT.to_le_bytes())),
+            Err(Errno::OutOfRange),
+            "a reserved endpoint"
+        );
+        assert_eq!(
+            refused(&|frame| frame[28..32].copy_from_slice(&0u32.to_le_bytes())),
+            Err(Errno::LengthOutOfRange),
+            "a zero extent"
+        );
+        let owner = super::DIALOG_OWNER_OFFSET;
+        assert_eq!(
+            refused(&|frame| frame[owner..owner + 8].copy_from_slice(&0u64.to_le_bytes())),
+            Err(Errno::OutOfRange),
+            "no owner"
+        );
+        assert_eq!(
+            refused(&|frame| frame[super::DIALOG_MODALITY_OFFSET] = 2),
+            Err(Errno::OutOfRange),
+            "a modality outside the set"
+        );
+        let title = super::DIALOG_TITLE_LEN_OFFSET;
+        assert_eq!(
+            refused(&|frame| frame[title] = u8::try_from(WINDOW_TITLE_MAX + 1).expect("a byte")),
+            Err(Errno::LengthOutOfRange),
+            "an over-long title"
+        );
     }
 
     #[test]

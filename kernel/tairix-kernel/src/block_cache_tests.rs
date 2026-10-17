@@ -155,7 +155,9 @@ impl MemDisk {
 
 impl Block for MemDisk {
     fn medium(&self) -> Option<BlkMedium> {
-        Some(BlkMedium::HardDisk)
+        Some(BlkMedium::of_transport(
+            tairix_abi::blkio::BlkTransport::Ata,
+        ))
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -221,7 +223,12 @@ fn cached() -> (Rc<RefCell<Store>>, BlockCache<MemDisk>) {
 #[test]
 fn the_cache_reports_the_medium_of_the_disk_it_caches() {
     let (_store, cache) = cached();
-    assert_eq!(cache.medium(), Some(BlkMedium::HardDisk));
+    assert_eq!(
+        cache.medium(),
+        Some(BlkMedium::of_transport(
+            tairix_abi::blkio::BlkTransport::Ata
+        ))
+    );
 }
 
 /// One block of recognisable bytes.

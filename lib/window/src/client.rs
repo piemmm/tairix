@@ -13,8 +13,10 @@
 //! damage rectangle it just changed — never pixel bytes. The session
 //! reads the pixels through its own mapping of the granted region.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
@@ -42,7 +44,9 @@ use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 
-use crate::server::{LayerSpec, ToolSpec, TransientSpec, WindowSizeState, WindowSizing};
+use crate::server::{
+    DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec, WindowSizeState, WindowSizing,
+};
 
 /// An open target an application pulled, owned rather than borrowed from the
 /// reply buffer so the pull can be drained in a loop.
@@ -590,13 +594,15 @@ const fn key_modifiers(modifiers: WireModifiers) -> Modifiers {
 /// governs how much the kernel buffers, not what an app may miss.
 pub const EVENT_MAILBOX_CAPACITY: usize = 32;
 
-/// The one call the client issues: send one request frame, receive one
-/// reply frame — the `ipc_call` syscall behind a seam, so the client is
-/// host-testable.
+/// The calls the client makes of the window endpoint — `ipc_call` and its
+/// posted halves behind a seam, so the client is host-testable.
+///
+/// The endpoint serves one client's requests in the order they reach it,
+/// posted or called, so a posted request is served before any call made after
+/// it.
 pub trait WindowTransport {
-    /// Issue one synchronous call to the window endpoint.
-    ///
-    /// Returns the reply length written into `reply`.
+    /// Issue one call and wait for its reply, returning the reply length
+    /// written into `reply`.
     ///
     /// # Errors
     ///
@@ -604,6 +610,133 @@ pub trait WindowTransport {
     /// session); the caller treats a transport failure exactly like a
     /// refused request.
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Post one request without waiting for its reply, returning the ticket
+    /// the reply is reaped by.
+    ///
+    /// # Errors
+    ///
+    /// As [`call`](Self::call), and the endpoint already holding as many
+    /// requests as it takes.
+    fn post(&mut self, request: &[u8]) -> Result<u64, Errno>;
+
+    /// The reply to the request posted as `ticket`, its length written into
+    /// `reply`, or `None` while it is still owed. A reaped reply is retired.
+    ///
+    /// # Errors
+    ///
+    /// As [`call`](Self::call).
+    fn reap(&mut self, ticket: u64, reply: &mut [u8]) -> Result<Option<usize>, Errno>;
+}
+
+/// A request the client posts rather than waits on. Each is made as input
+/// moves, so awaiting each would hand the application the desktop's frame
+/// time per pointer sample.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PostedRequest {
+    /// [`WindowClient::resize`].
+    Resize,
+    /// [`WindowClient::set_cursor`].
+    Cursor,
+    /// [`WindowClient::set_tooltip`].
+    Tooltip,
+    /// [`WindowClient::drag_verdict`].
+    DragVerdict,
+    /// [`WindowClient::set_title`].
+    Title,
+    /// [`WindowClient::set_sizing`].
+    Sizing,
+}
+
+impl PostedRequest {
+    const fn what(self) -> &'static str {
+        match self {
+            Self::Resize => "a resize",
+            Self::Cursor => "a pointer shape",
+            Self::Tooltip => "a tooltip",
+            Self::DragVerdict => "a drop answer",
+            Self::Title => "a title",
+            Self::Sizing => "a resize range",
+        }
+    }
+}
+
+/// A posted request the session refused, handed to the application once its
+/// answer is reaped ([`EventError::Refused`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Refused {
+    /// The window it was for.
+    pub window_id: u64,
+    /// What it asked.
+    pub request: PostedRequest,
+    /// The answer.
+    pub errno: Errno,
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            out,
+            "the desktop refused {} ({})",
+            self.request.what(),
+            self.errno
+        )
+    }
+}
+
+/// What one coalesced request asks, its window apart: no more than each
+/// kind carries, so holding the newest costs a few bytes rather than a whole
+/// request frame.
+#[derive(Copy, Clone, Debug)]
+enum Asked {
+    Cursor(CursorShape),
+    Tooltip(WindowRegion, TooltipText),
+    DragVerdict(u32, Option<DropOperation>),
+    Title(WindowTitle),
+    Sizing(WindowSizing),
+}
+
+impl Asked {
+    const fn kind(&self) -> PostedRequest {
+        match self {
+            Self::Cursor(_) => PostedRequest::Cursor,
+            Self::Tooltip(..) => PostedRequest::Tooltip,
+            Self::DragVerdict(..) => PostedRequest::DragVerdict,
+            Self::Title(_) => PostedRequest::Title,
+            Self::Sizing(_) => PostedRequest::Sizing,
+        }
+    }
+
+    const fn request(self, window_id: u64) -> WindowRequest {
+        match self {
+            Self::Cursor(shape) => WindowRequest::SetCursor { window_id, shape },
+            Self::Tooltip(region, text) => WindowRequest::SetTooltip {
+                window_id,
+                region,
+                text,
+            },
+            Self::DragVerdict(serial, verdict) => WindowRequest::DragVerdict {
+                window_id,
+                serial,
+                verdict,
+            },
+            Self::Title(title) => WindowRequest::SetTitle { window_id, title },
+            Self::Sizing(sizing) => WindowRequest::SetSizing { window_id, sizing },
+        }
+    }
+}
+
+/// A posted request awaiting its answer, and the newest of its kind asked for
+/// since, posted once that answer is in.
+#[derive(Copy, Clone, Debug)]
+struct Posting {
+    window_id: u64,
+    kind: PostedRequest,
+    ticket: u64,
+    held: Option<Asked>,
+    /// Its window was closed since: the answer is still reaped, but nobody
+    /// is told of it.
+    orphaned: bool,
 }
 
 /// What a window last presented, so the client can re-present it when
@@ -623,6 +756,14 @@ struct LastPresent {
     /// The frame index of the last accepted present, if the window has
     /// presented at all since it was created or resized.
     frame_index: Option<u32>,
+    /// The extent the session last accepted, which a refused resize leaves
+    /// the window at.
+    accepted: (u32, u32),
+    /// The newest geometry the session reported for the window.
+    reported: Option<(u32, u32, WindowSizeState)>,
+    /// A resize was asked while another was unanswered; the reported
+    /// geometry is owed back once that one is.
+    deferred: bool,
 }
 
 /// A typed handle on the desktop session's window service.
@@ -650,6 +791,15 @@ pub struct WindowClient<T: WindowTransport> {
     /// The serving session's attested identity, as the last reply that
     /// carried it stated. `None` until one has.
     session: Option<ProcId>,
+    /// The requests posted and not yet answered: at most one a kind per
+    /// window, so a burst of pointer samples has one in flight.
+    posted: Vec<Posting>,
+    /// Refusals reaped and not yet handed to the application.
+    refused: VecDeque<Refused>,
+    /// Geometry the application is owed again: a resize it asked while
+    /// another was unanswered, now free to go, or the size the session kept
+    /// on refusing one.
+    owed: VecDeque<WindowEvent>,
 }
 
 impl<T: WindowTransport> WindowClient<T> {
@@ -661,6 +811,9 @@ impl<T: WindowTransport> WindowClient<T> {
             frame: [0; WindowRequest::MAX_WIRE_LEN],
             pull_reply: [0; PULL_REPLY_MAX],
             session: None,
+            posted: Vec::new(),
+            refused: VecDeque::new(),
+            owed: VecDeque::new(),
         }
     }
 
@@ -755,24 +908,21 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * The session's typed refusal (a foreign or unknown parent, the
     ///   per-client window budget reached), a transport failure, or a
     ///   corrupt reply (fail closed, never a guessed id).
-    pub fn create_popup(&mut self, spec: &TransientSpec) -> Result<(u64, ProcId), Errno> {
+    pub fn create_popup(&mut self, spec: &PopupSpec) -> Result<(u64, ProcId), Errno> {
+        let transient = &spec.transient;
         let request = WindowRequest::CreatePopup {
-            parent_window_id: spec.parent_window_id,
-            shm_handle: spec.shm_handle,
-            event_endpoint: spec.event_endpoint,
-            frame_count: spec.frame_count,
-            width_px: spec.surface.width_px,
-            height_px: spec.surface.height_px,
-            stride_bytes: spec.surface.stride_bytes,
-            format: spec.surface.format,
+            parent_window_id: transient.parent_window_id,
+            shm_handle: transient.shm_handle,
+            event_endpoint: transient.event_endpoint,
+            frame_count: transient.frame_count,
+            width_px: transient.surface.width_px,
+            height_px: transient.surface.height_px,
+            stride_bytes: transient.surface.stride_bytes,
+            format: transient.surface.format,
             offset_x: spec.offset_x,
             offset_y: spec.offset_y,
         };
-        let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
-        let (window_id, server) = decode_create_reply(&reply[..len])?;
-        self.note_extent(window_id, spec.surface.width_px, spec.surface.height_px);
-        Ok((window_id, server))
+        self.create_transient(&request, transient)
     }
 
     /// Open a tool window: a floating palette hung from this app's own
@@ -807,13 +957,62 @@ impl<T: WindowTransport> WindowClient<T> {
             height_px: transient.surface.height_px,
             stride_bytes: transient.surface.stride_bytes,
             format: transient.surface.format,
-            offset_x: transient.offset_x,
-            offset_y: transient.offset_y,
+            offset_x: spec.offset_x,
+            offset_y: spec.offset_y,
             carry: spec.carry,
             title: spec.title,
         };
+        self.create_transient(&request, transient)
+    }
+
+    /// Open a dialog window: a form, a question or an operation's progress,
+    /// drawn by this app and owned by its own top-level window
+    /// `spec.transient.parent_window_id`.
+    ///
+    /// The session frames it as a dialog whose band names this application by
+    /// its attested identity before `spec.title`, centres it over its owner
+    /// and keeps it on screen, and stacks, hides and closes it with its owner,
+    /// off the taskbar. It takes the keyboard only where this app has earned
+    /// the front, and ignores presses until it has been seen a moment. An
+    /// [`OwnerModal`](tairix_abi::window_ipc::DialogModality::OwnerModal)
+    /// dialog holds its owner as an alert does; a modeless one holds nothing. The extent is this app's to size
+    /// to its content: one past the screen is fitted to it and told so with a
+    /// [`WindowEvent::Resized`]. The reply is the same shape as
+    /// [`Self::create`]'s.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::OutOfRange`] / [`Errno::LengthOutOfRange`] — a geometry or a
+    ///   reserved event endpoint the protocol refuses, caught before any call.
+    /// * The session's typed refusal (a foreign or unknown owner,
+    ///   [`Errno::NotSupported`] for an owner that is itself a transient, the
+    ///   window budget reached), a transport failure, or a corrupt reply.
+    pub fn create_dialog(&mut self, spec: &DialogSpec) -> Result<(u64, ProcId), Errno> {
+        let transient = &spec.transient;
+        let request = WindowRequest::CreateDialog {
+            owner_window_id: transient.parent_window_id,
+            shm_handle: transient.shm_handle,
+            event_endpoint: transient.event_endpoint,
+            frame_count: transient.frame_count,
+            width_px: transient.surface.width_px,
+            height_px: transient.surface.height_px,
+            stride_bytes: transient.surface.stride_bytes,
+            format: transient.surface.format,
+            modality: spec.modality,
+            title: spec.title,
+        };
+        self.create_transient(&request, transient)
+    }
+
+    /// Send the transient create `request` describes as `transient`, and note
+    /// the extent the window it answers with opened at.
+    fn create_transient(
+        &mut self,
+        request: &WindowRequest,
+        transient: &TransientSpec,
+    ) -> Result<(u64, ProcId), Errno> {
         let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
-        let len = self.call(&request, &mut reply)?;
+        let len = self.call(request, &mut reply)?;
         let (window_id, server) = decode_create_reply(&reply[..len])?;
         let surface = &transient.surface;
         self.note_extent(window_id, surface.width_px, surface.height_px);
@@ -1002,9 +1201,16 @@ impl<T: WindowTransport> WindowClient<T> {
     pub fn close(&mut self, window_id: u64) -> Result<(), Errno> {
         let closed = self.status_call(&WindowRequest::Close { window_id });
         // Forget it either way: a window the session does not know is
-        // certainly not one to keep re-presenting.
+        // certainly not one to keep re-presenting, nor to post to. What it
+        // has in flight is still reaped, unreported.
         self.presented
             .retain(|record| record.window_id != window_id);
+        for posting in &mut self.posted {
+            if posting.window_id == window_id {
+                posting.held = None;
+                posting.orphaned = true;
+            }
+        }
         closed
     }
 
@@ -1032,6 +1238,9 @@ impl<T: WindowTransport> WindowClient<T> {
         frame_count: u32,
         surface: &DisplayMode,
     ) -> Result<(), Errno> {
+        if self.resize_in_flight(window_id) {
+            return Err(Errno::WouldBlock);
+        }
         let request = WindowRequest::Resize {
             window_id,
             shm_handle,
@@ -1041,11 +1250,37 @@ impl<T: WindowTransport> WindowClient<T> {
             stride_bytes: surface.stride_bytes,
             format: surface.format,
         };
-        self.status_call(&request)?;
+        let ticket = self.post(&request)?;
+        self.posted.push(Posting {
+            window_id,
+            kind: PostedRequest::Resize,
+            ticket,
+            held: None,
+            orphaned: false,
+        });
         // The old frames describe the old extent, so the remembered
         // present is stale until the app paints the new size.
         self.note_extent(window_id, surface.width_px, surface.height_px);
         Ok(())
+    }
+
+    /// Whether a resize of `window_id` is still unanswered once every answer
+    /// that has landed is taken in. While one is, no other is sent: the
+    /// window's newest reported geometry is delivered again as a
+    /// [`WindowEvent::Resized`] once it is answered, so a caller asks this
+    /// before making a region it could not yet hand over.
+    pub fn resize_in_flight(&mut self, window_id: u64) -> bool {
+        self.reap_posted();
+        let in_flight = self
+            .posted
+            .iter()
+            .any(|posting| posting.window_id == window_id && posting.kind == PostedRequest::Resize);
+        if in_flight {
+            if let Some(record) = self.record_mut(window_id) {
+                record.deferred = true;
+            }
+        }
+        in_flight
     }
 
     /// The bytes of `frames` for window `window_id`, re-attaching the region
@@ -1097,7 +1332,7 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * A transport failure, or a corrupt status frame.
     pub fn set_title(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
         let title = WindowTitle::new(title)?;
-        self.status_call(&WindowRequest::SetTitle { window_id, title })
+        self.post_or_hold(window_id, Asked::Title(title))
     }
 
     /// Restate the range the window manager may resize window `window_id`
@@ -1121,7 +1356,7 @@ impl<T: WindowTransport> WindowClient<T> {
     ///   window is resizable at all.
     /// * A transport failure, or a corrupt status frame.
     pub fn set_sizing(&mut self, window_id: u64, sizing: WindowSizing) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SetSizing { window_id, sizing })
+        self.post_or_hold(window_id, Asked::Sizing(sizing))
     }
 
     /// Ask for window `window_id` to be put into `state` — the app's half
@@ -1201,11 +1436,7 @@ impl<T: WindowTransport> WindowClient<T> {
         serial: u32,
         verdict: Option<DropOperation>,
     ) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::DragVerdict {
-            window_id,
-            serial,
-            verdict,
-        })
+        self.post_or_hold(window_id, Asked::DragVerdict(serial, verdict))
     }
 
     /// The desktop folder the drag report numbered `serial` named, for the
@@ -1615,11 +1846,7 @@ impl<T: WindowTransport> WindowClient<T> {
         region: WindowRegion,
         text: TooltipText,
     ) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SetTooltip {
-            window_id,
-            region,
-            text,
-        })
+        self.post_or_hold(window_id, Asked::Tooltip(region, text))
     }
 
     /// Show `shape` for the pointer over the client area of this client's
@@ -1629,7 +1856,7 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// The session's refusal: `NotFound` for a window not this client's.
     pub fn set_cursor(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::SetCursor { window_id, shape })
+        self.post_or_hold(window_id, Asked::Cursor(shape))
     }
 
     /// Raise this client's own window `window_id` and give it the keyboard,
@@ -1774,7 +2001,8 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 
     /// Remember `window_id`'s client extent, discarding any frame index
-    /// recorded against a previous extent.
+    /// recorded against a previous extent. A window first recorded here was
+    /// just created at it, so the session has accepted it.
     fn note_extent(&mut self, window_id: u64, width_px: u32, height_px: u32) {
         if let Some(record) = self.record_mut(window_id) {
             record.width_px = width_px;
@@ -1787,7 +2015,160 @@ impl<T: WindowTransport> WindowClient<T> {
             width_px,
             height_px,
             frame_index: None,
+            accepted: (width_px, height_px),
+            reported: None,
+            deferred: false,
         });
+    }
+
+    /// Note the geometry the session reported for a window in `event`.
+    fn note_reported(&mut self, event: &WindowEvent) {
+        if let WindowEvent::Resized {
+            window_id,
+            width_px,
+            height_px,
+            state,
+        } = *event
+        {
+            if let Some(record) = self.record_mut(window_id) {
+                record.reported = Some((width_px, height_px, state));
+            }
+        }
+    }
+
+    /// Post `asked` for `window_id`, or, while one of its kind is
+    /// unanswered, hold it as the newest wanted, replacing any held before.
+    fn post_or_hold(&mut self, window_id: u64, asked: Asked) -> Result<(), Errno> {
+        self.reap_posted();
+        let kind = asked.kind();
+        // Encoded first, so what the wire cannot carry is refused now rather
+        // than when a held request is posted.
+        let len = asked.request(window_id).encode(&mut self.frame)?;
+        if let Some(posting) = self
+            .posted
+            .iter_mut()
+            .find(|posting| posting.window_id == window_id && posting.kind == kind)
+        {
+            posting.held = Some(asked);
+            return Ok(());
+        }
+        let ticket = self.transport.post(&self.frame[..len])?;
+        self.posted.push(Posting {
+            window_id,
+            kind,
+            ticket,
+            held: None,
+            orphaned: false,
+        });
+        Ok(())
+    }
+
+    /// Take in every posted request's answer that has landed, never waiting:
+    /// a refusal is kept for the application, a resize settles its window's
+    /// geometry, and the newest request held behind an answered one is
+    /// posted in its place.
+    pub fn reap_posted(&mut self) {
+        let mut index = 0;
+        while let Some(&posting) = self.posted.get(index) {
+            let mut reply = [0u8; WINDOW_CREATE_REPLY_LEN];
+            let answer = match self.transport.reap(posting.ticket, &mut reply) {
+                Ok(None) => {
+                    index += 1;
+                    continue;
+                }
+                Ok(Some(len)) => decode_status_reply(&reply[..len]),
+                Err(err) => Err(err),
+            };
+            self.settle(&posting, answer);
+            let next = posting
+                .held
+                .map(|held| self.post(&held.request(posting.window_id)));
+            match next {
+                Some(Ok(ticket)) => {
+                    self.posted[index] = Posting {
+                        ticket,
+                        held: None,
+                        ..posting
+                    };
+                    index += 1;
+                }
+                Some(Err(errno)) => {
+                    self.refuse(&posting, errno);
+                    self.posted.remove(index);
+                }
+                None => {
+                    self.posted.remove(index);
+                }
+            }
+        }
+    }
+
+    /// Act on `answer` to `posting`.
+    fn settle(&mut self, posting: &Posting, answer: Result<(), Errno>) {
+        if let Err(errno) = answer {
+            self.refuse(posting, errno);
+        }
+        if posting.kind != PostedRequest::Resize || posting.orphaned {
+            return;
+        }
+        let Some(record) = self.record_mut(posting.window_id) else {
+            return;
+        };
+        let state = record
+            .reported
+            .map_or_else(WindowSizeState::default, |(.., state)| state);
+        let owed = if answer.is_ok() {
+            record.accepted = (record.width_px, record.height_px);
+            None
+        } else {
+            (record.width_px, record.height_px) = record.accepted;
+            record.frame_index = None;
+            Some((record.accepted.0, record.accepted.1, state))
+        };
+        let owed = if core::mem::take(&mut record.deferred) {
+            record.reported
+        } else {
+            owed
+        };
+        if let Some((width_px, height_px, state)) = owed {
+            self.owed.push_back(WindowEvent::Resized {
+                window_id: posting.window_id,
+                width_px,
+                height_px,
+                state,
+            });
+        }
+    }
+
+    /// Keep `errno` for the application as the answer to `posting`, unless
+    /// its window was closed since.
+    fn refuse(&mut self, posting: &Posting, errno: Errno) {
+        if !posting.orphaned {
+            self.refused.push_back(Refused {
+                window_id: posting.window_id,
+                request: posting.kind,
+                errno,
+            });
+        }
+    }
+
+    /// What the client owes the application before its next delivered
+    /// event: a refusal, then geometry to lay out again.
+    pub(crate) fn take_owed(&mut self) -> Option<Result<WindowEvent, Refused>> {
+        self.reap_posted();
+        if let Some(refused) = self.refused.pop_front() {
+            return Some(Err(refused));
+        }
+        self.owed.pop_front().map(Ok)
+    }
+
+    /// Encode `request` and post it, answering its ticket.
+    fn post(&mut self, request: &WindowRequest) -> Result<u64, Errno> {
+        let Self {
+            transport, frame, ..
+        } = self;
+        let len = request.encode(frame)?;
+        transport.post(&frame[..len])
     }
 
     /// The mutable record for `window_id`, if this client owns it.
@@ -1914,6 +2295,10 @@ pub enum EventError {
     /// The mailbox itself failed — the endpoint torn down, the session gone.
     /// It will fail the same way again; the app treats the channel as ended.
     Mailbox(Errno),
+    /// The session refused a request the client posted. The application
+    /// reports it as it would a refused call, and the stream goes on; a
+    /// refused resize is followed by the size the session kept.
+    Refused(Refused),
 }
 
 /// What a [`park`](EventSource::park) woke for.
@@ -1974,6 +2359,11 @@ impl<S: EventDrain> WindowEvents<S> {
         &mut self,
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, EventError> {
+        match client.take_owed() {
+            Some(Ok(event)) => return Ok(Some(event)),
+            Some(Err(refused)) => return Err(EventError::Refused(refused)),
+            None => {}
+        }
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         if let Some(held) = self.read_ahead.take() {
             frame = held;
@@ -2051,6 +2441,11 @@ impl<S: EventSource> WindowEvents<S> {
         &mut self,
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, EventError> {
+        match client.take_owed() {
+            Some(Ok(event)) => return Ok(Some(event)),
+            Some(Err(refused)) => return Err(EventError::Refused(refused)),
+            None => {}
+        }
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         if let Some(held) = self.read_ahead.take() {
             frame = held;
@@ -2084,5 +2479,6 @@ fn decode_delivered<T: WindowTransport>(
     if let WindowEvent::RedrawRequested { window_id } = event {
         let _ = client.answer_redraw(window_id);
     }
+    client.note_reported(&event);
     Ok(event)
 }

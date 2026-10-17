@@ -6,11 +6,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::hwtree::{HwMatchKind, HwNode};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
 use tairix_devids::DevIds;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{hwtree, Transport};
+use tairix_procinfo::{hwtree, write_medium_facts, Transport};
 
 use crate::command::{Command, Options};
 use crate::error::LsusbError;
@@ -47,10 +48,17 @@ struct Device {
     vendor: u16,
     /// The device's product id (shared by all its interfaces).
     product: u16,
-    /// Each interface's 24-bit class triple
-    /// `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`,
-    /// in stable bus order.
-    interfaces: Vec<u32>,
+    /// The device's interfaces, in stable bus order.
+    interfaces: Vec<Interface>,
+}
+
+/// One interface of a [`Device`].
+struct Interface {
+    /// Its 24-bit class triple
+    /// `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`.
+    class24: u32,
+    /// Its hardware-tree node id, the parent of any unit its driver published.
+    node: u32,
 }
 
 /// Group the tree's USB interface nodes into physical devices, in stable
@@ -76,7 +84,10 @@ fn group_devices(nodes: &[HwNode], order: &[usize]) -> Vec<Device> {
                 .iter_mut()
                 .find(|d| d.controller == controller && d.address == node.address())
             {
-                device.interfaces.push(key.class());
+                device.interfaces.push(Interface {
+                    class24: key.class(),
+                    node: node.id(),
+                });
                 continue;
             }
         }
@@ -94,7 +105,10 @@ fn group_devices(nodes: &[HwNode], order: &[usize]) -> Vec<Device> {
             number,
             vendor: key.vendor(),
             product: key.product(),
-            interfaces: alloc::vec![key.class()],
+            interfaces: alloc::vec![Interface {
+                class24: key.class(),
+                node: node.id(),
+            }],
         });
     }
     devices
@@ -141,6 +155,7 @@ pub fn run(
     let nodes = hwtree::fetch_tree(transport).map_err(LsusbError::from)?;
     let order = hwtree::bus_order(&nodes);
     let devices = group_devices(&nodes, &order);
+    let media = unit_media(&nodes);
 
     let mut unnamed = 0u64;
     if options.tree {
@@ -152,8 +167,9 @@ pub fn run(
             line.push('\n');
             out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
             if options.verbose {
-                for &class24 in &device.interfaces {
-                    render_class(class24, database, 1, out)?;
+                for interface in &device.interfaces {
+                    render_class(interface.class24, database, 1, out)?;
+                    render_media(interface.node, &media, out)?;
                 }
             }
         }
@@ -262,6 +278,27 @@ fn render_class(
     Ok(())
 }
 
+/// Each storage unit's medium, keyed by the interface node its driver
+/// published the unit under.
+fn unit_media(nodes: &[HwNode]) -> Vec<(u32, BlkMedium)> {
+    nodes
+        .iter()
+        .filter_map(|node| Some((node.parent(), node.block_medium()?)))
+        .collect()
+}
+
+/// Render the medium of each unit published under interface `node`.
+fn render_media(node: u32, media: &[(u32, BlkMedium)], out: &dyn Output) -> Result<(), LsusbError> {
+    for (_, medium) in media.iter().filter(|(parent, _)| *parent == node) {
+        let mut line = String::from("  Medium: ");
+        // `write!` to a `String` cannot fail.
+        let _ = write_medium_facts(*medium, &mut line);
+        line.push('\n');
+        out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
+    }
+    Ok(())
+}
+
 /// Render the `-t` topology view: each bus (controller), the devices on
 /// it, and each device's interfaces — the USB topology only, never the
 /// non-USB ancestors above the controller.
@@ -291,7 +328,7 @@ fn render_tree(
         push_identity(&mut line, device, database, unnamed);
         line.push('\n');
         out.write_all(line.as_bytes()).map_err(LsusbError::Output)?;
-        for &class24 in &device.interfaces {
+        for &Interface { class24, .. } in &device.interfaces {
             let class = ((class24 >> 16) & 0xFF) as u8;
             let sub = ((class24 >> 8) & 0xFF) as u8;
             let protocol = (class24 & 0xFF) as u8;
@@ -626,6 +663,51 @@ C 03  Human Interface Device
                 "  bInterfaceClass 255",
                 "  bInterfaceSubClass 0",
                 "  bInterfaceProtocol 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_states_each_storage_units_medium_and_its_evidence() {
+        use tairix_abi::blkio::{BlkRemovability, BlkRotation, BlkRotationEvidence, BlkTransport};
+        use tairix_abi::hwtree::HwResource;
+
+        let mut controller = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Bus);
+        controller
+            .push_match_key(HwMatchKey::compatible(b"fixture,xhci").expect("fits"))
+            .expect("key fits");
+        let mut storage = HwNode::new(3, 2, HwDeviceClass::Storage);
+        storage
+            .push_match_key(HwMatchKey::usb(0x152d, 0x0578, 0x08_06_50))
+            .expect("key fits");
+        storage.set_address(1);
+        let mut unit = HwNode::new(4, 3, HwDeviceClass::Storage);
+        unit.push_match_key(HwMatchKey::compatible(b"tairix,usb-msd-lun").expect("fits"))
+            .expect("key fits");
+        let medium = BlkMedium::of_transport(BlkTransport::Usb)
+            .with_rotation(BlkRotation::from_rate_field(
+                7200,
+                BlkRotationEvidence::RotationRateVpd,
+            ))
+            .with_removability(BlkRemovability::from_rmb(true));
+        unit.push_resource(HwResource::block_medium(medium))
+            .expect("resource fits");
+        let nodes = [controller, storage, unit];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&HwTreeHeader::new(1, nodes.len() as u64).to_le_bytes());
+        for node in nodes {
+            bytes.extend_from_slice(&node.to_le_bytes());
+        }
+        let (out, result) = run_case(&["-v"], Ok(bytes), false);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines(),
+            [
+                "Bus 001 Device 001: ID 152d:0578",
+                "  bInterfaceClass 8",
+                "  bInterfaceSubClass 6",
+                "  bInterfaceProtocol 80",
+                "  Medium: USB; rotating, 7200 rpm (rotation-rate VPD); removable (INQUIRY)",
             ]
         );
     }

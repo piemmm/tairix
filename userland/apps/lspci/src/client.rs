@@ -11,7 +11,7 @@ use tairix_abi::hwtree::{HwMatchKind, HwNode, HwProperty, HwResource, HwResource
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_devids::DevIds;
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{hwtree, Transport};
+use tairix_procinfo::{hwtree, write_medium_facts, Transport};
 
 use crate::command::{Command, NameMode, Options};
 use crate::error::LspciError;
@@ -469,6 +469,15 @@ fn describe_property(resource: &HwResource, line: &mut String) {
         }
         Ok((HwProperty::BootConsole, _)) => {
             line.push_str("Takes the boot console's screen over");
+        }
+        Ok((HwProperty::BlockMedium, value)) => {
+            match tairix_abi::blkio::BlkMedium::decode(&value.to_le_bytes()) {
+                Some(medium) => {
+                    line.push_str("Medium: ");
+                    let _ = write_medium_facts(medium, line);
+                }
+                None => line.push_str("Medium (malformed)"),
+            }
         }
         Err(_) => line.push_str("Property (malformed)"),
     }

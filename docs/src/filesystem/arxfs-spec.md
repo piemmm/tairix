@@ -1864,9 +1864,11 @@ the write-then-close workloads are exactly the ones batching exists for. The
 offline `rescue` opens its own read-only handle, so it has no transaction to
 close.
 
-The **window** is one policy function over the device class the block seam
-reports: 30 s removable, 15 s rotational, 5 s solid-state and paravirtual. It
-buys device commands with recency — operations inside it fold into one commit,
+The **window** is one policy function over what one command to the device
+costs, read from the medium the block seam reports (`BlkCommandCost`): 30 s for
+a unit behind a USB bridge or an SD card protocol, whatever its medium; 15 s
+for a disk that seeks, or one not known not to; 5 s for a non-rotating medium
+on a direct bus or a paravirtual device. It buys device commands with recency — operations inside it fold into one commit,
 one transaction root, one superblock slot, one barrier, and one write of each
 metadata block they all rewrite — so it is widest where a command is dearest and
 smallest where one is already cheap. Nothing tunes it per volume.

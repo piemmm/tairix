@@ -18,7 +18,7 @@ use tairix_hid::{pump_error_limit_reached, transport_error, Decoded, SeatSink};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 use tairix_usb::device::INT_TRANSFER_MAX;
-use tairix_usb::transport::{UrbCall, UrbClient, UrbLink};
+use tairix_usb::transport::{UrbCall, UrbClient, UrbLink, CONTROL_BUDGET_MAX};
 use tairix_util::fmt::{format_hex_bytes, format_hex_u64};
 
 /// The interface is up and its reports are being served.
@@ -49,20 +49,22 @@ impl UrbCall for IpcUrbCall {
     }
 }
 
-/// The interface's control transfers, over its URB link.
+/// The interface's control transfers, over its URB link. Each may take the
+/// whole protocol bound: a report a device must accept or produce is allowed
+/// it (USB 2.0 §9.2.6.4).
 struct Link(UrbLink<'static, IpcUrbCall>);
 
 impl HidLink for Link {
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, Errno> {
-        self.0.control_in(setup, data)
+        self.0.control_in(setup, data, CONTROL_BUDGET_MAX)
     }
 
     fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), Errno> {
-        self.0.control_out(setup, data)
+        self.0.control_out(setup, data, CONTROL_BUDGET_MAX)
     }
 
     fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
-        self.0.control_no_data(setup)
+        self.0.control_no_data(setup, CONTROL_BUDGET_MAX)
     }
 }
 

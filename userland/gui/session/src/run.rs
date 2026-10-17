@@ -4656,9 +4656,10 @@ mod program {
             // the whole frame, as on the deadline path above: the animation
             // and the frame report's rate limit share it.
             let now_ns = tairix_rt::clock_get();
-            // An alert first shows in this frame, so its arm delay runs from
-            // now.
+            // An alert or a dialog's content first shows in this frame, so
+            // its arm delay runs from now.
             windows.alerts.stamp(now_ns);
+            windows.stamp_dialogs(now_ns);
             picker.stamp(now_ns);
             serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
             // A lone press of Ctrl typed this wake shows where the pointer
@@ -7183,7 +7184,7 @@ mod program {
                         .position(|group| group.owner == owner),
                 )
             };
-            let held = self.windows.alerts.holding(window_id).is_some();
+            let held = self.windows.is_held(window_id);
             DragPlace::over_window(window_id, held, under)
         }
     }
@@ -7867,20 +7868,20 @@ mod program {
             ShellOutcome::WindowManager(response) => match response {
                 InputResponse::Activated { window, local }
                 | InputResponse::SecondaryActivated { window, local }
-                    if windows.alerts.owns(window)
-                        || held_by_alert(windows, window).is_some() =>
+                    if windows.alerts.owns(window) || windows.holder_of(window).is_some() =>
                 {
-                    // An alert takes the press, and so does the window it
-                    // holds: that press hands the keyboard to the alert and
-                    // reaches no application.
+                    // An alert takes the press, and so does a window an alert
+                    // or a dialog holds: that press hands the keyboard to its
+                    // holder and reaches no application.
                     let mut answer = None;
-                    if let Some(alert) = held_by_alert(windows, window) {
-                        shell.focus_alert_window(compositor, alert);
+                    if let Some(holder) = windows.holder_of(window) {
+                        shell.focus_holder(compositor, holder);
                     } else if matches!(response, InputResponse::Activated { .. }) {
                         answer = windows.alerts.click(
                             window,
                             local,
                             tairix_rt::clock_get(),
+                            &mut windows.holds,
                             shell,
                             compositor,
                         );
@@ -8079,6 +8080,7 @@ mod program {
                             window,
                             &record,
                             tairix_rt::clock_get(),
+                            &mut windows.holds,
                             shell,
                             compositor,
                         ) {
@@ -9633,7 +9635,10 @@ mod program {
             return;
         };
         let title = alert_title(AlertSeverity::Error, Speaker::Desktop);
-        if !windows.alerts.notify(&spec, &title, shell, compositor) {
+        if !windows
+            .alerts
+            .notify(&spec, &title, &mut windows.holds, shell, compositor)
+        {
             app::report(APP_NAME, format_args!("no window to state a refusal in"));
         }
     }
@@ -9650,7 +9655,10 @@ mod program {
             return;
         };
         let title = alert_title(AlertSeverity::Error, Speaker::App(refusal.app()));
-        if !windows.alerts.notify(&spec, &title, shell, compositor) {
+        if !windows
+            .alerts
+            .notify(&spec, &title, &mut windows.holds, shell, compositor)
+        {
             app::report(
                 APP_NAME,
                 format_args!("no window to state a refused drop in"),
@@ -11066,16 +11074,6 @@ mod program {
         let _ = server.answer_alert(sink, answer.alert_id, answer.index, activation);
     }
 
-    /// The alert holding the served window shown as `wm`, if one does.
-    fn held_by_alert(
-        windows: &SessionWindows,
-        wm: tairix_wm::WindowId,
-    ) -> Option<tairix_wm::WindowId> {
-        windows
-            .ipc_id(wm)
-            .and_then(|window_id| windows.alerts.holding(window_id))
-    }
-
     /// Deliver one app-ward event, tearing the owner's windows down when
     /// the kernel proves the owner is gone (its event port was reclaimed,
     /// so the send finds nothing).
@@ -11097,12 +11095,9 @@ mod program {
         let Some(owner) = event.window_id().and_then(|id| server.owner_of(id)) else {
             return;
         };
-        // A window an alert holds takes no new input until it is answered.
-        if !tairix_desktop_session::alert::reaches_held_window(event)
-            && event
-                .window_id()
-                .is_some_and(|id| windows.alerts.holding(id).is_some())
-        {
+        // A held window takes no new input until its holder is gone, and a
+        // dialog no press until it has been seen.
+        if !windows.admits(event, tairix_rt::clock_get) {
             return;
         }
         if let Err(Errno::NotFound) = server.deliver_event(sink, event) {

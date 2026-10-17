@@ -405,7 +405,7 @@ impl<B: Block> DriverStoreService<B> {
 mod tests {
     use super::*;
     use crate::test_support::NullSink;
-    use tairix_abi::blkio::kernel_block_device;
+    use tairix_abi::blkio::{kernel_block_device, BlkTransport};
     use tairix_abi::driver::block::HealthSnapshot;
     use tairix_kernel_core::fs::blkmeter::MeteredBlock;
 
@@ -457,7 +457,7 @@ mod tests {
 
     impl Block for MemBlock {
         fn medium(&self) -> Option<BlkMedium> {
-            Some(BlkMedium::Nvme)
+            Some(BlkMedium::of_transport(BlkTransport::Nvme))
         }
 
         fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -700,8 +700,14 @@ mod tests {
         // budget rather than the unclassified default.
         let shared = Arc::new(SharedBlock::new(MemBlock::new()).unwrap());
         let window = shared.owned_handle();
-        assert_eq!(shared.medium(), Some(BlkMedium::Nvme));
-        assert_eq!(window.medium(), Some(BlkMedium::Nvme));
+        assert_eq!(
+            shared.medium(),
+            Some(BlkMedium::of_transport(BlkTransport::Nvme))
+        );
+        assert_eq!(
+            window.medium(),
+            Some(BlkMedium::of_transport(BlkTransport::Nvme))
+        );
         assert_eq!(window.geometry().unwrap(), shared.geometry());
     }
 

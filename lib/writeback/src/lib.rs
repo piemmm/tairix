@@ -10,7 +10,7 @@
 //!   ascending coalesced runs.
 //! * [`WritebackBound`] — the RAM-derived, pressure-governed, machine-shared
 //!   ceiling on what a volume's transaction may pin.
-//! * [`CommitScheduler`] — the dirty-age window by device class, reported to
+//! * [`CommitScheduler`] — the dirty-age window by command cost, reported to
 //!   the host's write-back timer so a quiet volume is still published.
 //! * [`RunWindow`] — the fallible staging buffer one coalesced device
 //!   transfer of at most [`RUN_BYTES`] moves through.

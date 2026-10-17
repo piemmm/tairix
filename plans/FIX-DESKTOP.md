@@ -24,7 +24,7 @@
 | DESK-18 | The font protocol is per run, not per glyph | done |
 | DESK-19 | A client's `Present` does not carry the desktop's frame work | planned |
 | DESK-20 | Settings asks for its pictures off its loop | done |
-| DESK-21 | Window-channel requests are posted, never awaited | planned |
+| DESK-21 | Window-channel requests are posted, never awaited | done |
 
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
@@ -1106,48 +1106,38 @@ Each stage is independently reviewable and must leave the whole-project
   than for those milliseconds.
 
 ### DESK-21 — Window-channel requests are posted, never awaited
-- **The witness.** On a Raspberry Pi 4 the file manager overran its 250 ms
-  budget (274 ms, 252 ms of it blocked across 40 calls) while a window was
-  resized: `route_event` → `resize_window` → `WindowPane::resize_with` →
-  `WindowClient::resize` → `ipc_call`, 34 ms in the sampled call alone. The
-  client already folds a consecutive run of `Resized` into its newest, so the
-  cost is not the number of samples: each geometry step is a round trip that
-  waits for the session's own loop to reach it, and the app inherits the
-  compositor's frame time on every step.
-- **The defect is the channel, not one request.** Every `WindowClient` request
-  is an `ipc_call`, and the ones an app issues per input event — `Resize` per
-  geometry step, `SetCursor` as the pointer moves, `SetTooltip`, `DragVerdict`
-  during a drag, `SetTitle` and `SetSizing` as content changes — each wait on
-  the session. `Present` is DESK-19's.
-- **Design.**
-  1. **The kernel already has the asynchronous half of a call.** `call_post`
-     posts with a deadline and returns a ticket, `call_reap` collects the
-     answer, and a `CallReply` wait source wakes the loop
-     (`plans/FIX-IO.md` IO1). `WindowTransport` gains post and reap, and
-     `WindowClient` posts every request whose answer the app does not need
-     before it can go on; the loop adds the reply source to the wait-set it
-     already blocks on, so no worker thread is involved.
-  2. **Order is the endpoint's.** A posted `Resize` must reach the session
-     before the `Present` of the frame painted at the new size, so the app
-     paints into the fresh surface at once. The stage proves the session
-     serves one client's calls in the order posted, or makes it so.
-  3. **A refusal is an answer, arriving later.** A reaped refusal is surfaced
-     as a typed outcome naming its request: a refused `Resize` drops the fresh
-     surface and repaints at the size the session kept; the others report as
-     they do today.
-  4. **Bounded and coalesced.** At most one request of each kind per window is
-     outstanding; a newer one is held as the latest wanted value and posted
-     when the outstanding answer is reaped, so a burst of cursor or tooltip
-     changes costs one round trip in flight, and the per-client call capacity
-     is never the back-pressure.
-  5. **What stays a call.** `Create`, `OpenMenu`, `OpenAlert` and the desktop
-     queries return something the app needs before it can go on; none is
-     issued per input event, and any that is becomes a posted request whose
-     answer is adopted when reaped.
-- **Proven by** a host test of the client over a transport that answers only
-  when told (no request blocks, order and coalescing hold, a refused resize
-  reverts), and on the Pi by a drag-resize of a file window producing no stall
-  report under `WindowClient`.
+- **What it fixed.** A Raspberry Pi 4 file manager overran its 250 ms budget
+  while a window was resized, blocked in `WindowClient::resize` →
+  `ipc_call`: every per-input request waited for the session's own loop.
+- **The posted half.** `WindowTransport` carries `post` and `reap`
+  (`call_post`/`call_reap`), and `WindowClient` posts `Resize`, `SetCursor`,
+  `SetTooltip`, `DragVerdict`, `SetTitle` and `SetSizing`. The shared binding
+  adds the window endpoint's `CallReply` source (`REPLY_TOKEN`, woken as
+  `Wake::Event`), and `WindowEvents::try_wait` reaps before it drains, so no
+  worker is involved.
+- **Order.** The kernel call endpoint is first-in first-out
+  (`CallEndpoint::recv_call` dequeues the oldest,
+  `recv_call_is_fifo_and_empty_yields_none`) and the session serves one
+  request to its reply before receiving the next, so a client's posted
+  `Resize` is served before the `Present` made after it.
+- **Refusals are answers.** A reaped refusal reaches the app as
+  `EventError::Refused`, which every app reports and carries on from. A
+  refused resize reverts the client's extent to the one the session kept and
+  delivers a `Resized` at it, which the app re-maps to.
+- **Bounded and coalesced.** One request of a kind per window is in flight; a
+  newer one is held as the latest wanted (its parameters alone, not a request
+  frame) and posted when that one is answered. A resize asked while one is
+  unanswered makes no region (`Fitted::Deferred`) and its size is delivered
+  again once that one is answered.
+- **What stays a call.** `Create`, `Present` (DESK-19's), `Close`, menus,
+  alerts and the queries: their answers are needed before the app goes on.
+- **Proven by** the `lib/window` tests over a loopback that answers posts only
+  when told: `a_posted_request_never_waits_on_the_session`,
+  `a_posted_resize_is_served_before_the_present_that_follows_it`,
+  `a_burst_of_one_kind_keeps_one_in_flight_and_ends_on_the_newest`,
+  `a_resize_asked_while_another_is_unanswered_is_delivered_again`, and the
+  rewritten refusal tests (`resize_is_refused_fail_closed` among them). The
+  Pi drag-resize witness is `plans/TEMPORARY.md` TMP-6.
 
 ### DESK-11 — The file manager's reads off its loop
 - Every unbounded read the file manager makes now runs on one reader

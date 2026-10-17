@@ -16,6 +16,9 @@ use tairix_abi::usb_urb::{IsoLayout, IsoPacket, IsoPacketStatus, UsbDirection, I
 use tairix_abi::{DriverError, RegisterBlock};
 use tairix_inline::BitSet256;
 
+use super::ops::Engine;
+use super::recover::{restart_ring, stop_endpoint};
+use super::route::Settle;
 use super::{
     bus_speed, ep_ctx_dwords, input_control_dwords, publish, Abandoned, DmaBank, Periodic,
     SlotHold, UsbDevice, CTX_DWORDS, DCI_CONTROL, DMA_CHUNK_ALIGN, EP_TYPE_ISOCH_IN,
@@ -458,15 +461,15 @@ impl Stream {
     }
 }
 
-/// What putting a refused setting back needs: whose it was, where its
-/// record sits, and the slot's endpoints either side of it.
+/// What selecting a setting needs between its commands: whose it is, where
+/// its record sits, and the slot's endpoints either side of it.
 #[derive(Copy, Clone)]
-struct Undo {
+pub(super) struct Selection {
     index: usize,
     interface: u8,
     current: Option<usize>,
     slot: u8,
-    output_ctx: usize,
+    old_mask: u32,
     added_mask: u32,
     others: u32,
 }
@@ -502,11 +505,11 @@ struct Planned {
     microframe: u64,
 }
 
-impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<H, M> {
     /// The controller's extended microframe now.
     fn bus_microframe(&mut self) -> Result<u64, DriverError> {
         let raw = self.xhci.microframe_index()?;
-        let now_us = self.wait.now_us();
+        let now_us = self.now_ns / 1_000;
         let clock = match self.bus_clock {
             Some(clock) => clock.advance(raw, now_us),
             None => BusClock::start(raw, now_us),
@@ -556,16 +559,15 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         Ok(())
     }
 
-    /// Select `alternate` on governed `interface` of the device served at
-    /// `index`: reserve the setting's isochronous endpoints with the
-    /// controller, then tell the device, putting the old setting back if it
-    /// refuses.
-    pub(super) fn set_interface(
+    /// Check `alternate` may be selected on governed `interface` of the
+    /// device served at `index`, and build the rings its isochronous
+    /// endpoints need.
+    fn prepare_setting(
         &mut self,
         index: usize,
         interface: u8,
         alternate: u8,
-    ) -> Result<(), DriverError> {
+    ) -> Result<(Selection, Vec<IsoEndpoint>), DriverError> {
         let device = self.device(index).ok_or(DriverError::NotFound)?;
         if !device.governs(interface) {
             return Err(DriverError::NotFound);
@@ -610,7 +612,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             return Err(DriverError::Busy);
         }
         let new_mask = setting.dci_mask();
-        let (slot, output_ctx) = (device.slot, device.output_ctx);
+        let slot = device.slot;
         let others = self.slot_endpoint_mask(slot) & !old_mask;
         if new_mask & others != 0 {
             return Err(DriverError::Busy);
@@ -629,38 +631,18 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
                 }
             }
         }
-        let reserved = self.configure_iso_endpoints(slot, output_ctx, old_mask, &added, others);
-        if let Err((err, hold)) = reserved {
-            self.release_iso_endpoints(&added, hold);
-            return Err(err);
-        }
-
-        match self.device_control(index, setup_set_interface(interface, alternate), &mut []) {
-            Ok(_) => {}
-            // A device with no setting but the default may refuse to be told
-            // to keep it (USB 2.0 §9.4.10).
-            Err(DriverError::EndpointStalled)
-                if alternate == 0
-                    && self.device(index).is_some_and(|device| {
-                        alternate_setting(&device.config, interface, 1)
-                            == Err(DriverError::NotFound)
-                    }) => {}
-            Err(err) => {
-                let undo = Undo {
-                    index,
-                    interface,
-                    current,
-                    slot,
-                    output_ctx,
-                    added_mask: new_mask,
-                    others,
-                };
-                self.revert_setting(undo, added);
-                return Err(err);
-            }
-        }
-        self.commit_setting(index, interface, current, added);
-        Ok(())
+        Ok((
+            Selection {
+                index,
+                interface,
+                current,
+                slot,
+                old_mask,
+                added_mask: new_mask,
+                others,
+            },
+            added,
+        ))
     }
 
     /// Lay out a fresh transfer ring for one endpoint a setting brings.
@@ -702,47 +684,12 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         }
     }
 
-    /// Configure Endpoint dropping `drop` and adding `endpoints`, the slot
-    /// keeping `kept`.
-    ///
-    /// # Errors
-    ///
-    /// The refusal, and whether the controller may still reach the added
-    /// endpoints' rings: a command that went unanswered may have taken them.
-    fn configure_iso_endpoints(
-        &mut self,
-        slot: u8,
-        output_ctx: usize,
-        drop: u32,
-        endpoints: &[IsoEndpoint],
-        kept: u32,
-    ) -> Result<(), (DriverError, SlotHold)> {
-        let input = self
-            .stage_iso_endpoints(output_ctx, drop, endpoints, kept)
-            .map_err(|err| (err, SlotHold::Released))?;
-        let event = self
-            .issue_command(Trb::new(
-                TrbType::ConfigureEndpoint,
-                input,
-                0,
-                trb::control_slot(slot),
-            ))
-            .map_err(|err| (err, SlotHold::Held))?;
-        match event.completion_code() {
-            Ok(CompletionCode::Success) => Ok(()),
-            Ok(CompletionCode::BandwidthError | CompletionCode::SecondaryBandwidthError) => {
-                Err((DriverError::NoBandwidth, SlotHold::Released))
-            }
-            _ => Err((DriverError::DeviceFault, SlotHold::Released)),
-        }
-    }
-
     /// Write the input context of a Configure Endpoint dropping `drop` and
     /// adding `endpoints`, the slot keeping `kept`, returning its address.
     /// Context Entries covers the highest endpoint left live.
     fn stage_iso_endpoints(
         &mut self,
-        output_ctx: usize,
+        slot: u8,
         drop: u32,
         endpoints: &[IsoEndpoint],
         kept: u32,
@@ -752,36 +699,27 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             .fold(0, |mask, endpoint| mask | 1 << endpoint.dci());
         let live = kept | add;
         let entries = u32::BITS - 1 - live.leading_zeros();
-        let mut slot_ctx = self.read_ctx(output_ctx)?;
+        let mut slot_ctx = self.read_ctx(self.pipe(slot)?.output_ctx)?;
         slot_ctx[0] = (slot_ctx[0] & !SLOT_CTX_CONTEXT_ENTRIES_MASK)
             | (entries << SLOT_CTX_CONTEXT_ENTRIES_SHIFT);
-        self.write_input_ctx(0, &input_control_dwords(drop, 1 | add))?;
-        self.write_input_ctx(1, &slot_ctx)?;
+        self.write_input_ctx(slot, 0, &input_control_dwords(drop, 1 | add))?;
+        self.write_input_ctx(slot, 1, &slot_ctx)?;
         for endpoint in endpoints {
-            self.write_input_ctx(1 + usize::from(endpoint.dci()), &iso_ep_ctx(endpoint))?;
+            self.write_input_ctx(slot, 1 + usize::from(endpoint.dci()), &iso_ep_ctx(endpoint))?;
         }
-        self.device_addr_of(self.layout.input_ctx)
+        self.input_ctx_addr(slot)
     }
 
-    /// Put `interface`'s setting at `current` back after the device refused
-    /// the one whose endpoints, `added`, the controller already took.
-    ///
-    /// If the controller will not take the old setting back it keeps the new
-    /// endpoints, and so does the record of them, which a later selection
-    /// replaces; a command that went unanswered keeps both sets' memory.
-    fn revert_setting(&mut self, undo: Undo, added: Vec<IsoEndpoint>) {
-        let Undo {
-            index,
-            interface,
-            current,
-            slot,
-            output_ctx,
-            added_mask,
-            others,
-        } = undo;
-        let mut previous = current
+    /// The setting `selection` replaced, its rings rebuilt for the
+    /// controller to take back.
+    fn take_previous_setting(
+        &mut self,
+        selection: &Selection,
+    ) -> Result<Vec<IsoEndpoint>, (DriverError, Vec<IsoEndpoint>)> {
+        let mut previous = selection
+            .current
             .and_then(|at| {
-                self.device_mut(index)
+                self.device_mut(selection.index)
                     .map(|device| core::mem::take(&mut device.streaming.selected[at].endpoints))
             })
             .unwrap_or_default();
@@ -789,16 +727,32 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             endpoint.ring = Some(self.build_ring(endpoint.ring_chunk, ISO_RING_TRBS)?);
             Ok(())
         });
-        let restored = match rebuilt {
-            Ok(()) => self.configure_iso_endpoints(slot, output_ctx, added_mask, &previous, others),
-            Err(err) => Err((err, SlotHold::Released)),
-        };
+        match rebuilt {
+            Ok(()) => Ok(previous),
+            Err(err) => Err((err, previous)),
+        }
+    }
+
+    /// Keep whichever setting the controller holds once a refused selection
+    /// was put back — `restored`, the old one, or else the new — giving the
+    /// other's memory back as the controller holds it.
+    fn finish_revert(
+        &mut self,
+        selection: &Selection,
+        (previous, added): (Vec<IsoEndpoint>, Vec<IsoEndpoint>),
+        restored: Result<(), (DriverError, SlotHold)>,
+    ) {
         let (keep, give_back, hold) = match restored {
             Ok(()) => (previous, added, SlotHold::Released),
             Err((_, hold)) => (added, previous, hold),
         };
         self.release_iso_endpoints(&give_back, hold);
-        self.record_setting(index, interface, current, keep);
+        self.record_setting(
+            selection.index,
+            selection.interface,
+            selection.current,
+            keep,
+        );
     }
 
     /// Record `endpoints` as `interface`'s setting at `current`, or as a new
@@ -890,7 +844,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             return Err(DriverError::DeviceFault);
         }
         if endpoint.stream.is_some() {
-            self.iso_stop(index, address)?;
+            return Err(DriverError::AlreadyExists);
         }
         let data_len = intervals
             .checked_mul(stride)
@@ -928,7 +882,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
     ) -> Result<(), DriverError> {
         // Completions already posted decide whether the ring is empty, and so
         // where the slot can go.
-        self.drain_events()?;
+        self.advance(self.now_ns)?;
         let ist = u64::from(self.xhci.ist_microframes());
         let cfc = self.xhci.contiguous_frame_ids();
         let now = self.bus_microframe()?;
@@ -1101,38 +1055,6 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         }))
     }
 
-    /// Stop the stream on `address`, discarding what it still had queued.
-    ///
-    /// Its buffers go back once the controller has stopped the endpoint; one
-    /// that does not answer keeps them. The ring is repositioned for the
-    /// next stream, or left unusable until a setting is selected afresh if
-    /// the controller will not take the new dequeue.
-    pub(super) fn iso_stop(&mut self, index: usize, address: u8) -> Result<(), DriverError> {
-        let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
-        let device_slot = device.slot;
-        let endpoint = device
-            .streaming
-            .endpoint_mut(address)
-            .ok_or(DriverError::NotFound)?;
-        let stream = endpoint.stream.take().ok_or(DriverError::NotFound)?;
-        endpoint.ring = None;
-        let (dci, ring_chunk) = (endpoint.dci(), endpoint.ring_chunk);
-        let stopped = self.stop_endpoint(device_slot, dci, Abandoned::Running);
-        if stopped.is_err() {
-            self.retire_slot_chunk(stream.data_chunk, SlotHold::Held);
-            return Err(DriverError::DeviceFault);
-        }
-        let _ = self.dma.release(stream.data_chunk);
-        let ring = self.restart_ring((device_slot, dci), ring_chunk, ISO_RING_TRBS)?;
-        if let Some(endpoint) = self
-            .device_mut(index)
-            .and_then(|device| device.streaming.endpoint_mut(address))
-        {
-            endpoint.ring = Some(ring);
-        }
-        Ok(())
-    }
-
     /// The entry and endpoint a transfer event on a selected isochronous
     /// endpoint belongs to.
     pub(super) fn iso_async_index(&self, event: Trb) -> Option<(usize, usize, usize)> {
@@ -1167,6 +1089,243 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             event.transfer_residual(),
             ring,
         );
+    }
+}
+
+/// Isochronous endpoints a selection built but has not recorded yet:
+/// dropped unrecorded — its operation ended — their memory is withheld, since
+/// the controller may have taken them.
+struct Unrecorded<'e, H: RegisterBlock, M: DmaBank> {
+    engine: &'e Engine<H, M>,
+    endpoints: Vec<IsoEndpoint>,
+}
+
+impl<H: RegisterBlock, M: DmaBank> Unrecorded<'_, H, M> {
+    fn take(&mut self) -> Vec<IsoEndpoint> {
+        core::mem::take(&mut self.endpoints)
+    }
+}
+
+impl<H: RegisterBlock, M: DmaBank> Drop for Unrecorded<'_, H, M> {
+    fn drop(&mut self) {
+        if self.endpoints.is_empty() {
+            return;
+        }
+        if let Ok(mut core) = self.engine.lock() {
+            if !core.resetting {
+                core.release_iso_endpoints(&self.endpoints, SlotHold::Held);
+            }
+        }
+    }
+}
+
+/// Select `alternate` on governed `interface` of the device served at
+/// `index`: reserve the setting's isochronous endpoints with the controller,
+/// then tell the device, putting the old setting back if it refuses.
+///
+/// # Errors
+///
+/// [`DriverError::NoBandwidth`] when the bus cannot schedule the setting,
+/// [`DriverError::NotFound`] for a setting the device lacks or an interface
+/// the device's node does not govern, [`DriverError::Busy`] while a stream
+/// runs on the interface, or the device's refusal.
+pub(super) async fn select_setting<H: RegisterBlock, M: DmaBank>(
+    engine: &Engine<H, M>,
+    index: usize,
+    interface: u8,
+    alternate: u8,
+) -> Result<(), DriverError> {
+    let (selection, added) = engine
+        .lock()?
+        .prepare_setting(index, interface, alternate)?;
+    let mut added = Unrecorded {
+        engine,
+        endpoints: added,
+    };
+    let reserved = configure_iso(
+        engine,
+        selection.slot,
+        selection.old_mask,
+        &added.endpoints,
+        selection.others,
+    )
+    .await;
+    if let Err((err, hold)) = reserved {
+        let endpoints = added.take();
+        engine.lock()?.release_iso_endpoints(&endpoints, hold);
+        return Err(err);
+    }
+    match engine
+        .control(
+            selection.slot,
+            setup_set_interface(interface, alternate),
+            &mut [],
+        )
+        .await
+    {
+        Ok(_) => {}
+        // A device with no setting but the default may refuse to be told to
+        // keep it (USB 2.0 §9.4.10).
+        Err(DriverError::EndpointStalled)
+            if alternate == 0
+                && engine.lock()?.device(index).is_some_and(|device| {
+                    alternate_setting(&device.config, interface, 1) == Err(DriverError::NotFound)
+                }) => {}
+        Err(err) => {
+            revert(engine, &selection, added.take()).await;
+            return Err(err);
+        }
+    }
+    let endpoints = added.take();
+    engine
+        .lock()?
+        .commit_setting(index, interface, selection.current, endpoints);
+    Ok(())
+}
+
+/// Put `selection`'s old setting back after the device refused the one
+/// whose endpoints, `added`, the controller already took. If the controller
+/// will not take the old setting back it keeps the new endpoints, and so
+/// does the record of them, which a later selection replaces.
+async fn revert<H: RegisterBlock, M: DmaBank>(
+    engine: &Engine<H, M>,
+    selection: &Selection,
+    added: Vec<IsoEndpoint>,
+) {
+    let mut added = Unrecorded {
+        engine,
+        endpoints: added,
+    };
+    let previous = match engine.lock() {
+        Ok(mut core) => core.take_previous_setting(selection),
+        Err(_) => return,
+    };
+    let (previous, restored) = match previous {
+        Ok(previous) => {
+            let restored = configure_iso(
+                engine,
+                selection.slot,
+                selection.added_mask,
+                &previous,
+                selection.others,
+            )
+            .await;
+            (previous, restored)
+        }
+        Err((err, previous)) => (previous, Err((err, SlotHold::Released))),
+    };
+    let added = added.take();
+    if let Ok(mut core) = engine.lock() {
+        core.finish_revert(selection, (previous, added), restored);
+    }
+}
+
+/// Configure Endpoint dropping `drop` and adding `endpoints` on `slot`, the
+/// slot keeping `kept`.
+///
+/// # Errors
+///
+/// The refusal, and whether the controller may still reach the added
+/// endpoints' rings: a command that went unanswered may have taken them.
+async fn configure_iso<H: RegisterBlock, M: DmaBank>(
+    engine: &Engine<H, M>,
+    slot: u8,
+    drop: u32,
+    endpoints: &[IsoEndpoint],
+    kept: u32,
+) -> Result<(), (DriverError, SlotHold)> {
+    let _input = engine
+        .input_context(slot)
+        .await
+        .map_err(|err| (err, SlotHold::Released))?;
+    let input = engine
+        .lock()
+        .and_then(|mut core| core.stage_iso_endpoints(slot, drop, endpoints, kept))
+        .map_err(|err| (err, SlotHold::Released))?;
+    let event = engine
+        .issue(
+            Trb::new(
+                TrbType::ConfigureEndpoint,
+                input,
+                0,
+                trb::control_slot(slot),
+            ),
+            Settle::Nothing,
+        )
+        .await
+        .map_err(|err| (err, SlotHold::Held))?;
+    match event.completion_code() {
+        Ok(CompletionCode::Success) => Ok(()),
+        Ok(CompletionCode::BandwidthError | CompletionCode::SecondaryBandwidthError) => {
+            Err((DriverError::NoBandwidth, SlotHold::Released))
+        }
+        _ => Err((DriverError::DeviceFault, SlotHold::Released)),
+    }
+}
+
+/// Stop the stream on `address` of the device served at `index`,
+/// discarding what it still had queued.
+///
+/// Its buffers go back once the controller has stopped the endpoint; one
+/// that does not answer keeps them. The ring is repositioned for the next
+/// stream, or left unusable until a setting is selected afresh if the
+/// controller will not take the new dequeue.
+///
+/// # Errors
+///
+/// [`DriverError::NotFound`] for no such stream, or the controller's refusal
+/// to stop or reposition the endpoint.
+pub(super) async fn stop_stream<H: RegisterBlock, M: DmaBank>(
+    engine: &Engine<H, M>,
+    index: usize,
+    address: u8,
+) -> Result<(), DriverError> {
+    let (slot, dci, ring_chunk, data_chunk) = {
+        let mut core = engine.lock()?;
+        let device = core.device_mut(index).ok_or(DriverError::NotFound)?;
+        let slot = device.slot;
+        let endpoint = device
+            .streaming
+            .endpoint_mut(address)
+            .ok_or(DriverError::NotFound)?;
+        let stream = endpoint.stream.take().ok_or(DriverError::NotFound)?;
+        endpoint.ring = None;
+        (slot, endpoint.dci(), endpoint.ring_chunk, stream.data_chunk)
+    };
+    let mut buffers = Withheld {
+        engine,
+        base: Some(data_chunk),
+    };
+    stop_endpoint(engine, slot, dci, Abandoned::Running)
+        .await
+        .map_err(|_| DriverError::DeviceFault)?;
+    if let Some(base) = buffers.base.take() {
+        let _ = engine.lock()?.dma.release(base);
+    }
+    let ring = restart_ring(engine, (slot, dci), ring_chunk, ISO_RING_TRBS).await?;
+    if let Some(endpoint) = engine
+        .lock()?
+        .device_mut(index)
+        .and_then(|device| device.streaming.endpoint_mut(address))
+    {
+        endpoint.ring = Some(ring);
+    }
+    Ok(())
+}
+
+/// A chunk the controller may still reach: withheld unless taken first.
+struct Withheld<'e, H: RegisterBlock, M: DmaBank> {
+    engine: &'e Engine<H, M>,
+    base: Option<usize>,
+}
+
+impl<H: RegisterBlock, M: DmaBank> Drop for Withheld<'_, H, M> {
+    fn drop(&mut self) {
+        if let (Some(base), Ok(mut core)) = (self.base, self.engine.lock()) {
+            if !core.resetting {
+                core.retire_slot_chunk(base, SlotHold::Held);
+            }
+        }
     }
 }
 

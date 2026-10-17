@@ -9,7 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality};
 use tairix_browse::vfs::write_document_title;
 use tairix_controls::{
     Button, ButtonContent, ControlRole, Dialog, DialogAction, ScrollAction, ScrollBar, ScrollModel,
@@ -21,7 +21,7 @@ use tairix_sandbox::decode::Isa;
 use tairix_sandbox::textsyntax::LexedBatch;
 use tairix_syntax::{Diagnostic, Format};
 use tairix_theme::Theme;
-use tairix_window::docapp::DocumentView;
+use tairix_window::docapp::{DialogWindow, DocumentView};
 use tairix_window::document::{Access, SavedDocument};
 use tairix_window::menu::{MenuBuilder, Plate};
 
@@ -280,7 +280,7 @@ struct Drag {
     anchor: (usize, usize),
 }
 
-/// A modal question over the window.
+/// A question the window asks in a dialog of its own.
 #[derive(Debug)]
 enum Modal {
     /// Which line to go to?
@@ -466,11 +466,50 @@ impl DocumentView for View {
     ) -> Outcome {
         match *input {
             InputEvent::KeyPressed { key, modifiers } => {
-                self.on_key(key, modifiers, layout, scale, theme, damage)
+                self.on_key(key, modifiers, layout, damage)
             }
             InputEvent::KeyReleased { .. } => Outcome::none(),
             _ => self.on_pointer(input, now_ns, layout, scale, theme, damage),
         }
+    }
+
+    fn dialog_window(
+        &self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<DialogWindow<'_>> {
+        let (dialog, _) = self.modal()?;
+        Some(DialogWindow {
+            title: dialog.title(),
+            rect: Self::modal_rect(dialog, layout.window(), scale, theme),
+            modality: DialogModality::Modeless,
+        })
+    }
+
+    fn dialog_input(
+        &mut self,
+        input: &InputEvent,
+        _now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        self.on_dialog(input, layout, scale, theme, damage)
+    }
+
+    fn dialog_focus_changed(&mut self, focused: bool, _layout: &Layout, _damage: &mut Region) {
+        if let Some(Modal::GoTo(_, field)) = &mut self.modal {
+            field.set_focused(focused);
+        }
+    }
+
+    fn dialog_refused(&mut self, why: &str, layout: &Layout, damage: &mut Region) -> Outcome {
+        self.modal = None;
+        self.message = Some(alloc::format!("Go to line could not be asked: {why}"));
+        damage.add(layout.status());
+        Outcome::none()
     }
 
     fn offered_extension(&self) -> &'static str {
@@ -1074,7 +1113,7 @@ impl View {
             Action::Replace => return self.open_find(Focus::Replace, layout, damage),
             Action::FindNext => return self.search(false, None, layout, damage),
             Action::FindPrevious => return self.search(true, None, layout, damage),
-            Action::GoToLine => return self.ask_go_to(layout, damage),
+            Action::GoToLine => return self.ask_go_to(),
             Action::LineEnding(to) => {
                 let id = self.ask();
                 self.conversion = Some(id);
@@ -1144,7 +1183,7 @@ impl View {
         self.report(effect, before, layout, damage)
     }
 
-    fn ask_go_to(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+    fn ask_go_to(&mut self) -> Outcome {
         let dialog = Dialog::new("Go to line").with_actions(alloc::vec![
             Button::labelled("Cancel"),
             Button::new(
@@ -1157,16 +1196,35 @@ impl View {
             .with_max_len(20);
         field.set_focused(true);
         self.modal = Some(Modal::GoTo(dialog, field));
-        damage.add(layout.window());
         Outcome::none()
     }
 
-    /// Where a modal question and its answer field are drawn, for a dialog
-    /// in a `window`.
+    /// Where a question and its answer field are drawn for a `window`: in the
+    /// drawing below the window's own area, which its dialog window shows.
     #[must_use]
     pub fn modal_rect(dialog: &Dialog, window: Rect, scale: Scale, theme: &Theme) -> Rect {
         let width = scale.scale_length(Dialog::QUESTION_WIDTH);
-        dialog.placed_over(window, width, TextField::height(scale, theme), scale, theme)
+        let height =
+            dialog.height_for_content(TextField::height(scale, theme), width, scale, theme);
+        Rect::new(window.left(), window.bottom(), width, height)
+    }
+
+    /// Feed `input` that reached the question's dialog window.
+    pub fn on_dialog(
+        &mut self,
+        input: &InputEvent,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        match *input {
+            InputEvent::KeyPressed { key, modifiers } => {
+                self.modal_key(key, modifiers, layout, scale, theme, damage)
+            }
+            InputEvent::KeyReleased { .. } | InputEvent::ModifiersChanged { .. } => Outcome::none(),
+            _ => self.modal_pointer(input, layout, scale, theme, damage),
+        }
     }
 
     fn modal_pointer(
@@ -1225,13 +1283,13 @@ impl View {
     }
 
     fn answer_modal(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
-        damage.add(layout.window());
         match self.modal.take() {
             Some(Modal::GoTo(_, field)) if index == 1 => {
                 if let Ok(line) = field.text().trim().parse::<usize>() {
                     self.command(&Command::GoToLine(line), layout, damage)
                 } else {
                     self.message = Some(String::from("A line number is a whole number"));
+                    damage.add(layout.status());
                     Outcome::none()
                 }
             }
@@ -1479,9 +1537,6 @@ impl View {
         if let InputEvent::ModifiersChanged { modifiers } = event {
             self.modifiers = *modifiers;
             return Outcome::none();
-        }
-        if self.modal.is_some() {
-            return self.modal_pointer(event, layout, scale, theme, damage);
         }
         if matches!(
             event,
@@ -1954,14 +2009,9 @@ impl View {
         key: Key,
         modifiers: Modifiers,
         layout: &Layout,
-        scale: Scale,
-        theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         self.modifiers = modifiers;
-        if self.modal.is_some() {
-            return self.modal_key(key, modifiers, layout, scale, theme, damage);
-        }
         let hex_shown = self.code_shown().is_none() && self.editor.mode() == Mode::Hex;
         if let Some(action) = shortcut(key, modifiers, hex_shown) {
             return self.run(action, layout, damage);

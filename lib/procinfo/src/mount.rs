@@ -277,8 +277,7 @@ mod tests {
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::blkio::BlkMedium;
-    use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters};
+    use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters, BlkMedium, BlkTransport};
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
         MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
@@ -498,7 +497,7 @@ mod tests {
             MountVolumeState {
                 usage: VolumeStats::default(),
                 availability: MountAvailability::Available,
-                medium: Some(BlkMedium::UsbFlash),
+                medium: Some(BlkMedium::of_transport(BlkTransport::Usb)),
             },
             [0u8; 16],
         )
@@ -506,7 +505,10 @@ mod tests {
         let fixture = Fixture::new(alloc::vec![record]);
         let seen = collect(&fixture).expect("walk");
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].medium(), Some(BlkMedium::UsbFlash));
+        assert_eq!(
+            seen[0].medium(),
+            Some(BlkMedium::of_transport(BlkTransport::Usb))
+        );
     }
 
     /// A machine with more mounts than one reply holds still lists them all:

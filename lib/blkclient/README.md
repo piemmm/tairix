@@ -56,11 +56,13 @@ them, so it lives here once and both consumers link it.
   validated at connect time before any consumer sees it, every reply frame
   is decoded fail-closed, and a transfer never reads more bytes out of the
   shared window than the request named.
-- The bounded-reissue policy (`IoBudget::should_reissue`) is the one
+- The bounded-reissue policy (`IoBudget::reissue_wait_ns`) is the one
   definition both a read and a write share, derived from the device's own
   declared medium rather than an assumed envelope, so a removable unit
   riding out a bus reset and a paravirtual device that has simply wedged
-  are each given their own class's patience.
+  are each given their own class's patience. A reissue the serving driver
+  vouches for (`BlkReissue::Now`) goes at once; any other waits out the
+  class's pacing.
 - A device need not declare a medium this ABI recognises, so the medium on a
   completion is an `Option`: an unrecognised medium word decodes to *unknown*
   and stays unknown instead of being renamed to a medium nobody reported.

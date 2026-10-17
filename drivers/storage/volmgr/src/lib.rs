@@ -27,9 +27,10 @@
 //!    is probed whole),
 //! 3. probes each candidate extent's head for a supported filesystem
 //!    signature (`lib/fsprobe`),
-//! 4. derives the deterministic catalog name (the volume's own label
-//!    sanitised through the alias character rules, else `<fstype><n>`;
-//!    a collision appends the volume-identity fingerprint), and
+//! 4. derives the catalog name from the volume alone (its own label in
+//!    kebab case, else `<transport>_<fingerprint>`; a label in use or
+//!    reserved takes `_<fingerprint>` of the volume's identity — [`name`]),
+//!    and
 //! 5. asks the kernel to attach and publish each recognised volume
 //!    (the `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall — the
 //!    kernel re-validates everything and performs the mount itself).

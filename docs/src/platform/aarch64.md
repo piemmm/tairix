@@ -1651,7 +1651,7 @@ powered, descended, and watched, with the device behind every connected
 downstream port on its own xHCI slot, each with a demand-allocated DMA
 region, bounded only by the controller's reported slot count) lives in one
 place —
-`tairix_usb::device::UsbDevice::bring_up` — so every device reached through
+`tairix_usb::device::UsbHost::bring_up` — so every device reached through
 the Pi 4B's onboard hub is *discovered*, never a guessed port (`AGENTS.md`
 §2.2 / §18): a keyboard and a storage stick plugged in together are both
 served, neither displacing the other. The HCD calls it once at bring-up; a
@@ -1723,7 +1723,7 @@ after Run, with no Port Power asserted and no connect debounce — but the
 Host Controller Reset in `Xhci::open` clears every `PORTSC`, and the VL805
 is port-power-controlled (`HCCPARAMS1` PPC = 1), so a powered-off port
 reports disconnected no matter what is plugged in (xHCI 1.2 §4.19.1.1).
-The bring-up walk (`UsbDevice::bring_up`) now asserts `PORTSC.PP`
+The bring-up walk (`UsbHost::bring_up`) asserts `PORTSC.PP`
 (`Xhci::set_port_power`, masking the write-1-to-clear bits) on every
 reported port, then debounce-polls `1..=max_ports` (bounded by the
 engine's budget; a genuinely empty controller comes up serving nothing,
@@ -1805,7 +1805,7 @@ geometry line as `max_scratchpad_hex`), `device::Layout` reserves a
 page-aligned scratchpad pointer array plus that many page-aligned buffers
 (failing closed if the bank cannot supply the chunk or a
 scratchpad-requiring controller reports no page size / an unaligned
-base), and `UsbDevice::start` fills the array with each buffer's
+base), and `UsbHost::start` fills the array with each buffer's
 device-visible base and points `DCBAA[0]` at it. The engine's shared DMA
 chunk is grown from the `tairix_usb::SlabBank` sized exactly to that
 reported geometry — the 31 × 4 KiB scratchpad pages plus the
@@ -1910,64 +1910,12 @@ sentinel). The sentinel-decoded `connected=1 speed=2` are therefore
 artifacts, not real reads, so we still cannot tell which downstream port
 holds the keyboard.
 
-The `completion_hex=0` was **not** the timeout it appeared to be: the four
-`4127` records are spaced at the same ~250 ms serial-logging cadence as
-the non-faulting `4125` lines, i.e. each `GET_STATUS` failed *fast*, not
-after spending the million-iteration poll budget — so an event almost
-certainly *did* arrive. The fault was a diagnostic gap.
-`UsbDevice::control`/`command` recorded `last_completion` only *after*
-`await_event_for` returned `Ok`, but `await_event_for` returns `Err`
-**before that** when the event it observes is for an unexpected TRB
-address *or* carries a completion code the driver's `CompletionCode` enum
-does not model (its fail-closed `completion_code()` decode rejects xHCI
-codes outside {1,2,3,4,5,6,13}). Those paths left `last_completion` at the
-`0` "no event" sentinel, so a real-but-rejected code was mislabelled as a
-timeout. `await_event_for` now records
-`self.last_completion = event.completion_code_raw()` the moment it
-observes any command/transfer event — before the address match and before
-the decode — so `completion_hex` is truthful: a genuine `0` now means no
-event was seen at all, while a non-zero value (including a reserved /
-controller-specific code) names what the hub actually answered
-(`AGENTS.md` §15.7). The now-redundant post-`await` assignments in
-`control`/`command` were dropped (§2.2/§2.14). Host-proven by
-`faulting_hub_port_status_records_the_completion_code` (a STALLed
-`GET_STATUS`, code `6`) and the new
-`faulting_hub_port_status_records_an_undecodable_completion_code` (a
-`GET_STATUS` answered with the unmodelled xHCI code `7`, Resource Error:
-the read fails closed on the decode yet `last_completion_code()` now
-retains `7` — it read `0` before the fix).
-
-With `completion_hex` truthful, the next metal capture named the fault:
-ports 1–2 read `completion_hex=0x0d` (xHCI ShortPacket, the IN data
-stage) and ports 3–4 `completion_hex=0`, **all** still failing closed
-(`wstatus=0xffff`). Every *other* EP0 control transfer — the device,
-configuration, and hub descriptors, `SET_ADDRESS`/`SET_CONFIGURATION`,
-and `SET_FEATURE(PORT_POWER)` — succeeds on this same EP0, so only the
-class `GET_STATUS` fails. `control` already tolerates a ShortPacket data
-stage (it is expected for a variable-length IN), so the `0x0d` is the
-*data* stage being recorded, then the **status-stage** event never
-satisfying the wait: `await_event_for` returns `Err` *fast* (the
-~250 ms logging cadence, not the million-iteration budget), so a real
-event arrives that the wait rejects — not a timeout.
-
-**Localising the reject — the current lever.** The remaining gap was
-that `await_event_for` discarded *why* it rejected (an unexpected TRB
-type vs. a TRB-address mismatch vs. an undecodable completion code vs. a
-true budget timeout) and *what* event it saw. It now records both: a
-`last_reject` reason (`1` unexpected type, `2` address mismatch, `3`
-undecodable code, `4` budget timeout) and the rejected event's raw
-TRB-type (`last_event_type`), reset per transfer alongside
-`last_completion` and exposed via `UsbDevice::last_reject_reason` /
-`last_event_type`. Behaviour is unchanged (the same fail-closed `Err`,
-`AGENTS.md` §2.9); only the diagnostic is richer. Each `4127` record now
-carries `evtype_hex` + `reject_hex` so the next capture pins which:
-`reject_hex=1` with a non-`0x20` `evtype_hex` is an asynchronous
-controller event reaching the status-stage wait (the likely cause of the
-fast reject), `reject_hex=4` would be a genuine timeout. Host-proven by
-`faulting_hub_port_status_records_an_unexpected_event_type` (a
-`GET_STATUS` answered by a `NoOp`-type event: the wait fails closed,
-`last_reject_reason()=1`, `last_event_type()=8`, and
-`last_completion_code()` stays a truthful `0`).
+The `completion_hex=0` was **not** the timeout it appeared to be: each
+`GET_STATUS` failed *fast*, so an event did arrive, which the synchronous wait
+of the time rejected without recording it. The engine no longer waits
+(`plans/USB.md` U14): a failed step's breadcrumb (`AttachFault`) records the
+completion code and event type of the event that ended it, or that its
+deadline did, so a capture names what the hub actually answered.
 
 **Still to do (the next lever):** once a port reports a real
 `connected_hex=1`/`speed_hex`, actually *addressing* the downstream
@@ -2080,7 +2028,7 @@ alone.
 
 To measure it (rather than guess, §15.7), the USB bring-up was split into
 a map prefix (discovery + DMA provisioning + BAR assign/map) composed
-with `Xhci::open` + `UsbDevice::start`, driven with **distinct** failure
+with `Xhci::open` + `UsbHost::start`, driven with **distinct** failure
 messages (mapping / open / start) and a one-shot `4106` geometry line in
 between (the provisioned DMA's device-visible base/length against the
 aperture top, the mapped BAR window length, and the controller's

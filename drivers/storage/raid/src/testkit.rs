@@ -13,7 +13,7 @@ use core::cell::RefCell;
 
 use crate::service::write_superblock;
 
-use tairix_abi::blkio::{BlkMedium, BlkOp, BlkRequest, BLK_REQUEST_LEN};
+use tairix_abi::blkio::{BlkMedium, BlkOp, BlkRequest, BlkTransport, BLK_REQUEST_LEN};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_abi::raid::RaidLevel;
@@ -22,6 +22,10 @@ use tairix_raid::{ArrayIdentity, ArraySuperblock, ArrayUuid, Candidate, Superblo
 use tairix_raidmeta::RESERVED_METADATA_BLOCKS;
 
 pub(crate) const UUID_A: ArrayUuid = [0xA1; 16];
+
+/// The medium every [`MemberDisk`] declares: a USB unit that reported nothing
+/// of its medium.
+pub(crate) const MEMBER_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb);
 pub(crate) const UUID_B: ArrayUuid = [0xB2; 16];
 
 /// Logical block size every member in these tests reports.
@@ -134,7 +138,7 @@ impl MemberDisk {
 
 impl Block for MemberDisk {
     fn medium(&self) -> Option<BlkMedium> {
-        Some(BlkMedium::UsbDisk)
+        Some(MEMBER_MEDIUM)
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -246,8 +250,13 @@ pub(crate) fn identity_of(array: ArrayUuid, members: &[ArraySuperblock]) -> Arra
 /// Encode one block request frame.
 pub(crate) fn request(op: BlkOp, lba: u64, blocks: u32) -> [u8; BLK_REQUEST_LEN] {
     let mut frame = [0u8; BLK_REQUEST_LEN];
-    BlkRequest { op, lba, blocks }
-        .encode(&mut frame)
-        .expect("the frame is exactly wide enough");
+    BlkRequest {
+        op,
+        lba,
+        blocks,
+        binding: 0,
+    }
+    .encode(&mut frame)
+    .expect("the frame is exactly wide enough");
     frame
 }

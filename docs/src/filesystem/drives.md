@@ -191,7 +191,10 @@ from discovered volume metadata must produce only safe, unambiguous aliases.
 **Conflicts fail closed.** Two volumes claiming the same label do **not**
 produce a silent pick: the ambiguous bare alias is refused (`AliasAmbiguous`),
 and the volumes remain reachable by `id::` (and by generated disambiguated
-display aliases only if policy permits).
+display aliases only if policy permits). Their `/Storage` catalog entries
+(§10) are not aliases and are never ambiguous: the volume already holding the
+label's name keeps it, and the other is catalogued as `<label>_<fingerprint>`
+of its own identity, the same at every attach.
 
 ## 8. Volume IDs and durable references
 
@@ -225,8 +228,9 @@ additional default-view entry requires amending `AGENTS.md` §16.1.
 
 `Storage:/` is a synthetic catalog of published non-core aliases (removable
 media, extra disks, network shares), projected into the `/` view as
-`/Storage/<name>`. It is a *view projection only*: `/Storage/Backup` is nothing
-more than a rendering of `Backup:/`, and `Backup:/file` must open even when the
+`/Storage/<name>`. It is a *view projection only*: `/Storage/backup` is nothing
+more than a rendering of a volume root — `Backup:/` once an alias names it — and
+`Backup:/file` must open even when the
 `Storage:` catalog or the `/` view is absent (§4 invariant 3). `Storage:` is
 never a parent volume that other volumes live *inside*: `/Storage` is a mount
 with no backing, stored on no volume, so its listing is exactly the attached
@@ -304,8 +308,10 @@ selector (alias/ID/driver root/network export/device); (2) walk the inner path
 and open/operate on the object. Both phases check authority before touching
 protected state (`AGENTS.md` §5.4). `uid = 0` is never an authority shortcut.
 
-Capability policy reuses the existing `CAP_FS_MOUNT` / `CAP_FS_MOUNT_RELAX`
-where they already fit. Finer authorities (attaching a driver, publishing a
+Capability policy reuses the existing `CAP_FS_MOUNT` where it already fits.
+Nothing relaxes a volume's `ro` or `noexec` yet, so the `CAP_FS_MOUNT_RELAX`
+the charter names for a relaxation does not exist; it arrives with the first
+operation that relaxes. Finer authorities (attaching a driver, publishing a
 root, administering persistent aliases, altering view projections, opening a
 raw device, recovery-only operations, privileged storage inventory) are
 introduced **only with the service that holds and enforces them** — never ahead
@@ -394,9 +400,18 @@ appears owned by the system user and the well-known `storage` group
 registry at root unlock), directories `rwxrwxr-x` and files `rw-rw-r--`, so
 any logged-in member reads and writes the medium while security-record
 stores stay refused (the format cannot hold one). A registry without the
-group, or a format with a real owner model (ARXFS, ext4), gets no wrapper:
-the former stays restrictively system-owned, the latter keeps its on-disk
-owners/modes/ACLs.
+group leaves such a volume restrictively system-owned.
+
+**A format that records ownership is served with it** — ext2/3/4 and ARXFS,
+removable or not. Every node presents the uid, gid, mode and ACL it stores;
+nothing maps, ignores or takes over ownership, and no mount option or
+capability changes that. A node made there carries its creator's uid and
+primary gid, and `chmod` and `chown` follow the owner and `CAP_FS_CHOWN` rules
+of any volume. So a volume made elsewhere keeps its owners' rules: a
+privileged owner's node stays out of a lesser user's reach, which loses access
+and grants none, and a user who is not the owner of a volume's root cannot
+make anything at its top level. The file manager states such a refusal and the
+item it concerned.
 
 ## 21. ABI and crate ownership
 
@@ -442,7 +457,8 @@ already attached under another name is `Busy`, which no other name answers.
 **Automount
 policy, catalog enumeration, and the mount-policy identity map are landed**
 (`plans/DEVICES.md` D3c/D3d): the `volmgr` policy driver probes and attaches
-recognised volumes with deterministic names, `/Storage` listings enumerate
+recognised volumes under names derived from each volume alone — its label,
+else its transport and identity fingerprint — `/Storage` listings enumerate
 the published runtime mounts (§10), and an ownerless foreign format mounts
 under the storage-group identity map (§20). Alias policy and the `fs::`
 resolver remain future increments; machine aliases then rebind from the

@@ -436,7 +436,7 @@ impl<B: Block> Ext4<B> {
             .ok()
             .and_then(core::num::NonZeroUsize::new)
             .ok_or(DriverError::Unsupported)?;
-        let class = dev.class();
+        let cost = dev.command_cost();
         let generation = tairix_crc32c::update(le32(&sb, SB_WTIME), &layout.uuid);
         let mut fs = Self {
             dev,
@@ -451,7 +451,7 @@ impl<B: Block> Ext4<B> {
             journal: None,
             journal_map: None,
             hints: Hints::default(),
-            schedule: CommitScheduler::new(class),
+            schedule: CommitScheduler::new(cost),
             bound: None,
             reading: None,
             data_written: false,

@@ -15,7 +15,7 @@ use tairix_controls::{
     FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, Slider, TextAction, TextField,
     Toggle,
 };
-use tairix_geometry::{Rect, Region, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{IndexDepth, SpriteName, TiffCompression};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
@@ -458,28 +458,37 @@ impl Form {
         self.purpose
     }
 
-    /// Where the form is drawn in `window`.
+    /// What the form is titled.
     #[must_use]
-    pub fn rect(&self, window: Rect, scale: Scale, theme: &Theme) -> Rect {
-        let width = scale.scale_length(FORM_WIDTH).min(window.width);
+    pub fn title(&self) -> &str {
+        self.dialog.title()
+    }
+
+    /// Where the form is drawn with its top-left at `origin`: its width, and
+    /// as tall as its rows need.
+    #[must_use]
+    pub fn rect(&self, origin: Point, scale: Scale, theme: &Theme) -> Rect {
+        let width = scale.scale_length(FORM_WIDTH);
         let band = Dialog::content_width(width, scale, theme);
         let column = self.group.slot_column(band, scale, theme);
         let content = self.group.measured_height(band, column, scale, theme);
-        self.dialog
-            .placed_over(window, width, content, scale, theme)
+        let height = self.dialog.height_for_content(content, width, scale, theme);
+        Rect::new(origin.x, origin.y, width, height)
     }
 
-    fn group_layout(&self, window: Rect, scale: Scale, theme: &Theme) -> Option<FieldLayout> {
-        let bounds = self.rect(window, scale, theme);
+    /// The rows laid out in the form at `origin`, a list one of them opens
+    /// placed within the form: its window is all the room it has.
+    fn group_layout(&self, origin: Point, scale: Scale, theme: &Theme) -> Option<FieldLayout> {
+        let bounds = self.rect(origin, scale, theme);
         let content = self.dialog.content_rect(bounds, scale, theme)?;
-        Some(self.group.layout(content, window, scale, theme))
+        Some(self.group.layout(content, bounds, scale, theme))
     }
 
-    /// Paint the form over `window`.
-    pub fn render(&self, surface: &mut Surface, window: Rect, scale: Scale, theme: &Theme) {
-        let bounds = self.rect(window, scale, theme);
+    /// Paint the form with its top-left at `origin`.
+    pub fn render(&self, surface: &mut Surface, origin: Point, scale: Scale, theme: &Theme) {
+        let bounds = self.rect(origin, scale, theme);
         self.dialog.render(surface, bounds, scale, theme);
-        if let Some(layout) = self.group_layout(window, scale, theme) {
+        if let Some(layout) = self.group_layout(origin, scale, theme) {
             self.group.render(surface, layout, scale, theme);
             if !layout.popup.is_empty() {
                 self.group.render_popup(surface, layout.popup, scale, theme);
@@ -491,18 +500,18 @@ impl Form {
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
-        window: Rect,
+        origin: Point,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Answer> {
-        if let Some(layout) = self.group_layout(window, scale, theme) {
+        if let Some(layout) = self.group_layout(origin, scale, theme) {
             let acted = self.group.on_pointer(event, layout, scale, theme, damage);
             if let Some(action) = acted {
-                return self.adopt(&action, layout, (window, scale, theme), damage);
+                return self.adopt(&action, layout, (origin, scale, theme), damage);
             }
         }
-        let bounds = self.rect(window, scale, theme);
+        let bounds = self.rect(origin, scale, theme);
         match self.dialog.on_pointer(event, bounds, scale, theme, damage) {
             Some(DialogAction::ActionActivated { index: 1 }) => Some(Answer::Confirmed),
             Some(DialogAction::ActionActivated { .. }) => Some(Answer::Cancelled),
@@ -516,13 +525,13 @@ impl Form {
     pub fn on_key(
         &mut self,
         stroke: Keystroke,
-        window: Rect,
+        origin: Point,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Answer> {
         let listing = self.group.rows().iter().any(FieldRow::popup_open);
-        let layout = self.group_layout(window, scale, theme)?;
+        let layout = self.group_layout(origin, scale, theme)?;
         let stroke = match stroke.key {
             Key::Named(NamedKey::Escape) if !listing => return Some(Answer::Cancelled),
             Key::Named(NamedKey::Enter) if !listing => return Some(Answer::Confirmed),
@@ -537,7 +546,7 @@ impl Form {
             _ => stroke,
         };
         let acted = self.group.on_key(stroke, layout, scale, theme, damage)?;
-        self.adopt(&acted, layout, (window, scale, theme), damage)
+        self.adopt(&acted, layout, (origin, scale, theme), damage)
     }
 
     /// Follow what a row asked for, keeping the rows that restate each other
@@ -546,7 +555,7 @@ impl Form {
         &mut self,
         acted: &FieldGroupAction,
         before: FieldLayout,
-        (window, scale, theme): (Rect, Scale, &Theme),
+        (origin, scale, theme): (Point, Scale, &Theme),
         damage: &mut Region,
     ) -> Option<Answer> {
         if let FieldAction::Text(TextAction::Submitted) = acted.action {
@@ -556,7 +565,7 @@ impl Form {
             return Some(Answer::Cancelled);
         }
         // The sheet may change size, so what it covered is repainted too.
-        damage.add(self.rect(window, scale, theme));
+        damage.add(self.rect(origin, scale, theme));
         match self.purpose {
             Purpose::Scale => self.follow_proportions(acted),
             Purpose::NewPicture => self.follow_new_picture(acted),
@@ -564,11 +573,11 @@ impl Form {
             Purpose::Layer => self.follow_opacity(acted),
             _ => {}
         }
-        damage.add(self.rect(window, scale, theme));
-        // A list hangs past the sheet, so what it opened into or vacated is
+        damage.add(self.rect(origin, scale, theme));
+        // A list hangs past its row, so what it opened into or vacated is
         // reported beside it.
         if before.popup_may_move(&acted.action) {
-            if let Some(after) = self.group_layout(window, scale, theme) {
+            if let Some(after) = self.group_layout(origin, scale, theme) {
                 before.report_popup_moved(after, damage);
             }
         }

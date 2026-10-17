@@ -32,6 +32,7 @@ use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL};
 use tairix_theme::{Palette, TextRole, Theme};
+use tairix_util::utf8::is_hidden;
 
 use crate::damage;
 use crate::paint::{
@@ -934,20 +935,17 @@ impl TitleBarLayout {
 }
 
 /// Bound an untrusted window title/identity string: cap its length and replace
-/// control characters with a space, so it renders as plain text and cannot
-/// smuggle escape sequences or break the layout (spec §11.18). The text
-/// engine's own directional handling applies when it is drawn.
+/// every character that draws nothing yet can hide, reorder or break the text
+/// around it — a control, a bidirectional override, a zero-width character
+/// ([`is_hidden`]) — with a space, so it renders as the plain text it is and
+/// cannot smuggle an escape sequence, break the layout, or read as another
+/// name (spec §11.18).
 fn sanitize_label(text: &str) -> String {
     const MAX: usize = 512;
-    let mut out = String::new();
-    for ch in text.chars().take(MAX) {
-        if ch.is_control() {
-            out.push(' ');
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    text.chars()
+        .take(MAX)
+        .map(|ch| if is_hidden(ch) { ' ' } else { ch })
+        .collect()
 }
 
 /// The window-manager-owned title bar: application identity, a title, a stable
@@ -1019,8 +1017,8 @@ impl TitleBar {
         Self::seating(WindowFurnitureState::active_fixed(), TitleBarCommands::Pane)
     }
 
-    /// An alert's band: put-to-back alone, and the title centred across the
-    /// whole band.
+    /// The band of an alert or a dialog window: put-to-back alone, and the
+    /// title centred across the whole band.
     #[must_use]
     pub fn dialog() -> Self {
         Self::seating(
@@ -2102,9 +2100,10 @@ impl WindowFrame {
         }
     }
 
-    /// An alert's frame: the window's rim and plate around a band seating
-    /// put-to-back alone, with its title centred. It is moved by its band and
-    /// never resized, minimised, maximised or closed from it.
+    /// The frame of an alert or a dialog window: the window's rim and plate
+    /// around a band seating put-to-back alone, with its title centred. It is
+    /// moved by its band and never resized, minimised, maximised or closed
+    /// from it.
     #[must_use]
     pub fn dialog() -> Self {
         let title_bar = TitleBar::dialog();

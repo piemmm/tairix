@@ -465,7 +465,7 @@ chunks grown on attach and released on detach, so the served-device count
 is bounded only by the controller's reported slots and genuine memory
 exhaustion — never a compile-time budget.
 
-`UsbDevice::start` first declares the controller quiesced to its DMA bank
+`UsbHost::start` first declares the controller quiesced to its DMA bank
 (`DmaBank::device_quiesced`) — an `Xhci` exists only once `open` has halted
 and reset it, so rings a dead predecessor left may leave the kernel's DMA
 quarantine — then zeroes the shared chunk, publishes the ERST entry and the
@@ -479,12 +479,12 @@ reported attached) — is disabled, and its chunks go back to the bank only once
 the controller confirms Disable Slot: an unconfirmed slot keeps its DCBAA entry
 and has its chunks withheld (`DmaBank::withhold`), the local bookkeeping is
 still freed so a re-plug enumerates, and a failed attach is not re-driven onto
-it. A teardown untracks the slot's endpoints before issuing Disable Slot, so a
-completion landing during the wait is drained rather than re-arming the slot. A
-confirmed controller reset (`reset_and_reenumerate`) releases every chunk so
-withheld; a reset that fails releases none.
-`UsbDevice::attach_root_port(port)` then brings the device on a root-hub
-port to the configured state (§4.3): port reset when the port is not
+it. A teardown untracks the slot's endpoints before posting Disable Slot, so a
+completion landing meanwhile is dropped rather than re-arming the slot. A
+confirmed controller reset (`UsbHost::reset_and_reenumerate`) releases every
+chunk so withheld; a reset that fails releases none.
+A root port's operation then brings the device on it to the configured state
+(§4.3): port reset when the port is not
 yet enabled — awaited to completion exactly as a downstream hub port's is
 (`await_root_port_reset_complete`: `PORTSC` re-read at 20 ms intervals
 parked on the controller's interrupt, bounded at 800 ms, requiring the
@@ -555,24 +555,18 @@ The endpoint is not primed during enumeration. A hub
 reports interface class `0x09`, not HID, and is served as a hub alone: no
 interface its configuration claims gets a device entry, which would alias the
 region its hub entry holds. Its interrupt status-change endpoint is captured
-during enumeration but armed only once the hub is installed and marked:
-arming it inline would make the hub deliver asynchronous status-change
-reports that interleave with — and fault — the EP0 hub-class transfers that
-follow (a transfer event whose interrupt-TRB pointer is not in the control
-wait's watch list → `REJECT_ADDRESS_MISMATCH`, then a wedged ring; the metal
-symptom was the hub's per-port `GET_STATUS` reads returning the all-ones
-sentinel). A hub reporting no such endpoint is left unwatched, never watched
-on an endpoint an earlier hub reported.
+during enumeration but armed only once the hub is installed and marked, so
+no status-change report arrives for a hub not yet in the table. A hub
+reporting no such endpoint is left unwatched, never watched on an endpoint an
+earlier hub reported.
 
 Devices *downstream* of an enumerated hub (every external device on the
 Pi 4B hangs off the onboard `2109:3431` VIA hub) are each reached on
-their **own xHCI slot** — the `bring_up` walk attaches every connected
-downstream port, so a keyboard and
-a storage stick are served together. `UsbDevice::attach_downstream_device
-(down_port, speed)` keeps the hub addressed on its slot and gives the
-new device the EP0 ring, output context, and control data buffer of a freshly
-claimed device region (`control`/`address_device`/`next_report` follow the
-active slot through `ep0_ring_off`/`output_ctx_off`/`ctrl_data_off`), then
+their **own xHCI slot** — every downstream port is reconciled by its own
+operation, so a keyboard and a storage stick are served together, side by
+side. Each attach keeps the hub addressed on its slot and gives the new
+device a control pipe of its own — EP0 ring, output context, input context
+and control data buffer in a freshly claimed device region — then
 Enable Slot + Address Device
 with a slot context carrying the **Route String** (the hub's downstream
 port, §8.9) and — for a full/low-speed device behind the high-speed hub
@@ -581,28 +575,27 @@ so the controller splits its transactions through the hub's TT. The
 post-Address sequence (descriptors → Configure Endpoint →
 `SET_CONFIGURATION` → ready for request-driven report arming) is the shared
 `finish_enumeration`, identical to a root-port device —
-only the topology in the slot context differs. A failed attach restores
-the hub as the active control context and releases the claimed slot, so
-one port's broken device never costs the other ports their service. The
-caller owns the wall-clock settle windows (the `Delay` seam): the walk
-powers the port, resets it (`SET_FEATURE(PORT_RESET)`), then **polls the
-reset to completion** (`await_hub_port_reset_complete`: `GET_STATUS` at
-20 ms parked intervals, bounded at 800 ms — a slow external hub
-legitimately takes hundreds of milliseconds — requiring reset-signalling
-done and the port enabled, then the `TRSTRCY` settle) before addressing at
-the speed the final status reports. The root-port tier runs the same
+only the topology in the slot context differs. A failed attach releases
+the claimed slot, so one port's broken device never costs the other ports
+their service. The attach powers the port, resets it
+(`SET_FEATURE(PORT_RESET)`), then **awaits the reset's completion** — the
+hub's status-change report, or a `GET_STATUS` at the 20 ms poll interval,
+bounded at 800 ms (a slow external hub legitimately takes hundreds of
+milliseconds) — requiring reset-signalling done and the port enabled, clears
+`C_PORT_RESET` at once, then waits out the `TRSTRCY` settle on a timer
+before addressing at the speed the final status reports; a port that reads
+disconnected ends the attach. The root-port tier runs the same
 protocol step over `PORTSC` off the same three figures
 (`PORT_RESET_POLL_US` / `PORT_RESET_POLLS` / `PORT_RESET_SETTLE_US`,
 defined once), so a fix to the reset handling cannot land on one tier and
-miss the other. A failed attach snapshots its diagnostics
-(`UsbDevice::last_attach_fault`: port, error, stage, completion/
-event-type/reject, final `wPortStatus`) before the latch drain overwrites
-the live state, so the HCD's hot-plug failure warning names the failing
-step.
+miss the other. A failed attach records its own breadcrumb (`AttachFault`:
+port, error, stage, the completion code and event type its failing step
+ended with or that its deadline did, final `wPortStatus`), so the HCD's
+skipped-port warning names the failing step.
 
 Before addressing anything behind it, the bring-up walk first
-**marks the hub as a hub** in its own slot context
-(`configure_hub_slot`): it reads the hub descriptor (`bNbrPorts` and the
+**marks the hub as a hub** in its own slot context: it reads the hub
+descriptor (`bNbrPorts` and the
 `wHubCharacteristics` TT Think Time, `read_hub_topology` — requested at
 the full base-descriptor size production stacks send, only the bytes
 delivered decoded, by `HubDescriptor::decode` alone, and retried a bounded
@@ -671,15 +664,23 @@ zero events. An interface with no interrupt-IN endpoint and no bulk pair is
 not served.
 
 Control transfers carry the SETUP payload as immediate data, set
-Interrupt-on-Short-Packet on the IN data stage, and watch only the
-addresses of their own in-flight TRBs: a completion for a TRB never
-issued, an undecodable completion code, an unexpected event type, or a
-stalled request is a `DeviceFault`, and every wait is bounded by the
-engine's poll budget (`AGENTS.md` §2.1 / §2.9). A slot's data stages move
-through the control data buffer in its own region, and IN data is copied out
-before any other context is activated. A timed-out transfer stays armed, so a
-device that answers one late writes only its own region, never the data of
-another device's or a hub's transfer (a port status it could otherwise spoof).
+Interrupt-on-Short-Packet on the IN data stage, and are matched only to the
+addresses of their own in-flight TRBs: an undecodable completion code or a
+stalled request fails the transfer, and every transfer is bounded by the
+USB request ceiling or its URB's deadline (`AGENTS.md` §2.1 / §2.9). Each
+slot's control pipe runs one TD at a time; one that fails or overruns is
+taken back — the endpoint stopped or reset and repositioned past it — before
+the next runs. A slot's data stages move through the control data buffer in
+its own region, so a device that answers late writes only its own region,
+never the data of another device's or a hub's transfer (a port status it
+could otherwise spoof).
+
+A control URB names how long the HCD may hold it, no longer than the USB
+request ceiling, `USB_CONTROL_TIMEOUT_MAX_MS`; one still held then has its TD
+taken back and is answered `TimedOut`, and the device's control pipe serves
+its next request. Nothing the engine does waits inside its service step: a
+device whose control endpoint NAKs for ever delays no other device's reports,
+bulk completions or URB deadlines.
 
 `UsbDevice::next_report` serves a class driver's interrupt-IN URB: its first
 request fixes the length the endpoint is armed to, and nothing is armed
@@ -769,7 +770,7 @@ way is given up, its port left unserved until it is re-plugged: no endpoint
 that never works can keep the controller recovering it.
 
 A hub's status-change transfer that fails halts its endpoint just the same.
-`UsbDevice::next_hub_change` recovers it — stopped, its ring restarted, the
+An operation recovers it — stopped, its ring restarted, the
 hub's own `CLEAR_FEATURE(ENDPOINT_HALT)`, a fresh transfer armed — and
 reconciles every downstream port, since the report the failure lost may have
 carried any change: a device freed while its port went on carrying it is
@@ -784,7 +785,12 @@ way is given up (`plans/USB.md` U12).
 Every bulk URB names how long the HCD may hold it. The serve loop parks no
 longer than the soonest held URB's deadline, and one still held then is
 abandoned — its pipe stopped and restarted empty, so its TD can never complete
-late into a later transfer — and answered `TimedOut`. A held URB the
+late into a later transfer — and answered `TimedOut`. Its log (event 27153)
+carries the EP State its endpoint had at the deadline. The context's dequeue
+pointer is the controller's own only once the endpoint has stopped, so where
+the controller stood against the TD follows the stop as event 27154: still on
+its first TRB or a later one — a device still working on the transfer — on
+the TRB after it — a completion the host lost — or elsewhere. A held URB the
 controller finished in time is delivered first, so a deadline never discards a
 completion already in. A report poll may hold for ever, since a device reports
 when it has something to say.
@@ -801,7 +807,8 @@ drops what it has captured before each command through `DiscardReports`,
 scoped and refused the same way. Each failure and expiry is logged as event 27153 with
 the controller's completion code for the endpoint the transfer ran on — a
 request reaching outside its interface as the refusal 27149 — and one refused
-at once as a held one would be.
+at once as a held one would be. A STALL is logged at `Info`, since it is the
+device's own answer for its class driver to read, never a failure of the bus.
 
 ## VL805 USB bus driver — `drivers/bus/usb/vl805`
 
@@ -1237,12 +1244,12 @@ chunk the engine grows (the shared structures now, each device's
 region as it attaches) is verified at allocation time to lie wholly
 **below** the aperture the bridge lets devices reach (fail-closed
 `OutOfRange`, `AGENTS.md` §5.4) — and then brings the controller up
-through `Xhci::open` + `UsbDevice::start` + `UsbDevice::bring_up`
+through `Xhci::open` + `UsbHost::start` + `UsbHost::bring_up`
 (`bring_up_controller_diagnostic`, whose phase breadcrumb reports a
 map / open / start / enumerate failure distinctly — the `enumerate`
 phase now only ever names a fault of the **controller**, because a device
 that will not enumerate is a counted skip and never fails the walk). Before
-its first chunk, `UsbDevice::start` narrows the bank, and through it every
+its first chunk, `UsbHost::start` narrows the bank, and through it every
 later carve of the host, to the controller's own reach — 32 address bits
 for a controller without `HCCPARAMS1.AC64` — so the kernel places the
 chunks where the controller reaches them rather than the bank refusing them
@@ -1304,8 +1311,8 @@ The USB host driver does the same one level down, for the HID device it
 enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).
 A USB device's class lives on its *interface*, not its device
 descriptor (whose `bDeviceClass` is `0` for an HID device), so
-the enumeration (`UsbDevice::bring_up` /
-`UsbDevice::attach_root_port`) reads the configuration descriptor at its
+the enumeration (each port's operation, started by `UsbHost::bring_up`)
+reads the configuration descriptor at its
 exact advertised `wTotalLength` during bring-up (a 9-byte header read
 first, then precisely that many bytes) and parses **every**
 default-alternate interface descriptor (`InterfaceInfo::decode_all`,

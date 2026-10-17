@@ -37,7 +37,7 @@ extern crate alloc;
 pub mod gpt;
 pub mod mbr;
 
-use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium, BlkReissue};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
@@ -406,6 +406,11 @@ impl<B: Block> Block for PartitionBlock<B> {
     /// the composed device beneath is rebuilding.
     fn backing_availability(&self) -> MountAvailability {
         self.inner.backing_availability()
+    }
+
+    /// Whether the disk's recovery has worked is the disk's to say.
+    fn reissue(&mut self) -> BlkReissue {
+        self.inner.reissue()
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

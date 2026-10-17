@@ -50,8 +50,8 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::blkio::{
-        serve_request_recovering, BlkDeviceClass, BlkHealth, BlkMedium, BlkOp, BlkRequest,
-        BLK_COMPLETION_LEN, BLK_REQUEST_LEN,
+        serve_request_recovering, Answer, BlkDeviceClass, BlkHealth, BlkMedium, BlkOp,
+        BlkPublication, BlkRequest, BlkTransport, BLK_COMPLETION_LEN, BLK_REQUEST_LEN,
     };
     use tairix_abi::driver::block::{Block, BlockGeometry};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -78,7 +78,7 @@ mod program {
     const DEVICE_CLASS: BlkDeviceClass = DEVICE_MEDIUM.class();
 
     /// What the served device declares it is.
-    const DEVICE_MEDIUM: BlkMedium = BlkMedium::Virtual;
+    const DEVICE_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Virtual);
 
     /// Logical block size the served device reports.
     const BLOCK_SIZE: u32 = 512;
@@ -294,15 +294,18 @@ mod program {
             let len = tairix_rt::call_recv_nonblock(self.endpoint, &mut request, &mut ticket)
                 .map_err(Errno::from_syscall)?;
             let mut frame = [0u8; BLK_COMPLETION_LEN];
-            let reply_len = serve_request_recovering(
+            let Answer::Reply(reply_len) = serve_request_recovering(
                 &mut self.device,
-                false,
+                BlkPublication::default(),
                 &request[..len],
                 window,
                 &mut frame,
                 &mut self.health,
                 tairix_rt::clock_get(),
-            );
+            ) else {
+                // The fixture's device always answers; it never comes ready.
+                return Err(Errno::WouldBlock);
+            };
             let ret = tairix_rt::call_reply(self.endpoint, ticket, &frame[..reply_len]);
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
@@ -336,6 +339,10 @@ mod program {
                     Err(err) => return Err(err),
                 }
             }
+        }
+
+        fn pause(&mut self, ns: u64) {
+            tairix_rt::park_ns(ns);
         }
     }
 
@@ -385,6 +392,7 @@ mod program {
             op: BlkOp::Geometry,
             lba: 0,
             blocks: 0,
+            binding: 0,
         }
         .encode(&mut frame)?;
         tairix_rt::call_post(EP_WEDGED, &frame[..len], deadline_ns).map_err(Errno::from_syscall)

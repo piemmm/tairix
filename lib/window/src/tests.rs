@@ -20,12 +20,12 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick,
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView, BundleRunPath,
-    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
-    DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
-    PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, TerrainPlate,
-    TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
-    DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems,
+    DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
+    MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
+    SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX,
+    WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -33,15 +33,15 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
     damage_in, pointer_point, present_damage, present_damage_list, retained_damage, DeclaredTip,
-    EventDrain, EventError, EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents,
-    WindowTransport,
+    EventDrain, EventError, EventSource, Owed, Parked, PostedRequest, Refused, Repaint, Target,
+    WindowClient, WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
-    DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry, PickedFile,
-    PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState,
-    WindowSizing, WINDOW_REPLY_MAX,
+    DialogSpec, DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry,
+    PickedFile, PopupSpec, PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost,
+    WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -58,6 +58,31 @@ const SURFACE: DisplayMode = DisplayMode {
 
 /// Bytes one SURFACE frame occupies.
 const FRAME_LEN: usize = 48;
+
+/// The refusal the client reaped for a posted request, if it reaped one.
+fn refusal<T: WindowTransport>(client: &mut WindowClient<T>) -> Option<Refused> {
+    client.take_owed()?.err()
+}
+
+/// The refusal of `request` for `window_id` with `errno`.
+const fn refused(window_id: u64, request: PostedRequest, errno: Errno) -> Refused {
+    Refused {
+        window_id,
+        request,
+        errno,
+    }
+}
+
+/// The size the session kept for `window_id`, delivered again after it
+/// refused a resize.
+const fn kept(window_id: u64, mode: &DisplayMode) -> WindowEvent {
+    WindowEvent::Resized {
+        window_id,
+        width_px: mode.width_px,
+        height_px: mode.height_px,
+        state: WindowSizeState::Restored,
+    }
+}
 
 /// Window frames one test client may hold: eight [`SURFACE`] frames, so a
 /// test can reach the bound in a handful of creates and prove the ninth is
@@ -218,6 +243,9 @@ struct RecordingHost {
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
     /// Every tool window opened: its id, parent, carry and title.
     tools: Vec<(u64, u64, Option<u32>, String)>,
+    /// Every dialog opened: its id, owner, whether it earned the keyboard,
+    /// how it holds its owner, and its title.
+    dialogs: Vec<(u64, u64, bool, DialogModality, String)>,
     layers: Vec<(ProcId, u64, DisplayMode, i32, i32, LayerDepth)>,
     layer_places: Vec<(u64, i32, i32, LayerDepth)>,
     refuse_layer: Option<Errno>,
@@ -295,6 +323,7 @@ impl Default for RecordingHost {
             opened: Vec::new(),
             popups: Vec::new(),
             tools: Vec::new(),
+            dialogs: Vec::new(),
             layers: Vec::new(),
             layer_places: Vec::new(),
             refuse_layer: None,
@@ -439,6 +468,25 @@ impl WindowHost for RecordingHost {
             window_id,
             spec.transient.parent_window_id,
             spec.carry,
+            String::from(spec.title.as_str()),
+        ));
+        Ok(())
+    }
+
+    fn dialog_opened(
+        &mut self,
+        window_id: u64,
+        focus: bool,
+        spec: &DialogSpec,
+    ) -> Result<(), Errno> {
+        if self.refuse_popup {
+            return Err(Errno::WouldBlock);
+        }
+        self.dialogs.push((
+            window_id,
+            spec.transient.parent_window_id,
+            focus,
+            spec.modality,
             String::from(spec.title.as_str()),
         ));
         Ok(())
@@ -807,6 +855,15 @@ struct Loopback {
     ticket: u64,
     /// Every frame the client put on the wire, in order.
     sent: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    /// Whether a posted request waits to be served until
+    /// [`Loopback::serve_posted`], as one does while the session is busy.
+    holds_posts: bool,
+    /// Posted requests not yet served, oldest first, by post ticket.
+    unserved: VecDeque<(u64, alloc::vec::Vec<u8>)>,
+    /// Replies to served posts not yet reaped, by post ticket.
+    answered: alloc::vec::Vec<(u64, alloc::vec::Vec<u8>)>,
+    /// The ticket the next post is given.
+    next_post: u64,
 }
 
 impl Loopback {
@@ -822,7 +879,34 @@ impl Loopback {
             sink: QueueSink::default(),
             ticket: TICKET_A,
             sent: alloc::vec::Vec::new(),
+            holds_posts: false,
+            unserved: VecDeque::new(),
+            answered: alloc::vec::Vec::new(),
+            next_post: 1,
         }))
+    }
+
+    /// Serve one request frame, answering the reply.
+    fn serve_frame(&mut self, request: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut frame = [0u8; WINDOW_REPLY_MAX];
+        let len = self.server.serve(
+            &mut self.host,
+            &mut self.sink,
+            &mut self.identity,
+            self.ticket,
+            request,
+            &mut frame,
+        );
+        frame[..len].to_vec()
+    }
+
+    /// Serve every posted request still waiting, oldest first, as the session
+    /// reaches them.
+    fn serve_posted(&mut self) {
+        while let Some((ticket, request)) = self.unserved.pop_front() {
+            let reply = self.serve_frame(&request);
+            self.answered.push((ticket, reply));
+        }
     }
 }
 
@@ -878,22 +962,42 @@ fn request_frame(request: &WindowRequest) -> alloc::vec::Vec<u8> {
 
 impl WindowTransport for Rc<RefCell<Loopback>> {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-        let mut frame = [0u8; WINDOW_REPLY_MAX];
         let inner = &mut *self.borrow_mut();
         inner.sent.push(request.to_vec());
-        let len = inner.server.serve(
-            &mut inner.host,
-            &mut inner.sink,
-            &mut inner.identity,
-            inner.ticket,
-            request,
-            &mut frame,
-        );
-        if reply.len() < len {
-            return Err(Errno::BufferTooSmall);
+        // The endpoint serves a client's requests in order, so whatever it
+        // posted earlier is served before this call.
+        inner.serve_posted();
+        let frame = inner.serve_frame(request);
+        let out = reply.get_mut(..frame.len()).ok_or(Errno::BufferTooSmall)?;
+        out.copy_from_slice(&frame);
+        Ok(frame.len())
+    }
+
+    fn post(&mut self, request: &[u8]) -> Result<u64, Errno> {
+        let inner = &mut *self.borrow_mut();
+        inner.sent.push(request.to_vec());
+        let ticket = inner.next_post;
+        inner.next_post += 1;
+        inner.unserved.push_back((ticket, request.to_vec()));
+        if !inner.holds_posts {
+            inner.serve_posted();
         }
-        reply[..len].copy_from_slice(&frame[..len]);
-        Ok(len)
+        Ok(ticket)
+    }
+
+    fn reap(&mut self, ticket: u64, reply: &mut [u8]) -> Result<Option<usize>, Errno> {
+        let inner = &mut *self.borrow_mut();
+        let Some(index) = inner.answered.iter().position(|(at, _)| *at == ticket) else {
+            return if inner.unserved.iter().any(|(at, _)| *at == ticket) {
+                Ok(None)
+            } else {
+                Err(Errno::NotFound)
+            };
+        };
+        let (_, frame) = inner.answered.swap_remove(index);
+        let out = reply.get_mut(..frame.len()).ok_or(Errno::BufferTooSmall)?;
+        out.copy_from_slice(&frame);
+        Ok(Some(frame.len()))
     }
 }
 
@@ -1018,15 +1122,33 @@ fn popup_spec(
     events: u64,
     offset_x: i32,
     offset_y: i32,
-) -> TransientSpec {
+) -> PopupSpec {
+    PopupSpec {
+        transient: transient_spec(parent_window_id, shm, events),
+        offset_x,
+        offset_y,
+    }
+}
+
+/// A one-frame SURFACE-shaped transient of `parent`, granted as `shm`, its
+/// events routed to `events`.
+fn transient_spec(parent_window_id: u64, shm: u64, events: u64) -> TransientSpec {
     TransientSpec {
         parent_window_id,
         shm_handle: shm,
         event_endpoint: events,
         frame_count: 1,
         surface: SURFACE,
-        offset_x,
-        offset_y,
+    }
+}
+
+/// A dialog of `owner` granted as `shm`, holding its owner as `modality`
+/// says.
+fn dialog_spec(owner: u64, shm: u64, modality: DialogModality) -> DialogSpec {
+    DialogSpec {
+        transient: transient_spec(owner, shm, EVENTS_A),
+        modality,
+        title: tairix_abi::window_ipc::WindowTitle::new("Go to line").expect("a title"),
     }
 }
 
@@ -1295,15 +1417,27 @@ fn resize_is_refused_fail_closed() {
     let window = create_id(&mut client, 7, EVENTS_A, 2, "Files").expect("create succeeds");
 
     // A window the caller does not own answers like one that never
-    // existed, and the host is never told.
+    // existed, and the host is never told; the size the session kept is
+    // delivered again.
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.resize(window, 20, 2, &BIG), Err(Errno::NotFound));
+    client.resize(window, 20, 2, &BIG).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Resize, Errno::NotFound))
+    );
+    assert_eq!(client.take_owed(), Some(Ok(kept(window, &SURFACE))));
+    assert!(loopback.borrow().host.resized.is_empty());
     loopback.borrow_mut().ticket = TICKET_A;
 
     // A host that refuses the resize leaves the old geometry intact: the
     // window still presents at its original size, not the (refused) new one.
     loopback.borrow_mut().host.refuse_resize = Some(Errno::WouldBlock);
-    assert_eq!(client.resize(window, 20, 2, &BIG), Err(Errno::WouldBlock));
+    client.resize(window, 20, 2, &BIG).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Resize, Errno::WouldBlock))
+    );
+    assert_eq!(client.take_owed(), Some(Ok(kept(window, &SURFACE))));
     loopback.borrow_mut().host.refuse_resize = None;
     client
         .present(window, 0, full_damage())
@@ -1342,12 +1476,19 @@ fn a_caller_cannot_touch_another_clients_window() {
         client.present(window, 0, full_damage()),
         Err(Errno::NotFound)
     );
-    assert_eq!(client.close(window), Err(Errno::NotFound));
-    assert_eq!(client.set_title(window, "B's"), Err(Errno::NotFound));
+    client.set_title(window, "B's").expect("posted");
+    client
+        .set_sizing(window, WindowSizing::Fixed)
+        .expect("posted");
     assert_eq!(
-        client.set_sizing(window, WindowSizing::Fixed),
-        Err(Errno::NotFound)
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Title, Errno::NotFound))
     );
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Sizing, Errno::NotFound))
+    );
+    assert_eq!(client.close(window), Err(Errno::NotFound));
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 1);
@@ -1395,9 +1536,17 @@ fn an_owner_restates_its_window_s_range_and_a_refusal_changes_nothing() {
     );
     // An unknown window is refused, and a host refusal leaves the
     // previous range standing.
-    assert_eq!(client.set_sizing(window + 1, range), Err(Errno::NotFound));
+    client.set_sizing(window + 1, range).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window + 1, PostedRequest::Sizing, Errno::NotFound))
+    );
     loopback.borrow_mut().host.refuse_sizing = Some(Errno::NotSupported);
-    assert_eq!(client.set_sizing(window, range), Err(Errno::NotSupported));
+    client.set_sizing(window, range).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Sizing, Errno::NotSupported))
+    );
     assert_eq!(loopback.borrow().host.resized_range.len(), 1);
 }
 
@@ -1458,9 +1607,17 @@ fn an_owner_retitles_its_window_and_a_refusal_changes_nothing() {
     );
     // An unknown window is refused, and a host refusal leaves the
     // previous title standing.
-    assert_eq!(client.set_title(window + 1, "ghost"), Err(Errno::NotFound));
+    client.set_title(window + 1, "ghost").expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window + 1, PostedRequest::Title, Errno::NotFound))
+    );
     loopback.borrow_mut().host.refuse_retitle = Some(Errno::WouldBlock);
-    assert_eq!(client.set_title(window, "refused"), Err(Errno::WouldBlock));
+    client.set_title(window, "refused").expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Title, Errno::WouldBlock))
+    );
     assert_eq!(loopback.borrow().host.retitled.len(), 1);
 }
 
@@ -1658,11 +1815,13 @@ fn a_resize_past_the_budget_is_refused_and_keeps_the_old_geometry() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
 
+    client.resize(window, 8, 2, &TALL).expect("posted");
     assert_eq!(
-        client.resize(window, 8, 2, &TALL),
-        Err(Errno::NoSpace),
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Resize, Errno::NoSpace)),
         "a resize is charged against the same budget as a create"
     );
+    assert_eq!(client.take_owed(), Some(Ok(kept(window, &SURFACE))));
     // Resizing within the budget is still allowed, and the window keeps
     // working: the refusal above changed nothing.
     client
@@ -1907,7 +2066,9 @@ fn a_dead_clients_parent_and_popups_are_all_torn_down() {
 /// A tool window of `parent` granted as `shm`, carried at `carry`.
 fn tool_spec(parent_window_id: u64, shm: u64, carry: Option<u32>) -> ToolSpec {
     ToolSpec {
-        transient: popup_spec(parent_window_id, shm, EVENTS_A, -3, 9),
+        transient: transient_spec(parent_window_id, shm, EVENTS_A),
+        offset_x: -3,
+        offset_y: 9,
         carry,
         title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
     }
@@ -1972,6 +2133,129 @@ fn a_transient_hangs_only_from_a_top_level_window_of_the_callers_own() {
         "a foreign parent reads as none"
     );
     assert_eq!(loopback.borrow().server.window_count(), 3);
+}
+
+#[test]
+fn a_dialog_opens_through_its_own_path_with_the_front_it_earned() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let owner = create_id(&mut client, 7, EVENTS_A, 1, "TextEdit").expect("owner");
+    loopback.borrow_mut().host.focused = Some(owner);
+    let (held, server) = client
+        .create_dialog(&dialog_spec(owner, 8, DialogModality::OwnerModal))
+        .expect("the dialog opens");
+    assert_eq!(server, SERVER);
+    loopback.borrow_mut().host.focused = None;
+    let (free, _) = client
+        .create_dialog(&dialog_spec(owner, 9, DialogModality::Modeless))
+        .expect("so does a second");
+    let inner = loopback.borrow();
+    assert_eq!(
+        inner.host.dialogs,
+        alloc::vec![
+            (
+                held,
+                owner,
+                true,
+                DialogModality::OwnerModal,
+                String::from("Go to line")
+            ),
+            (
+                free,
+                owner,
+                false,
+                DialogModality::Modeless,
+                String::from("Go to line")
+            ),
+        ],
+        "the keyboard only where the user is working in the application"
+    );
+    assert!(inner.host.popups.is_empty() && inner.host.tools.is_empty());
+    assert_eq!(inner.host.opened.len(), 1, "never the top-level path");
+}
+
+#[test]
+fn a_dialog_hangs_only_from_a_top_level_window_of_the_callers_own() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let owner = create_id(&mut client, 7, EVENTS_A, 1, "Paint").expect("owner");
+    let (dialog, _) = client
+        .create_dialog(&dialog_spec(owner, 8, DialogModality::Modeless))
+        .expect("a dialog");
+    let (tool, _) = client
+        .create_tool(&tool_spec(owner, 9, None))
+        .expect("a tool window");
+    for transient in [dialog, tool] {
+        assert_eq!(
+            client.create_dialog(&dialog_spec(transient, 9, DialogModality::OwnerModal)),
+            Err(Errno::NotSupported),
+            "one level only"
+        );
+    }
+    assert_eq!(
+        client.create_tool(&tool_spec(dialog, 9, None)),
+        Err(Errno::NotSupported),
+        "nor hangs anything else"
+    );
+    loopback.borrow_mut().ticket = TICKET_B;
+    let mut foreign = dialog_spec(owner, 9, DialogModality::Modeless);
+    foreign.transient.event_endpoint = EVENTS_B;
+    assert_eq!(
+        client.create_dialog(&foreign),
+        Err(Errno::NotFound),
+        "a foreign owner reads as none"
+    );
+    assert_eq!(loopback.borrow().server.window_count(), 3);
+    assert_eq!(loopback.borrow().host.dialogs.len(), 1);
+}
+
+#[test]
+fn a_dialog_shares_the_budget_and_closes_with_its_owner_and_what_holds_it() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let owner = create_id(&mut client, 7, EVENTS_A, 1, "Files").expect("owner");
+    let (dialog, _) = client
+        .create_dialog(&dialog_spec(owner, 8, DialogModality::Modeless))
+        .expect("a dialog");
+    for _ in 2..FRAMES_PER_CLIENT {
+        create_id(&mut client, 7, EVENTS_A, 1, "w").expect("within the budget");
+    }
+    assert_eq!(
+        client.create_dialog(&dialog_spec(owner, 8, DialogModality::Modeless)),
+        Err(Errno::NoSpace)
+    );
+    let question = client
+        .open_alert(EVENTS_A, Some(dialog), &sample_alert())
+        .expect("a question holding the dialog");
+    client.close(owner).expect("the owner closes");
+    let inner = loopback.borrow();
+    assert!(inner.host.closed.contains(&owner) && inner.host.closed.contains(&dialog));
+    assert_eq!(inner.host.alerts_withdrawn, [question]);
+    assert_eq!(
+        alert_answers(&inner.sink, EVENTS_A),
+        [WindowEvent::AlertClosed {
+            alert_id: question,
+            outcome: AlertOutcome::Dismissed
+        }],
+        "the question goes with the dialog it held"
+    );
+}
+
+#[test]
+fn a_refused_dialog_commits_nothing_and_spends_no_activation() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let owner = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("owner");
+    loopback.borrow_mut().host.focused = Some(owner);
+    loopback.borrow_mut().host.refuse_popup = true;
+    assert_eq!(
+        client.create_dialog(&dialog_spec(owner, 8, DialogModality::OwnerModal)),
+        Err(Errno::WouldBlock)
+    );
+    loopback.borrow_mut().host.refuse_popup = false;
+    assert_eq!(loopback.borrow().server.window_count(), 1);
+    let next = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("retry");
+    assert_eq!(next, owner + 1, "the refused dialog consumed no id");
 }
 
 #[test]
@@ -2314,6 +2598,150 @@ fn a_run_of_resizes_folds_to_the_newest_extent() {
         "the whole run collapses onto the size the last sample named"
     );
     assert_eq!(waiter.try_wait(&mut client), Ok(None));
+}
+
+/// No per-input request waits on the session: each is posted and answered
+/// later, so a loop busy with a slow desktop still returns at once.
+#[test]
+fn a_posted_request_never_waits_on_the_session() {
+    const BIG: DisplayMode = DisplayMode {
+        width_px: 8,
+        height_px: 3,
+        stride_bytes: 32,
+        format: DisplayFormat::Bgra8888,
+    };
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("cursor");
+    client
+        .set_tooltip(window, sample_menu_anchor(), tip("Copy"))
+        .expect("tooltip");
+    client.set_title(window, "b").expect("title");
+    client
+        .set_sizing(window, WindowSizing::Fixed)
+        .expect("sizing");
+    client.resize(window, 20, 2, &BIG).expect("resize");
+    {
+        let host = &loopback.borrow().host;
+        assert!(host.cursors.is_empty() && host.tooltips.is_empty());
+        assert!(host.retitled.is_empty() && host.resized_range.is_empty());
+        assert!(host.resized.is_empty(), "nothing was served yet");
+    }
+    assert_eq!(client.take_owed(), None, "nothing is answered yet");
+
+    loopback.borrow_mut().serve_posted();
+    assert_eq!(client.take_owed(), None, "every answer was an acceptance");
+    let host = &loopback.borrow().host;
+    assert_eq!(host.cursors, [(window, CursorShape::Text)]);
+    assert_eq!(host.retitled.len(), 1);
+    assert_eq!(host.resized.len(), 1);
+}
+
+/// A posted resize reaches the session before the present of the frame
+/// painted at its size, which the app makes at once.
+#[test]
+fn a_posted_resize_is_served_before_the_present_that_follows_it() {
+    const BIG: DisplayMode = DisplayMode {
+        width_px: 8,
+        height_px: 3,
+        stride_bytes: 32,
+        format: DisplayFormat::Bgra8888,
+    };
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+
+    client.resize(window, 20, 2, &BIG).expect("resize");
+    client
+        .present(window, 1, one(DamageRect::full(&BIG)))
+        .expect("the present at the new size is served after the resize");
+    assert_eq!(client.take_owed(), None, "the resize was accepted");
+}
+
+/// A burst of one kind keeps one request in flight and ends on the newest:
+/// the ones in between are never sent.
+#[test]
+fn a_burst_of_one_kind_keeps_one_in_flight_and_ends_on_the_newest() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    let sent_before = loopback.borrow().sent.len();
+
+    for shape in [CursorShape::Text, CursorShape::Busy, CursorShape::Crosshair] {
+        client.set_cursor(window, shape).expect("cursor");
+    }
+    assert_eq!(
+        loopback.borrow().sent.len(),
+        sent_before + 1,
+        "one in flight"
+    );
+
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    assert_eq!(
+        loopback.borrow().sent.len(),
+        sent_before + 2,
+        "the newest is posted once the first is answered"
+    );
+    loopback.borrow_mut().serve_posted();
+    client.reap_posted();
+    assert_eq!(
+        loopback.borrow().host.cursors,
+        [
+            (window, CursorShape::Text),
+            (window, CursorShape::Crosshair)
+        ]
+    );
+    assert_eq!(client.take_owed(), None);
+}
+
+/// A resize asked while another is unanswered makes no region and is
+/// delivered again once that one is answered, so the window ends at the
+/// newest size the session reported.
+#[test]
+fn a_resize_asked_while_another_is_unanswered_is_delivered_again() {
+    const BIG: DisplayMode = DisplayMode {
+        width_px: 8,
+        height_px: 3,
+        stride_bytes: 32,
+        format: DisplayFormat::Bgra8888,
+    };
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, 2 * 96)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().holds_posts = true;
+    let resized = |width_px| WindowEvent::Resized {
+        window_id: window,
+        width_px,
+        height_px: 3,
+        state: WindowSizeState::Restored,
+    };
+    let mut events = WindowEvents::new(QueueSource::new([resized(8).to_le_bytes()]));
+    assert_eq!(events.try_wait(&mut client), Ok(Some(resized(8))));
+    client.resize(window, 20, 2, &BIG).expect("posted");
+    let mut later = WindowEvents::new(QueueSource::new([resized(12).to_le_bytes()]));
+    assert_eq!(later.try_wait(&mut client), Ok(Some(resized(12))));
+    assert!(client.resize_in_flight(window), "the first is unanswered");
+    assert_eq!(
+        client.resize(window, 20, 2, &BIG),
+        Err(Errno::WouldBlock),
+        "no second resize is sent while the first is unanswered"
+    );
+
+    loopback.borrow_mut().serve_posted();
+    assert_eq!(
+        later.try_wait(&mut client),
+        Ok(Some(resized(12))),
+        "the newest size is delivered again"
+    );
+    assert!(!client.resize_in_flight(window));
 }
 
 /// Only a *consecutive* run folds, and only for the same window: the event
@@ -3307,9 +3735,12 @@ fn a_drag_is_answered_by_its_owner_and_dropped_where_a_report_named() {
         )
         .expect("the desktop");
     loopback.borrow_mut().ticket = TICKET_B;
+    client
+        .drag_verdict(source, 3, Some(DropOperation::Copy))
+        .expect("posted");
     assert_eq!(
-        client.drag_verdict(source, 3, Some(DropOperation::Copy)),
-        Err(Errno::NotFound),
+        refusal(&mut client),
+        Some(refused(source, PostedRequest::DragVerdict, Errno::NotFound)),
         "only the owner answers"
     );
     loopback.borrow_mut().ticket = TICKET_A;
@@ -3375,9 +3806,10 @@ fn a_drag_is_answered_by_its_owner_and_dropped_where_a_report_named() {
         Ok("/D"),
         "read after the drop"
     );
+    client.drag_verdict(source, 3, None).expect("posted");
     assert_eq!(
-        client.drag_verdict(source, 3, None),
-        Err(Errno::NotFound),
+        refusal(&mut client),
+        Some(refused(source, PostedRequest::DragVerdict, Errno::NotFound)),
         "not carried"
     );
     client.begin_drag(source, one_file()).expect("a new drag");
@@ -5202,9 +5634,12 @@ fn a_tooltip_declaration_reaches_the_host_and_replaces_rather_than_appends() {
     // A window the caller does not own answers like one that never existed,
     // and the host is never told.
     loopback.borrow_mut().ticket = TICKET_B;
+    client
+        .set_tooltip(window, region, tip("Copy"))
+        .expect("posted");
     assert_eq!(
-        client.set_tooltip(window, region, tip("Copy")),
-        Err(Errno::NotFound)
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Tooltip, Errno::NotFound))
     );
     assert!(loopback.borrow().host.tooltips.is_empty());
     loopback.borrow_mut().ticket = TICKET_A;
@@ -5241,9 +5676,12 @@ fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().host.refuse_tooltip = Some(Errno::NotSupported);
+    client
+        .set_tooltip(window, sample_menu_anchor(), tip("Copy"))
+        .expect("posted");
     assert_eq!(
-        client.set_tooltip(window, sample_menu_anchor(), tip("Copy")),
-        Err(Errno::NotSupported),
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Tooltip, Errno::NotSupported)),
         "a refused tip is an answer the app reports and carries on from"
     );
     assert!(loopback.borrow().host.tooltips.is_empty());
@@ -5472,9 +5910,12 @@ fn only_a_window_s_owner_sets_its_pointer_shape() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().ticket = TICKET_B;
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("posted");
     assert_eq!(
-        client.set_cursor(window, CursorShape::Text),
-        Err(Errno::NotFound)
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Cursor, Errno::NotFound))
     );
     assert!(
         loopback.borrow().host.cursors.is_empty(),
@@ -5897,8 +6338,8 @@ fn an_alert_is_put_up_for_its_owner_and_answered_exactly_once() {
 }
 
 #[test]
-fn an_alert_may_hold_only_the_callers_own_top_level_window() {
-    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+fn an_alert_may_hold_only_the_callers_own_top_level_window_or_dialog() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN), (9, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().ticket = TICKET_B;
@@ -5910,11 +6351,24 @@ fn an_alert_may_hold_only_the_callers_own_top_level_window() {
     let (popup, _) = client
         .create_popup(&popup_spec(window, 8, EVENTS_A, 0, 0))
         .expect("a popup");
-    assert_eq!(
-        client.open_alert(EVENTS_A, Some(popup), &sample_alert()),
-        Err(Errno::OutOfRange)
-    );
+    let (tool, _) = client
+        .create_tool(&tool_spec(window, 8, None))
+        .expect("a tool window");
+    for fleeting in [popup, tool] {
+        assert_eq!(
+            client.open_alert(EVENTS_A, Some(fleeting), &sample_alert()),
+            Err(Errno::OutOfRange)
+        );
+    }
     assert!(loopback.borrow().host.alerts.is_empty());
+    // A copy's question holds the copy's own window, not the folder's.
+    let (dialog, _) = client
+        .create_dialog(&dialog_spec(window, 9, DialogModality::Modeless))
+        .expect("a dialog");
+    client
+        .open_alert(EVENTS_A, Some(dialog), &sample_alert())
+        .expect("an alert holds a dialog");
+    assert_eq!(loopback.borrow().host.alerts[0].2, Some(dialog));
 }
 
 #[test]

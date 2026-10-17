@@ -5,13 +5,16 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters, BlkMedium};
+use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters, BlkMedium, BlkTransport};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, VolumeHealth, VolumeIoStatsRecord,
 };
 
 use super::{Drive, DriveChange, DrivePanels, DriveSample};
+
+/// An `NVMe` namespace.
+const NVME: BlkMedium = BlkMedium::of_transport(BlkTransport::Nvme);
 
 const SECOND: u64 = 1_000_000_000;
 
@@ -34,7 +37,7 @@ fn record(free: u64, availability: MountAvailability) -> MountRecord {
                 files_free: 1_234,
             },
             availability,
-            medium: Some(BlkMedium::Nvme),
+            medium: Some(NVME),
         },
         [0x5f; 16],
     )
@@ -284,7 +287,7 @@ fn a_file_created_repaints_the_facts_and_moves_nothing() {
         MountVolumeState {
             usage,
             availability: MountAvailability::Available,
-            medium: Some(BlkMedium::Nvme),
+            medium: Some(NVME),
         },
         [0x5f; 16],
     )

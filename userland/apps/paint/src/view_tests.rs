@@ -3,7 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView, CursorShape};
+use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView, CursorShape, DialogModality};
 use tairix_colour::Rgba;
 use tairix_controls::{Keystroke, WindowControlKind};
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
@@ -137,6 +137,23 @@ impl Window {
 
     fn act(&mut self, action: Action) -> Outcome {
         let outcome = self.view.act(action, &self.layout, &mut Region::new());
+        self.apply(&outcome);
+        outcome
+    }
+
+    /// A key pressed in the window's dialog.
+    fn dialog_key(&mut self, key: Key) -> Outcome {
+        let theme = self.registry.active();
+        let outcome = self.view.on_dialog(
+            &InputEvent::KeyPressed {
+                key,
+                modifiers: Modifiers::default(),
+            },
+            self.now,
+            &self.layout,
+            (Scale::ONE, theme),
+            &mut Region::new(),
+        );
         self.apply(&outcome);
         outcome
     }
@@ -813,7 +830,7 @@ fn a_new_picture_asked_for_starts_from_the_settings_and_is_handed_to_run() {
     window.view.begin(&preferences);
     window.act(Action::NewPicture);
     assert!(window.view.asking());
-    let outcome = window.key(Key::Named(NamedKey::Enter), plain());
+    let outcome = window.dialog_key(Key::Named(NamedKey::Enter));
     let Some(Request::Own(Own::NewWindow { picture, format })) = outcome.request else {
         panic!("a new window");
     };
@@ -827,6 +844,42 @@ fn a_new_picture_asked_for_starts_from_the_settings_and_is_handed_to_run() {
     assert_eq!(format, SaveFormat::Bmp);
 }
 
+/// A form is asked in a dialog of the window's own, drawn beside the window
+/// and its floating panes, holding the window until it is answered; the
+/// window's own input is never filtered for it.
+#[test]
+fn a_form_is_asked_in_a_dialog_of_its_own_that_holds_the_window() {
+    let mut window = Window::white(10, 10);
+    window.act(Action::NewPicture);
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let wanted = window
+        .view
+        .dialog_window(&window.layout, Scale::ONE, theme)
+        .expect("the form asks for a dialog");
+    assert_eq!(wanted.modality, DialogModality::OwnerModal);
+    assert!(tairix_window::docapp::fits_beside(
+        wanted.rect,
+        window.layout.window()
+    ));
+    for slot in window.layout.floating() {
+        assert!(slot.frame.intersection(&wanted.rect).is_empty());
+    }
+    window.key(Key::Char('e'), plain());
+    assert_eq!(
+        window.view.tool(),
+        Tool::Eraser,
+        "the window's key is its own"
+    );
+    assert!(window.view.asking(), "and leaves the form up");
+    window.dialog_key(Key::Named(NamedKey::Escape));
+    assert!(!window.view.asking(), "Escape in the dialog turns it down");
+    assert!(window
+        .view
+        .dialog_window(&window.layout, Scale::ONE, theme)
+        .is_none());
+}
+
 #[test]
 fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
     let mut window = Window::white(10, 10);
@@ -835,7 +888,7 @@ fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
     window.run_worker(surveying.expect("asked"));
     assert!(window.view.asking());
     assert!(!window.view.asking_to_close());
-    let outcome = window.key(Key::Named(NamedKey::Enter), plain());
+    let outcome = window.dialog_key(Key::Named(NamedKey::Enter));
     assert!(matches!(
         outcome.request,
         Some(Request::SaveWhere { then_close: false })
@@ -844,7 +897,7 @@ fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
     let surveying = window.view.ask_how(true, &window.layout, &mut damage);
     window.run_worker(surveying.expect("asked"));
     assert!(window.view.asking_to_close(), "a quit waits on the sheet");
-    window.key(Key::Named(NamedKey::Escape), plain());
+    window.dialog_key(Key::Named(NamedKey::Escape));
     assert!(!window.view.asking() && !window.view.asking_to_close());
 }
 
@@ -1581,7 +1634,7 @@ fn a_dock_drag_ends_where_a_conversion_turns_its_ink_into_an_entry() {
     let mut window = Window::white(16, 16);
     let form = crate::dialog::Form::convert(Some(IndexDepth::Eight));
     window.view.modal = Some(super::Modal::Form(alloc::boxed::Box::new(form)));
-    let convert = window.key(Key::Named(NamedKey::Enter), plain());
+    let convert = window.dialog_key(Key::Named(NamedKey::Enter));
     assert!(window.view.busy());
     window.move_to(window.dock_point((4, 4)));
     window.press(PointerButton::Primary);
@@ -2180,7 +2233,7 @@ fn a_new_page_joins_a_tiffs_pages_unnamed() {
     assert!(window.view.document().is_pages());
     window.act(Action::NewEntry);
     assert!(window.view.asking());
-    window.key(Key::Named(NamedKey::Enter), plain());
+    window.dialog_key(Key::Named(NamedKey::Enter));
     let document = window.view.document();
     assert_eq!(document.entries().len(), 2);
     assert_eq!(document.current(), 1, "the new page shows");
@@ -3527,12 +3580,12 @@ fn a_layer_is_renamed_and_faded_through_its_form_and_undone_whole() {
     window.act(Action::LayerProperties);
     assert!(window.view.asking());
     for _ in 0.."layer".len() {
-        window.key(Key::Named(NamedKey::Backspace), plain());
+        window.dialog_key(Key::Named(NamedKey::Backspace));
     }
     for ch in "Sky".chars() {
-        window.key(Key::Char(ch), plain());
+        window.dialog_key(Key::Char(ch));
     }
-    window.key(Key::Named(NamedKey::Enter), plain());
+    window.dialog_key(Key::Named(NamedKey::Enter));
     assert!(!window.view.asking());
     assert_eq!(layers_of(&window)[1].name, "Sky");
     window.key(Key::Char('z'), ctrl());

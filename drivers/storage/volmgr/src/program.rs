@@ -25,7 +25,7 @@ use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
 use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
-use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
+use tairix_drv_storage_volmgr::name::{candidates, VolumeName};
 use tairix_drv_storage_volmgr::plan::{plan_volumes, PlanSummary, VolumePlan};
 use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -176,16 +176,13 @@ fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static
     );
 }
 
-/// Ask the kernel to attach one planned volume, walking the deterministic
-/// candidate-name sequence on a name collision. Any other refusal is
-/// final: the kernel audited its cause, and retrying an identical request
-/// cannot change the answer.
-fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errno> {
+/// Ask the kernel to attach one planned volume, walking its deterministic
+/// candidate names while each is in use. Any other refusal is final: the
+/// kernel audited its cause, and retrying an identical request cannot change
+/// the answer.
+fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<VolumeName, Errno> {
     let mut last = Errno::AlreadyExists;
-    for attempt in 0..CANDIDATE_ATTEMPTS {
-        let Some(name) = candidate(&plan.base, &plan.identity, attempt) else {
-            break;
-        };
+    for name in candidates(plan.base, plan.identity) {
         let request = VolumeAttachRequest {
             endpoint,
             window,
@@ -198,7 +195,7 @@ fn attach_plan(endpoint: u64, window: u64, plan: &VolumePlan) -> Result<(), Errn
         let len = request.encode(&mut frame)?;
         let ret = tairix_rt::volume_attach(&frame[..len]);
         if ret == 0 {
-            return Ok(());
+            return Ok(name);
         }
         let errno = Errno::from_syscall(ret);
         if errno != Errno::AlreadyExists {
@@ -275,14 +272,28 @@ fn attach_all(endpoint: u64, window_id: u64, plans: &[VolumePlan]) -> u64 {
     let mut attached = 0u64;
     for plan in plans {
         match attach_plan(endpoint, window_id, plan) {
-            Ok(()) => {
+            Ok(name) => {
                 attached += 1;
-                log_hex_event(
-                    VOLMGR_ATTACHED,
-                    Level::Info,
-                    "volmgr: volume attached and published",
-                    "first_lba_hex",
-                    plan.first_lba,
+                let mut lba = [0u8; 16];
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Info,
+                        id: VOLMGR_ATTACHED,
+                        message: "volmgr: volume attached and published",
+                        fields: &[
+                            Field {
+                                key: "name",
+                                value: FieldValue::Str(
+                                    core::str::from_utf8(name.as_bytes()).unwrap_or(""),
+                                ),
+                            },
+                            Field {
+                                key: "first_lba_hex",
+                                value: FieldValue::Str(format_hex_u64(plan.first_lba, &mut lba)),
+                            },
+                        ],
+                    },
                 );
             }
             Err(err) => {

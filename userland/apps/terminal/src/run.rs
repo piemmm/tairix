@@ -1849,7 +1849,7 @@ mod program {
                     return Applied::Running;
                 }
                 let new_mode = app::mode_for(snapped_w, snapped_h);
-                if open.pane.resize(client, &new_mode) {
+                if open.pane.resize(client, &new_mode) == app::Fitted::Adopted {
                     let (cols, rows) = grid_dims(snapped_w, snapped_h, open.look.font);
                     let _ = open.terminal.resize(cols, rows);
                     let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
@@ -2151,6 +2151,10 @@ mod program {
                 // dropped and the drain reads on past it; only the mailbox
                 // itself failing ends the channel.
                 Err(EventError::Undecodable(_)) => continue,
+                Err(EventError::Refused(refused)) => {
+                    app::report(OWN_WORD, refused);
+                    continue;
+                }
                 Err(EventError::Mailbox(_)) => return EventOutcome::ChannelLost,
             };
             // An application-scoped event names the emulator rather

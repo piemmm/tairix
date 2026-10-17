@@ -28,9 +28,6 @@ use crate::view::View;
 /// How far the caret's row is lifted from the page, in 255ths.
 const CURRENT_ROW_ALPHA: u8 = 18;
 
-/// How much a modal question darkens the window behind it, in 255ths.
-const VEIL_ALPHA: u8 = 110;
-
 /// Paint the whole window into `surface`; `focused` says whether it holds
 /// the keyboard, which is when the caret is drawn.
 pub fn render_into(
@@ -76,9 +73,7 @@ pub fn render_into(
         status(surface, view, layout, theme, faces.status);
     }
     if let Some((dialog, field)) = view.modal() {
-        let window = layout.window();
-        blend_area(surface, window, palette.drop_shadow.with_alpha(VEIL_ALPHA));
-        let bounds = View::modal_rect(dialog, window, scale, theme);
+        let bounds = View::modal_rect(dialog, layout.window(), scale, theme);
         dialog.render(surface, bounds, scale, theme);
         if let Some(content) = dialog.content_rect(bounds, scale, theme) {
             field.render(surface, content, scale, theme);

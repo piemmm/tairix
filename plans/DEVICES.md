@@ -364,13 +364,11 @@ names a sibling crate.
   outstanding and completes it on the controller event exactly like an
   interrupt URB; the class driver still holds **zero** DMA authority
   (the HCD bounce-copies through its staging buffers).
-- Reality-driven fixes landed with it: the resting-context switch
-  (`rest_active_context`) **parks**
-  a downstream device's EP0 ring (`device_ep0_ring`) instead of dropping
-  it, so a post-enumeration device-targeted control transfer (a URB
-  control-IN, the recovery's `CLEAR_FEATURE`) switches to the device via
-  `activate_device_control` and never wrongly targets the hub — the Pi
-  topology, where every stick sits behind the integrated hub;
+- Each slot keeps a control pipe of its own (`plans/USB.md` U14), so a
+  post-enumeration device-targeted control transfer (a URB control-IN, the
+  recovery's `CLEAR_FEATURE`) goes on the device's own EP0 ring and never
+  wrongly targets the hub — the Pi topology, where every stick sits behind
+  the integrated hub;
   `describe_device` derives the emitted node's class from the interface
   class byte (`0x08` → `Storage`, `0x03` → `Input`, else `Other`)
   instead of hardcoding `Input`. Teardown/reset paths clear all bulk
@@ -403,14 +401,21 @@ names a sibling crate.
   fall-through, CSW-stall single retry, and the spec's reset recovery — a
   Bulk-Only Mass Storage Reset, then both bulk pipes' halts cleared
   (BOT 1.0 §5.3.4) — whenever an exchange breaks: a transfer that fails or
-  outruns the exchange's budget (a request's share of the class deadline,
-  halved so the reset still fits), a tag mismatch, a corrupt CSW, a phase
-  error. A command the reset ended answers reissuably (`WouldBlock`), or
+  outruns its command's own budget (`CommandBudget::exchange_ns`: a media
+  command, query, or flush allowance plus the transfer at the class's
+  slowest throughput), a tag mismatch, a corrupt CSW, a phase error. A command the reset ended answers reissuably (`WouldBlock`), or
   `TimedOut` when the device would not answer its own reset, so the unit's
   health rides it out rather than failing it at once; CBI and UAS end a
-  broken exchange the same way with their own resets; `GET MAX LUN` (STALL means
-  one LUN, >15 fails closed), `INQUIRY`, bounded `TEST UNIT
-  READY`/`REQUEST SENSE` ready drain, `READ CAPACITY(10)`/`(16)`
+  broken exchange the same way with their own resets. A reset that put the
+  transport back in step is followed by `TEST UNIT READY`: a unit answering
+  ready has the request come back at once (`BlkReissue::Now`), one coming
+  ready has it held, one without its medium is retracted; `GET MAX LUN` (STALL means
+  one LUN, >15 fails closed), `INQUIRY`, the timed per-unit readiness
+  lifecycle (`src/ready.rs`: `TEST UNIT READY` classified by key/ASC/ASCQ,
+  one `START STOP UNIT`, the ready budget, requests held while a unit comes
+  ready, empty units polled for a medium every two seconds, a changed medium
+  retracted and published afresh under a new binding), the medium probe (VPD
+  00h/B0h/B1h, else ATA PASS-THROUGH IDENTIFY word 217), `READ CAPACITY(10)`/`(16)`
   (validated power-of-two 512–4096 block size; 16-byte form past the
   32-bit LBA horizon), `READ`/`WRITE(10)`/`(16)` selected by range,
   `SYNCHRONIZE CACHE(10)` (ILLEGAL REQUEST = no cache = success),
@@ -590,7 +595,8 @@ volume-policy service.
   (`tairix,usb-msd-lun` today; a future hot-pluggable block source adds
   its key as data — the engine names no bus, §2.20).
 - **The instance** (caps: `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_FS_MOUNT`,
-  `CAP_LOG_EMIT`; no MMIO/DMA/IRQ/emit): connects a **read-only** blkio
+  `CAP_HW_EMIT` — to publish a RAID array member's node — and
+  `CAP_LOG_EMIT`; no MMIO/DMA/IRQ): connects a **read-only** blkio
   `Block` client (hostile geometry refused at connect; `write_blocks`
   refuses by construction), probes a whole-device filesystem signature
   first (superfloppy), else the GPT/MBR table (`lib/partition`), probing
@@ -604,20 +610,28 @@ volume-policy service.
   `id::` root). It then exits `0` — run-to-completion; the kernel-held
   mount outlives it, and a re-plug re-discovers and reloads afresh.
   Events 28080–28084 log probe/attach/nothing-attachable/device-failed.
-- **Naming is deterministic, never a coin-flip:**
-  1. the volume's own label, sanitised through the alias character rules
-     (ALIAS.md §5.2: lowercased `a-z0-9-_`, everything else dropped,
-     leading separators stripped, empty falls through);
-  2. else `<fstype><n>` (`fat1`, `ext1`, `arxfs1`), `n` the 1-based
-     per-type ordinal in device order;
-  3. a name the kernel reports in use (`AlreadyExists`) gets the
-     volume-identity fingerprint appended (ALIAS.md §3.8, rendered by
-     `tairix_fsprobe::fingerprint` — lowercase Crockford base32, spelled
-     with `-` because the volume-name grammar has no `@`), lengthened
-     4 → 8 → full per retry; distinct identities have distinct full
-     fingerprints, so the sequence terminates. Re-inserting the same
-     volume re-derives the same name (stable identity), so a user's
-     scripts keep working.
+- **A volume is named from itself, never from its format or its order**
+  (`drivers/storage/volmgr/src/name.rs`):
+  1. its own label, read where its format keeps it (ext's
+     `s_volume_name`; FAT32's root-directory label entry, which a relabel
+     rewrites, else the boot sector's copy; a format's `NO NAME`
+     placeholder is no label), in kebab case: ASCII letters lowercased,
+     digits kept, each run of anything else one `-`, trimmed — `My Backup
+     Disk` is `my-backup-disk`;
+  2. with no usable label, `<transport>_<fingerprint>` (`usb_25cm`): the
+     bus the device is reached over and four characters of the volume
+     identity's fingerprint (ALIAS.md §10), so two unlabelled sticks take
+     the same names whichever is attached first;
+  3. a label already in use (the kernel answers `AlreadyExists`), or one
+     spelling a root-view entry, a storage resolver or a resource namespace
+     (`system`, `id`, `disk`, …), takes `_<fingerprint>` of the volume's own
+     identity (`backup_k3x9`); a generated name still in use lengthens to 8
+     characters, then the whole fingerprint, which no two identities share.
+  A label never yields `_`, so no label can spell a name generated for
+  another volume. The bare label belongs to whichever volume holds it; a
+  given volume always derives the same suffix. The kernel re-validates every
+  name against the alias spelling (`validate_volume_name`: lowercase
+  `a-z0-9-_`, beginning and ending with a letter or digit).
 - **Defect fixed en route (§2.18):** `lib/partition`'s `mbr::encode`
   silently *dropped* a `PartitionType::Other` partition (its type byte
   encoded as the unused marker). `type_byte_for` now returns `Option`
@@ -655,10 +669,16 @@ volume-policy service.
   logged-in member reads, writes and creates on the medium without ambient
   authority while non-members read only. No
   installed gid (or a registry without the group) leaves the volume
-  restrictively system-owned (fail closed, never an invented gid); volumes
-  with a real owner model (ext4, ARXFS) are never wrapped. Removable
-  mounts keep `noexec` (landed in D3b); `CAP_FS_MOUNT_RELAX`
-  relaxation stays future work with its own enforcement point.
+  restrictively system-owned (fail closed, never an invented gid). A format
+  that records ownership (ext2/3/4, ARXFS) is never wrapped, removable or
+  not: its nodes present the uid, gid, mode and ACL they store, a node made
+  there carries its creator, and `chmod`/`chown` follow the ordinary owner
+  and `CAP_FS_CHOWN` rules, so a stick made elsewhere keeps its owners' rules
+  and a user who does not own its root makes nothing at its top level; the
+  file manager states that refusal naming the item
+  (`an_ext_volume_keeps_its_on_disk_ownership_scenario`). Removable mounts
+  keep `noexec` (landed in D3b); nothing relaxes it, so no relax capability
+  exists.
 - **Catalog enumeration:** listing a driver-backed directory merges the
   backed mounts sitting directly beneath it (`MountTable::direct_children`
   → the `fs_readdir` service), so `/Storage` enumerates the published
@@ -967,8 +987,9 @@ nodes by their own compatible keys, which is data, not bus coupling
   control endpoint, desynchronising its EP0 cursor from a recovered
   ring.
 - Host-proven end to end over scripted doubles: the shared SCSI layer
-  (per-set CDB spelling, MODE SENSE forms, flush semantics, the bounded
-  ready drain, UAS/CBI-UFI in-band sense vs BOT `REQUEST SENSE`), each
+  (per-set CDB spelling, MODE SENSE forms, flush semantics, the readiness
+  state machine, the medium probe, UAS/CBI-UFI in-band sense vs BOT
+  `REQUEST SENSE`), each
   transport's framing and recovery trails, descriptor classification
   incl. hostile streams,
   and the engine's control-OUT delivery, EP0 stall recovery, and
@@ -988,9 +1009,6 @@ nodes by their own compatible keys, which is data, not bus coupling
     service; a protocol violation fails the exchange closed rather than
     aborting via TMF. Queueing and streams arrive together with a
     queued block consumer and xHCI stream-context support.
-  - **Floppy media-change polling.** A medium inserted after bring-up is
-    served on re-plug; a `TEST UNIT READY` poll cycle (one-shot-timed,
-    never a spin) is staged with the removable-media policy work.
   - The interrupt-less CB variant (protocol `0x01`) and ATAPI
     sub-classes stay out of scope (§3).
 

@@ -12,7 +12,7 @@ use crate::confirm::build_spec;
 use crate::tests::headless_desktop;
 
 /// A prompt drawn at 200% on a small desktop is fitted to it whole: every
-/// button reachable, the window 4:3, and no edge off the screen.
+/// button reachable and no edge off the screen.
 #[test]
 fn a_prompt_on_a_small_dense_screen_is_wholly_on_it() {
     let (mut shell, mut comp) = headless_desktop();
@@ -32,8 +32,6 @@ fn a_prompt_on_a_small_dense_screen_is_wholly_on_it() {
             && bounds.bottom() <= screen.bottom(),
         "{bounds:?} is not on {screen:?}"
     );
-    let (w, h) = (u64::from(bounds.width), u64::from(bounds.height));
-    assert!((w * 3).abs_diff(h * 4) <= 4, "{w}x{h} is 4:3");
     let client = comp.window_client_rect(prompt.wm()).expect("a client");
     for index in [DECLINE, ACCEPT] {
         let at = prompt.button_centre(index, &shell, &comp);

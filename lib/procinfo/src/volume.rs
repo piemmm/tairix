@@ -12,7 +12,12 @@
 //! for the `mount(8)`-shaped listings, and prose for a desktop fact list.
 //! They are two renderings of one classification, not two classifications.
 
-use tairix_abi::blkio::BlkMedium;
+use core::fmt::{self, Write};
+
+use tairix_abi::blkio::{
+    BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation, BlkRotationEvidence,
+    BlkTransport,
+};
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, VolumeHealth};
 
@@ -170,17 +175,79 @@ pub const fn volume_health_name(health: VolumeHealth) -> &'static str {
 }
 
 /// The medium a volume lives on, or that its device declared none.
+///
+/// It claims only what the device reported: a USB unit whose rotation is
+/// unknown is a "USB drive", never a flash drive or a disk.
 #[must_use]
 pub const fn medium_name(medium: Option<BlkMedium>) -> &'static str {
-    match medium {
-        Some(BlkMedium::HardDisk) => "hard disk",
-        Some(BlkMedium::SolidState) => "solid-state drive",
-        Some(BlkMedium::Nvme) => "NVMe drive",
-        Some(BlkMedium::UsbFlash) => "USB flash drive",
-        Some(BlkMedium::UsbDisk) => "USB disk",
-        Some(BlkMedium::SdCard) => "SD card",
-        Some(BlkMedium::Virtual) => "virtual disk",
-        None => "unclassified",
+    let Some(medium) = medium else {
+        return "unclassified";
+    };
+    match (medium.transport, medium.rotation) {
+        (BlkTransport::Virtual, _) => "virtual disk",
+        (BlkTransport::Nvme, _) => "NVMe drive",
+        (BlkTransport::Sd, _) => "SD card",
+        (BlkTransport::Ata, BlkRotation::Rotating { .. }) => "hard disk",
+        (BlkTransport::Ata, BlkRotation::NonRotating(_)) => "solid-state drive",
+        (BlkTransport::Ata, BlkRotation::Unknown) => "ATA drive",
+        (BlkTransport::Usb, BlkRotation::Rotating { .. }) => "USB hard disk",
+        (BlkTransport::Usb, BlkRotation::NonRotating(_)) => "USB flash drive",
+        (BlkTransport::Usb, BlkRotation::Unknown) => "USB drive",
+    }
+}
+
+/// Write every fact `medium` states and what established each, so a
+/// misdetection is read off the report rather than inferred from timing:
+/// `USB; rotating, 7200 rpm (rotation-rate VPD); removable (INQUIRY)`.
+///
+/// # Errors
+///
+/// Whatever `out` returns.
+pub fn write_medium_facts(medium: BlkMedium, out: &mut impl Write) -> fmt::Result {
+    out.write_str(match medium.transport {
+        BlkTransport::Ata => "ATA",
+        BlkTransport::Nvme => "NVMe",
+        BlkTransport::Usb => "USB",
+        BlkTransport::Sd => "SD",
+        BlkTransport::Virtual => "virtual",
+    })?;
+    match medium.rotation {
+        BlkRotation::Unknown => out.write_str("; rotation unknown")?,
+        BlkRotation::NonRotating(evidence) => {
+            write!(out, "; non-rotating ({})", rotation_evidence(evidence))?;
+        }
+        BlkRotation::Rotating { rpm, evidence } => {
+            write!(
+                out,
+                "; rotating, {rpm} rpm ({})",
+                rotation_evidence(evidence)
+            )?;
+        }
+    }
+    match medium.removability {
+        BlkRemovability::Unknown => out.write_str("; removability unknown"),
+        BlkRemovability::Fixed(evidence) => {
+            write!(out, "; fixed ({})", removability_evidence(evidence))
+        }
+        BlkRemovability::Removable(evidence) => {
+            write!(out, "; removable ({})", removability_evidence(evidence))
+        }
+    }
+}
+
+const fn rotation_evidence(evidence: BlkRotationEvidence) -> &'static str {
+    match evidence {
+        BlkRotationEvidence::Transport => "transport",
+        BlkRotationEvidence::RotationRateVpd => "rotation-rate VPD",
+        BlkRotationEvidence::AtaIdentify => "ATA IDENTIFY",
+    }
+}
+
+const fn removability_evidence(evidence: BlkRemovabilityEvidence) -> &'static str {
+    match evidence {
+        BlkRemovabilityEvidence::Transport => "transport",
+        BlkRemovabilityEvidence::Inquiry => "INQUIRY",
+        BlkRemovabilityEvidence::MediumAbsent => "medium absent",
     }
 }
 
@@ -188,9 +255,12 @@ pub const fn medium_name(medium: Option<BlkMedium>) -> &'static str {
 mod tests {
     use super::{
         availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
-        VolumeBytes,
+        write_medium_facts, VolumeBytes,
     };
-    use tairix_abi::blkio::BlkMedium;
+    use tairix_abi::blkio::{
+        BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation, BlkRotationEvidence,
+        BlkTransport,
+    };
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeHealth};
 
@@ -343,18 +413,58 @@ mod tests {
             assert!(!volume_health_name(health).is_empty());
         }
         assert_eq!(volume_health_name(VolumeHealth::Failing), "Failing");
-        for medium in [
-            BlkMedium::HardDisk,
-            BlkMedium::SolidState,
-            BlkMedium::Nvme,
-            BlkMedium::UsbFlash,
-            BlkMedium::UsbDisk,
-            BlkMedium::SdCard,
-            BlkMedium::Virtual,
-        ] {
+        for transport in BlkTransport::ALL {
+            let medium = BlkMedium::of_transport(transport);
             assert_ne!(medium_name(Some(medium)), medium_name(None));
         }
         assert_eq!(medium_name(None), "unclassified");
+    }
+
+    #[test]
+    fn a_usb_unit_is_named_only_for_what_it_reported() {
+        let usb = BlkMedium::of_transport(BlkTransport::Usb);
+        let rmb = BlkRemovability::from_rmb(true);
+        assert_eq!(medium_name(Some(usb)), "USB drive");
+        assert_eq!(
+            medium_name(Some(usb.with_removability(rmb))),
+            "USB drive",
+            "a removable bit is no evidence of flash"
+        );
+        assert_eq!(
+            medium_name(Some(usb.with_rotation(BlkRotation::from_rate_field(
+                7200,
+                BlkRotationEvidence::RotationRateVpd
+            )))),
+            "USB hard disk"
+        );
+        assert_eq!(
+            medium_name(Some(usb.with_rotation(BlkRotation::NonRotating(
+                BlkRotationEvidence::AtaIdentify
+            )))),
+            "USB flash drive"
+        );
+    }
+
+    #[test]
+    fn the_facts_name_each_source() {
+        let mut out = alloc::string::String::new();
+        let medium = BlkMedium::of_transport(BlkTransport::Usb)
+            .with_rotation(BlkRotation::from_rate_field(
+                7200,
+                BlkRotationEvidence::RotationRateVpd,
+            ))
+            .with_removability(BlkRemovability::Removable(
+                BlkRemovabilityEvidence::MediumAbsent,
+            ));
+        write_medium_facts(medium, &mut out).expect("a string takes it");
+        assert_eq!(
+            out,
+            "USB; rotating, 7200 rpm (rotation-rate VPD); removable (medium absent)"
+        );
+        out.clear();
+        write_medium_facts(BlkMedium::of_transport(BlkTransport::Ata), &mut out)
+            .expect("a string takes it");
+        assert_eq!(out, "ATA; rotation unknown; removability unknown");
     }
 
     fn record(source: &[u8], target: &[u8]) -> MountRecord {

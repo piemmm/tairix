@@ -598,7 +598,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let Some(question) = self.question_wm() else {
             return false;
         };
-        shell.focus_alert_window(compositor, question);
+        shell.focus_holder(compositor, question);
         true
     }
 

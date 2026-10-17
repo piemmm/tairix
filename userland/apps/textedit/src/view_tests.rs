@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::time::Duration64;
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuMark, AppMenuRowView};
+use tairix_abi::window_ipc::{AppMenuItemId, AppMenuMark, AppMenuRowView, DialogModality};
 use tairix_controls::WHEEL_STEP;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -76,17 +76,26 @@ impl Harness {
 
     fn key(&mut self, key: Key, modifiers: Modifiers) -> (super::Outcome, Region) {
         let mut damage = Region::new();
-        let outcome = self.view.on_key(
-            key,
-            modifiers,
+        let outcome = self.view.on_key(key, modifiers, &self.layout, &mut damage);
+        if outcome.relayout != Relayout::None {
+            self.relayout();
+        }
+        (outcome, damage)
+    }
+
+    /// A key pressed in the window's dialog.
+    fn dialog_key(&mut self, key: Key) -> (super::Outcome, Region) {
+        let mut damage = Region::new();
+        let outcome = self.view.on_dialog(
+            &InputEvent::KeyPressed {
+                key,
+                modifiers: Modifiers::default(),
+            },
             &self.layout,
             Scale::ONE,
             self.registry.active(),
             &mut damage,
         );
-        if outcome.relayout != Relayout::None {
-            self.relayout();
-        }
         (outcome, damage)
     }
 
@@ -410,21 +419,48 @@ fn a_question_open_over_the_text_does_not_hold_a_quit() {
 }
 
 #[test]
-fn go_to_line_asks_for_a_number_and_goes_there() {
+fn go_to_line_asks_in_a_dialog_of_its_own_and_goes_there() {
     let mut harness = Harness::new(b"a\nb\nc\nd\n", Format::PlainText);
     harness.ctrl('l', false);
-    assert!(harness.view.modal().is_some());
-    harness.type_str("3");
-    harness.press(Key::Named(NamedKey::Enter));
+    let wanted = harness
+        .view
+        .dialog_window(&harness.layout, Scale::ONE, harness.registry.active())
+        .expect("the question asks for a dialog");
+    assert_eq!(wanted.title, "Go to line");
+    assert_eq!(wanted.modality, DialogModality::Modeless);
+    assert!(
+        tairix_window::docapp::fits_beside(wanted.rect, harness.layout.window()),
+        "drawn beside the window, never over it"
+    );
+    harness.dialog_key(Key::Char('3'));
+    harness.dialog_key(Key::Named(NamedKey::Enter));
     assert!(harness.view.modal().is_none());
     assert_eq!(harness.view.editor().selection().head, 4);
+}
+
+/// The window goes on taking its own keys while the question is up: nothing
+/// filters them for it.
+#[test]
+fn the_window_keeps_its_keys_while_its_question_is_up() {
+    let mut harness = Harness::new(b"abc", Format::PlainText);
+    harness.ctrl('l', false);
+    harness.type_str("x");
+    assert_eq!(
+        harness.view.editor().document().len(),
+        4,
+        "typed into the text"
+    );
+    let (dialog, field) = harness.view.modal().expect("the question stays");
+    assert!(field.text().is_empty(), "{:?}", dialog.title());
+    harness.dialog_key(Key::Named(NamedKey::Escape));
+    assert!(harness.view.modal().is_none(), "Escape cancels it");
 }
 
 #[test]
 fn typing_a_line_number_repaints_the_question_not_the_window() {
     let mut harness = Harness::new(b"a\nb\nc\nd\n", Format::PlainText);
     harness.ctrl('l', false);
-    let (_, damage) = harness.key(Key::Char('3'), Modifiers::default());
+    let (_, damage) = harness.dialog_key(Key::Char('3'));
     let (dialog, _) = harness.view.modal().expect("the question stays");
     let question = View::modal_rect(
         dialog,

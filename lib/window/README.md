@@ -32,8 +32,20 @@ server and every app's client can never drift apart.
   when it finally goes. A sink that accepts a pick conclusion is answering
   for it either way, which is what clears the pending pick.
 - **Client** (`WindowClient` / `WindowEvents`): the app-side half over
-  the injected `WindowTransport` seam (the `ipc_call` syscall in
-  production). `create` validates and sends the window geometry, grant
+  the injected `WindowTransport` seam (`ipc_call` and its posted halves,
+  `call_post`/`call_reap`, in production). The requests an app makes as
+  input moves — `resize`, `set_cursor`, `set_tooltip`, `drag_verdict`,
+  `set_title`, `set_sizing` — are **posted, never awaited**
+  (`plans/FIX-DESKTOP.md` DESK-21): at most one of each kind per window is in
+  flight, a newer one is held as the latest wanted and posted when that one
+  is answered, and the endpoint serves a client's requests in order, so a
+  posted resize reaches the session before the present painted at its size.
+  `WindowEvents::try_wait` takes in landed answers before it drains: a
+  refusal is handed out as `EventError::Refused`, which the app reports and
+  carries on from, and a refused resize is followed by a `Resized` at the
+  size the session kept. A resize asked while one is unanswered is
+  `Fitted::Deferred` — no region is made for it — and its size is delivered
+  again once that one is answered. `create` validates and sends the window geometry, grant
   handle, event endpoint, title, and the app's `WindowSizing` — whether it
   is resizable and the smallest client extent it can lay out at, `0`
   declaring none — returning the session-minted window id. The minimum is
@@ -101,12 +113,12 @@ server and every app's client can never drift apart.
   ends depend on them agreeing: the session reads a refused delivery as
   evidence that the owner has stopped draining, which would mean
   different things per app if each chose its own slack.
-- **Popup surfaces** (`WindowRequest::CreatePopup`, `TransientSpec`): an app
+- **Popup surfaces** (`WindowRequest::CreatePopup`, `PopupSpec`): an app
   opens an undecorated child surface above one of its own windows, so a
   context menu or a settings sheet is never clipped by the window that owns
-  it. `WindowClient::create_popup` takes one `TransientSpec` — the parent
-  window, the grant handle, the event endpoint, the frame count and
-  geometry, and an offset in physical pixels from the *parent's client
+  it. `WindowClient::create_popup` takes one `PopupSpec` — a `TransientSpec`
+  (the parent window, the grant handle, the event endpoint, the frame count
+  and geometry) and an offset in physical pixels from the *parent's client
   origin*, since an app is never told its own window's screen position. The
   server validates it exactly as a `Create` and additionally requires that
   the parent is a live window the caller owns (a foreign or unknown parent
@@ -120,9 +132,10 @@ server and every app's client can never drift apart.
   exactly as on a top-level id; closing the **parent** tears down every
   popup keyed to it (as does `client_exited`), while closing the popup's
   own id tears down only the popup. One `TransientSpec` definition serves both
-  halves, so the app's request and the engine's validated view cannot
-  drift. A transient hangs only from a top-level window: a popup, a tool
-  window or a layer surface named as a parent is refused `NotSupported`.
+  halves and every transient kind, so the app's request and the engine's
+  validated view cannot drift. A transient hangs only from a top-level window:
+  a popup, a tool window, a dialog or a layer surface named as a parent is
+  refused `NotSupported`.
 - **Tool windows** (`WindowRequest::CreateTool`, `ToolSpec`): a floating
   palette hung from one of the app's own windows, which the window manager
   frames with a mini title band reading its title and the user moves. It is
@@ -131,6 +144,16 @@ server and every app's client can never drift apart.
   press the parent still holds to carry it on, and its moves come back as
   `WindowEvent::ToolMoved`. `WindowClient::create_tool` and
   `WindowPane::open_tool` open one.
+- **Dialog windows** (`WindowRequest::CreateDialog`, `DialogSpec`): a form, a
+  question or an operation's progress, drawn by the app in a window of its
+  own that the session frames, centres over its owner, fits to the screen and
+  names by the app's attested identity (`WindowHost::dialog_opened`). It is
+  validated, owned, budgeted and torn down as a popup is; its
+  `DialogModality` says whether it holds its owner as an alert does, and it
+  takes the keyboard only where the app has earned the front, spending the
+  activation that earned it. An alert may hold a dialog, and closing a window
+  dismisses every alert holding it or a transient that closed with it.
+  `WindowClient::create_dialog` and `WindowPane::open_dialog` open one.
 - **The seat's desktop is asked for here, and kept current here.** An app
   cannot draw honestly without knowing the screen it is on, the desktop's
   UI scale, and whether the theme runs light or dark — and the compositor
@@ -165,12 +188,14 @@ server and every app's client can never drift apart.
 
 - **The app-side shell** (`app`, bare-metal targets only): the bring-up
   sequence every windowed `Run` binary repeated verbatim. `RtWindowTransport`
-  is the production `ipc_call` transport — it was byte-identical in all seven
-  app binaries before it moved here. `bind_event_mailbox` binds the process's
+  is the production transport — `ipc_call` for a call, `call_post` and
+  `call_reap` for a posted request. `bind_event_mailbox` binds the process's
   one event mailbox and builds the wait-set with the machine's
-  memory-pressure band already on it, reserving `EVENT_TOKEN` and
-  `PRESSURE_TOKEN` so an app numbering its own members from
-  `FIRST_APP_TOKEN` cannot collide; `park` / `park_until` wait on that set
+  memory-pressure band, the desktop notice and the window-reply wake already
+  on it, reserving `EVENT_TOKEN`, `PRESSURE_TOKEN`, `DESKTOP_TOKEN` and
+  `REPLY_TOKEN` so an app numbering its own members from `FIRST_APP_TOKEN`
+  cannot collide (a reply wakes the park as `Wake::Event`, since the event
+  drain takes it in); `park` / `park_until` wait on that set
   and answer a typed `Wake`, so the *decision* about a band change has one
   definition while the *response* (which caches to hand back) stays each
   app's own. `bring_up_desktop` asks for the seat's desktop and primes a

@@ -36,6 +36,9 @@
 //! mints the window, the DMA carve by `CAP_MEM_DMA`).
 
 #![no_std]
+// `Box::try_new`, so an operation the heap refuses fails its start rather
+// than aborting the driver.
+#![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
@@ -153,6 +156,12 @@ impl PortStatus {
     #[must_use]
     pub const fn connect_changed(self) -> bool {
         self.0 & regs::PORTSC_CSC != 0
+    }
+
+    /// The change bits latched on the port ([`regs::PORTSC_CHANGES`]).
+    #[must_use]
+    pub const fn changes(self) -> u32 {
+        self.0 & regs::PORTSC_CHANGES
     }
 
     /// Whether the device on the port can be unplugged: the port does not
@@ -560,7 +569,7 @@ impl<H: RegisterBlock> Xhci<H> {
 
     /// Page-sized scratchpad buffers the controller requires software to
     /// reserve (`HCSPARAMS2` Max Scratchpad Buffers; `0` when none are
-    /// needed). [`device::UsbDevice::start`] reserves this many pages and
+    /// needed). [`device::UsbHost::start`] reserves this many pages and
     /// points `DCBAA[0]` at their pointer array (xHCI §4.20).
     #[must_use]
     pub const fn max_scratchpad_buffers(&self) -> u32 {
@@ -941,6 +950,44 @@ impl<H: RegisterBlock> Xhci<H> {
             self.write_op(offset, (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_PP)?;
         }
         Ok(())
+    }
+
+    /// Clear the change bits `changes` names on root-hub `port`, leaving
+    /// every other latch alone.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for a port the controller does not have.
+    pub fn clear_port_changes(&mut self, port: u8, changes: u32) -> Result<(), DriverError> {
+        if port == 0 || port > self.max_ports {
+            return Err(DriverError::OutOfRange);
+        }
+        if changes & regs::PORTSC_CHANGES == 0 {
+            return Ok(());
+        }
+        let offset = regs::PORTSC_BASE + (usize::from(port) - 1) * regs::PORTSC_STRIDE;
+        let raw = self.read_op(offset)?;
+        self.write_op(
+            offset,
+            (raw & !regs::PORTSC_RW1C_MASK) | (changes & regs::PORTSC_CHANGES),
+        )
+    }
+
+    /// Abort the command executing and stop the command ring (xHCI 1.2
+    /// §4.6.1.2): the controller reports the aborted command, then the
+    /// stopped ring, each by a Command Completion Event.
+    ///
+    /// `resume` and `cycle` name the TRB after the aborted one. The running
+    /// ring ignores the pointer, but one that stops before the upper dword
+    /// lands takes it, so it must name where the ring stopped.
+    ///
+    /// # Errors
+    ///
+    /// A fault writing the register.
+    pub fn abort_command_ring(&mut self, resume: u64, cycle: bool) -> Result<(), DriverError> {
+        let rcs = if cycle { regs::CRCR_RCS } else { 0 };
+        self.write_op(regs::CRCR, low_dword(resume) | rcs | regs::CRCR_CA)?;
+        self.write_op(regs::CRCR + 4, high_dword(resume))
     }
 
     /// Ring a doorbell: `index` 0 with `target` 0 notifies the

@@ -86,6 +86,9 @@ pub struct BlkClient {
     /// instead of asserting one nobody declared; for patience it is served the
     /// bounded unclassified envelope.
     declared_medium: Option<BlkMedium>,
+    /// The binding of the publication this client connected to, repeated on
+    /// every request so none reaches a medium that has since replaced it.
+    binding: u64,
     /// This device's fold: its identity and name, the availability overlay,
     /// every counter the three per-volume queries report, and the per-device
     /// [`IoBudget`](tairix_abi::blkio::IoBudget) this client serves it with.
@@ -101,6 +104,15 @@ pub struct BlkClient {
     /// wedged paravirtual device cannot stall this mount's callers for three
     /// times its class's patience.
     meter: DeviceIoMeter,
+}
+
+/// Park the calling task for `ns`, the pacing a reissue waits out. A caller
+/// the scheduler cannot park (a host test, before the dispatch loop runs)
+/// reissues at once.
+fn pause(ns: u64) {
+    if let Some(hook) = wait_arch() {
+        let _ = crate::sleep::park_until(hook.now_ns().saturating_add(ns));
+    }
 }
 
 impl BlkClient {
@@ -162,12 +174,14 @@ impl BlkClient {
             // endpoint that never answers fails closed promptly rather than
             // being granted a spinning disk's patience on nothing but hope.
             declared_medium: None,
+            binding: 0,
             meter: DeviceIoMeter::new(endpoint_id, audit),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
             lba: 0,
             blocks: 0,
+            binding: 0,
         })?;
         if !completion.block_size.is_power_of_two()
             || completion.block_size < MIN_BLOCK_SIZE
@@ -189,6 +203,7 @@ impl BlkClient {
         // unknown and served the bounded unclassified envelope, so it cannot
         // buy patience and cannot be reported as a medium it never declared.
         client.declared_medium = completion.medium;
+        client.binding = completion.binding;
         // The device has now answered for itself, so the fold adopts the
         // envelope its medium earns and the name its driver declares. The name
         // is validated on the way in, so an untrusted driver cannot reach a
@@ -232,6 +247,7 @@ impl BlkClient {
             op: BlkOp::Flush,
             lba: 0,
             blocks: 0,
+            binding: self.binding,
         })
         .map(|_| ())
         .map_err(DriverError::from_errno)
@@ -250,23 +266,26 @@ impl BlkClient {
     /// is merely recovering. The reissue count is bounded by the shared
     /// per-class budget, so a device that keeps answering reissuably still
     /// fails closed deterministically rather than retrying forever
-    /// (`AGENTS.md`'s ban on retry-until-it-works). Each reissue re-posts and
-    /// re-parks on the reply — it is event-driven, never a busy spin: the
-    /// serving driver owns the recovery grace window and its timers; this
-    /// consumer only honours the reissuable reply. A hard deadline timeout or
-    /// a torn-down endpoint fails closed with no reissue — a device that
-    /// consumed its whole deadline without answering is treated as wedged, not
-    /// retried.
+    /// (`AGENTS.md`'s ban on retry-until-it-works). A reissue the driver says
+    /// its recovery has made ready goes at once; any other first parks the
+    /// task out the class's pacing
+    /// ([`IoBudget::reissue_wait_ns`](tairix_abi::blkio::IoBudget::reissue_wait_ns)),
+    /// so the retries are spread over the device's grace window rather than
+    /// spent at once. A hard deadline timeout or a torn-down endpoint fails
+    /// closed with no reissue — a device that consumed its whole deadline
+    /// without answering is treated as wedged, not retried.
     fn transfer(&self, request: BlkRequest) -> Result<BlkCompletion, Errno> {
         let mut attempts: u32 = 0;
         loop {
             let outcome = self.transfer_once(request)?;
-            if self.meter.budget().should_reissue(outcome.status, attempts) {
-                self.meter.reissued();
-                attempts += 1;
-                continue;
+            let Some(wait_ns) = self.meter.budget().reissue_wait_ns(&outcome, attempts) else {
+                return outcome.data();
+            };
+            self.meter.reissued();
+            attempts += 1;
+            if wait_ns > 0 {
+                pause(wait_ns);
             }
-            return outcome.data();
         }
     }
 
@@ -497,6 +516,7 @@ impl Block for BlkClient {
                 op: BlkOp::Read,
                 lba,
                 blocks,
+                binding: self.binding,
             })
             .map_err(DriverError::from_errno)?;
             self.window_read(&mut buf[off..off + chunk]);
@@ -524,6 +544,7 @@ impl Block for BlkClient {
                 op: BlkOp::Write,
                 lba,
                 blocks,
+                binding: self.binding,
             })
             .map_err(DriverError::from_errno)?;
             off += chunk;
@@ -546,14 +567,15 @@ mod tests {
 
     extern crate std;
     use core::ptr::NonNull;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::sync::{Arc as StdArc, Mutex};
     use std::thread;
     use std::vec;
     use std::vec::Vec;
 
     use tairix_abi::blkio::{
-        encode_error_completion, BlkDeviceClass, BlkQueueCounters, BLK_FLAG_READ_ONLY,
+        encode_error_completion, BlkDeviceClass, BlkQueueCounters, BlkReissue, BlkRotation,
+        BlkRotationEvidence, BlkStatus, BlkTransport, BLK_FLAG_READ_ONLY,
     };
     use tairix_abi::driver::block::BlockClass;
     use tairix_kernel_ipc::{CallEndpointLimits, RecvCall};
@@ -585,7 +607,9 @@ mod tests {
     /// trait default nor the pre-connect placeholder, so a test asserting
     /// the client's budget proves it adopted the *device's* class rather
     /// than keeping an assumed envelope.
-    const MEM_DEVICE_MEDIUM: BlkMedium = BlkMedium::UsbFlash;
+    const MEM_DEVICE_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
+        BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
+    );
     const MEM_DEVICE_CLASS: BlkDeviceClass = MEM_DEVICE_MEDIUM.class();
     /// The name the scripted double declares, so a test asserting the
     /// client's reported name proves it adopted the *device's* rather than
@@ -595,7 +619,7 @@ mod tests {
     const MEM_DEVICE_NAME: &str = "mem-blk";
     /// The class the scripted double declares: a spinning disk, whose
     /// reissue budget the bounded-reissue tests are written against.
-    const SCRIPTED_DEVICE_MEDIUM: BlkMedium = BlkMedium::HardDisk;
+    const SCRIPTED_DEVICE_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata);
     const SCRIPTED_DEVICE_CLASS: BlkDeviceClass = SCRIPTED_DEVICE_MEDIUM.class();
 
     /// Mint distinct endpoint ids per test so the global registry never
@@ -720,6 +744,7 @@ mod tests {
                                     0
                                 },
                                 medium: device.reported_medium,
+                                binding: 0,
                             }
                             .encode(&mut reply)
                             .unwrap(),
@@ -1072,9 +1097,27 @@ mod tests {
     /// `EndpointStalled`, a transient from `WouldBlock`) and its hard ones
     /// (a `MediumError`, a `DeviceOffline`) to exercise the client's
     /// bounded-reissue policy.
+    /// What the scripted device answers one data request with.
+    #[derive(Clone, Copy)]
+    enum Verdict {
+        /// It serves the request.
+        Served,
+        /// It fails it with this error.
+        Failed(Errno),
+        /// It answers reissuably, its driver vouching that its recovery has
+        /// worked.
+        Recovered,
+    }
+
+    impl From<Option<Errno>> for Verdict {
+        fn from(failure: Option<Errno>) -> Self {
+            failure.map_or(Self::Served, Self::Failed)
+        }
+    }
+
     fn serve_scripted(
         endpoint: Arc<CallEndpoint>,
-        script: StdArc<Mutex<Vec<Option<Errno>>>>,
+        script: StdArc<Mutex<Vec<Verdict>>>,
         count: usize,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
@@ -1098,14 +1141,20 @@ mod tests {
                             flags: 0,
                             medium: Some(SCRIPTED_DEVICE_MEDIUM),
                             name: BlkDeviceName::new(SCRIPTED_DEVICE_NAME),
+                            binding: 0,
                         }
                         .encode(&mut reply)
                         .unwrap(),
                         // A scripted data request: the next verdict, or a
                         // (window-unchanged) success when the script says so.
                         _ => match script.lock().unwrap().remove(0) {
-                            Some(err) => encode_error_completion(&mut reply, err).unwrap(),
-                            None => BlkCompletion::default().encode(&mut reply).unwrap(),
+                            Verdict::Failed(err) => {
+                                encode_error_completion(&mut reply, err).unwrap()
+                            }
+                            Verdict::Served => BlkCompletion::default().encode(&mut reply).unwrap(),
+                            Verdict::Recovered => BlkCompletion::default()
+                                .encode_reissuable(BlkStatus::Reset, BlkReissue::Now, &mut reply)
+                                .unwrap(),
                         },
                     },
                 };
@@ -1120,10 +1169,19 @@ mod tests {
         script: Vec<Option<Errno>>,
         count: usize,
     ) -> (BlkClient, thread::JoinHandle<()>) {
+        connect_verdicts(script.into_iter().map(Verdict::from).collect(), count)
+    }
+
+    /// Connect a client to a server answering each data request with the
+    /// next of `verdicts`.
+    fn connect_verdicts(
+        verdicts: Vec<Verdict>,
+        count: usize,
+    ) -> (BlkClient, thread::JoinHandle<()>) {
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
-        let script = StdArc::new(Mutex::new(script));
+        let script = StdArc::new(Mutex::new(verdicts));
         let server = serve_scripted(endpoint, script, count);
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let client = BlkClient::connect(id, hold, &SINK).expect("connect");
@@ -1150,6 +1208,83 @@ mod tests {
         let mut buf = [0u8; BLOCK_SIZE];
         client.read_blocks(0, &mut buf).expect("read after reissue");
         server.join().unwrap();
+    }
+
+    /// Each reissue first parks out the class's pacing, so a recovering
+    /// device has its grace window to come back in rather than meeting every
+    /// reissue at once.
+    #[test]
+    fn each_reissue_first_waits_out_the_class_pacing() {
+        // Each pacing park advances the clock by this share of the pacing,
+        // so a full pause takes exactly this many parks.
+        const SHARES: u32 = 8;
+        let retries = scripted_retry_budget();
+        let mut script = vec![Some(Errno::EndpointStalled); retries];
+        script.push(None);
+        let (mut client, server) = connect_scripted(script, 2 + retries);
+        let pacing = SCRIPTED_DEVICE_CLASS.budget().reissue_pacing_ns();
+        assert_eq!(
+            pacing % u64::from(SHARES),
+            0,
+            "the shares divide the pacing"
+        );
+
+        let (_, task) = crate::test_boot::claim_scheduler();
+        let cpu = crate::test_boot::claim_cpu();
+        crate::test_boot::run_claim_on(cpu);
+        let paced = AtomicU32::new(0);
+        let on_park = |_| {
+            let arch = crate::test_boot::claimed_wait_arch().expect("claimed hook");
+            // Only a pause sleeps on the sleep queue; the reply wait does not.
+            if crate::waitq::SLEEP_WAITQ.wake_task(arch, task) {
+                paced.fetch_add(1, Ordering::SeqCst);
+                crate::test_boot::advance_clock(pacing / u64::from(SHARES));
+            }
+        };
+        crate::test_boot::with_park_probe(cpu, on_park, |_| {
+            let mut buf = [0u8; BLOCK_SIZE];
+            client
+                .read_blocks(0, &mut buf)
+                .expect("read after paced reissues");
+        });
+        server.join().unwrap();
+        assert_eq!(
+            paced.load(Ordering::SeqCst),
+            SHARES * u32::try_from(retries).expect("budget fits"),
+            "every reissue, and only a reissue, waited out the whole pacing"
+        );
+    }
+
+    /// A reissue the driver vouches for — its reset worked and the unit
+    /// answered ready — goes at once rather than waiting out the pacing.
+    #[test]
+    fn a_reissue_its_driver_vouches_for_does_not_wait_out_the_pacing() {
+        let retries = scripted_retry_budget();
+        let mut verdicts = vec![Verdict::Recovered; retries];
+        verdicts.push(Verdict::Served);
+        let (mut client, server) = connect_verdicts(verdicts, 2 + retries);
+        let pacing = SCRIPTED_DEVICE_CLASS.budget().reissue_pacing_ns();
+        let (_, task) = crate::test_boot::claim_scheduler();
+        let cpu = crate::test_boot::claim_cpu();
+        crate::test_boot::run_claim_on(cpu);
+        let paced = AtomicU32::new(0);
+        // A pause would be counted and ended here, so a client that waited
+        // fails the assertion below rather than parking for ever.
+        let on_park = |_| {
+            let arch = crate::test_boot::claimed_wait_arch().expect("claimed hook");
+            if crate::waitq::SLEEP_WAITQ.wake_task(arch, task) {
+                paced.fetch_add(1, Ordering::SeqCst);
+                crate::test_boot::advance_clock(pacing);
+            }
+        };
+        crate::test_boot::with_park_probe(cpu, on_park, |_| {
+            let mut buf = [0u8; BLOCK_SIZE];
+            client
+                .read_blocks(0, &mut buf)
+                .expect("read after vouched reissues");
+        });
+        server.join().unwrap();
+        assert_eq!(paced.load(Ordering::SeqCst), 0, "no reissue waited");
     }
 
     #[test]
@@ -1422,7 +1557,7 @@ mod tests {
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
-        let script = StdArc::new(Mutex::new(script));
+        let script = StdArc::new(Mutex::new(script.into_iter().map(Verdict::from).collect()));
         let server = serve_scripted(endpoint, script, count);
         let hold = KernelHold::for_test(window, BLK_DATA_LEN);
         let client = BlkClient::connect(id, hold, audit).expect("connect");

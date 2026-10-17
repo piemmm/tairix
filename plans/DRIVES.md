@@ -142,8 +142,8 @@ id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/snapshots/2026-06-20
 `/Storage/<volume>` remains a compatibility projection only:
 
 ```text
-/Storage/Backup        -> Backup:/
-/Storage/CameraCard    -> CameraCard:/
+/Storage/backup        -> Backup:/
+/Storage/cameracard    -> CameraCard:/
 ```
 
 A process must be able to open `Backup:/file` even if the synthetic `/` view or
@@ -585,12 +585,17 @@ If two roots claim the same alias or label:
 - the namespace manager may publish disambiguated display aliases, but must not
   silently choose one for privileged operations.
 
+A `/Storage` catalog entry is not an alias, and is never ambiguous: the volume
+already holding a label's name keeps it, and another volume claiming that label
+is catalogued under the label and its own identity's fingerprint
+(`docs/src/drivers/block.md`, the volume manager), the same at every attach.
+
 Example:
 
 ```text
-CameraCard:        # denied: ambiguous
-CameraCard-1:      # generated display alias, if policy allows
-CameraCard-2:      # generated display alias, if policy allows
+CameraCard:                 # denied: ambiguous
+/Storage/cameracard         # the volume attached first
+/Storage/cameracard_k3x9    # the other, named from its own identity
 id::<uuid-a>/DCIM
 id::<uuid-b>/DCIM
 ```
@@ -749,8 +754,8 @@ Both phases must enforce capability checks before touching protected state.
 
 ### 11.2 Suggested capabilities
 
-The final spec may reuse existing `CAP_FS_MOUNT` and
-`CAP_FS_MOUNT_RELAX`, but the model is clearer with more precise capabilities.
+The final spec may reuse the existing `CAP_FS_MOUNT`, but the model is clearer
+with more precise capabilities, none of which exists yet.
 Suggested names:
 
 ```text
@@ -1222,6 +1227,12 @@ TAIRiX must not let a weak foreign filesystem weaken TAIRiX security. If a
 foreign filesystem cannot store TAIRiX ACLs or capabilities, the root publication
 must apply a policy wrapper and default to restrictive flags.
 
+A format that records ownership (ext2/3/4) is served with the uid, gid, mode
+and ACL it stores, removable or not, exactly as a native volume is: nothing
+maps or overrides it, and a refusal that ownership causes is stated to the
+user (`docs/src/filesystem/drives.md` §20). A format that records none
+(FAT32) is served under the storage-group identity map.
+
 ---
 
 ## 21. ABI and library ownership
@@ -1423,7 +1434,7 @@ A shell can still use view paths:
 ```text
 /Users/ian/Documents
 /System/Applications/Editor.app
-/Storage/CameraCard/DCIM
+/Storage/cameracard/DCIM
 ```
 
 But tools that care about durability or recovery can use:
@@ -1447,7 +1458,7 @@ adfs::HardDisc4/Apps/Paint
 The key user-facing property:
 
 ```text
-Backup:/file.txt does not depend on /Storage/Backup existing.
+Backup:/file.txt does not depend on /Storage/backup existing.
 ```
 
 ---
@@ -1510,7 +1521,7 @@ id::<volume-id>/snapshots/latest
 The most important compatibility rule is:
 
 ```text
-/Storage/Backup/file.txt is only a projection of Backup:/file.txt.
+/Storage/backup/file.txt is only a projection of Backup:/file.txt.
 ```
 
 The most important filesystem-backed rule is:

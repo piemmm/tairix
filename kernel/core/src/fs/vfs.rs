@@ -774,6 +774,32 @@ impl Vfs {
         DelegatedFs::new_secured(fs, mount).stat(cred, covered.remainder(), final_link)
     }
 
+    /// Whether `cred` holds every one of `access` on the node at `covered`,
+    /// as an open asks before it hands out a descriptor; asking to write is
+    /// refused on a read-only mount.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::ReadOnly`] for a write on a read-only mount,
+    /// [`VfsError::PermissionDenied`] for an access the node withholds, or as
+    /// [`Vfs::stat_via`].
+    pub fn authorize_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        covered: &CoveredPath,
+        fs: &mut F,
+        final_link: FinalLink,
+        access: &[Access],
+    ) -> Result<(), VfsError> {
+        let purpose = if access.contains(&Access::Write) {
+            MountUse::Write
+        } else {
+            MountUse::Read
+        };
+        let mount = self.delegate_context(cred, covered, purpose)?;
+        DelegatedFs::new_secured(fs, mount).authorize(cred, covered.remainder(), final_link, access)
+    }
+
     /// Per-inode counterpart of [`Vfs::readlink_via`].
     ///
     /// # Errors

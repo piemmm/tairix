@@ -21,7 +21,15 @@ disagree about what identifies a volume.
 - `ProbedVolume` — the matched filesystem type
   (`tairix_abi::volume::VolumeFsType`), the volume's stable identity
   exactly as the matching filesystem driver publishes it, and its
-  recorded label (trimmed; empty where the format records none).
+  recorded label (trimmed; empty where the format records none or holds
+  FAT's `NO NAME` placeholder).
+- FAT32's authoritative label: `fat32_root_dir_byte` places the root
+  directory from the boot sector, and `ProbedVolume::with_fat32_directory_label`
+  takes the label entry found in its head (`fat32_directory_label`), which a
+  relabel rewrites, over the boot sector's copy.
+- `Fat32Bpb` — the validated FAT32 parameter block and the region offsets it
+  places, read by both this probe and `drivers/filesystem/fat32`, with the
+  FAT directory-entry constants the driver imports.
 - `fat32_identity_from_boot` — the FAT32 content-derived identity
   (serial + label + tag; FAT32 has no UUID), shared with
   `drivers/filesystem/fat32`.

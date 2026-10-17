@@ -36,7 +36,10 @@ so a multi-interface device lists once.
 
 - `-v` — after each device, list every one of its interfaces' class,
   subclass, and protocol (`bInterfaceClass`, `bInterfaceSubClass`,
-  `bInterfaceProtocol`) with the names the USB class tables carry.
+  `bInterfaceProtocol`) with the names the USB class tables carry, and
+  for a storage interface the medium of each of its units: whether it
+  rotates and whether it can be removed, each with what reported it, or
+  `unknown` where the unit reported nothing.
 - `-t` — render the buses, their devices, and each device's interface
   classes as a tree.
 - `-d [<vendor>]:[<product>]` — list only devices matching the given
@@ -49,7 +52,8 @@ so a multi-interface device lists once.
 ## EXAMPLES
 
 - `lsusb` — every discovered USB device, with names.
-- `lsusb -v` — the same, with each interface's class identity.
+- `lsusb -v` — the same, with each interface's class identity and each
+  storage unit's medium.
 - `lsusb -s 2:` — every device on bus 2.
 - `lsusb -d 046d:` — every device from vendor `046d` (Logitech).
 - `lsusb -t` — the devices under their bus topology.

@@ -28,11 +28,11 @@ use tairix_abi::usb_urb::{
     USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwNode, ProcId};
-use tairix_usb::device::{DeviceIdentity, HubEvent, BULK_BUF_LEN};
+use tairix_usb::device::{DeviceIdentity, BULK_BUF_LEN};
 use tairix_usb::transport::{on_own_endpoint, UrbEngine};
 
 use crate::domain::{ControllerDomainEvent, ControllerHealth};
-use crate::serve::{attach_transport_grants, Reach, UrbOutcome, UrbReply, UrbService};
+use crate::serve::{attach_transport_grants, Operation, Reach, UrbOutcome, UrbReply, UrbService};
 
 /// Calls a transport endpoint queues before it is served. A class driver
 /// submits one at a time and blocks on the reply, so a small queue absorbs a
@@ -73,10 +73,8 @@ pub enum Note {
     /// A faulted transfer was its device leaving: the device is detached and
     /// its nodes retracted.
     FaultDetached,
-    /// Whether a faulting device is still attached could not be read.
+    /// Whether a faulting device is still attached could not be asked.
     DetachUnconfirmed(DriverError),
-    /// The hub change a fault detach left could not be serviced.
-    HubServiceFailed(DriverError),
     /// A woken endpoint's queue could not be read.
     ReceiveFailed(Errno),
     /// The controller's fault domain moved.
@@ -120,22 +118,20 @@ pub trait Seam {
     fn describe(&self, index: usize) -> Result<HwNode, DriverError>;
     /// The transfer engine of the device served at `index`.
     fn engine(&mut self, index: usize) -> Self::Engine<'_>;
-    /// Detach the device at `index` if its port reads it gone, returning
-    /// whether it did.
+    /// Have the port the device at `index` hangs off looked at again, so a
+    /// device that left is torn down.
     ///
     /// # Errors
     ///
-    /// The port could not be read.
-    fn detach_if_gone(&mut self, index: usize) -> Result<bool, DriverError>;
-    /// Service one pending hub status change.
-    ///
-    /// # Errors
-    ///
-    /// The engine's refusal.
-    fn next_hub_change(&mut self) -> Result<HubEvent, DriverError>;
+    /// The engine's refusal, such as no device served there.
+    fn confirm_departure(&mut self, index: usize) -> Result<(), DriverError>;
+    /// Whether the look [`Self::confirm_departure`] asked for at `index` is
+    /// done.
+    fn departure_settled(&self, index: usize) -> bool;
     /// Whether the controller has latched a fatal error or halted.
     fn faulted(&mut self) -> bool;
-    /// Reset the controller and enumerate it afresh.
+    /// Reset the controller and start enumerating it afresh, the walk's end
+    /// reported by the engine's service.
     ///
     /// # Errors
     ///
@@ -197,6 +193,8 @@ pub trait Seam {
 /// one device-table index.
 pub struct Interfaces<B> {
     transports: Vec<Transport<B>>,
+    /// A controller reset's walk is running: the recovery ends with it.
+    resetting: bool,
 }
 
 struct Transport<B> {
@@ -206,6 +204,9 @@ struct Transport<B> {
     watched: bool,
     service: UrbService,
     node: Option<Node<B>>,
+    /// A faulted URB's answer, held while the engine looks at whether its
+    /// device left: answered [`Errno::NotFound`] if it did.
+    confirming: Option<UrbReply>,
 }
 
 struct Node<B> {
@@ -239,6 +240,7 @@ impl<B> Interfaces<B> {
     pub const fn new() -> Self {
         Self {
             transports: Vec::new(),
+            resetting: false,
         }
     }
 
@@ -384,12 +386,8 @@ impl<B: UrbBuffer> Interfaces<B> {
         transport.watched.then_some(slot)
     }
 
-    /// Serve the call that woke transport `slot`.
-    ///
-    /// A transfer or operation that ran synchronously parked on the
-    /// controller's interrupt line and may have taken another transport's
-    /// completion off it, so every held URB is driven, and every finished
-    /// slot delivered, after one.
+    /// Serve the call that woke transport `slot`: answered at once, or held
+    /// until the engine finishes it.
     pub fn serve_submit<S: Seam<Buffer = B>>(
         &mut self,
         slot: usize,
@@ -421,43 +419,36 @@ impl<B: UrbBuffer> Interfaces<B> {
             Some(_) if health.is_recovering() => Reach::Recovering,
             Some(_) => Reach::Served,
         };
-        let reply = if let UsbRequest::Transfer(urb) = request {
+        let outcome = if let UsbRequest::Transfer(urb) = request {
             let served = transport.node.as_ref().map(|node| node.index);
             let (index, shm): (usize, &mut [u8]) = match transport.node.as_mut() {
                 None => (0, &mut []),
                 Some(node) => (node.index, node.buffer.bytes()),
             };
             let now_ns = seam.now_ns();
-            let reply = match transport.service.on_submit(
+            let outcome = transport.service.on_submit(
                 reach,
                 ticket,
                 now_ns,
                 &urb,
                 shm,
                 &mut seam.engine(index),
-            ) {
-                UrbOutcome::Reply(reply) => reply,
-                UrbOutcome::Held | UrbOutcome::Idle => return,
-            };
-            // The reissuable answer a recovering controller gives is no
-            // failure; anything else refused or faulted at once is noted as
-            // a held URB's failure would be.
-            let failed = reply.errno().filter(|&errno| errno != Errno::WouldBlock);
-            if let (Some(errno), Some(index)) = (failed, served) {
-                seam.note(Note::UrbFailed {
-                    index,
-                    transfer: urb.transfer_type,
-                    errno,
-                });
+            );
+            if let (UrbOutcome::Reply(reply), Some(index)) = (&outcome, served) {
+                if let Some(errno) = reply.errno() {
+                    seam.note(Note::UrbFailed {
+                        index,
+                        transfer: urb.transfer_type,
+                        errno,
+                    });
+                }
             }
-            reply
+            outcome
         } else {
             transport.operate(reach, ticket, request, seam)
         };
-        seam.reply(transport.endpoint, reply);
-        if reach == Reach::Served {
-            self.drive_busy(health, seam);
-            self.deliver_streams(seam);
+        if let UrbOutcome::Reply(reply) = outcome {
+            seam.reply(transport.endpoint, reply);
         }
     }
 
@@ -490,12 +481,12 @@ impl<B: UrbBuffer> Interfaces<B> {
     pub fn expire_overdue<S: Seam<Buffer = B>>(
         &mut self,
         now_ns: u64,
-        health: &mut ControllerHealth,
+        health: &ControllerHealth,
         seam: &mut S,
     ) {
         let serving = !(health.is_recovering() || health.is_failed_closed());
         if serving {
-            self.drive_busy(health, seam);
+            self.drive_busy(seam);
         }
         for transport in &mut self.transports {
             let Some(node) = transport.node.as_ref() else {
@@ -524,14 +515,13 @@ impl<B: UrbBuffer> Interfaces<B> {
         }
     }
 
-    /// Drive every held URB against what the controller has buffered, then
-    /// recover the controller if a device's departure left it faulted.
-    pub fn drive_busy<S: Seam<Buffer = B>>(&mut self, health: &mut ControllerHealth, seam: &mut S) {
-        let mut detached = false;
-        for slot in 0..self.transports.len() {
-            let Some(transport) = self.transports.get_mut(slot) else {
-                continue;
-            };
+    /// Drive every held call against what the controller has done. A URB
+    /// that faulted is held while the engine looks at whether its device
+    /// left, and answered once it knows: [`Errno::NotFound`] with the node it
+    /// retracts if the device left, its own fault otherwise.
+    pub fn drive_busy<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
+        for transport in &mut self.transports {
+            transport.settle_departure(seam);
             if !transport.service.is_busy() {
                 continue;
             }
@@ -547,7 +537,6 @@ impl<B: UrbBuffer> Interfaces<B> {
             let UrbOutcome::Reply(reply) = outcome else {
                 continue;
             };
-            let endpoint = transport.endpoint;
             let errno = reply.errno();
             if let (Some(errno), Some(transfer)) = (errno, transfer) {
                 seam.note(Note::UrbFailed {
@@ -556,79 +545,66 @@ impl<B: UrbBuffer> Interfaces<B> {
                     errno,
                 });
             }
-            if errno == Some(Errno::DeviceFault)
-                && self.fault_detach(slot, index, reply.ticket, seam)
-            {
-                detached = true;
-                continue;
+            if transfer.is_some() && errno == Some(Errno::DeviceFault) {
+                match seam.confirm_departure(index) {
+                    Ok(()) => {
+                        transport.confirming = Some(reply);
+                        continue;
+                    }
+                    Err(err) => seam.note(Note::DetachUnconfirmed(err)),
+                }
             }
-            seam.reply(endpoint, reply);
-        }
-        if detached {
-            self.recover(health, seam);
+            seam.reply(transport.endpoint, reply);
         }
     }
 
-    /// Detach the device at `index` if its faulted URB, `ticket` on transport
-    /// `slot`, was it leaving: retract every node it carried, answer the URB
-    /// `NotFound`, and service the hub change it may already have posted,
-    /// re-plug included. Returns whether it left.
-    fn fault_detach<S: Seam<Buffer = B>>(
-        &mut self,
-        slot: usize,
-        index: usize,
-        ticket: u64,
-        seam: &mut S,
-    ) -> bool {
-        match seam.detach_if_gone(index) {
-            Ok(true) => {}
-            Ok(false) => return false,
-            Err(err) => {
-                seam.note(Note::DetachUnconfirmed(err));
-                return false;
-            }
-        }
-        self.reconcile(seam);
-        if let Some(transport) = self.transports.get(slot) {
-            seam.reply(
-                transport.endpoint,
-                UrbReply::new(ticket, Err(Errno::NotFound)),
-            );
-        }
-        seam.note(Note::FaultDetached);
-        match seam.next_hub_change() {
-            Ok(HubEvent::None) => {}
-            Ok(_) => self.reconcile(seam),
-            Err(err) => seam.note(Note::HubServiceFailed(err)),
-        }
-        true
-    }
-
-    /// Reset a controller that has faulted, or whose last reset left it
-    /// faulted, returning whether an attempt ran.
+    /// Reset a controller that has faulted, or whose last reset did not
+    /// bring it back, returning whether an attempt started. The attempt ends
+    /// with its walk ([`Self::finish_recovery`]); while it runs nothing is
+    /// driven, and every call is held.
     ///
-    /// The nodes stay published through the reset, so a device that comes
-    /// back keeps its node and its driver. A held URB is answered only once
-    /// its device's fate is known — `NotFound` with its node, the reissuable
-    /// `WouldBlock` where its device came back — since a resubmit prompted
-    /// sooner could reach a device that replaced its own. A failed attempt
-    /// keeps held report polls for the next, which the caller runs on
-    /// [`ControllerHealth::wait_timeout`] because a faulted controller raises
-    /// no interrupt (xHCI §4.24.1). Once the grace window has elapsed every
-    /// node is retracted and the controller is not tried again.
+    /// A faulted controller raises no interrupt (xHCI §4.24.1), so the caller
+    /// runs a failed attempt's successor on [`ControllerHealth::wait_timeout`].
+    /// Once the grace window has elapsed every node is retracted and the
+    /// controller is not tried again.
     pub fn recover<S: Seam<Buffer = B>>(
         &mut self,
         health: &mut ControllerHealth,
         seam: &mut S,
     ) -> bool {
-        if health.is_failed_closed() || !(health.is_recovering() || seam.faulted()) {
+        if self.resetting
+            || health.is_failed_closed()
+            || !(health.is_recovering() || seam.faulted())
+        {
             return false;
         }
         let owner = health.owner();
         if let Some(event) = health.begin_recovery(seam.now_ns()) {
             seam.note(Note::Domain { event, owner });
         }
-        let serving = seam.reset().is_ok() && !seam.faulted();
+        if seam.reset().is_ok() {
+            self.resetting = true;
+        } else {
+            self.note_attempt(false, health, seam);
+        }
+        true
+    }
+
+    /// End the recovery whose walk has just finished. The nodes stayed
+    /// published through it, so a device that came back keeps its node and
+    /// its driver; a held call is answered only now its device's fate is
+    /// known — `NotFound` with its node, the reissuable `WouldBlock` where
+    /// the engine had been asked for it, and the rest driven afresh — since a
+    /// resubmit prompted sooner could reach a device that replaced its own.
+    pub fn finish_recovery<S: Seam<Buffer = B>>(
+        &mut self,
+        health: &mut ControllerHealth,
+        seam: &mut S,
+    ) {
+        if !core::mem::take(&mut self.resetting) {
+            return;
+        }
+        let serving = !seam.faulted();
         if serving {
             // The reset took every stream with it; a node kept across it
             // governs its own interface alone again.
@@ -636,24 +612,42 @@ impl<B: UrbBuffer> Interfaces<B> {
                 node.end_streams(Errno::WouldBlock, seam);
             }
             self.reconcile_as(Matching::Reenumerated, seam);
-        }
-        for transport in &mut self.transports {
-            let outcome = if serving {
-                transport.service.abort_outstanding(Errno::WouldBlock)
-            } else {
-                transport.service.reissue_held_transfer()
-            };
-            if let UrbOutcome::Reply(reply) = outcome {
-                seam.reply(transport.endpoint, reply);
+            for transport in &mut self.transports {
+                if let Some(reply) = transport.confirming.take() {
+                    seam.reply(transport.endpoint, reply);
+                }
+                if let UrbOutcome::Reply(reply) = transport.service.reissue_after_reset() {
+                    seam.reply(transport.endpoint, reply);
+                }
             }
         }
+        self.note_attempt(serving, health, seam);
+        if serving {
+            self.drive_busy(seam);
+        }
+    }
+
+    /// Whether a controller reset's walk is running.
+    #[must_use]
+    pub const fn is_resetting(&self) -> bool {
+        self.resetting
+    }
+
+    fn note_attempt<S: Seam<Buffer = B>>(
+        &mut self,
+        serving: bool,
+        health: &mut ControllerHealth,
+        seam: &mut S,
+    ) {
         if let Some(event) = health.note_reset(serving, seam.now_ns()) {
-            seam.note(Note::Domain { event, owner });
+            seam.note(Note::Domain {
+                event,
+                owner: health.owner(),
+            });
         }
         if health.is_failed_closed() {
             self.retract_all(seam);
         }
-        true
     }
 
     /// Retract every node, answering each one's URBs `NotFound`, as the HCD
@@ -672,6 +666,7 @@ impl<B> Transport<B> {
             watched: false,
             service: UrbService::new(),
             node: None,
+            confirming: None,
         }
     }
 
@@ -683,40 +678,92 @@ impl<B> Transport<B> {
 }
 
 impl<B: UrbBuffer> Transport<B> {
+    /// Settle the faulted URB a departure check holds once the engine has
+    /// looked: its own fault if its device is still served; if it left, the
+    /// node goes and the URB is answered `NotFound`.
+    fn settle_departure<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
+        let (Some(node), Some(faulted)) = (self.node.as_ref(), self.confirming) else {
+            return;
+        };
+        let served = seam
+            .identity(node.index)
+            .is_some_and(|current| current == node.identity);
+        if !served {
+            self.retract(seam);
+        } else if seam.departure_settled(node.index) {
+            self.confirming = None;
+            seam.reply(self.endpoint, faulted);
+        }
+    }
+
     /// Retract the node, then release the HCD's mapping of its buffer and
-    /// answer its held URB `NotFound`, so a driver being unloaded is never
+    /// answer its held calls `NotFound`, so a driver being unloaded is never
     /// left parked on a device that is gone. Its streams end first.
     fn retract<S: Seam<Buffer = B>>(&mut self, seam: &mut S) {
         if let Some(mut node) = self.node.take() {
             node.end_streams(Errno::NotFound, seam);
             seam.remove(node.id);
         }
+        if let Some(faulted) = self.confirming.take() {
+            seam.reply(
+                self.endpoint,
+                UrbReply::new(faulted.ticket, Err(Errno::NotFound)),
+            );
+            seam.note(Note::FaultDetached);
+        }
         self.answer_held(Errno::NotFound, seam);
     }
 
-    /// Perform an interface or stream operation for the node, answering at
-    /// once.
+    /// Perform an interface or stream operation for the node: one the engine
+    /// runs over several commands is held as a URB is, the rest answered at
+    /// once. While the controller recovers every operation is held, and
+    /// answered once it is back.
     fn operate<S: Seam<Buffer = B>>(
         &mut self,
         reach: Reach,
         ticket: u64,
         request: UsbRequest,
         seam: &mut S,
-    ) -> UrbReply {
-        let endpoint = self.endpoint;
-        let node = match (reach, self.node.as_mut()) {
-            (Reach::Served, Some(node)) => node,
-            (Reach::Recovering, Some(_)) => {
-                return UrbReply::status(ticket, Err(Errno::WouldBlock));
-            }
-            _ => return UrbReply::status(ticket, Err(Errno::NotFound)),
+    ) -> UrbOutcome {
+        let Some(node) = self.node.as_mut().filter(|_| reach != Reach::Retracted) else {
+            return UrbOutcome::Reply(UrbReply::status(ticket, Err(Errno::NotFound)));
         };
         let index = node.index;
-        let result = match request {
+        let operation = match request {
             UsbRequest::SetInterface {
                 interface,
                 alternate,
-            } => seam.engine(index).set_interface(interface, alternate),
+            } => Operation::SetInterface {
+                interface,
+                alternate,
+            },
+            UsbRequest::ClearHalt { endpoint } => Operation::ClearHalt { endpoint },
+            UsbRequest::IsoStop { endpoint } if reach == Reach::Served => {
+                if let Err(err) = node.forget_stream(endpoint) {
+                    return UrbOutcome::Reply(UrbReply::status(ticket, Err(err.as_errno())));
+                }
+                Operation::IsoStop { endpoint }
+            }
+            _ if reach == Reach::Recovering => return self.service.on_deferred(ticket),
+            other => return UrbOutcome::Reply(self.answer_at_once(ticket, other, seam)),
+        };
+        self.service
+            .on_operation(reach, ticket, operation, &mut seam.engine(index))
+    }
+
+    /// Carry out an operation that needs nothing the engine runs.
+    fn answer_at_once<S: Seam<Buffer = B>>(
+        &mut self,
+        ticket: u64,
+        request: UsbRequest,
+        seam: &mut S,
+    ) -> UrbReply {
+        let endpoint = self.endpoint;
+        let Some(node) = self.node.as_mut() else {
+            return UrbReply::status(ticket, Err(Errno::NotFound));
+        };
+        let index = node.index;
+        let result = match request {
             UsbRequest::ClaimInterface { interface } => {
                 seam.engine(index).claim_interface(interface)
             }
@@ -727,26 +774,21 @@ impl<B: UrbBuffer> Transport<B> {
                 };
             }
             UsbRequest::IsoQueue { endpoint, slot } => node.queue(endpoint, slot, seam),
-            UsbRequest::IsoStop { endpoint } => node.stop(endpoint, seam),
-            // Clearing a pipe or its reports under a held transfer would
-            // strand or starve it; a class driver holds one URB at a time, so
-            // this is no driver's own call.
-            UsbRequest::ClearHalt { .. } | UsbRequest::DiscardReports { .. }
-                if self.service.is_busy() =>
-            {
+            // Discarding its reports under a held report poll would starve
+            // it; a class driver holds one call at a time, so this is no
+            // driver's own call.
+            UsbRequest::DiscardReports { .. } if self.service.is_busy() => {
                 return UrbReply::status(ticket, Err(Errno::AlreadyExists));
-            }
-            UsbRequest::ClearHalt { endpoint } => {
-                let engine = &mut seam.engine(index);
-                let cleared = on_own_endpoint(endpoint, engine, UrbEngine::clear_halt);
-                return UrbReply::status(ticket, cleared);
             }
             UsbRequest::DiscardReports { endpoint } => {
                 let engine = &mut seam.engine(index);
                 let discarded = on_own_endpoint(endpoint, engine, UrbEngine::discard_reports);
                 return UrbReply::status(ticket, discarded);
             }
-            UsbRequest::Transfer(_) => Err(DriverError::OutOfRange),
+            UsbRequest::Transfer(_)
+            | UsbRequest::SetInterface { .. }
+            | UsbRequest::ClearHalt { .. }
+            | UsbRequest::IsoStop { .. } => Err(DriverError::OutOfRange),
         };
         UrbReply::status(ticket, result.map_err(DriverError::as_errno))
     }
@@ -831,15 +873,15 @@ impl<B: UrbBuffer> Node<B> {
             .iso_queue(endpoint, slot, stream.region.bytes())
     }
 
-    /// Stop the stream on `endpoint` at its class driver's word.
-    fn stop<S: Seam<Buffer = B>>(&mut self, endpoint: u8, seam: &mut S) -> Result<(), DriverError> {
+    /// Forget the stream on `endpoint`, which its class driver is stopping.
+    fn forget_stream(&mut self, endpoint: u8) -> Result<(), DriverError> {
         let at = self
             .streams
             .iter()
             .position(|stream| stream.endpoint == endpoint)
             .ok_or(DriverError::NotFound)?;
         self.streams.swap_remove(at);
-        seam.engine(self.index).iso_stop(endpoint)
+        Ok(())
     }
 
     /// Notify each stream's finished slots, ending a stream that halted or

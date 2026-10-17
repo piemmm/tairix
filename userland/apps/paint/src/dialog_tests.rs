@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::Keystroke;
 use tairix_controls::{FieldAction, FieldGroupAction};
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{Point, Region, Scale};
 use tairix_image::{IndexDepth, TiffCompression};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::ThemeRegistry;
@@ -12,7 +12,8 @@ use super::{Answer, Form, Purpose, SaveChoices};
 use crate::save::{Loss, SaveFormat, SaveSettings};
 use crate::transform::{Anchor, PaletteChoice};
 
-const WINDOW: Rect = Rect::new(0, 0, 900, 640);
+/// Where a form is drawn for its dialog window: below a 900×640 window.
+const AT: Point = Point::new(0, 640);
 
 fn key(named: NamedKey) -> Keystroke {
     Keystroke {
@@ -31,7 +32,7 @@ fn typed(form: &mut Form, text: &str) {
             modifiers: Modifiers::default(),
             at_ns: 0,
         };
-        form.on_key(stroke, WINDOW, Scale::ONE, registry.active(), &mut damage);
+        form.on_key(stroke, AT, Scale::ONE, registry.active(), &mut damage);
     }
 }
 
@@ -41,7 +42,7 @@ fn clear_field(form: &mut Form, len: usize) {
     for _ in 0..len {
         form.on_key(
             key(NamedKey::Backspace),
-            WINDOW,
+            AT,
             Scale::ONE,
             registry.active(),
             &mut damage,
@@ -84,17 +85,11 @@ fn enter_accepts_and_escape_turns_down() {
     let mut form = Form::save_as(every_format(), SaveFormat::Jpeg, settings, false);
     let theme = registry.active();
     assert_eq!(
-        form.on_key(
-            key(NamedKey::Escape),
-            WINDOW,
-            Scale::ONE,
-            theme,
-            &mut damage
-        ),
+        form.on_key(key(NamedKey::Escape), AT, Scale::ONE, theme, &mut damage),
         Some(Answer::Cancelled)
     );
     assert_eq!(
-        form.on_key(key(NamedKey::Enter), WINDOW, Scale::ONE, theme, &mut damage),
+        form.on_key(key(NamedKey::Enter), AT, Scale::ONE, theme, &mut damage),
         Some(Answer::Confirmed)
     );
     assert_eq!(form.save_as_answer(), (SaveFormat::Jpeg, settings));
@@ -119,7 +114,7 @@ fn a_new_picture_reads_its_size_and_refuses_one_out_of_bounds() {
     let mut damage = Region::new();
     form.on_key(
         key(NamedKey::Tab),
-        WINDOW,
+        AT,
         Scale::ONE,
         registry.active(),
         &mut damage,
@@ -285,13 +280,13 @@ fn clicking_the_confirm_button_accepts() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     let mut form = Form::canvas((10, 10));
-    let bounds = form.rect(WINDOW, Scale::ONE, theme);
+    let bounds = form.rect(AT, Scale::ONE, theme);
     let mut damage = Region::new();
     // The confirming action is the rightmost one, near the bottom right.
     let aim = Point::new(bounds.right() - 30, bounds.bottom() - 16);
     form.on_pointer(
         &InputEvent::PointerMoved { to: aim },
-        WINDOW,
+        AT,
         Scale::ONE,
         theme,
         &mut damage,
@@ -300,7 +295,7 @@ fn clicking_the_confirm_button_accepts() {
         &InputEvent::PointerPressed {
             button: PointerButton::Primary,
         },
-        WINDOW,
+        AT,
         Scale::ONE,
         theme,
         &mut damage,
@@ -309,7 +304,7 @@ fn clicking_the_confirm_button_accepts() {
         &InputEvent::PointerReleased {
             button: PointerButton::Primary,
         },
-        WINDOW,
+        AT,
         Scale::ONE,
         theme,
         &mut damage,
@@ -347,16 +342,14 @@ fn a_layer_form_keeps_the_exact_opacity_until_its_slider_moves() {
     );
 }
 
-/// A choice list hangs past the sheet, so opening one reports the whole plate
-/// it opens into, not only the sheet it was pressed on.
+/// A choice list opens within the form's own dialog window, the only room it
+/// has, and what it opens into is reported.
 #[test]
-fn an_opened_list_is_reported_past_the_sheet() {
+fn an_opened_list_stays_within_the_sheet_and_is_reported() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     let mut form = Form::convert(None);
-    let layout = form
-        .group_layout(WINDOW, Scale::ONE, theme)
-        .expect("laid out");
+    let layout = form.group_layout(AT, Scale::ONE, theme).expect("laid out");
     let row = form
         .group
         .row_rect(0, layout, Scale::ONE, theme)
@@ -382,18 +375,18 @@ fn an_opened_list_is_reported_past_the_sheet() {
             button: PointerButton::Primary,
         },
     ] {
-        form.on_pointer(&event, WINDOW, Scale::ONE, theme, &mut damage);
+        form.on_pointer(&event, AT, Scale::ONE, theme, &mut damage);
     }
     let popup = form
-        .group_layout(WINDOW, Scale::ONE, theme)
+        .group_layout(AT, Scale::ONE, theme)
         .expect("laid out")
         .popup;
     assert!(!popup.is_empty(), "the press opened the list");
-    let sheet = form.rect(WINDOW, Scale::ONE, theme);
-    assert_ne!(
+    let sheet = form.rect(AT, Scale::ONE, theme);
+    assert_eq!(
         sheet.intersection(&popup),
         popup,
-        "the list hangs past the sheet"
+        "the list stays within the sheet's window"
     );
     assert!(
         tairix_controls::testkit::covers(&damage, popup),

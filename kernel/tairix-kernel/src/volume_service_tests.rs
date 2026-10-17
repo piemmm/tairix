@@ -23,19 +23,24 @@ extern crate std;
 use std::boxed::Box;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc as StdArc, Mutex};
 use std::thread;
+use std::time::Duration;
 use std::vec;
 use std::vec::Vec;
 
 use tairix_abi::blkio::{
-    encode_error_completion, BlkCompletion, BlkMedium, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
-    BLK_DATA_LEN, BLK_REQUEST_LEN,
+    encode_error_completion, BlkCompletion, BlkMedium, BlkOp, BlkRemovability,
+    BlkRemovabilityEvidence, BlkRequest, BlkTransport, BLK_COMPLETION_LEN, BLK_DATA_LEN,
+    BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::NameMatching;
-use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
-use tairix_abi::fs::OpenFlags;
+use tairix_abi::driver::filesystem::{
+    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind, NodeSecurity,
+};
+use tairix_abi::fs::{OpenFlags, FS_OWNER_UNCHANGED};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno};
@@ -153,6 +158,20 @@ const STORAGE_GID: u32 = 100;
 const MEMBER_UID: u32 = 1000;
 const OUTSIDER_UID: u32 = 2000;
 
+/// A principal whose primary group is the one owning the ext ACL fixture's
+/// `/f`, so the ACL, not the mode's group triad, decides its access.
+const GROUP_PEER_UID: u32 = 3000;
+const FIXTURE_GID: u32 = 1000;
+
+/// A caller holding only `CAP_FS_CHOWN`, the authority an owner reassignment
+/// needs.
+struct Chown;
+impl CapabilityQuery for Chown {
+    fn holds(&self, cap: CapabilityId) -> bool {
+        cap == CapabilityId::FS_CHOWN
+    }
+}
+
 /// 64 MiB — comfortably past the FAT32 minimum cluster count.
 const SECTORS_64MIB: u64 = (64 << 20) / 512;
 
@@ -220,6 +239,9 @@ struct ServedDevice {
     /// The block whose write the stick is pulled straight after, if any.
     pull_after: Option<u64>,
     pulled: bool,
+    /// Taken by the first request: the server says it has the request, then
+    /// answers nothing until the gate opens — a device that stops answering.
+    hold_first: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
 }
 
 impl ServedDevice {
@@ -233,6 +255,7 @@ impl ServedDevice {
             geometries: 0,
             pull_after: None,
             pulled: false,
+            hold_first: None,
         }
     }
 
@@ -270,6 +293,11 @@ fn serve(
                 thread::yield_now();
                 continue;
             };
+            let held = device.lock().unwrap().hold_first.take();
+            if let Some((received, gate)) = held {
+                received.send(()).unwrap();
+                gate.recv().unwrap();
+            }
             let mut reply = [0u8; BLK_COMPLETION_LEN];
             let len = match BlkRequest::decode(&call.request) {
                 Err(err) => encode_error_completion(&mut reply, err).unwrap(),
@@ -289,6 +317,7 @@ fn serve(
                                 flags: 0,
                                 medium: device.medium,
                                 name: device.block.device_name(),
+                                binding: 0,
                             }
                             .encode(&mut reply)
                             .unwrap()
@@ -427,13 +456,14 @@ fn an_unwired_service_fails_closed() {
 /// a member of the storage group, and a non-member.
 fn identity_with_storage_member() -> tairix_kernel_sec::IdentityTable {
     let mut identity = IdentityTableBuilder::new();
-    for gid in [0, STORAGE_GID, OUTSIDER_UID] {
+    for gid in [0, STORAGE_GID, OUTSIDER_UID, FIXTURE_GID] {
         identity.push_group(GroupRecord { gid: GroupId(gid) });
     }
     for (uid, gid) in [
         (0, 0),
         (MEMBER_UID, STORAGE_GID),
         (OUTSIDER_UID, OUTSIDER_UID),
+        (GROUP_PEER_UID, FIXTURE_GID),
     ] {
         identity.push_user(UserRecord {
             uid: UserId(uid),
@@ -576,6 +606,13 @@ fn assert_a_member_creates_on_the_volume() {
         FS_SERVICE.set_mode(0, &NoCaps, made, 0o600).err(),
         Some(Errno::NotSupported),
         "the format stores no mode of its own"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .set_owner(0, &Chown, made, OUTSIDER_UID, FS_OWNER_UNCHANGED)
+            .err(),
+        Some(Errno::NotSupported),
+        "nor any owner"
     );
 }
 
@@ -772,8 +809,10 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     a_taken_catalog_name_is_answered_as_taken_scenario(window_ptr, facility);
     a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(window_ptr, facility);
     an_ext2_volume_mounts_as_ext2_scenario(window_ptr, facility);
+    an_ext_volume_keeps_its_on_disk_ownership_scenario(window_ptr, facility);
     a_stick_pulled_mid_commit_returns_read_only_scenario(window_ptr, facility);
     an_unpublished_transaction_is_recorded_lost_scenario(window_ptr, facility);
+    a_device_that_stops_answering_holds_up_no_other_scenario(window_ptr, facility);
 }
 
 /// The driver handle of the volume shown at `/Storage/<name>`.
@@ -1092,7 +1131,8 @@ fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
         .devices
         .lock()
         .iter()
-        .filter(|shared| shared.endpoint == endpoint_id)
+        .filter(|slot| slot.endpoint == endpoint_id)
+        .filter_map(|slot| slot.connected.as_ref())
         .map(|shared| {
             let mut held = usize::MAX;
             shared
@@ -1675,6 +1715,105 @@ fn unrecognised_medium_mounts_as_unknown_scenario(
         .expect("unrecognised-medium scenario server thread");
 }
 
+/// A disk that stops answering mid-attach holds up only its own volumes:
+/// another disk attaches and serves while the first waits on its device.
+///
+/// The stalled disk withholds its first answer, the connect's geometry, so
+/// no transfer of its own has staged bytes in the one test window the other
+/// disk's transfers use.
+fn a_device_that_stops_answering_holds_up_no_other_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (stalled_image, stalled_identity) = fat32_image(0x0D15_C040, b"stalled payload");
+    let stalled_blocks = (stalled_image.data.len() / BLOCK_SIZE) as u64;
+    let stalled_endpoint = 0xB1D0_5E17_0000_0040_u64;
+    let (received, has_request) = mpsc::channel();
+    let (open_gate, gate) = mpsc::channel();
+    let stalled = StdArc::new(Mutex::new(ServedDevice {
+        hold_first: Some((received, gate)),
+        ..ServedDevice::new(stalled_image)
+    }));
+    let stalled_stop = StdArc::new(AtomicBool::new(false));
+    let stalled_server = serve(
+        register_endpoint(stalled_endpoint, 0x70_1040),
+        window_ptr as usize,
+        StdArc::clone(&stalled),
+        StdArc::clone(&stalled_stop),
+    );
+    let (_va, stalled_region) =
+        sharedreg::create(facility, ProcessId(0x70_0040), 8).expect("region");
+    let stalled_attach = thread::spawn(move || {
+        VOLUME_SERVICE.attach(&VolumeAttachRequest {
+            endpoint: stalled_endpoint,
+            window: stalled_region,
+            first_lba: 0,
+            blocks: stalled_blocks,
+            fstype: VolumeFsType::Fat32,
+            name: b"stall1",
+        })
+    });
+    has_request
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the stalled disk holds the attach's first request");
+
+    let (image, identity) = fat32_image(0x0D15_C041, b"healthy payload");
+    let blocks = (image.data.len() / BLOCK_SIZE) as u64;
+    let endpoint = 0xB1D0_5E17_0000_0041_u64;
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        register_endpoint(endpoint, 0x70_1041),
+        window_ptr as usize,
+        StdArc::new(Mutex::new(ServedDevice::new(image))),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0041), 8).expect("region");
+    let (attached, outcome) = mpsc::channel();
+    let healthy_attach = thread::spawn(move || {
+        let result = VOLUME_SERVICE.attach(&VolumeAttachRequest {
+            endpoint,
+            window: region,
+            first_lba: 0,
+            blocks,
+            fstype: VolumeFsType::Fat32,
+            name: b"well1",
+        });
+        attached.send(result).unwrap();
+    });
+    let healthy = outcome.recv_timeout(Duration::from_secs(60));
+    if healthy.is_ok() {
+        assert_volume_reads("/Storage/well1/hello.txt", b"healthy payload");
+    }
+    // Answered whatever happened, so a failure never wedges the suite.
+    open_gate.send(()).unwrap();
+    assert_eq!(
+        healthy,
+        Ok(Ok(())),
+        "the other disk attached while the stalled one waited on its device"
+    );
+    healthy_attach.join().expect("the healthy attach thread");
+    assert_eq!(
+        stalled_attach.join().expect("the stalled attach thread"),
+        Ok(()),
+        "the stalled disk attaches once it answers"
+    );
+    assert_volume_reads("/Storage/stall1/hello.txt", b"stalled payload");
+    assert_every_attached_volume_is_served();
+
+    for volume_id in [identity, stalled_identity] {
+        VOLUME_SERVICE
+            .detach(&VolumeDetachRequest {
+                volume_id,
+                force: false,
+            })
+            .expect("detach");
+    }
+    for (stop, server) in [(stop, server), (stalled_stop, stalled_server)] {
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("scenario server thread");
+    }
+}
+
 /// Deterministic entropy for the fixture volume's key hierarchy. The
 /// image never leaves this test, so a counter is the right source: a real
 /// RNG would make the volume unreproducible for no gain.
@@ -1832,6 +1971,12 @@ fn ext4_image(uuid: [u8; 16]) -> RamBlock {
 const EXT2_FIXTURE: &[u8] =
     include_bytes!("../../../drivers/filesystem/ext4/tests/fixtures/ext2.sparse");
 
+/// A real e2fsprogs volume whose root is `0:0` `0755` and whose `/f` is
+/// `1000:1000` `0664` under a POSIX ACL: named user 1000 `rw-`, named group
+/// 2000 `r--`, owning group `r--`, mask `rw-`.
+const EXT_ACL_FIXTURE: &[u8] =
+    include_bytes!("../../../drivers/filesystem/ext4/tests/fixtures/acl_block.sparse");
+
 #[path = "../../../drivers/filesystem/ext4/tests/support/sparse.rs"]
 mod ext_fixture;
 
@@ -1968,6 +2113,160 @@ fn an_ext2_volume_mounts_as_ext2_scenario(window_ptr: *mut u8, facility: &'stati
     round.outcome.expect("the volume attaches");
     assert_eq!(mount_record(b"ext2vol").fstype_bytes(), b"ext2");
     retire(identity, false, round);
+}
+
+/// An ext volume made elsewhere, served as a removable USB stick, is
+/// presented with the ownership it stores — never mapped as an ownerless FAT
+/// volume is — so its records reach every caller unchanged, a user who is
+/// not its root's owner is refused at its top level, a node made there
+/// carries its creator, and `chmod` and `chown` follow the ordinary owner and
+/// capability rules.
+fn an_ext_volume_keeps_its_on_disk_ownership_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let image = ext_fixture::sparse(EXT_ACL_FIXTURE);
+    let identity = Ext4::open_read_only(RamBlock {
+        data: image.clone(),
+    })
+    .expect("an e2fsprogs volume")
+    .volume_uuid();
+    let removable = BlkMedium::of_transport(BlkTransport::Usb)
+        .with_removability(BlkRemovability::Removable(BlkRemovabilityEvidence::Inquiry));
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0016,
+            owner: 0x70_1026,
+            region_task: 0x70_0026,
+            name: b"extown",
+            fstype: VolumeFsType::Ext4,
+        },
+        ServedDevice {
+            medium: Some(removable),
+            ..ServedDevice::new(RamBlock { data: image })
+        },
+    );
+    round.outcome.expect("the volume attaches");
+    assert_the_volume_presents_its_records();
+    assert_ownership_rules_govern_what_is_made();
+
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: false,
+        })
+        .expect("the volume detaches");
+    round.stop.store(true, Ordering::Relaxed);
+    round.server.join().expect("server thread");
+    let kept = round.device.lock().unwrap().block.data.clone();
+    let mut fs = Ext4::open(RamBlock { data: kept }).expect("the volume reopens");
+    let shared = fs.lookup(fs.root(), b"shared").expect("shared");
+    let file = fs.lookup(shared, b"mine.txt").expect("mine.txt");
+    let stored = fs.security(file).expect("its record");
+    assert_eq!(
+        (stored.uid, stored.gid, stored.mode),
+        (OUTSIDER_UID, STORAGE_GID, 0o600),
+        "the medium stores what was made on it"
+    );
+}
+
+/// The `(uid, gid, mode)` the node at `path` presents to `uid`.
+fn owned(uid: u32, path: &str) -> (u32, u32, u32) {
+    let stat = FS_SERVICE
+        .stat(uid, &NoCaps, path, FinalLink::Follow)
+        .expect("stat");
+    (stat.uid, stat.gid, stat.mode)
+}
+
+/// The ACL fixture's records reach every caller as stored, the ACL decides
+/// over the mode's group triad, and its root's owner alone makes anything
+/// at the top level.
+fn assert_the_volume_presents_its_records() {
+    assert_eq!(owned(OUTSIDER_UID, "/Storage/extown"), (0, 0, 0o755));
+    assert_eq!(
+        owned(OUTSIDER_UID, "/Storage/extown/f"),
+        (1000, FIXTURE_GID, 0o664)
+    );
+    let create = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::EXCLUSIVE);
+    assert_eq!(
+        FS_SERVICE
+            .mkdir(MEMBER_UID, &NoCaps, "/Storage/extown/mine")
+            .err(),
+        Some(Errno::PermissionDenied),
+        "the volume's owner refuses a folder at its top level"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .open(MEMBER_UID, &NoCaps, "/Storage/extown/mine.txt", create)
+            .err(),
+        Some(Errno::PermissionDenied),
+        "and a file"
+    );
+    let mut buf = [0u8; 8];
+    FS_SERVICE
+        .read(GROUP_PEER_UID, &NoCaps, "/Storage/extown/f", 0, &mut buf)
+        .expect("the owning group reads");
+    assert_eq!(
+        FS_SERVICE
+            .write(GROUP_PEER_UID, &NoCaps, "/Storage/extown/f", 0, false, b"X")
+            .err(),
+        Some(Errno::PermissionDenied),
+        "the ACL's owning-group entry decides, not the mode's group triad"
+    );
+    FS_SERVICE
+        .write(MEMBER_UID, &NoCaps, "/Storage/extown/f", 0, false, b"X")
+        .expect("the owner writes");
+}
+
+/// A node made on the volume carries its creator, and `chmod` and `chown`
+/// follow the owner and capability rules of any volume.
+fn assert_ownership_rules_govern_what_is_made() {
+    FS_SERVICE
+        .mkdir(0, &NoCaps, "/Storage/extown/shared")
+        .expect("the root's owner makes a folder");
+    assert_eq!(owned(0, "/Storage/extown/shared").0, 0);
+    FS_SERVICE
+        .set_mode(0, &NoCaps, "/Storage/extown/shared", 0o777)
+        .expect("its owner opens it to everyone");
+    let mine = "/Storage/extown/shared/mine.txt";
+    let create = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::EXCLUSIVE);
+    FS_SERVICE
+        .open(MEMBER_UID, &NoCaps, mine, create)
+        .expect("a member makes a file there");
+    let (uid, gid, _) = owned(MEMBER_UID, mine);
+    assert_eq!(
+        (uid, gid),
+        (MEMBER_UID, STORAGE_GID),
+        "a new node carries its creator's user and group"
+    );
+    assert_eq!(
+        FS_SERVICE
+            .set_mode(OUTSIDER_UID, &NoCaps, mine, 0o666)
+            .err(),
+        Some(Errno::PermissionDenied),
+        "only the owner changes its mode"
+    );
+    FS_SERVICE
+        .set_mode(MEMBER_UID, &NoCaps, mine, 0o600)
+        .expect("its owner does");
+    assert_eq!(owned(MEMBER_UID, mine).2, 0o600);
+    assert_eq!(
+        FS_SERVICE
+            .set_owner(MEMBER_UID, &NoCaps, mine, OUTSIDER_UID, FS_OWNER_UNCHANGED)
+            .err(),
+        Some(Errno::PermissionDenied),
+        "giving a node away needs the chown authority"
+    );
+    FS_SERVICE
+        .set_owner(MEMBER_UID, &Chown, mine, OUTSIDER_UID, FS_OWNER_UNCHANGED)
+        .expect("which grants it");
+    assert_eq!(owned(OUTSIDER_UID, mine).0, OUTSIDER_UID);
 }
 
 /// A stick pulled mid-commit (`plans/DEVICES.md` D4c): the volume had been

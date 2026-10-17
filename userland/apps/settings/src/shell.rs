@@ -24,7 +24,7 @@ use tairix_controls::{
     CredentialSheet, Crumb, DisclosureSet, FieldGroup, Keystroke, Menu, MenuAction, MenuItem,
     PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollPart,
     ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation, TextAction,
-    CREDENTIAL_REFUSED_REASON,
+    CREDENTIAL_HEIGHT, CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
@@ -292,7 +292,7 @@ impl Captures {
     }
 }
 
-/// A credential question standing over the window, and what it is for.
+/// A credential question in a dialog window of its own, and what it is for.
 struct Asking {
     sheet: CredentialSheet,
     program: &'static str,
@@ -462,7 +462,7 @@ pub struct Shell {
     wanted: Wanted,
     /// The action band beneath the pane on show, for a pane that has one.
     footer: Option<Footer>,
-    /// The credential question standing over the window, and what it will
+    /// The credential question up in its own dialog window, and what it will
     /// ask the broker to run once an account is offered.
     asking: Option<Asking>,
     /// Moved whenever what the pane's pictures want may have: the pane, what
@@ -1729,15 +1729,81 @@ impl Shell {
                 popups,
             );
         }
-        // And the credential question stands over even that: while it is
-        // up it holds the keyboard, and nothing behind it can be reached.
+    }
+
+    /// The client extent of the credential question's dialog window at
+    /// `scale`, while one is up.
+    #[must_use]
+    pub fn question_extent(&self, scale: Scale) -> Option<(u32, u32)> {
+        self.asking.as_ref().map(|_| {
+            (
+                scale.scale_length(CREDENTIAL_WIDTH),
+                scale.scale_length(CREDENTIAL_HEIGHT),
+            )
+        })
+    }
+
+    /// What the credential question's dialog window is titled after the
+    /// application's name.
+    #[must_use]
+    pub const fn question_title(&self) -> &'static str {
+        ASK_TITLE
+    }
+
+    /// Draw the credential question across its dialog window's `client`.
+    pub fn render_question(
+        &self,
+        surface: &mut Surface,
+        client: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) {
         if let Some(asking) = &self.asking {
-            asking.sheet.render(
-                surface,
-                CredentialSheet::centred_in(viewport, scale),
-                scale,
-                popups,
-            );
+            asking.sheet.render(surface, client, scale, theme);
+        }
+    }
+
+    /// Route one pointer event that reached the credential question's window,
+    /// whose client is `client`, reporting what it drew in that window's
+    /// pixels.
+    pub fn on_question_pointer(
+        &mut self,
+        event: &InputEvent,
+        client: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> ShellOutcome {
+        self.asked(client, damage, |sheet, bounds, damage| {
+            sheet.on_pointer(event, bounds, scale, theme, damage)
+        })
+    }
+
+    /// Route one key press that reached the credential question's window.
+    pub fn on_question_key(
+        &mut self,
+        stroke: Keystroke,
+        client: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> ShellOutcome {
+        self.asked(client, damage, |sheet, bounds, damage| {
+            sheet.on_key(stroke, bounds, scale, theme, damage)
+        })
+    }
+
+    /// Step the credential question's password marker to `now_ns`, reporting
+    /// what moved in its window's pixels.
+    pub fn advance_question(
+        &mut self,
+        now_ns: u64,
+        client: Rect,
+        scale: Scale,
+        damage: &mut Region,
+    ) {
+        if let Some(asking) = self.asking.as_mut() {
+            asking.sheet.advance(now_ns, client, scale, damage);
         }
     }
 
@@ -1805,14 +1871,6 @@ impl Shell {
     ) -> ShellOutcome {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = Some(*to);
-        }
-        // The credential question is modal: while it is up nothing behind
-        // it can be pressed, so a stray click cannot change a pane the
-        // reader is about to authenticate for.
-        if self.asking.is_some() {
-            return self.asked(viewport, scale, damage, |sheet, bounds, damage| {
-                sheet.on_pointer(event, bounds, scale, theme, damage)
-            });
         }
         let frame = self.frame(viewport, scale, theme);
 
@@ -2087,10 +2145,6 @@ impl Shell {
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) {
-        if let Some(asking) = self.asking.as_mut() {
-            let bounds = CredentialSheet::centred_in(viewport, scale);
-            asking.sheet.advance(now_ns, bounds, scale, damage);
-        }
         let pane_due = self.body.form().and_then(Form::secret_deadline_ns);
         if pane_due.is_none_or(|due| due > now_ns) {
             return;
@@ -2149,11 +2203,6 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
-        if self.asking.is_some() {
-            return self.asked(viewport, scale, damage, |sheet, bounds, damage| {
-                sheet.on_key(stroke, bounds, scale, theme, damage)
-            });
-        }
         let Keystroke { key, modifiers, .. } = stroke;
         let frame = self.frame(viewport, scale, theme);
 
@@ -2258,9 +2307,8 @@ impl Shell {
         Some(self.commanded(acted, viewport, scale, theme, damage))
     }
 
-    /// Route one event into the credential question standing over the
-    /// window, `answer` being what the sheet made of it at the bounds it is
-    /// drawn in.
+    /// Route one event into the credential question drawn across its
+    /// window's `client`, `answer` being what the sheet made of it.
     ///
     /// A cancellation takes it down and changes nothing anywhere. An offer
     /// is handed to the caller as the one run to ask the broker for, and
@@ -2268,19 +2316,16 @@ impl Shell {
     /// refusal can be corrected without retyping the account.
     fn asked(
         &mut self,
-        viewport: Rect,
-        scale: Scale,
+        client: Rect,
         damage: &mut Region,
         answer: impl FnOnce(&mut CredentialSheet, Rect, &mut Region) -> Option<CredentialAction>,
     ) -> ShellOutcome {
-        let bounds = CredentialSheet::centred_in(viewport, scale);
         let Some(asking) = self.asking.as_mut() else {
             return ShellOutcome::Idle;
         };
-        match answer(&mut asking.sheet, bounds, damage) {
+        match answer(&mut asking.sheet, client, damage) {
             Some(CredentialAction::Cancelled) => {
                 self.asking = None;
-                damage.add(viewport);
                 ShellOutcome::Changed
             }
             // The sheet refuses an unofferable password itself, so this only
@@ -2452,10 +2497,18 @@ impl Shell {
         }
     }
 
-    /// Whether a credential question is standing over the window.
+    /// Whether a credential question is up, in its own dialog window.
     #[must_use]
     pub const fn asking(&self) -> bool {
         self.asking.is_some()
+    }
+
+    /// The credential question's window could not be shown, for `why`: the
+    /// question is turned down and the reason said where the pane states its
+    /// refusals, so nothing waits on a question nobody can see.
+    pub fn decline_question(&mut self, why: &str) {
+        self.asking = None;
+        self.refuse(alloc::format!("No account could be asked for: {why}"));
     }
 
     /// Adopt what the pane's action band reported.

@@ -1237,6 +1237,17 @@ fn open_on_volume<F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Si
             {
                 return Err(VfsError::IsADirectory);
             }
+            // Byte access is the node's to grant, so it is asked here as
+            // every later read and write asks it again.
+            let access: &[Access] = match (flags.is_read(), flags.is_write()) {
+                (true, true) => &[Access::Read, Access::Write],
+                (true, false) => &[Access::Read],
+                (false, true) => &[Access::Write],
+                (false, false) => &[],
+            };
+            if !access.is_empty() {
+                vfs.authorize_via_secured(cred, covered, fs, final_link, access)?;
+            }
             // Truncate-on-open zeroes the file; it requires write
             // access (enforced at `OpenFlags::from_bits`) and is
             // authorised by the secured truncate.

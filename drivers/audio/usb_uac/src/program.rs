@@ -15,7 +15,7 @@ use tairix_drv_audio_usb_uac::REQUIRED_CAPABILITIES;
 use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_usb::device::CTRL_DATA_LEN;
-use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink};
+use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink, CONTROL_BUDGET_MAX};
 
 /// Stream endpoints one function may name: every endpoint number, each way.
 const STREAM_ENDPOINTS: usize = 32;
@@ -94,13 +94,15 @@ impl Live {
     }
 }
 
+/// Every control request may take the whole protocol bound: a device
+/// changing its clock may need it to accept the new rate (USB 2.0 §9.2.6.4).
 impl UacTransport for Live {
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, Errno> {
-        self.link.control_in(setup, data)
+        self.link.control_in(setup, data, CONTROL_BUDGET_MAX)
     }
 
     fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), Errno> {
-        self.link.control_out(setup, data)
+        self.link.control_out(setup, data, CONTROL_BUDGET_MAX)
     }
 
     fn claim_interface(&mut self, interface: u8) -> Result<(), Errno> {
@@ -220,7 +222,9 @@ fn main() -> i32 {
         Ok(transport) => transport,
         Err(code) => return code,
     };
-    let Ok(config) = read_configuration(&mut |setup, data| link.control_in(setup, data)) else {
+    let Ok(config) =
+        read_configuration(&mut |setup, data| link.control_in(setup, data, CONTROL_BUDGET_MAX))
+    else {
         return end(
             DriverExit::BringupFailed,
             &[step(

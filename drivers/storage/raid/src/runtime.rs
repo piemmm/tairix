@@ -37,12 +37,16 @@
 use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockClass;
 
-use tairix_abi::blkio::{serve_request_recovering, BlkHealth, BlkHealthState, BLK_COMPLETION_LEN};
+use tairix_abi::blkio::{
+    encode_error_completion, serve_request_recovering, Answer, BlkHealth, BlkHealthState,
+    BlkPublication, BLK_COMPLETION_LEN,
+};
 use tairix_abi::driver::block::Block;
 use tairix_abi::raid::{ArrayHealth, MemberState};
 use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
 use tairix_abi::time::Time64;
 use tairix_abi::DriverError;
+use tairix_abi::Errno;
 use tairix_partition::PartitionBlock;
 use tairix_raid::{
     ArrayIdentity, ArrayMaintenance, MaintenanceAction, MaintenancePolicy, MemberRetry,
@@ -192,15 +196,20 @@ impl<B: Block> ArrayRuntime<B> {
         now_ns: u64,
     ) -> usize {
         self.maintenance.note_foreground(now_ns);
-        serve_request_recovering(
+        match serve_request_recovering(
             &mut self.array,
-            false,
+            BlkPublication::default(),
             request,
             window,
             reply,
             &mut self.health,
             now_ns,
-        )
+        ) {
+            Answer::Reply(len) => len,
+            // A member coming ready is its own driver's to hold; an array that
+            // somehow meets one answers reissuably rather than not at all.
+            Answer::Hold => encode_error_completion(reply, Errno::WouldBlock).unwrap_or(0),
+        }
     }
 
     /// Perform at most one bounded chunk of self-maintenance, or [`None`] when

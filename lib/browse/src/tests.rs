@@ -14,7 +14,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -40,6 +40,32 @@ use crate::source::{DirectorySource, Listing, Probe};
 /// command band shown, so the listing has a header to be offset by. The
 /// hidden band has its own tests.
 const BAND: crate::ToolbarBand = crate::ToolbarBand::Shown;
+
+/// A disk on an ATA bus that reported its rotation.
+const HARD_DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata).with_rotation(
+    BlkRotation::from_rate_field(7200, BlkRotationEvidence::AtaIdentify),
+);
+
+/// A solid-state disk on an ATA bus.
+const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
+    .with_rotation(BlkRotation::NonRotating(BlkRotationEvidence::AtaIdentify));
+
+/// An `NVMe` namespace.
+const NVME: BlkMedium = BlkMedium::of_transport(BlkTransport::Nvme);
+
+/// A USB unit that reported a non-rotating medium: served as removable.
+const STICK: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
+    BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
+);
+
+/// A USB unit whose bridge reported no rotation.
+const USB_DRIVE: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb);
+
+/// A card in an SD slot.
+const SD_CARD: BlkMedium = BlkMedium::of_transport(BlkTransport::Sd);
+
+/// A paravirtual device.
+const VIRTUAL: BlkMedium = BlkMedium::of_transport(BlkTransport::Virtual);
 
 /// The entry the focus rests on, chosen or not.
 pub(crate) fn focused<S: DirectorySource>(browser: &Browser<S>) -> Option<&Entry> {
@@ -110,8 +136,8 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
     let places = Places::new(
         &home(),
         &[
-            volume("Scratch", "/Storage/Scratch", Some(BlkMedium::SolidState)),
-            volume("Backup", "/Storage/Backup", Some(BlkMedium::HardDisk)),
+            volume("Scratch", "/Storage/Scratch", Some(SSD)),
+            volume("Backup", "/Storage/Backup", Some(HARD_DISK)),
         ],
     );
     // The user's own places first, in their fixed order, then the volumes
@@ -161,10 +187,10 @@ fn every_storage_medium_draws_its_own_drive_icon() {
     let places = Places::new(
         &[],
         &[
-            volume("Disk", "/Storage/Disk", Some(BlkMedium::HardDisk)),
-            volume("Fast", "/Storage/Fast", Some(BlkMedium::SolidState)),
-            volume("Stick", "/Storage/Stick", Some(BlkMedium::UsbFlash)),
-            volume("Guest", "/Storage/Guest", Some(BlkMedium::Virtual)),
+            volume("Disk", "/Storage/Disk", Some(HARD_DISK)),
+            volume("Fast", "/Storage/Fast", Some(SSD)),
+            volume("Stick", "/Storage/Stick", Some(STICK)),
+            volume("Guest", "/Storage/Guest", Some(VIRTUAL)),
             volume("Plain", "/Storage/Plain", None),
         ],
     );
@@ -933,10 +959,10 @@ fn storage() -> MockFs {
 /// The volumes [`storage`] has mounted, one elsewhere, and one at its file.
 fn storage_volumes() -> Vec<Volume> {
     vec![
-        volume("Backup", "/Storage/Backup", Some(BlkMedium::Nvme)),
-        volume("Camera", "/Storage/Camera", Some(BlkMedium::SdCard)),
-        volume("Image", "/Storage/Image", Some(BlkMedium::UsbFlash)),
-        volume("Deep", "/Archive/Deep", Some(BlkMedium::HardDisk)),
+        volume("Backup", "/Storage/Backup", Some(NVME)),
+        volume("Camera", "/Storage/Camera", Some(SD_CARD)),
+        volume("Image", "/Storage/Image", Some(STICK)),
+        volume("Deep", "/Archive/Deep", Some(HARD_DISK)),
     ]
 }
 
@@ -982,10 +1008,10 @@ fn every_volume_root_finds_its_drive_whatever_order_the_rail_lists_it_in() {
     // names they are mounted at, so a lookup that leaned on the rail's order
     // would hand out the wrong drives.
     let volumes = [
-        volume("A", "/Storage/Zulu", Some(BlkMedium::HardDisk)),
-        volume("B", "/Storage/Mike", Some(BlkMedium::SolidState)),
-        volume("C", "/Storage/Kilo", Some(BlkMedium::Nvme)),
-        volume("D", "/Storage/Alfa", Some(BlkMedium::UsbDisk)),
+        volume("A", "/Storage/Zulu", Some(HARD_DISK)),
+        volume("B", "/Storage/Mike", Some(SSD)),
+        volume("C", "/Storage/Kilo", Some(NVME)),
+        volume("D", "/Storage/Alfa", Some(USB_DRIVE)),
     ];
     let mut fs = MockFs::fixture();
     fs.dirs.insert(
@@ -1513,8 +1539,8 @@ fn a_rename_selects_the_stem_and_keeps_the_ending() {
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     use crate::render::{
-        chrome_height, grid_metrics, open_with_chooser_extent, progress_dialog_rect, row_height,
-        scrollbar_bounds, sidebar_view, toolbar_height,
+        chrome_height, grid_metrics, open_with_chooser_extent, row_height, scrollbar_bounds,
+        sidebar_view, toolbar_height,
     };
 
     let theme = Theme::dark();
@@ -1544,14 +1570,11 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     assert!(tiles_hidpi.cell_height > tiles.cell_height);
     assert!(tiles_hidpi.gap > tiles.gap);
 
-    // The overlays this surface still owns: the progress panel and the
-    // "Open With…" chooser. The right-click menu and every question are not
-    // among them — their windows are the desktop's, sized by the one shared
-    // rule that reads the desktop's own density.
-    assert!(
-        progress_dialog_rect(vp, hidpi, &theme).height
-            > progress_dialog_rect(vp, Scale::ONE, &theme).height
-    );
+    // The overlay this surface still owns: the "Open With…" chooser. The
+    // right-click menu and every question are not among them — their windows
+    // are the desktop's, sized by the one shared rule that reads the
+    // desktop's own density — and an operation's progress is a window of its
+    // own.
     // The chooser is its own popup, sized to its content, so what scales with
     // the density is the extent it asks that popup to be — in both axes, since
     // both are measured from what it draws.
@@ -10147,7 +10170,7 @@ fn trash_dir_is_the_library_trash_subtree_of_home() {
 
 use crate::progress::{ProgressModel, ProgressOp};
 use crate::render::{
-    build_progress_cancel, draw_progress_dialog, progress_cancel_at, progress_dialog_rect,
+    build_progress_cancel, draw_progress_window, progress_cancel_at, progress_window_extent,
 };
 
 #[test]
@@ -10208,81 +10231,78 @@ fn progress_cancel_is_latched_and_shown() {
 }
 
 #[test]
-fn progress_dialog_rect_is_centered_and_clamped_within_the_viewport() {
-    let theme = Theme::dark();
-
-    let vp = Rect::new(0, 0, 480, 320);
-    let rect = progress_dialog_rect(vp, Scale::ONE, &theme);
-    assert!(rect.width > 0 && rect.height > 0);
-    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
-    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
-    assert!(
-        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
-    );
-    // A window smaller than the panel still yields a drawable clamped rect (no
-    // panic).
-    let tiny = Rect::new(0, 0, 20, 16);
-    let small = progress_dialog_rect(tiny, Scale::ONE, &theme);
-    assert!(small.width >= 1 && small.width <= tiny.width);
-    assert!(small.height >= 1 && small.height <= tiny.height);
+fn a_waiting_operation_says_so_and_then_counts() {
+    let mut model = ProgressModel::new(ProgressOp::Copy);
+    model.set_waiting(true);
+    assert!(model.is_waiting());
+    assert_eq!(model.status_line(), "Waiting for the operations before it");
+    model.set_waiting(false);
+    model.set_done(2);
+    assert_eq!(model.status_line(), "2 items copied");
 }
 
 #[test]
-fn draw_progress_dialog_paints_into_the_surface_without_panicking() {
+fn a_progress_window_is_sized_to_its_content_and_grows_with_the_density() {
+    let theme = Theme::dark();
+    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    assert!(width > 0 && height > 0);
+    let dense = Scale::from_percent(200).expect("a scale");
+    let (wide, tall) = progress_window_extent(dense, &theme);
+    assert!(wide > width && tall > height);
+}
+
+#[test]
+fn a_progress_window_paints_across_its_client_without_panicking() {
     use tairix_raster::Surface;
 
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
+    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let client = Rect::new(0, 0, width, height);
     let mut model = ProgressModel::new(ProgressOp::Copy);
     model.set_done(7);
-
-    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
+    let mut surface = Surface::new(width, height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_progress_dialog(&mut surface, &model, Scale::ONE, &theme, vp);
+    draw_progress_window(&mut surface, &model, Scale::ONE, &theme, client);
     assert_ne!(surface.pixels().to_vec(), before);
 
-    // A degenerate viewport draws nothing and does not panic.
+    // A window the desktop fitted to almost nothing draws what fits.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_progress_dialog(&mut tiny, &model, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
+    draw_progress_window(&mut tiny, &model, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
 }
 
 #[test]
-fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_grid() {
+fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_it() {
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
+    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let client = Rect::new(0, 0, width, height);
 
     // Scanning the whole window, the Cancel hit-test resolves true for a
-    // contiguous, reachable region and false everywhere else — so the drawn
-    // button and the hit-test agree on exactly one target.
+    // reachable region in the lower right and false everywhere else.
     let mut hits = 0u32;
-    let mut y = 0;
-    while y < i32::try_from(vp.height).unwrap() {
-        let mut x = 0;
-        while x < i32::try_from(vp.width).unwrap() {
-            if progress_cancel_at(vp, Scale::ONE, &theme, Point::new(x, y)) {
+    for y in 0..i32::try_from(height).unwrap() {
+        for x in 0..i32::try_from(width).unwrap() {
+            if progress_cancel_at(client, Scale::ONE, &theme, Point::new(x, y)) {
                 hits += 1;
+                assert!(x > i32::try_from(width / 2).unwrap());
+                assert!(y > i32::try_from(height / 2).unwrap());
             }
-            x += 1;
         }
-        y += 1;
     }
     assert!(hits > 0, "the Cancel button is reachable");
-
-    // A click well outside the panel resolves nothing (fail closed).
     assert!(!progress_cancel_at(
-        vp,
+        client,
         Scale::ONE,
         &theme,
         Point::new(-5, -5)
     ));
-    // On a window too small to place the button, nothing resolves (fail
-    // closed) rather than placing a phantom button.
-    let tiny = Rect::new(0, 0, 20, 16);
+    // In a window too small to place the button, nothing resolves (fail
+    // closed) rather than a phantom button.
+    let tiny = Rect::new(0, 0, 4, 4);
     assert!(!progress_cancel_at(
         tiny,
         Scale::ONE,
         &theme,
-        Point::new(5, 5)
+        Point::new(1, 1)
     ));
 }
 
@@ -12357,7 +12377,7 @@ fn read_drive(free: u64) -> Drive {
                     files_free: 0,
                 },
                 availability: MountAvailability::Available,
-                medium: Some(BlkMedium::Nvme),
+                medium: Some(NVME),
             },
             [0x5f; 16],
         )

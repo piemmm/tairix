@@ -77,10 +77,10 @@ nothing — it never reports a success it did not get.
   bare ground and the command band let the blurred desktop through at the icon
   bar's weight, while everything laid on them stays solid — the sidebar's
   plate, every settings group, field, button and picture. What the shell opens
-  over its own content — a choice list, the category menu, the credential
-  question — is drawn on the opaque theme (`Grounds`), because laid down
-  translucent it would show the desktop through the window instead of the pane
-  it covers. The window asks the compositor for `Theme::backdrop_blur` as it
+  over its own content — a choice list, the category menu — is drawn on the
+  opaque theme (`Grounds`), because laid down translucent it would show the
+  desktop through the window instead of the pane it covers. The credential
+  question is not drawn in this window at all (below). The window asks the compositor for `Theme::backdrop_blur` as it
   opens and on every desktop change; the window manager's frame and title bar
   stay opaque.
 - **The sidebar is one plate.** The search field and the strip stand on a
@@ -825,9 +825,15 @@ The credential question every elevated run is offered through is the shared
 `lib/controls` credential sheet, the same surface the desktop session puts up
 when a command it may not perform is chosen: one credential surface on the
 desktop, with one focus order, one refusal wording, and one place the secret
-lives. It is modal while it is up, so a press behind it cannot change a pane
-the reader is about to authenticate for, and the password is held only in the
-masked field's bounded buffer, which zeroises what it discards. Both masked
+lives. It is asked in a dialog window of its own whose band reads "Settings —
+Authenticate" from the bundle's attested identity, so it never passes for the
+session's own prompt, which is undecorated and holds the whole seat. The
+dialog holds the settings window until it is answered, so a press behind it
+cannot change a pane the reader is about to authenticate for; that hold is the
+desktop's, and the shell filters none of its window's input for it. A dialog
+the desktop will not open turns the question down with the reason stated in
+the action band. The password is held only in the masked field's bounded
+buffer, which zeroises what it discards. Both masked
 fields step their marker's dots on the window's own clock: the event loop
 stamps each key as it takes it, parks no later than
 `Shell::secret_deadline_ns`, and on that wake presents only the field

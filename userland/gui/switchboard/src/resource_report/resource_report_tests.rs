@@ -826,9 +826,14 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
     );
     // The queue record carries the budget, so the capacity block states the
     // envelope the device is really served with.
+    let budget = BlkDeviceClass::SolidState.budget();
     assert_eq!(
         fact(volume, "Device class budget"),
-        &Reading::measured("32 deep · 5.0 s deadline")
+        &Reading::measured(format!(
+            "{} deep · {} deadline",
+            budget.queue_depth,
+            crate::format::format_latency(budget.deadline_ns)
+        ))
     );
 
     // The hero is the rate, split by direction and traced duplex.

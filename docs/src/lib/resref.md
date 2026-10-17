@@ -4,7 +4,7 @@
 reference* string is lexed and validated into a structured value. TAIRiX has no
 `/dev`, `/proc`, or `/sys`; non-filesystem resources — the random source, a
 disk, a serial port, a live metric — are named by typed references such as
-`sys:random`, `disk:backup@7K2M`, or `stats:net/wan/rx.pps?window=1s`. Turning
+`sys:random`, `disk:backup@7k2m`, or `stats:net/wan/rx.pps?window=1s`. Turning
 that spelling into a typed form is identical wherever it happens (the shell's
 redirection targets, command arguments, completion, and typed shell values
 first, and the resolver services behind them), so it lives here once and every
@@ -38,17 +38,19 @@ op           = "=" | "!=" | "<" | "<=" | ">" | ">=" | "~"
 | --- | --- | --- |
 | Simple | `sys:random` | one-segment selector |
 | Multi-segment | `info:cpu/vendor` | `/`-separated selector parts |
-| Guarded | `disk:backup@7K2M` | identity-guard fingerprint |
-| Faceted | `disk:backup@7K2M::raw` | typed operation/view |
+| Guarded | `disk:backup@7k2m` | identity-guard fingerprint |
+| Faceted | `disk:backup@7k2m::raw` | typed operation/view |
 | Query | `stats:net/wan/rx.pps?window=1s` | comparison parameters |
 | Query-only | `disk:?removable=true,size>=16GiB` | empty selector + query |
-| Fingerprint shorthand | `disk:@7K2M` | empty selector + guard |
+| Fingerprint shorthand | `disk:@7k2m` | empty selector + guard |
 | Full identity | `disk:id/serial/S6XYZ123456789` | case-sensitive selector |
 
 `namespace`, `facet`, and each parameter `key` are lowercase ASCII idents
 (`a-z 0-9 - _`) that start with a letter. Selector parts are **case-sensitive**
 (`a-z A-Z 0-9 - _ .`), because full identity selectors carry mixed-case,
-hyphenated tokens. The reserved delimiters `:`, `/`, `@`, `::`, `?`, and `,`
+hyphenated tokens. A guard fingerprint is ASCII letters and digits, which a
+dash may group for reading (`@7k2m-q8d3`) but never begins, ends, or doubles;
+comparison ignores it. The reserved delimiters `:`, `/`, `@`, `::`, `?`, and `,`
 never appear inside the part they delimit, so a rendered reference always
 re-parses to the same value (`Display` renders the canonical spelling).
 

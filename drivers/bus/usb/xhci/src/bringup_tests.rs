@@ -3,7 +3,7 @@
 //!
 //! QEMU models no Pi USB timing, so these tests prove the composition and its
 //! fail-closed paths against in-process mocks (an MMIO mapper backing real
-//! heap, a DMA host minting leaked [`DmaSlab`]s, a no-op [`Delay`]). The live
+//! heap, a DMA host minting leaked [`DmaSlab`]s). The live
 //! controller bring-up — the first 32-bit read off a real BAR returning a
 //! plausible `CAPLENGTH` — is the on-metal acceptance item; over the inert
 //! zeroed window here [`Xhci::open`](tairix_usb::Xhci::open) fails closed with
@@ -19,15 +19,13 @@ use core::ptr::NonNull;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{
-    CapabilityId, Delay, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper,
-    RegisterWindow,
+    CapabilityId, DriverError, DriverHost, DriverKind, MmioMapError, MmioMapper, RegisterWindow,
 };
 
 use super::{
     bring_up_controller, bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     ControllerResources,
 };
-use tairix_usb::device::EventWait;
 use tairix_usb::XhciOpenStage;
 
 /// The controller's register BAR base/len the HCD maps (the metal VL805 BAR0
@@ -122,30 +120,6 @@ impl DriverHost for MockHost {
     }
 }
 
-/// A no-op delay: the fail-closed and controller-hand-off paths all fail
-/// before any settle window, so the clock is never read here.
-struct NoopDelay;
-
-impl Delay for NoopDelay {
-    fn delay_us(&self, _us: u32) {}
-
-    fn now_us(&self) -> u64 {
-        0
-    }
-}
-
-/// A deterministic event-wait stand-in: every path here fails before an
-/// event wait, so the clock is never read and the park is never entered.
-struct NoopWait;
-
-impl EventWait for NoopWait {
-    fn now_us(&self) -> u64 {
-        0
-    }
-
-    fn wait_us(&self, _budget_us: u64) {}
-}
-
 fn host_with(phys: u64, mmio_map: bool, mapper: bool, dma: bool) -> MockHost {
     MockHost {
         mmio_map,
@@ -161,15 +135,8 @@ fn host_with(phys: u64, mmio_map: bool, mapper: bool, dma: bool) -> MockHost {
 fn bring_up(
     host: &MockHost,
     dma_aperture_top: u64,
-) -> Result<super::ControllerDevice<'_>, DriverError> {
-    bring_up_controller(
-        host,
-        &NoopDelay,
-        &NoopWait,
-        BAR_BASE,
-        BAR_LEN,
-        Some(dma_aperture_top),
-    )
+) -> Result<super::ControllerHost<'_>, DriverError> {
+    bring_up_controller(host, BAR_BASE, BAR_LEN, Some(dma_aperture_top))
 }
 
 #[test]
@@ -227,16 +194,9 @@ fn diagnostic_localises_the_controller_open_stall() {
     // `Capability` reset sub-stage, so a metal capture localises the stall
     // rather than seeing a bare `DeviceFault`.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, true, true);
-    let err = bring_up_controller_diagnostic(
-        &host,
-        &NoopDelay,
-        &NoopWait,
-        BAR_BASE,
-        BAR_LEN,
-        Some(APERTURE_TOP),
-    )
-    .err()
-    .expect("an inert controller window fails closed");
+    let err = bring_up_controller_diagnostic(&host, BAR_BASE, BAR_LEN, Some(APERTURE_TOP))
+        .err()
+        .expect("an inert controller window fails closed");
     assert_eq!(err.phase, BringupPhase::ControllerOpen);
     assert_eq!(err.error, DriverError::DeviceFault);
     assert_eq!(err.open_stage, Some(XhciOpenStage::Capability));
@@ -256,20 +216,13 @@ fn diagnostic_localises_a_setup_stall() {
     // exists: the structured error names the `Setup` phase and carries no
     // controller snapshot.
     let host = host_with(DMA_PHYS_IN_APERTURE, true, false, true);
-    let err = bring_up_controller_diagnostic(
-        &host,
-        &NoopDelay,
-        &NoopWait,
-        BAR_BASE,
-        BAR_LEN,
-        Some(APERTURE_TOP),
-    )
-    .err()
-    .expect("a host with no mapper fails closed");
+    let err = bring_up_controller_diagnostic(&host, BAR_BASE, BAR_LEN, Some(APERTURE_TOP))
+        .err()
+        .expect("a host with no mapper fails closed");
     assert_eq!(err.phase, BringupPhase::Setup);
     assert_eq!(err.error, DriverError::Unsupported);
     assert_eq!(err.open_stage, None);
-    assert_eq!(err.enum_stage, None);
+    assert_eq!((err.usbcmd, err.usbsts), (None, None));
 }
 
 #[test]

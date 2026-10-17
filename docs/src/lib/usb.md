@@ -32,8 +32,19 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   ring, interrupter-0 event ring) and runs the controller; `begin_port_reset` /
   `clear_port_reset_change` / `set_port_power` / `ring_doorbell` / `ack_event`
   drive the root hub and rings. Awaiting a reset it started is deliberately
-  *not* this layer's job — that needs a clock and the controller's interrupt,
-  which `UsbDevice` owns (`await_root_port_reset_complete`).
+  *not* this layer's job — that is the port's operation's.
+- `device::UsbHost` — the engine and the operations it runs. Every procedure
+  that spans a controller round trip — a control transfer, a command, a port
+  reset, an enumeration, a hub descent, a recovery — is an `async`
+  operation with an owner, cancelled by owner, its guards giving back what it
+  holds. `service(now)` routes every event the controller posted (transfer
+  events by slot and endpoint, command completions by command-TRB address),
+  fires due timers and command deadlines, and runs every operation that moved;
+  it reports what the topology did, whether a walk settled, and the earliest
+  deadline, which bounds the caller's park. Nothing waits inside a step, so one
+  device's slow pipe, hung command or recovery holds up no other. A command
+  the controller does not complete within its budget is aborted (Command Ring
+  Abort, xHCI 1.2 §4.6.1.2), failing only its owner.
 - `device::UsbDevice` — the multi-device enumeration engine: per device,
   Enable Slot → Address Device → an 8-byte `GET_DESCRIPTOR` prefix whose
   validated `bMaxPacketSize0` drives an Evaluate Context EP0 fix-up when
@@ -67,8 +78,11 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   are the controller's reported slot count and genuine memory exhaustion,
   never a compile-time budget. A composite
   device — a wireless keyboard+mouse receiver — occupies one entry per
-  served interface, the siblings sharing its slot and EP0
+  served interface, the siblings sharing its slot and its control pipe
   (`InterfaceInfo::decode_all` decodes every default-alternate interface).
+  Each slot's control pipe — its EP0 ring, data buffer and input context, in
+  the slot's own region — runs one TD at a time from a FIFO, and a TD that
+  fails is taken back before the next runs.
   `next_report(index, …)` arms one
   interrupt-IN transfer for the class URB device `index` is currently serving,
   and `engine_for(index)` is the per-device `UrbEngine` view the HCD's URB
@@ -85,14 +99,14 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   and returns `Ok(None)`, so the URB stays parked and a ZLP costs one
   controller interrupt rather than a reply-and-resubmit spin; a genuine
   per-report fault still surfaces after the ring is retired.
-  `bring_up` is the arch-neutral bring-up orchestration the host-controller
-  driver runs once: it powers all root ports, parks through the connect
-  debounce, and attaches **every** connected root port (`attach_root_port`).
+  `UsbHost::bring_up` starts the arch-neutral bring-up walk: it powers all
+  root ports, waits out the connect debounce on a timer, and hands **every**
+  root port to its own operation.
   A root device that is itself a hub (the Pi 4B's onboard USB2 hub) is
   installed, descended — every connected downstream port, nested tiers
   included — and watched; a directly-attached device (the Pi 4B's USB3 side
   of each jack is wired straight to a root port) is served beside it (settle
-  windows supplied by the `tairix_abi::Delay` seam) — a keyboard and a
+  windows waited out on one-shot timers) — a keyboard and a
   storage stick plugged in together are both served, neither displacing the
   other. A transaction fault while a device's address is assigned or its
   device and configuration descriptors are read re-drives it on a fresh slot,
@@ -113,19 +127,18 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   device that left it vacant, recover one still enabled in place, or reset and
   re-enumerate the port — a bounded ladder, so an endpoint that never works is
   given up rather than recovered forever. A hub whose status-change transfer
-  fails is recovered by `next_hub_change` itself, which reconciles every port
-  behind it (`HubEvent::HubRecovered`). A device absent at bring-up is a
+  fails is recovered by an operation of its own, which reconciles every port
+  behind it (`HubEvent::HubRecovered`). A device that leaves mid-attach ends
+  its attach at whatever step it stands. A device absent at bring-up is a
   first-class state, not a failure: the controller
   comes up watched (each hub's status-change endpoint, and the root ports'
-  latched connect changes serviced by `next_root_change`, with no controller
-  reset), so a cold boot with nothing plugged in works and each device
-  autoloads when plugged in. The `PORTSC` walk runs only when a latched
-  source has armed it — a Port Status Change Event drained by any ring
-  consumer, or the `USBSTS.PCD` summary the interrupt acknowledgement reads —
-  so a device streaming reports never touches a port register, while neither
-  trigger can lose a plug. Both are xHCI-mandated latches, and the arming is
-  recorded at the one point every ring consumer funnels through, so a plug
-  whose event was swallowed by a synchronous engine wait is still scanned for.
+  latched connect changes, each reconciled by its port's operation with no
+  controller reset), so a cold boot with nothing plugged in works and each
+  device autoloads when plugged in. The `PORTSC` walk runs only when a latched
+  source has armed it — a Port Status Change Event the service step routes,
+  or the `USBSTS.PCD` summary the interrupt acknowledgement reads — so a
+  device streaming reports never touches a port register, while neither
+  trigger can lose a plug: both are xHCI-mandated latches.
   `device_identity(index)` names each served interface by its bus position
   (root port and Route String) and descriptor identity (vendor, product,
   `bcdDevice`, device class triple, and the interface's number and class
@@ -238,9 +251,9 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   operation with a status or a stream's grant. `transport` adds the two ends
   both sides share:
   - `UrbEngine` — the controller-side operation seam the HCD's live engine
-    performs (`UsbDevice` implements it: `control_in` over the EP0 control
-    transfer — targeting the enumerated *device*, switching a hub-downstream
-    device's EP0 ring active for the transfer — `control_no_data` over the
+    performs (`DeviceEngine` implements it, each call answering `None` while
+    the engine runs it: `control_in` queued on the device's control pipe and
+    reaped on a later drive — `control_no_data` over the
     same path for a SETUP-only class request (the BOT Mass Storage Reset,
     `plans/DEVICES.md` D2), `control_out` for a class request carrying an
     OUT data stage (the CBI ADSC command channel, `plans/DEVICES.md` D5),
@@ -254,8 +267,12 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     interface's four pipes need (`plans/DEVICES.md` D1/D5), addressed by
     endpoint number and routed to the matching per-pipe ring), `abandon` for
     a URB held past its deadline (a bulk pipe is stopped and restarted empty,
-    so its TD can never complete late into a later transfer), `clear_halt`
-    for a bulk pipe, and the interface and stream operations above
+    so its TD can never complete late into a later transfer; once the stop
+    makes the endpoint context's dequeue pointer the controller's own, where
+    it stood against the TD is queued for the driver's log,
+    `UsbDevice::take_abandon_report`), `clear_halt`
+    for a bulk pipe, and the interface and stream operations above, those
+    the engine runs over several commands collected on a later drive
     (`set_interface`, `claim_interface`, `iso_start` / `iso_queue` /
     `iso_stop` / `iso_take`), which an engine serving no periodic endpoint
     refuses `Unsupported`.
@@ -282,8 +299,9 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     not-yet-arrived interrupt-IN report — or a bulk transfer still in flight —
     leaves the HCD's IPC ticket outstanding until the controller event
     arrives or the URB's deadline passes, so the class driver parks instead of
-    retrying. Every bulk URB carries a deadline; a report poll may carry none,
-    and a control transfer runs within the controller's own bound.
+    retrying. Every bulk and control URB carries a deadline, a control URB's
+    held no longer than `USB_CONTROL_TIMEOUT_MAX_MS` (a class driver states it
+    with `CONTROL_BUDGET_MAX` or less); a report poll may carry none.
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
     straight to `drive_urb`), and
@@ -353,18 +371,17 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   machines are proven host-side against a register-level mock plus an in-memory
   ring/DMA model (§2.2); the doorbell below them is the on-metal acceptance
   item (no QEMU `raspi*` USB vertical exists, §0.4).
-- Synchronous completion waits **park** on the caller-supplied
-  `device::EventWait` seam (on metal: the HCD's `irq_wait` on the
-  controller's bound interrupt line, which the caller binds before
-  `UsbDevice::start` — start enables the completion interrupter itself, at the
-  1 ms xHCI reset moderation default `regs::IMODI_DEFAULT`, never `IMOD = 0`,
-  so an interrupt-IN endpoint that streams a report every service interval — a
+- An operation waits only on a routed completion or a one-shot timer, each
+  bounded by a wall-clock budget (the per-command budget, the USB 2.0 §9.2.6
+  request ceiling, the power-on-good + attach-debounce window); the caller
+  parks on the controller's interrupt line, bound before `UsbHost::start` —
+  start enables the completion interrupter itself, at the 1 ms xHCI reset
+  moderation default `regs::IMODI_DEFAULT`, never `IMOD = 0`, so an
+  interrupt-IN endpoint that streams a report every service interval — a
   mouse polling every microframe — is coalesced to ≤~1000 interrupts/s rather
-  than storming a core with one interrupt per report) and
-  are bounded by wall-clock budgets (the USB 2.0 §9.2.6 request ceiling for
-  a completion, the power-on-good + attach-debounce window for the boot
-  connect scan). Only the brief register handshakes (`Xhci` open/start/
-  reset readiness) keep the bounded iteration poll budget.
+  than storming a core with one interrupt per report. Only the brief register
+  handshakes (`Xhci` open/start/reset readiness) keep the bounded iteration
+  poll budget.
 - Every endpoint is polled at the interval its descriptor states; a device
   that has nothing new to report is quiet because its class driver set its
   idle rate, not because the host slowed it.

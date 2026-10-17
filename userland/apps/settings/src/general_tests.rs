@@ -11,7 +11,6 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{SystemIdentity, Uptime};
 use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
-use tairix_controls::testkit::keystroke;
 use tairix_controls::Keystroke;
 use tairix_geometry::{to_i32, Point, Scale};
 use tairix_icon::NoArtwork;
@@ -23,7 +22,7 @@ use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
-use crate::test_support::{damage, opaque, stated, theme, WIDE};
+use crate::test_support::{damage, opaque, question_client, question_key, stated, theme, WIDE};
 
 /// A shell showing `pane`, with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
@@ -87,31 +86,16 @@ fn press_action(shell: &mut Shell) -> ShellOutcome {
 }
 
 /// Type `text` into whichever field of the credential question holds the
-/// keyboard, then `Tab` or `Enter`.
+/// keyboard, in the question's own window.
 fn type_into(shell: &mut Shell, text: &str) {
-    let theme = theme();
-    let mut sink = damage();
     for ch in text.chars() {
-        shell.on_key(
-            keystroke(Key::Char(ch)),
-            WIDE,
-            Scale::ONE,
-            &theme,
-            &mut sink,
-        );
+        question_key(shell, Key::Char(ch));
     }
 }
 
+/// Press `key` in the credential question's own window.
 fn press(shell: &mut Shell, key: NamedKey) -> ShellOutcome {
-    let theme = theme();
-    let mut sink = damage();
-    shell.on_key(
-        keystroke(Key::Named(key)),
-        WIDE,
-        Scale::ONE,
-        &theme,
-        &mut sink,
-    )
+    question_key(shell, Key::Named(key))
 }
 
 // --- The staged model ---------------------------------------------------
@@ -275,22 +259,35 @@ fn the_questions_password_steps_its_marker_on_the_clock_its_keystroke_was_taken_
     );
 
     let theme = theme();
+    let client = question_client(&shell);
     let at = 7 * SECRET_TICK_NS;
     let stroke = Keystroke {
         key: Key::Char('h'),
         modifiers: Modifiers::default(),
         at_ns: at,
     };
-    shell.on_key(stroke, WIDE, Scale::ONE, &theme, &mut damage());
+    shell.on_question_key(stroke, client, Scale::ONE, &theme, &mut damage());
     let due = at + SECRET_TICK_NS;
     assert_eq!(shell.secret_deadline_ns(), Some(due));
 
     let mut early = damage();
-    shell.advance_secrets(due - 1, WIDE, (Scale::ONE, &theme), &mut early);
+    shell.advance_question(due - 1, client, Scale::ONE, &mut early);
     assert!(early.is_empty(), "no dot moves before its tick");
     let mut stepped = damage();
     shell.advance_secrets(due, WIDE, (Scale::ONE, &theme), &mut stepped);
+    assert!(
+        stepped.is_empty(),
+        "nothing of the question is in the window"
+    );
+    shell.advance_question(due, client, Scale::ONE, &mut stepped);
     assert!(!stepped.is_empty(), "the step reports where to present");
+    assert!(
+        stepped
+            .rects()
+            .iter()
+            .all(|rect| rect.intersection(&client) == *rect),
+        "in the question's own window"
+    );
     assert_eq!(shell.secret_deadline_ns(), Some(due + SECRET_TICK_NS));
 }
 
@@ -306,35 +303,23 @@ fn cancelling_the_question_changes_nothing_anywhere() {
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 1);
 }
 
+/// The question is held modal by the desktop, which holds the settings
+/// window while its dialog is up, so the window's own input is never
+/// filtered for it here: what reaches the pane is the pane's.
 #[test]
-fn the_question_is_modal_while_it_is_up() {
-    // A press behind the question must not change a pane the reader is
-    // about to authenticate for.
+fn the_window_keeps_its_own_input_while_the_question_is_up() {
     let mut shell = showing_with("caching", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
     press_action(&mut shell);
     assert!(shell.asking());
     let staged = shell.form_for_test().expect("a form").pending();
-
-    let theme = theme();
-    let frame = shell.frame(WIDE, Scale::ONE, &theme);
-    let at = Point::new(
-        frame.content.left() + to_i32(frame.content.width / 2),
-        frame.content.top() + to_i32(frame.content.height / 4),
+    press_command(&mut shell, 0);
+    assert_ne!(
+        shell.form_for_test().expect("a form").pending(),
+        staged,
+        "Revert reached the pane"
     );
-    let mut sink = damage();
-    for event in [
-        InputEvent::PointerMoved { to: at },
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-    ] {
-        shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
-    }
-    assert_eq!(shell.form_for_test().expect("a form").pending(), staged);
+    assert!(shell.asking(), "and left the question to be answered");
 }
 
 #[test]
@@ -557,13 +542,12 @@ fn a_store_whose_master_switch_is_off_still_reports_each_class_value() {
     assert!(form.pending().is_empty());
 }
 
-/// The window's bare ground is the icon bar's glass, a strip row laid on it is
-/// solid, and so is the credential question standing over the pane: laid down
-/// translucent, it would show the desktop through the window instead of the
-/// pane it covers. Nothing anywhere is more see-through than the glass.
+/// The window's bare ground is the icon bar's glass and a strip row laid on
+/// it is solid, and nothing anywhere is more see-through than the glass. The
+/// credential question is drawn in a window of its own, solid, and never into
+/// this one.
 #[test]
-fn the_window_is_glass_and_the_question_over_it_is_solid() {
-    use tairix_controls::CredentialSheet;
+fn the_window_is_glass_and_its_question_is_solid_in_its_own_window() {
     use tairix_raster::Color;
     use tairix_theme::ThemeRegistry;
 
@@ -597,20 +581,27 @@ fn the_window_is_glass_and_the_question_over_it_is_solid() {
         "a resting strip row lets the desktop through"
     );
 
-    let sheet = CredentialSheet::centred_in(WIDE, Scale::ONE);
-    let corner = Scale::ONE.scale_length(grounds.popups.metrics().window_corner_radius) + 2;
-    let x = u32::try_from(sheet.right()).expect("on the surface") - corner;
-    let y = u32::try_from(sheet.bottom()).expect("on the surface") - corner;
-    assert_eq!(
-        surface.get(x, y).map(|pixel| pixel.a),
-        Some(u8::MAX),
-        "the question lets the desktop through the window"
-    );
-
     let weakest = surface.pixels().iter().map(|pixel| pixel.a).min();
     assert_eq!(
         weakest,
         Some(p.chrome_alpha),
         "something is thinner than the glass"
+    );
+    let mut asked = Surface::new(WIDE.width, WIDE.height).expect("a surface");
+    shell.render(&mut asked, WIDE, Scale::ONE, grounds, &mut NoArtwork);
+    assert_eq!(
+        asked.pixels(),
+        surface.pixels(),
+        "drawn into no part of this window"
+    );
+
+    let client = question_client(&shell);
+    let mut question = Surface::new(client.width, client.height).expect("a surface");
+    shell.render_question(&mut question, client, Scale::ONE, grounds.popups);
+    let middle = question.get(client.width / 2, client.height / 2);
+    assert_eq!(
+        middle.map(|pixel| pixel.a),
+        Some(u8::MAX),
+        "the question is solid"
     );
 }

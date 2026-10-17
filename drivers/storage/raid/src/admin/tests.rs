@@ -19,7 +19,7 @@ use crate::testkit::{
     candidates, request, superblock, MemberDisk, BLOCK_SIZE, DEVICE_BLOCKS, NOW, UUID_A,
 };
 
-use tairix_abi::blkio::{decode_completion, BlkMedium, BlkOp, BLK_COMPLETION_LEN};
+use tairix_abi::blkio::{decode_completion, BlkMedium, BlkOp, BlkTransport, BLK_COMPLETION_LEN};
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::{MemberState, RaidLevel};
 use tairix_abi::raid_admin::{
@@ -92,7 +92,7 @@ fn agent_of(index: usize) -> ProcId {
 /// What a device of `blocks` logical blocks answered when it was connected to.
 fn probed(blocks: u64) -> ProbedDevice {
     ProbedDevice {
-        medium: Some(BlkMedium::Virtual),
+        medium: Some(BlkMedium::of_transport(BlkTransport::Virtual)),
         geometry: BlockGeometry {
             block_size: BLOCK_SIZE,
             block_count: blocks,

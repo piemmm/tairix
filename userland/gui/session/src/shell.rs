@@ -292,6 +292,21 @@ pub fn prompt_origin(screen: Rect, (width, height): (u32, u32)) -> Point {
     .origin
 }
 
+/// A rectangle of `size` centred over `over`, which may lie partly off the
+/// screen: the caller clamps it onto where it may stand.
+#[must_use]
+pub fn centred_over(over: Rect, (width, height): (u32, u32)) -> Rect {
+    let half = |outer: u32, inner: u32| {
+        tairix_geometry::to_i32(outer / 2).saturating_sub(tairix_geometry::to_i32(inner / 2))
+    };
+    Rect::new(
+        over.left().saturating_add(half(over.width, width)),
+        over.top().saturating_add(half(over.height, height)),
+        width,
+        height,
+    )
+}
+
 /// Where an alert whose client is `client` opens on `screen`, frame included:
 /// centred across it a third of the way down, set `cascade` pixels down and
 /// across from those before it, and kept on the screen.
@@ -862,24 +877,6 @@ impl DesktopShell {
         Some(window)
     }
 
-    /// Close the popup window `window` opened by
-    /// [`open_popup_window`](Self::open_popup_window): remove it from the
-    /// compositor and drop focus if it held it.
-    ///
-    /// Returns `false`, changing nothing, for a window the compositor does not
-    /// know. The taskbar is untouched — a popup never had an entry there —
-    /// so the bar needs no re-present.
-    pub fn close_popup_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
-        if !compositor.remove(window) {
-            return false;
-        }
-        if self.router.focused() == Some(window) {
-            self.router.unfocus();
-        }
-        self.sync_active_frame(compositor);
-        true
-    }
-
     /// Open `surface` as a tool window of `parent` whose client lands at
     /// `client` on screen, framed with the mini title band reading `title`
     /// and kept wholly on screen — *without* the keyboard and off the
@@ -954,11 +951,15 @@ impl DesktopShell {
         Some(window)
     }
 
-    /// Take alert window `window` down, handing the keyboard to `next` when
-    /// the alert held it, and leaving it on the desktop when `next` can no
-    /// longer take it — a window already gone. Returns `false`, changing
-    /// nothing, for a window the compositor does not know.
-    pub fn close_alert_window(
+    /// Take transient `window` down — a popup, a tool window, an alert or a
+    /// dialog — handing the keyboard to `next` when `window` held it, and
+    /// leaving it on the desktop when there is no `next` or it can no longer
+    /// take it, a window already gone. Returns `false`, changing nothing, for
+    /// a window the compositor does not know.
+    ///
+    /// The taskbar is untouched — a transient never had an entry there — so
+    /// the bar needs no re-present.
+    pub fn close_transient_window(
         &mut self,
         compositor: &mut Compositor,
         window: WindowId,
@@ -975,16 +976,61 @@ impl DesktopShell {
         true
     }
 
-    /// Raise alert window `window` with its owner's family and give it the
-    /// keyboard: the user pressed the window it holds. Returns `false` for a
-    /// window the compositor does not know.
-    pub fn focus_alert_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
-        if !compositor.raise(window) {
+    /// Raise `holder` — an alert or an owner-modal dialog — with its owner's
+    /// family and give it the keyboard: the user pressed the window it holds.
+    /// Returns `false` for a window the compositor does not know.
+    pub fn focus_holder(&mut self, compositor: &mut Compositor, holder: WindowId) -> bool {
+        if !compositor.raise(holder) {
             return false;
         }
-        let focused = self.router.focus(window, compositor);
+        let focused = self.router.focus(holder, compositor);
         self.sync_active_frame(compositor);
         focused
+    }
+
+    /// Open `surface` as a dialog window of `owner`, framed as a dialog titled
+    /// `title`, centred over its owner and wholly within the work area.
+    ///
+    /// An owner-modal dialog (`modal`) is its family's front, so raising the
+    /// family hands it the keyboard; a modeless one floats with the family
+    /// and takes the keyboard only when pressed. Either takes it on opening
+    /// only when `focus`, else it waits where its family stands; while the
+    /// seat is held (`behind`) it opens beneath the window holding the
+    /// keyboard and takes nothing. `None` for an owner the compositor does
+    /// not know.
+    pub fn open_dialog_window(
+        &mut self,
+        compositor: &mut Compositor,
+        owner: WindowId,
+        surface: Surface,
+        title: &str,
+        (modal, focus, behind): (bool, bool, bool),
+    ) -> Option<WindowId> {
+        let frame = WindowFrame::dialog();
+        let over = compositor.window(owner)?.bounds();
+        let client = Rect::new(0, 0, surface.width(), surface.height());
+        let outer = frame.outer_for_client(client, compositor.scale(), compositor.theme());
+        let origin = centred_over(over, (outer.width, outer.height))
+            .clamped_onto(self.work_area(compositor))
+            .origin;
+        let raise = focus && !behind;
+        let window = match (modal, raise) {
+            (true, true) => compositor.add_transient_window(owner, origin, surface)?,
+            (true, false) => compositor.add_transient_window_in_place(owner, origin, surface)?,
+            (false, true) => compositor.add_floating_window(owner, origin, surface)?,
+            (false, false) => compositor.add_floating_window_in_place(owner, origin, surface)?,
+        };
+        compositor.set_window_frame(window, frame);
+        compositor.set_window_title(window, title);
+        if behind {
+            if let Some(front) = self.router.focused() {
+                compositor.stack_below(window, front);
+            }
+        } else if raise {
+            self.router.focus(window, compositor);
+        }
+        self.sync_active_frame(compositor);
+        Some(window)
     }
 
     /// Carry the primary press `parent`'s content holds on as a move of its

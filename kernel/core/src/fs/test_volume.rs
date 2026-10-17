@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkTransport};
 use tairix_abi::driver::filesystem::{FilesystemRead, MountFlags, NodeSecurity};
 use tairix_abi::driver::DriverHandle;
 use tairix_caps::CapabilitySet;
@@ -31,7 +31,7 @@ pub(crate) const TEST_GID: u32 = 1000;
 pub(crate) const MOUNT: &str = "/Storage/vol";
 /// The storage medium the fixture's block device declares, so the snapshot
 /// can be checked against a value only the attach path could have supplied.
-pub(crate) const MOUNT_MEDIUM: BlkMedium = BlkMedium::SolidState;
+pub(crate) const MOUNT_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Nvme);
 
 /// A sink that discards every event — the identity-table verifier audits its
 /// outcome but these tests assert behaviour, not the audit trail.

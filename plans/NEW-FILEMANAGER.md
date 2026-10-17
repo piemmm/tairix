@@ -393,7 +393,7 @@ FM4b's pure context-menu chrome model,
 FM7b's app-side move/copy verbs (`Ctrl+X`/`Ctrl+C`/`Ctrl+V` cut/copy/paste
 driving `plan_paste`→`paste_strategy`→`fs_rename` / `CopyCursor`+`CopyWalk` /
 copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
-and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
+and FM7b's app-side Delete verb (the `Delete`-key confirmation alert
 + the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
 FM7b's app-side **progress + cancel** for both Delete and copy/paste (each
 confirmed operation a `Job` — a `DeleteWalk`, a `TrashRun` or a `Paste` state
@@ -629,7 +629,7 @@ user pick any. See FM6b below.
   equivalent. A feature earns its place or it is not built (§2.3).
 
 - **Destructive actions are honest and reversible where cheap (§2.24).**
-  Delete asks once (a `lib/controls` `Dialog` with honest action warmth),
+  Delete asks once (an alert with honest action warmth),
   reports refusals in-UI (a denied delete is an answer, not a crash), and
   — where the backing supports it cheaply — prefers a recoverable move to
   a per-user trash location over an irreversible unlink (staged FM7).
@@ -1451,17 +1451,18 @@ autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
 **Progress + cancel covers both the Delete verb and copy/paste.** Neither
 interactive verb drives its walk on the window's loop: the confirmed work is a
 `Job` the operations worker carries out one unit at a time — one directory
-read, one unlink, one `fs_mkdir`, one copy chunk, or one rename — while the
-window shows a modal progress panel and takes a cancel or a close (FM20). One
-`Job` carries a `DeleteWalk`, a `TrashRun` or the app-side `Paste` state
-machine, so all three run through one path (§2.2). The drawn surface is the shared
-`lib/browse::progress` model (`ProgressModel` — op kind, the honest rising count
-from the walk's own figure, and a *latched* cancel) painted by
-`render::draw_progress_dialog` as a `lib/controls` `Panel` + an indeterminate
-`Progress` trace (a "working" bar, no fabricated percentage since the total is
-unknown until the reads reveal it, §2.24) + a Cancel `Button`;
-`render::progress_cancel_at` is the mirror hit-test resolving a click to the
-drawn button (fail closed off it, §2.2/§5.4). A latched cancel stops the walk at
+read, one unlink, one `fs_mkdir`, one copy chunk, or one rename — while its own
+modeless progress window, a dialog of the folder window, shows its count and
+takes a cancel (FM20). One `Job` carries a `DeleteWalk`, a `TrashRun` or the
+app-side `Paste` state machine, so all three run through one path (§2.2). The
+drawn surface is the shared `lib/browse::progress` model (`ProgressModel` — op
+kind, the honest rising count from the walk's own figure, whether it waits for
+the operations before it, and a *latched* cancel) painted across the progress
+window by `render::draw_progress_window` as an indeterminate `Progress` trace (a
+"working" bar, no fabricated percentage since the total is unknown until the
+reads reveal it, §2.24) + a Cancel `Button`; `render::progress_cancel_at` is the
+mirror hit-test resolving a click to the drawn button (fail closed off it,
+§2.2/§5.4). A latched cancel stops the walk at
 the next unit boundary (never mid-node, and never mid-chunk), and a completed or
 cancelled/refused run alike re-lists so a partial result is shown honestly
 (§2.24).
@@ -1961,7 +1962,7 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
     tool renders muted and a click on it resolves to nothing, §5.4). Clicking it
     recomputes the Trash location (so a stale click can never empty the wrong
     directory), builds `empty_trash_plan` from the listing the window shows,
-    confirms with the `DeleteDisposition::Permanent` dialog, and hands the
+    confirms with the `DeleteDisposition::Permanent` alert, and hands the
     plan's `DeleteWalk` to the operations worker a delete uses
     (`ProgressOp::Delete`), under the user's own `fs_readdir`/`fs_unlink` (no new
     capability). An already-empty Trash is a silent no-op; a refusal is stated

@@ -1,6 +1,6 @@
-//! Unit tests for the alert control: its 4:3 extent, the RISC OS layout, the
-//! keyboard and pointer answers, and the detail that scrolls only when even
-//! the largest window the screen holds cannot seat it.
+//! Unit tests for the alert control: its content-sized extent, the RISC OS
+//! layout, the keyboard and pointer answers, and the text that scrolls only
+//! when its share of the screen cannot seat it.
 
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -9,6 +9,11 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use super::{Alert, AlertAction, Metrics, ALERT_BUTTON_MIN_WIDTH, ALERT_MIN_WIDTH};
+
+/// A headline of `words` four-letter words.
+fn long_headline(words: usize) -> alloc::string::String {
+    "word ".repeat(words).trim_end().into()
+}
 
 /// A title band and a rim, as a dialog frame adds them.
 const FRAME: (u32, u32) = (2, 34);
@@ -34,12 +39,6 @@ fn alert(detail: &str, buttons: &[AlertButton]) -> Alert {
 
 fn ok() -> AlertButton {
     button("OK", AlertButtonRole::Default)
-}
-
-/// Whether a window `(w, h)` is 4:3 to within the pixel a division rounds.
-fn is_four_thirds((w, h): (u32, u32)) -> bool {
-    let (w, h) = (u64::from(w), u64::from(h));
-    (w * 3).abs_diff(h * 4) <= 4
 }
 
 fn outer((w, h): (u32, u32)) -> (u32, u32) {
@@ -85,65 +84,119 @@ fn click(alert: &mut Alert, at: Point, bounds: Rect) -> Option<AlertAction> {
 }
 
 #[test]
-fn every_alert_window_is_four_by_three() {
+fn an_alert_is_exactly_as_tall_as_its_content() {
     let theme = Theme::dark();
     let long = "word ".repeat(150);
     for detail in ["", "The volume is full.", long.as_str()] {
         for scale in [Scale::ONE, Scale::from_percent(200).expect("a scale")] {
-            let extent = alert(detail, &[ok()]).client_extent(FRAME, SCREEN, scale, &theme);
-            assert!(is_four_thirds(outer(extent)), "{detail:.20}: {extent:?}");
+            let alert = alert(detail, &[ok()]);
+            let extent = alert.client_extent(FRAME, SCREEN, scale, &theme);
+            let metrics = Metrics::of(scale, &theme);
+            assert_eq!(
+                extent.1,
+                alert.needed_height(extent.0, &metrics, scale, &theme),
+                "{detail:.20} at {scale:?}"
+            );
+            let layout = alert.layout(client(extent), scale, &theme);
+            assert_eq!(layout.scroll_room, 0, "nothing scrolls while it fits");
         }
     }
 }
 
 #[test]
-fn a_short_alert_is_the_smallest_window_and_a_long_one_grows() {
+fn a_one_line_alert_is_short_and_a_long_one_grows_to_the_measure() {
     let theme = Theme::dark();
     let short = alert("", &[ok()]).client_extent(FRAME, SCREEN, Scale::ONE, &theme);
-    assert_eq!(outer(short).0, ALERT_MIN_WIDTH);
+    let narrow = alert("", &[ok()]);
+    let metrics = Metrics::of(Scale::ONE, &theme);
+    assert!(
+        outer(short).0 >= ALERT_MIN_WIDTH,
+        "never narrower than the minimum"
+    );
+    assert!(
+        short.1 < short.0 * 3 / 4,
+        "a short alert is not padded out to a shape: {short:?}"
+    );
+    assert!(short.1 <= metrics.pad * 3 + metrics.mark + metrics.button_h * 2);
     let long = "word ".repeat(150);
     let grown = alert(&long, &[ok()]).client_extent(FRAME, SCREEN, Scale::ONE, &theme);
-    assert!(outer(grown).0 > ALERT_MIN_WIDTH);
+    let measure = Alert::measure(Scale::ONE, &theme);
+    assert!(outer(grown).0 > outer(short).0);
+    assert!(
+        metrics.text_width(grown.0) <= measure,
+        "a long text is set to the measure, not wider"
+    );
+    assert!(
+        metrics.text_width(grown.0) + 10 * 8 >= measure,
+        "it uses it"
+    );
+    assert!(narrow.client_extent(FRAME, SCREEN, Scale::ONE, &theme).0 <= grown.0);
 }
 
 #[test]
-fn nothing_an_alert_says_is_cut_while_the_screen_has_room() {
+fn a_long_headline_wraps_whole_and_nothing_is_cut() {
     let theme = Theme::dark();
-    let long = "A sentence that explains what went wrong. ".repeat(20);
-    let mut alert = alert(&long, &[ok()]);
-    let extent = alert.client_extent(FRAME, SCREEN, Scale::ONE, &theme);
-    let layout = alert.layout(client(extent), Scale::ONE, &theme);
-    assert_eq!(
-        layout.shown_lines, layout.detail_lines,
-        "the whole detail shows"
+    let headline = long_headline(32);
+    let spec =
+        AlertSpec::new(AlertSeverity::Warning, &headline, "", &[ok()]).expect("a valid spec");
+    let alert = Alert::from_spec(&spec);
+    let scale = Scale::from_percent(200).expect("a scale");
+    let narrow = (480, 1080);
+    let extent = alert.client_extent(FRAME, narrow, scale, &theme);
+    let layout = alert.layout(client(extent), scale, &theme);
+    let font = layout.lines.headline.font;
+    let wrapped: alloc::vec::Vec<_> = font
+        .wrap_to_width(&headline, layout.text.width, usize::MAX)
+        .collect();
+    assert!(
+        wrapped.len() > 6,
+        "past the six lines a headline was cut at"
     );
-    assert_eq!(layout.scroll_room(), 0);
-    // Nothing scrolls a detail that shows whole.
     assert_eq!(
-        key(&mut alert, Key::Named(NamedKey::End), false, client(extent)),
-        None
+        layout.lines.headline_lines,
+        wrapped.len(),
+        "every line is kept"
     );
-    assert_eq!(alert.scroll, 0);
+    let words: usize = wrapped
+        .iter()
+        .map(|line| line.text.split_whitespace().count())
+        .sum();
+    assert_eq!(words, 32, "every word is laid out, none elided");
+    assert_eq!(
+        layout.scroll_room, 0,
+        "and the window is tall enough for it"
+    );
 }
 
 #[test]
-fn a_detail_too_long_for_the_screen_scrolls_rather_than_being_cut() {
+fn text_past_the_screens_share_scrolls_whole_and_the_buttons_stay() {
     let theme = Theme::dark();
     let lines = "line\n".repeat(200);
-    let mut alert = alert(&lines, &[ok()]);
-    let extent = alert.client_extent(FRAME, (640, 480), Scale::ONE, &theme);
+    let spec = AlertSpec::new(AlertSeverity::Error, &long_headline(30), &lines, &[ok()])
+        .expect("a valid spec");
+    let mut alert = Alert::from_spec(&spec);
+    let small = (640, 480);
+    let extent = alert.client_extent(FRAME, small, Scale::ONE, &theme);
     assert!(outer(extent).0 <= 640 && outer(extent).1 <= 480);
     let bounds = client(extent);
     let layout = alert.layout(bounds, Scale::ONE, &theme);
-    assert!(layout.shown_lines > 0 && layout.shown_lines < layout.detail_lines);
+    assert!(layout.scroll_room > 0);
+    let pad = i32::try_from(Metrics::of(Scale::ONE, &theme).pad).expect("small");
+    assert_eq!(
+        layout.buttons[0].bottom(),
+        bounds.bottom() - pad,
+        "the buttons stay at the foot"
+    );
+    assert!(layout.text.bottom() <= layout.buttons[0].top());
     key(&mut alert, Key::Named(NamedKey::Down), false, bounds);
-    assert_eq!(alert.scroll, 1);
+    assert_eq!(alert.scroll, 1, "the headline scrolls too");
     key(&mut alert, Key::Named(NamedKey::End), false, bounds);
     assert_eq!(
-        alert.scroll,
-        layout.scroll_room(),
+        alert.scroll, layout.scroll_room,
         "the end shows the last line"
     );
+    let (headline, detail) = layout.lines.fitting(alert.scroll, layout.text.height);
+    assert_eq!(alert.scroll + headline + detail, layout.lines.total());
     key(&mut alert, Key::Named(NamedKey::Home), false, bounds);
     assert_eq!(alert.scroll, 0);
     let mut damage = Region::new();
@@ -156,6 +209,20 @@ fn a_detail_too_long_for_the_screen_scrolls_rather_than_being_cut() {
     );
     assert_eq!(alert.scroll, 3, "a detent scrolls three lines");
     assert!(!damage.is_empty());
+}
+
+#[test]
+fn a_density_change_lays_the_window_out_again() {
+    let theme = Theme::dark();
+    let alert = alert("The volume is full.", &[ok()]);
+    let one = alert.client_extent(FRAME, SCREEN, Scale::ONE, &theme);
+    let two = alert.client_extent(
+        FRAME,
+        SCREEN,
+        Scale::from_percent(200).expect("a scale"),
+        &theme,
+    );
+    assert!(two.0 > one.0 && two.1 > one.1, "{one:?} then {two:?}");
 }
 
 #[test]
@@ -183,10 +250,10 @@ fn the_buttons_stand_along_the_foot_at_the_right() {
     );
     assert!(cancel.width >= ALERT_BUTTON_MIN_WIDTH);
     assert!(
-        layout.mark.right() < layout.headline.left(),
+        layout.mark.right() < layout.text.left(),
         "the mark leads the text"
     );
-    assert!(layout.headline.bottom() <= replace.top());
+    assert!(layout.text.bottom() <= replace.top());
 }
 
 #[test]
@@ -341,7 +408,7 @@ fn a_click_on_a_button_chooses_it_and_a_click_beside_them_does_not() {
     let bounds = client(alert.client_extent(FRAME, SCREEN, Scale::ONE, &theme));
     let layout = alert.layout(bounds, Scale::ONE, &theme);
     let centre = |rect: Rect| Point::new(rect.left() + 4, rect.top() + 4);
-    assert_eq!(click(&mut alert, centre(layout.headline), bounds), None);
+    assert_eq!(click(&mut alert, centre(layout.text), bounds), None);
     assert_eq!(
         click(&mut alert, centre(layout.buttons[0]), bounds),
         Some(AlertAction::Chosen { index: 0 })
@@ -410,8 +477,7 @@ fn an_alert_paints_its_mark_its_words_and_its_buttons() {
         })
     };
     assert!(differs(layout.mark), "the mark is drawn");
-    assert!(differs(layout.headline), "the headline is drawn");
-    assert!(differs(layout.detail), "the detail is drawn");
+    assert!(differs(layout.text), "the words are drawn");
     assert!(differs(layout.buttons[0]), "the button is drawn");
 }
 
@@ -449,7 +515,7 @@ fn a_row_too_wide_for_the_window_wraps_and_every_button_stays_inside() {
     let layout = alert.layout(bounds, Scale::ONE, &theme);
     let highest = rects.iter().map(Rect::top).min().expect("buttons");
     assert!(
-        layout.headline.bottom() <= highest,
+        layout.text.bottom() <= highest,
         "the text stands above every row"
     );
 }

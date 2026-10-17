@@ -28,25 +28,30 @@
 //!    the probe deliberately ignores: the content signature decides.
 //!
 //! Each recognised volume yields a [`VolumePlan`] carrying its extent,
-//! filesystem, stable identity, and the derived **base** catalog name
-//! (label-first, else `<fstype><n>` — the [`crate::name`] policy), in
-//! stable device order. Collision handling happens at attach time
-//! ([`crate::name::candidate`]); the plan itself is one deterministic
-//! pass.
+//! filesystem, stable identity, and what its catalog name is made from (its
+//! label, read where its format keeps it — for FAT32 the root directory's
+//! label entry, which a relabel rewrites — else the device's transport: the
+//! [`crate::name`] policy), in stable device order. Collision handling
+//! happens at attach time ([`crate::name::candidates`]); the plan itself is
+//! one deterministic pass.
 
+use tairix_abi::blkio::BlkTransport;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
-use tairix_fsprobe::{probe, probe_raid_member, ProbedVolume, PROBE_HEAD_LEN};
+use tairix_fsprobe::{
+    fat32_root_dir_byte, probe, probe_raid_member, ProbedVolume, FAT32_LABEL_SCAN_LEN,
+    PROBE_HEAD_LEN,
+};
 use tairix_partition::{parse_partition_table, Partition, PartitionError};
 
-use crate::name::{fallback_name, sanitise_label, VolumeName};
+use crate::name::NameBase;
 
-/// Largest logical block the head buffer covers (matches the block-size
+/// Largest logical block the read buffer covers (matches the block-size
 /// bound the blkio client enforces at connect). It also covers the whole
-/// probe head, so one buffer serves both roles.
+/// probe head and the FAT32 label scan, so one buffer serves every read.
 const HEAD_BUF_LEN: usize = 4096;
-const _: () = assert!(HEAD_BUF_LEN >= PROBE_HEAD_LEN);
+const _: () = assert!(HEAD_BUF_LEN >= PROBE_HEAD_LEN && HEAD_BUF_LEN >= FAT32_LABEL_SCAN_LEN);
 
 /// One attachable volume the probe recognised.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -59,9 +64,9 @@ pub struct VolumePlan {
     pub fstype: VolumeFsType,
     /// The volume's stable identity, as the filesystem driver publishes it.
     pub identity: [u8; 16],
-    /// The derived base catalog name (collision suffixes are applied at
-    /// attach time).
-    pub base: VolumeName,
+    /// What its catalog name is made from; the name itself is chosen at
+    /// attach time.
+    pub base: NameBase,
 }
 
 /// What the device-wide probe pass found.
@@ -95,15 +100,14 @@ pub fn plan_volumes<B: Block>(
     mut sink: impl FnMut(&VolumePlan),
 ) -> Result<PlanSummary, DriverError> {
     let geometry = dev.geometry()?;
+    let transport = dev.medium().map(|medium| medium.transport);
     let mut summary = PlanSummary::default();
-    // Per-fstype ordinals for the `<fstype><n>` fallback names, counted
-    // in device order so the derivation is stable per layout.
-    let mut ordinals = [0u32; 3];
 
     // Whole-device: a RAID array member first, then a whole-device
     // filesystem (see the module docs for the order and why).
-    if let Some((head, len)) = read_head(dev, &geometry, 0, geometry.block_count)? {
-        let head = &head[..len];
+    let whole = (0, geometry.block_count);
+    if let Some(read) = read_extent(dev, &geometry, whole, 0, PROBE_HEAD_LEN)? {
+        let head = read.bytes();
         if probe_raid_member(head).is_some() {
             // A member occupies the whole device: it belongs to a RAID array
             // awaiting assembly, so it is not attachable as a standalone
@@ -113,7 +117,8 @@ pub fn plan_volumes<B: Block>(
             return Ok(summary);
         }
         if let Some(probed) = probe(head) {
-            sink(&plan_from(&probed, 0, geometry.block_count, &mut ordinals));
+            let probed = with_directory_label(dev, &geometry, whole, head, probed)?;
+            sink(&plan_from(&probed, whole, transport));
             summary.planned = 1;
             return Ok(summary);
         }
@@ -136,15 +141,16 @@ pub fn plan_volumes<B: Block>(
             summary.unrecognised += 1;
             continue;
         };
-        match read_head(dev, &geometry, extent.0, extent.1)? {
-            Some((head, len)) => {
-                let head = &head[..len];
+        match read_extent(dev, &geometry, extent, 0, PROBE_HEAD_LEN)? {
+            Some(read) => {
+                let head = read.bytes();
                 if probe_raid_member(head).is_some() {
                     // A partition that is a RAID array member is skipped for
                     // the same reason as a whole-device member above.
                     summary.raid_members += 1;
                 } else if let Some(probed) = probe(head) {
-                    sink(&plan_from(&probed, extent.0, extent.1, &mut ordinals));
+                    let probed = with_directory_label(dev, &geometry, extent, head, probed)?;
+                    sink(&plan_from(&probed, extent, transport));
                     summary.planned += 1;
                 } else {
                     summary.unrecognised += 1;
@@ -169,57 +175,99 @@ fn bounded_extent(partition: &Partition, geometry: &BlockGeometry) -> Option<(u6
     Some((partition.start_lba, partition.block_count))
 }
 
-/// Read an extent's head into a buffer, returning it with the valid byte
-/// length, or `None` when the geometry cannot be used to read a head (a zero
-/// or oversized block size, or a zero-length extent).
+/// Bytes read from an extent: whole blocks, of which [`Fetched::bytes`] are
+/// the ones asked for.
+struct Fetched {
+    buf: [u8; HEAD_BUF_LEN],
+    start: usize,
+    end: usize,
+}
+
+impl Fetched {
+    fn bytes(&self) -> &[u8] {
+        &self.buf[self.start..self.end]
+    }
+}
+
+/// Read up to `len` bytes of `extent` (first block, block count) from byte
+/// `offset` of it, or `None` when the geometry cannot be used (a zero or
+/// oversized block size, an empty extent) or `offset` lies outside the
+/// extent.
 ///
-/// One read serves both classifiers: the caller passes the returned slice to
-/// [`probe_raid_member`] (is this a RAID array member?) and, failing that, to
-/// [`probe`] (is this a supported filesystem?), so a device head is read once.
-fn read_head<B: Block>(
+/// One read serves both classifiers at a head: the caller passes the bytes
+/// to [`probe_raid_member`] (is this a RAID array member?) and, failing that,
+/// to [`probe`] (is this a supported filesystem?), so a head is read once.
+fn read_extent<B: Block>(
     dev: &mut B,
     geometry: &BlockGeometry,
-    first_lba: u64,
-    blocks: u64,
-) -> Result<Option<([u8; HEAD_BUF_LEN], usize)>, DriverError> {
-    let block_size = geometry.block_size as usize;
+    (first_lba, blocks): (u64, u64),
+    offset: u64,
+    len: usize,
+) -> Result<Option<Fetched>, DriverError> {
+    let Ok(block_size) = usize::try_from(geometry.block_size) else {
+        return Ok(None);
+    };
     if block_size == 0 || block_size > HEAD_BUF_LEN || blocks == 0 {
         return Ok(None);
     }
-    // Whole blocks covering the probe head, bounded by the extent. The
-    // arithmetic stays in `usize`: `wanted` is small by construction, and
-    // an extent too large for `usize` cannot bound it further.
-    let wanted = PROBE_HEAD_LEN.div_ceil(block_size);
-    let read_blocks = usize::try_from(blocks).map_or(wanted, |extent| wanted.min(extent));
+    let block_bytes = u64::from(geometry.block_size);
+    let skipped = offset / block_bytes;
+    if skipped >= blocks {
+        return Ok(None);
+    }
+    // Less than one block, so it fits `usize`.
+    let skip = usize::try_from(offset % block_bytes).unwrap_or(0);
+    let wanted = (skip + len)
+        .div_ceil(block_size)
+        .min(HEAD_BUF_LEN / block_size);
+    let read_blocks = usize::try_from(blocks - skipped).map_or(wanted, |left| wanted.min(left));
     let read_bytes = read_blocks * block_size;
-    let mut head = [0u8; HEAD_BUF_LEN];
-    let take = read_bytes.min(HEAD_BUF_LEN);
-    dev.read_blocks(first_lba, &mut head[..take])?;
-    Ok(Some((head, take)))
+    let mut buf = [0u8; HEAD_BUF_LEN];
+    dev.read_blocks(first_lba + skipped, &mut buf[..read_bytes])?;
+    Ok(Some(Fetched {
+        buf,
+        start: skip,
+        end: (skip + len).min(read_bytes),
+    }))
 }
 
-/// Build the plan record for one recognised volume, deriving its base
-/// name and advancing its type's fallback ordinal.
+/// `probed` labelled from its root directory when it is a FAT32 volume,
+/// whose label entry there outranks the boot sector's copy. A root the
+/// parameter block places outside the extent leaves the boot label standing.
+fn with_directory_label<B: Block>(
+    dev: &mut B,
+    geometry: &BlockGeometry,
+    extent: (u64, u64),
+    head: &[u8],
+    probed: ProbedVolume,
+) -> Result<ProbedVolume, DriverError> {
+    if probed.fstype != VolumeFsType::Fat32 {
+        return Ok(probed);
+    }
+    let Some(root) = fat32_root_dir_byte(head) else {
+        return Ok(probed);
+    };
+    Ok(
+        match read_extent(dev, geometry, extent, root, FAT32_LABEL_SCAN_LEN)? {
+            Some(entries) => probed.with_fat32_directory_label(entries.bytes()),
+            None => probed,
+        },
+    )
+}
+
+/// Build the plan record for one recognised volume on a device reached over
+/// `transport`.
 fn plan_from(
     probed: &ProbedVolume,
-    first_lba: u64,
-    blocks: u64,
-    ordinals: &mut [u32; 3],
+    (first_lba, blocks): (u64, u64),
+    transport: Option<BlkTransport>,
 ) -> VolumePlan {
-    let slot = match probed.fstype {
-        VolumeFsType::ARXFS => 0,
-        VolumeFsType::Ext4 => 1,
-        VolumeFsType::Fat32 => 2,
-    };
-    ordinals[slot] += 1;
-    let base = sanitise_label(probed.label())
-        .unwrap_or_else(|| fallback_name(probed.fstype, ordinals[slot]));
     VolumePlan {
         first_lba,
         blocks,
         fstype: probed.fstype,
         identity: probed.identity,
-        base,
+        base: NameBase::of(probed.label(), transport),
     }
 }
 
@@ -327,7 +375,36 @@ mod tests {
         assert_eq!(plans[0].first_lba, 0);
         assert_eq!(plans[0].blocks, 64);
         assert_eq!(plans[0].fstype, VolumeFsType::Fat32);
-        assert_eq!(plans[0].base.as_bytes(), b"holidaypix");
+        assert_eq!(base_text(&plans[0]), b"holiday-pix");
+    }
+
+    /// The text a plan's name is made from: its label, or the transport its
+    /// unlabelled volume is named after.
+    fn base_text(plan: &VolumePlan) -> &[u8] {
+        match &plan.base {
+            NameBase::Label(label) => label.as_bytes(),
+            NameBase::Unlabelled(_) => b"<unlabelled>",
+        }
+    }
+
+    #[test]
+    fn a_fat32_label_is_read_from_its_root_directory() {
+        let mut image = vec![0u8; 64 * BS];
+        write_fat32(&mut image, 0, *b"SRLN", b"NO NAME    ");
+        // Two reserved sectors and two one-sector FATs: the root directory,
+        // cluster 2 of one sector, is sector 4.
+        image[13] = 1;
+        image[14..16].copy_from_slice(&2u16.to_le_bytes());
+        image[36..40].copy_from_slice(&1u32.to_le_bytes());
+        let root = 4 * BS;
+        image[root..root + 11].copy_from_slice(b"CAMERA CARD");
+        image[root + 11] = tairix_fsprobe::FAT_ATTR_VOLUME_ID;
+        let mut dev = MemBlock {
+            image,
+            faulty: false,
+        };
+        let (plans, _) = collect(&mut dev);
+        assert_eq!(base_text(&plans[0]), b"camera-card");
     }
 
     #[test]
@@ -373,13 +450,13 @@ mod tests {
         assert_eq!(plans[0].first_lba, 8);
         assert_eq!(plans[0].fstype, VolumeFsType::Fat32);
         assert_eq!(
-            plans[0].base.as_bytes(),
-            b"fat1",
-            "a blank label falls back to <fstype><n>"
+            plans[0].base,
+            NameBase::Unlabelled(None),
+            "a blank label names the volume by its device, never its format"
         );
         assert_eq!(plans[1].first_lba, 80);
         assert_eq!(plans[1].fstype, VolumeFsType::Ext4);
-        assert_eq!(plans[1].base.as_bytes(), b"backup");
+        assert_eq!(base_text(&plans[1]), b"backup");
         assert_eq!(plans[1].identity, [7u8; 16]);
     }
 
@@ -429,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn two_unlabelled_volumes_of_one_type_get_distinct_ordinals() {
+    fn two_unlabelled_volumes_of_one_type_are_named_apart_by_identity() {
         let mut image = vec![0u8; 256 * BS];
         let parts = [
             Partition {
@@ -454,8 +531,9 @@ mod tests {
             faulty: false,
         };
         let (plans, _) = collect(&mut dev);
-        assert_eq!(plans[0].base.as_bytes(), b"fat1");
-        assert_eq!(plans[1].base.as_bytes(), b"fat2");
+        let first = crate::name::candidates(plans[0].base, plans[0].identity).next();
+        let second = crate::name::candidates(plans[1].base, plans[1].identity).next();
+        assert_ne!(first, second);
     }
 
     /// Write a valid RAID array-member superblock (a RAID1 mirror, member 0 of

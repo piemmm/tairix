@@ -542,6 +542,13 @@ pub enum DriverError {
     /// and one that was busy or briefly disturbed answers the request when it
     /// is issued again. Maps to [`Errno::TimedOut`].
     TimedOut = 26,
+    /// The device is coming ready — a disk spinning up — and cannot serve the
+    /// operation yet.
+    ///
+    /// Not a fault: a serving driver holds the request until the unit is
+    /// ready rather than answering it ([`crate::blkio::Answer::Hold`]). Maps
+    /// to the reissuable [`Errno::WouldBlock`] wherever it reaches a caller.
+    NotReady = 27,
 }
 
 impl DriverError {
@@ -589,6 +596,7 @@ impl DriverError {
             24 => Ok(Self::Stale),
             25 => Ok(Self::ReadOnly),
             26 => Ok(Self::TimedOut),
+            27 => Ok(Self::NotReady),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -628,7 +636,7 @@ impl DriverError {
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
             Self::DeviceFault => Errno::DeviceFault,
-            Self::Busy => Errno::WouldBlock,
+            Self::Busy | Self::NotReady => Errno::WouldBlock,
             Self::Unsupported | Self::NotImplemented => Errno::NotImplemented,
         }
     }
@@ -1490,6 +1498,7 @@ mod tests {
         assert_eq!(DriverError::Stale.as_errno(), Errno::Stale);
         assert_eq!(DriverError::ReadOnly.as_errno(), Errno::ReadOnly);
         assert_eq!(DriverError::TimedOut.as_errno(), Errno::TimedOut);
+        assert_eq!(DriverError::NotReady.as_errno(), Errno::WouldBlock);
     }
 
     #[test]
@@ -1521,12 +1530,17 @@ mod tests {
             DriverError::Stale,
             DriverError::ReadOnly,
             DriverError::TimedOut,
+            DriverError::NotReady,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
+        let first_unknown = i32::try_from(all.len() + 1).expect("few variants");
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(27), Err(DriverError::OutOfRange));
+        assert_eq!(
+            DriverError::from_i32(first_unknown),
+            Err(DriverError::OutOfRange)
+        );
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

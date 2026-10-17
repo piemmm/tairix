@@ -453,12 +453,13 @@ can never diverge in navigation semantics, listing policy, or look.
     volume row is ever fabricated.
   - **The medium is real data.** Each volume carries the storage medium its
     backing device actually declares (the mount record's `BlkMedium`), and
-    `tairix_icon::disk_icon` maps it to the shipped artwork — a hard disk, an
-    SSD, an NVMe drive, a USB flash drive, a USB disk and an SD card each draw
-    their own drive icon, while a paravirtual or unknown medium draws the
-    generic drive. A USB stick can
-    never masquerade as an internal disk, and nothing here classifies a device
-    by its name or by guesswork.
+    `tairix_icon::disk_icon` draws only what that reported: a disk whose
+    medium rotates is a hard disk on an ATA bus or behind a USB bridge and a
+    non-rotating ATA one an SSD, an NVMe namespace and an SD card have their
+    own pictures, a USB unit is a flash stick once it reported a non-rotating
+    medium and the external drive, which shows no medium, while it reported
+    neither, and an undeclared or paravirtual device is the generic drive.
+    Nothing here classifies a device by its name or by guesswork.
   - **Below the toolbar, on the listing's row grid.** The command toolbar is
     *window* chrome: its band spans the full window width at the top, so it
     reaches the window's leading edge and aligns with the rest of the
@@ -658,14 +659,16 @@ can never diverge in navigation semantics, listing policy, or look.
   the driving walk reports (`DeleteWalk::removed` / `CopyWalk::copied` / the
   move-to-Trash item count), and a
   *latched* cancel; its `title`/`status_line` never fabricate a percentage,
-  since the total is unknown until the walk's reads reveal it. The drawn
-  surface is the renderer's `draw_progress_dialog` (a `lib/controls` `Panel`,
-  an indeterminate `Progress` "working" trace captioned with the count, and a
-  Cancel `Button`), with `progress_cancel_at` the mirror hit-test resolving a
-  click to the drawn Cancel (fail closed off it). The model holds no authority
-  and does no I/O, so the read-only picker (which never deletes or copies)
-  never builds one. The delete, copy/paste, and move-to-Trash drives are all
-  wired end to end in the files app, each reusing this one panel.
+  since the total is unknown until the walk's reads reveal it, and an
+  operation waiting for those before it says so. The drawn surface is the
+  renderer's `draw_progress_window`, which fills the operation's own progress
+  window at `progress_window_extent` with an indeterminate `Progress`
+  "working" trace captioned with the count and a Cancel `Button`, with
+  `progress_cancel_at` the mirror hit-test resolving a click to the drawn
+  Cancel (fail closed off it). The model holds no authority and does no I/O,
+  so the read-only picker (which never deletes or copies) never builds one.
+  The delete, copy/paste, and move-to-Trash drives are all wired end to end in
+  the files app, each in a progress window of its own.
 - **Renderer** (`render`): every entry point takes the desktop's
   `tairix_geometry::Scale` and the active `Theme`, and nothing takes a
   typeface: each resolves the body face the theme's own ladder names at that

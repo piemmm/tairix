@@ -2266,7 +2266,9 @@ dependencies = [
  "tairix-fsprobe",
  "tairix-log",
  "tairix-partition",
+ "tairix-path",
  "tairix-raidmeta",
+ "tairix-resref",
  "tairix-rt",
  "tairix-util",
 ]

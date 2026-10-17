@@ -31,8 +31,8 @@ use tairix_abi::usb_urb::{
 use tairix_abi::{DriverError, Errno};
 use tairix_inline::BitSet256;
 
-/// The deadline every bulk transfer here carries, long past anything a test
-/// waits.
+/// The deadline every bulk and control transfer here carries, long past
+/// anything a test waits.
 const TIMEOUT: NonZeroU32 = NonZeroU32::MIN.saturating_add(999);
 
 /// A clock that never moves, so a deadline from it has all of its budget left.
@@ -138,9 +138,9 @@ impl UrbEngine for MockEngine {
         Ok(())
     }
 
-    fn clear_halt(&mut self, endpoint: u8) -> Result<(), DriverError> {
+    fn clear_halt(&mut self, endpoint: u8) -> Result<Option<()>, DriverError> {
         self.cleared.push(endpoint);
-        Ok(())
+        Ok(Some(()))
     }
 
     fn discard_reports(&mut self, endpoint: u8) -> Result<(), DriverError> {
@@ -148,21 +148,25 @@ impl UrbEngine for MockEngine {
         Ok(())
     }
 
-    fn control_in(&mut self, _setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
+    fn control_in(
+        &mut self,
+        _setup: [u8; 8],
+        data: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
         self.control_calls += 1;
         let n = self.control_response.len().min(data.len());
         data[..n].copy_from_slice(&self.control_response[..n]);
-        Ok(n)
+        Ok(Some(n))
     }
 
-    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), DriverError> {
+    fn control_no_data(&mut self, setup: [u8; 8]) -> Result<Option<()>, DriverError> {
         self.no_data_setups.push(setup);
-        Ok(())
+        Ok(Some(()))
     }
 
-    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<(), DriverError> {
+    fn control_out(&mut self, setup: [u8; 8], data: &[u8]) -> Result<Option<()>, DriverError> {
         self.control_out_transfers.push((setup, data.to_vec()));
-        Ok(())
+        Ok(Some(()))
     }
 
     fn scope(&self) -> Option<UrbScope> {
@@ -231,13 +235,13 @@ impl UrbEngine for MockEngine {
         Ok(Some(n))
     }
 
-    fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<(), DriverError> {
+    fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<Option<()>, DriverError> {
         self.operations.push(UsbRequest::SetInterface {
             interface,
             alternate,
         });
         if self.scope.governs(interface) {
-            Ok(())
+            Ok(Some(()))
         } else {
             Err(DriverError::NotFound)
         }
@@ -256,7 +260,7 @@ impl UrbEngine for MockEngine {
         Ok(())
     }
 
-    fn iso_stop(&mut self, endpoint: u8) -> Result<(), DriverError> {
+    fn iso_stop(&mut self, endpoint: u8) -> Result<Option<()>, DriverError> {
         self.operations.push(UsbRequest::IsoStop { endpoint });
         Err(DriverError::NotFound)
     }
@@ -296,21 +300,24 @@ impl UrbCall for DirectCall {
             Ok(UsbRequest::SetInterface {
                 interface,
                 alternate,
-            }) => status(engine.set_interface(interface, alternate), reply),
+            }) => status(
+                engine.set_interface(interface, alternate).map(|_| ()),
+                reply,
+            ),
             Ok(UsbRequest::ClaimInterface { interface }) => {
                 status(engine.claim_interface(interface), reply)
             }
             Ok(UsbRequest::IsoQueue { endpoint, slot }) => {
                 status(engine.iso_queue(endpoint, slot, &buffer), reply)
             }
-            Ok(UsbRequest::IsoStop { endpoint }) => status(engine.iso_stop(endpoint), reply),
+            Ok(UsbRequest::IsoStop { endpoint }) => {
+                status(engine.iso_stop(endpoint).map(|_| ()), reply)
+            }
             Ok(UsbRequest::IsoStart(_)) => status(Err(DriverError::Unsupported), reply),
             Ok(UsbRequest::ClearHalt { endpoint }) => {
-                let frame = encode_status_reply(on_own_endpoint(
-                    endpoint,
-                    &mut *engine,
-                    UrbEngine::clear_halt,
-                ));
+                let frame = encode_status_reply(
+                    on_own_endpoint(endpoint, &mut *engine, UrbEngine::clear_halt).map(|_| ()),
+                );
                 reply[..frame.len()].copy_from_slice(&frame);
                 Ok(frame.len())
             }
@@ -356,7 +363,9 @@ fn control_in_round_trips_through_the_client() {
 
     // A GET_DESCRIPTOR(device) SETUP packet for its first eight bytes.
     let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x08, 0x00];
-    let transferred = client.control_in(setup, 8).expect("control-IN completes");
+    let transferred = client
+        .control_in(setup, 8, TIMEOUT)
+        .expect("control-IN completes");
     assert_eq!(transferred, 8);
     // The device's bytes landed in the shared buffer the class driver reads.
     assert_eq!(&buffer.borrow()[..8], &descriptor[..]);
@@ -660,7 +669,7 @@ fn control_no_data_round_trips_through_the_client() {
     // A BOT Bulk-Only Mass Storage Reset SETUP packet.
     let setup = [0x21, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     client
-        .control_no_data(setup)
+        .control_no_data(setup, TIMEOUT)
         .expect("no-data control-OUT completes");
     // The engine received exactly the SETUP packet, once.
     assert_eq!(engine.borrow().no_data_setups, vec![setup]);
@@ -832,14 +841,19 @@ fn a_link_copies_out_what_a_control_read_delivered() {
     let (mut link, sent) = scripted_link(&mut shm, vec![Ok(6)]);
     let mut data = [0u8; 8];
     assert_eq!(
-        link.control_in([0x80, 0x06, 0, 1, 0, 0, 8, 0], &mut data),
+        link.control_in([0x80, 0x06, 0, 1, 0, 0, 8, 0], &mut data, TIMEOUT),
         Ok(6)
     );
     assert_eq!(data, [1, 2, 3, 4, 5, 6, 0, 0]);
     assert_eq!(sent.borrow()[0].length, 8);
+    assert_eq!(
+        sent.borrow()[0].timeout_ms,
+        Some(TIMEOUT),
+        "the budget rides the URB"
+    );
     let mut long = [0u8; 33];
     assert_eq!(
-        link.control_in([0x80, 0x06, 0, 1, 0, 0, 33, 0], &mut long),
+        link.control_in([0x80, 0x06, 0, 1, 0, 0, 33, 0], &mut long, TIMEOUT),
         Err(Errno::LengthOutOfRange)
     );
 }
@@ -849,7 +863,7 @@ fn a_link_stages_a_control_writes_data_before_it_sends_it() {
     let mut shm = vec![0u8; 16];
     let (mut link, sent) = scripted_link(&mut shm, vec![Ok(3)]);
     assert_eq!(
-        link.control_out([0x21, 0x09, 0, 3, 0, 0, 3, 0], &[7, 8, 9]),
+        link.control_out([0x21, 0x09, 0, 3, 0, 0, 3, 0], &[7, 8, 9], TIMEOUT),
         Ok(())
     );
     assert_eq!(sent.borrow()[0].length, 3);

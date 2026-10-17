@@ -1,18 +1,18 @@
 //! The desktop's alert windows (`plans/APPWIN.md` AW8): every error,
-//! warning, notice and question, whoever raised it, in a 4:3 window of its own
-//! the session draws.
+//! warning, notice and question, whoever raised it, in a window of its own the
+//! session draws, sized to what it says.
 //!
 //! [`AlertWindow`] is one alert on screen: its compositor window, the shared
 //! [`Alert`] control drawn into it, and the moment its buttons arm. [`Alerts`]
 //! holds the alerts applications raised, by the id the window server minted,
-//! and which window each one holds modal.
+//! each holding the window it names through the shared [`Holds`].
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-use tairix_abi::window_ipc::{AlertSeverity, AlertSpec, PointerAction, WindowEvent};
+use tairix_abi::window_ipc::{AlertSeverity, AlertSpec};
 use tairix_controls::{damage, Alert, AlertAction};
 use tairix_theme::Theme;
 use tairix_wm::{
@@ -20,10 +20,12 @@ use tairix_wm::{
     Surface, WindowId,
 };
 
+use crate::hold::Holds;
 use crate::shell::DesktopShell;
 
-/// How long an alert's buttons ignore input after it first appears: a click
-/// or a key meant for what was there a moment ago must not answer it.
+/// How long an alert's buttons — or a dialog window's content — ignore input
+/// after it first appears: a click or a key meant for what was there a moment
+/// ago must not answer it.
 pub const ALERT_ARM_NS: u64 = 350 * tairix_abi::time::NANOS_PER_MILLI;
 
 /// The most notices of its own the desktop keeps up at once: enough that a
@@ -63,13 +65,35 @@ pub fn alert_title(severity: AlertSeverity, speaker: Speaker<'_>) -> String {
     format!("{kind} from {who}")
 }
 
-/// Who an application's alert speaks for: its signed title `name`, unless that
-/// is blank or the desktop's own word — then `bundle`, the path the kernel
-/// attests it was launched from, which no other program shares.
+/// A dialog window's title: who it speaks for, then what its application
+/// titled it — the attested name first, so a title too long for its band
+/// elides itself rather than the name.
+#[must_use]
+pub fn dialog_title(speaker: Speaker<'_>, title: &str) -> String {
+    let who = match speaker {
+        Speaker::App(name) => name,
+        Speaker::Desktop => DESKTOP,
+    };
+    let title = title.trim();
+    if title.is_empty() {
+        String::from(who)
+    } else {
+        format!("{who} \u{2014} {title}")
+    }
+}
+
+/// Who an application's alert or dialog speaks for: its signed title `name`,
+/// unless that is blank, the desktop's own word, or holds a character that
+/// draws nothing yet can hide or reorder the text beside it — then `bundle`,
+/// the path the kernel attests it was launched from, which no other program
+/// shares.
 #[must_use]
 pub fn app_speaker<'a>(name: &'a str, bundle: &'a str) -> Speaker<'a> {
     let name = name.trim();
-    if name.is_empty() || name.eq_ignore_ascii_case(DESKTOP) {
+    if name.is_empty()
+        || name.eq_ignore_ascii_case(DESKTOP)
+        || name.chars().any(tairix_util::utf8::is_hidden)
+    {
         Speaker::App(bundle)
     } else {
         Speaker::App(name)
@@ -355,7 +379,7 @@ impl AlertWindow {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) {
-        let _ = shell.close_alert_window(compositor, self.wm, next);
+        let _ = shell.close_transient_window(compositor, self.wm, next);
     }
 
     fn bounds(&self) -> Rect {
@@ -408,8 +432,9 @@ fn cascade_step(scale: Scale, cascade: u32) -> u32 {
     scale.scale_length(CASCADE_STEP).saturating_mul(cascade)
 }
 
-/// The client extent `alert` opens at on `screen` at `scale` in `theme`: 4:3
-/// with the dialog frame around it, and no larger than the screen allows.
+/// The client extent `alert` opens at on `screen` at `scale` in `theme`: what
+/// its content needs inside the dialog frame, and no larger than the screen
+/// allows.
 pub(crate) fn extent(alert: &Alert, screen: Rect, scale: Scale, theme: &Theme) -> (u32, u32) {
     let frame = tairix_controls::WindowFrame::dialog();
     let probe = frame.outer_for_client(Rect::new(0, 0, 0, 0), scale, theme);
@@ -419,29 +444,6 @@ pub(crate) fn extent(alert: &Alert, screen: Rect, scale: Scale, theme: &Theme) -
         scale,
         theme,
     )
-}
-
-/// Whether `event` still reaches a window an alert holds: nothing that
-/// starts anything does — a press, a motion, a key, a scroll, a pinch — but a
-/// release does, so a press the window saw before the alert held it is not
-/// left down when the alert is answered.
-#[must_use]
-pub const fn reaches_held_window(event: &WindowEvent) -> bool {
-    match event {
-        WindowEvent::Pointer {
-            action: PointerAction::Released(_),
-            ..
-        }
-        | WindowEvent::Key {
-            key: KeyInput::Released { .. },
-            ..
-        } => true,
-        WindowEvent::Pointer { .. }
-        | WindowEvent::Key { .. }
-        | WindowEvent::Scrolled { .. }
-        | WindowEvent::Pinch { .. } => false,
-        _ => true,
-    }
 }
 
 /// One alert on screen, and who raised it.
@@ -485,14 +487,15 @@ pub struct Answer {
 }
 
 impl Alerts {
-    /// Put up alert `id`, holding window-channel window `holds` — shown as
-    /// `owner` — titled `title`. Returns whether it is up.
+    /// Put up alert `id` saying `spec`, titled `title`, holding
+    /// window-channel window `holds` — shown as `owner` — its hold taken in
+    /// `held`. Returns whether it is up.
     pub fn open(
         &mut self,
         (id, holds, owner): (u64, Option<u64>, Option<WindowId>),
-        spec: &AlertSpec,
-        title: &str,
+        (spec, title): (&AlertSpec, &str),
         (focus, behind): (bool, bool),
+        held: &mut Holds,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
@@ -506,6 +509,9 @@ impl Alerts {
             compositor,
         ) {
             Some(window) => {
+                if let Some(owner) = owner {
+                    held.take(owner, window.wm());
+                }
                 self.up.push(AppAlert {
                     origin: Origin::Client { id, holds },
                     window,
@@ -525,6 +531,7 @@ impl Alerts {
         &mut self,
         spec: &AlertSpec,
         title: &str,
+        holds: &mut Holds,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
@@ -539,7 +546,7 @@ impl Alerts {
                 .iter()
                 .position(|alert| alert.origin == Origin::Desktop)
             {
-                self.take_down(oldest, shell, compositor);
+                self.take_down(oldest, holds, shell, compositor);
             }
         }
         let cascade = u32::try_from(self.up.len()).unwrap_or(u32::MAX);
@@ -557,12 +564,18 @@ impl Alerts {
 
     /// Take alert `id` down without an answer: the window server has
     /// answered it already, or its application is gone.
-    pub fn withdraw(&mut self, id: u64, shell: &mut DesktopShell, compositor: &mut Compositor) {
+    pub fn withdraw(
+        &mut self,
+        id: u64,
+        holds: &mut Holds,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
         let index = self.up.iter().position(
             |alert| matches!(alert.origin, Origin::Client { id: minted, .. } if minted == id),
         );
         if let Some(index) = index {
-            self.take_down(index, shell, compositor);
+            self.take_down(index, holds, shell, compositor);
         }
     }
 
@@ -570,19 +583,6 @@ impl Alerts {
     #[must_use]
     pub fn owns(&self, wm: WindowId) -> bool {
         self.up.iter().any(|alert| alert.window.wm() == wm)
-    }
-
-    /// The alert holding window-channel window `window`, as its compositor
-    /// window: the newest, which is the one in front.
-    #[must_use]
-    pub fn holding(&self, window: u64) -> Option<WindowId> {
-        self.up
-            .iter()
-            .rev()
-            .find(|alert| {
-                matches!(alert.origin, Origin::Client { holds: Some(held), .. } if held == window)
-            })
-            .map(|alert| alert.window.wm())
     }
 
     /// Start the arm delay of every alert put up since the last wake.
@@ -599,6 +599,7 @@ impl Alerts {
         wm: WindowId,
         local: Point,
         now_ns: u64,
+        holds: &mut Holds,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
@@ -606,7 +607,7 @@ impl Alerts {
         let chosen = self.up[index]
             .window
             .click(local, now_ns, shell, compositor)?;
-        self.answered(index, chosen, shell, compositor)
+        self.answered(index, chosen, holds, shell, compositor)
     }
 
     /// A key on focused alert window `wm`, and the answer it gave, the alert
@@ -616,12 +617,13 @@ impl Alerts {
         wm: WindowId,
         key: &KeyInput,
         now_ns: u64,
+        holds: &mut Holds,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
         let index = self.position(wm)?;
         let chosen = self.up[index].window.key(key, now_ns, shell, compositor)?;
-        self.answered(index, chosen, shell, compositor)
+        self.answered(index, chosen, holds, shell, compositor)
     }
 
     /// A wheel turn over alert window `wm`.
@@ -646,24 +648,21 @@ impl Alerts {
         }
     }
 
-    /// Take alert `index` down, the keyboard going to the alert behind it
-    /// holding the same window, else that window, else — for an alert that
-    /// held none — the window it took the keyboard from, or the front alert
-    /// holding that one.
-    fn take_down(&mut self, index: usize, shell: &mut DesktopShell, compositor: &mut Compositor) {
+    /// Take alert `index` down, the keyboard going to the front of the
+    /// window it held — the holder behind it, else that window — or, for an
+    /// alert that held none, to the front of the window it took the keyboard
+    /// from.
+    fn take_down(
+        &mut self,
+        index: usize,
+        holds: &mut Holds,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
         let closing = self.up.remove(index).window;
-        let front_holding = |window: WindowId| {
-            self.up
-                .iter()
-                .rev()
-                .find(|alert| alert.window.owner == Some(window))
-                .map(|alert| alert.window.wm)
-        };
         let next = match closing.owner {
-            Some(owner) => front_holding(owner).or(Some(owner)),
-            None => closing
-                .returns_to
-                .map(|window| front_holding(window).unwrap_or(window)),
+            Some(_) => holds.release(closing.wm),
+            None => closing.returns_to.map(|window| holds.front(window)),
         };
         closing.close(next, shell, compositor);
     }
@@ -678,12 +677,13 @@ impl Alerts {
         &mut self,
         index: usize,
         chosen: usize,
+        holds: &mut Holds,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
         let chosen = u8::try_from(chosen).ok()?;
         let origin = self.up[index].origin;
-        self.take_down(index, shell, compositor);
+        self.take_down(index, holds, shell, compositor);
         let Origin::Client { id, .. } = origin else {
             return None;
         };

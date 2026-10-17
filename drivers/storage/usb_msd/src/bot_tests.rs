@@ -32,6 +32,11 @@ fn lun_count_reads_get_max_lun_and_stall_means_one() {
     dev.max_lun = Some(3);
     let mut scsi = scsi(dev);
     assert_eq!(scsi.lun_count(), Ok(4));
+    assert_eq!(
+        device(&scsi).budgets,
+        [crate::scsi::unknown_unit_budget().exchange_ns(CommandKind::Query, 1)],
+        "the request runs in an exchange of its own, which bounds its control transfer"
+    );
 
     let mut dev = ScriptedDevice::new();
     dev.max_lun = None; // STALL: no multi-LUN support.
@@ -134,6 +139,26 @@ fn a_mismatched_csw_tag_runs_reset_recovery_and_fails() {
 }
 
 #[test]
+fn a_reset_recovery_runs_in_an_exchange_of_its_own() {
+    // A command that broke after spending its exchange still owes the reset,
+    // which a spent exchange would refuse before the request is sent.
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Data(vec![0u8; 512]));
+    dev.queue_csw(FIRST_TAG + 7, 0, 0);
+    let mut scsi = scsi(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    let budgets = &device(&scsi).budgets;
+    assert_eq!(
+        budgets.len(),
+        3,
+        "the command's exchange, the reset's, then the readiness probe's"
+    );
+    assert_eq!(budgets[0], budgets[1], "as long as the command it serves");
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+}
+
+#[test]
 fn a_corrupt_csw_signature_or_residue_fails_closed() {
     // Bad signature.
     let mut dev = ScriptedDevice::new();
@@ -180,7 +205,17 @@ fn a_data_phase_that_fails_on_the_wire_resets_the_transport_and_is_reissuable() 
             "{failure:?} left the device mid-command"
         );
         assert_eq!(device(&scsi).trail, ["reset", "clear"], "{failure:?}");
-        assert_eq!(device(&scsi).exchanges, 1);
+        assert_eq!(
+            device(&scsi).exchanges,
+            3,
+            "the command's exchange, its reset's, then the readiness probe's"
+        );
+        // Never a reissue: the one command after the reset asks whether the
+        // unit is ready.
+        let frames = &device(&scsi).out_frames;
+        assert_eq!(frames.len(), 2, "{failure:?}");
+        assert_eq!(parse_cbw(&frames[0]).4[0], 0x28, "READ(10)");
+        assert_eq!(parse_cbw(&frames[1]).4, [0u8; 6], "TEST UNIT READY");
     }
 }
 
@@ -341,4 +376,43 @@ fn multi_lun_commands_carry_the_lun_byte() {
     // A LUN outside the protocol bound never reaches the wire.
     assert_eq!(scsi.read(16, 0, 512, &mut buf), Err(Errno::OutOfRange));
     assert_eq!(device(&scsi).out_frames.len(), 1);
+}
+
+/// The 2026-10-17 witness: an enclosure answers its first read only once its
+/// disk has spun up, about 8 s in. A unit not known not to rotate is given a
+/// spin-up on every access, so the read is served with no reset; a unit that
+/// reported flash is not, and an answer that slow is a broken exchange.
+#[test]
+fn a_read_answering_after_a_spin_up_is_served_without_a_reset() {
+    use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
+
+    let spin_up = 8_000_000_000;
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps
+        .push_back(InStep::After(spin_up, vec![0x42; 512]));
+    dev.queue_csw(FIRST_TAG, 0, 0);
+    let mut device_stack = scsi(dev);
+    let mut buf = [0u8; 512];
+    device_stack.read(0, 0, 512, &mut buf).expect("ridden out");
+    assert!(buf.iter().all(|&byte| byte == 0x42));
+    assert!(
+        device(&device_stack).trail.is_empty(),
+        "no reset recovery ran"
+    );
+
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps
+        .push_back(InStep::After(3 * spin_up, vec![0x42; 512]));
+    let mut device_stack = scsi(dev);
+    device_stack.set_medium(
+        0,
+        BlkMedium::of_transport(BlkTransport::Usb).with_rotation(BlkRotation::NonRotating(
+            BlkRotationEvidence::RotationRateVpd,
+        )),
+    );
+    assert_eq!(
+        device_stack.read(0, 0, 512, &mut buf),
+        Err(Errno::WouldBlock)
+    );
+    assert_eq!(device(&device_stack).trail, ["reset", "clear"]);
 }

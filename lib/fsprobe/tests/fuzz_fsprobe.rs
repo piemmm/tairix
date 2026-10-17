@@ -15,8 +15,8 @@
 //! sweep; `cargo xtask fuzz` extends the loop to a wall-clock budget.
 
 use tairix_fsprobe::{
-    fingerprint, probe, probe_raid_member, ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC,
-    PROBE_HEAD_LEN,
+    fat32_directory_label, fat32_root_dir_byte, fingerprint, probe, probe_raid_member,
+    ARXFS_HEADER_MAGIC, EXT4_SUPERBLOCK_MAGIC, PROBE_HEAD_LEN,
 };
 use tairix_fuzzseed::Prng;
 
@@ -95,7 +95,11 @@ fn exercise_never_panics(bytes: &[u8]) {
         // The fingerprint renderer must accept any identity the probe
         // produced.
         let _ = fingerprint(&probed.identity);
+        // The same bytes read as a root directory's head.
+        let _ = probed.with_fat32_directory_label(bytes).label();
     }
+    let _ = fat32_root_dir_byte(bytes);
+    let _ = fat32_directory_label(bytes);
     // The RAID-member recogniser parses the same untrusted head; it must
     // also refuse a malformed record cleanly rather than panic.
     let _ = probe_raid_member(bytes);

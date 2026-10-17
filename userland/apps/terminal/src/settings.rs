@@ -1,5 +1,5 @@
-//! The in-window settings sheet: a modal panel the terminal draws over its
-//! own screen, built from the shared Reactive Alloy controls
+//! The settings sheet: a panel the terminal shows in a popup window of its
+//! own above its screen, built from the shared Reactive Alloy controls
 //! (`plans/GUI-CONTROLS-DESIGN.md`).
 //!
 //! The sheet edits a copy of the [`Profile`] it opened on and never touches
@@ -137,7 +137,7 @@ pub enum SheetOutcome {
     Dismissed,
 }
 
-/// The in-window settings sheet (module documentation above).
+/// The settings sheet (module documentation above).
 pub struct Settings {
     profile: Profile,
     panel: Panel,

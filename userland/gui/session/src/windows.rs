@@ -17,15 +17,16 @@
 //! its frame disagree.
 
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::{DesktopInfo, DesktopText, Motion};
 use tairix_abi::driver::display::{DamageList, DisplayMode};
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation,
-    HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose, PointerAction,
-    TerrainPlate, ToolOver, WindowEvent, WindowRegion,
+    AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DragItems,
+    DropOperation, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose,
+    PointerAction, TerrainPlate, ToolOver, WindowEvent, WindowRegion,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
@@ -36,8 +37,8 @@ use tairix_log::{EventId, Field, FieldValue};
 use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
 use tairix_window::{
-    Activation, AlertOpen, ClientRegion, CursorSetName, HandOverDesk, PreviewSize, ToolSpec,
-    WallpaperName, WindowHost,
+    Activation, AlertOpen, ClientRegion, CursorSetName, DialogSpec, HandOverDesk, PreviewSize,
+    ToolSpec, WallpaperName, WindowHost,
 };
 
 use crate::launch::{
@@ -47,14 +48,15 @@ use tairix_taskbar::menu::about_sheet;
 use tairix_window::WindowSizing;
 use tairix_wm::{
     Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Scale, Surface, Window,
-    WindowControlKind, WindowId,
+    WindowControlKind, WindowFrame, WindowId,
 };
 
-use crate::alert::{alert_title, app_speaker, Alerts, Speaker};
+use crate::alert::{alert_title, app_speaker, dialog_title, Alerts, Speaker, ALERT_ARM_NS};
 use crate::apps::{AppBarBridge, BundleIndex};
 use crate::clipboard::ClipboardService;
 use crate::confirm::ConfirmPrompt;
 use crate::elevate::ElevatePrompt;
+use crate::hold::{is_press, reaches_held_window, Holds};
 use crate::layer::{
     apply_participation, clamped_origin, fits_layer_bound, stack_at_depth, terrain_into,
     LayerDecision, LayerState, LayerSurface,
@@ -316,6 +318,21 @@ struct WindowRecord {
     /// its parent's). What a menu chain's information row resolves its
     /// attested identity from.
     owner: ProcId,
+    /// When a press first reaches the window.
+    armed: Armed,
+}
+
+/// When a served window first answers a press: a dialog only a moment after
+/// its content is first shown, so a press meant for what was there before it
+/// cannot answer it.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Armed {
+    /// From the start: any window but a dialog.
+    Always,
+    /// A dialog whose content has not been shown yet.
+    Unseen,
+    /// A dialog shown, from this instant.
+    From(u64),
 }
 
 /// What a served window is to the window it may hang from.
@@ -329,6 +346,9 @@ enum Standing {
     /// A tool window the compositor window holds, framed and moved by the
     /// user, its moves reported to its owner.
     Tool(WindowId),
+    /// A dialog window the compositor window owns, placed over it by the
+    /// session and holding it when owner-modal.
+    Dialog(WindowId),
 }
 
 impl Standing {
@@ -337,7 +357,7 @@ impl Standing {
     const fn parent(self) -> Option<WindowId> {
         match self {
             Self::TopLevel => None,
-            Self::Popup(parent) | Self::Tool(parent) => Some(parent),
+            Self::Popup(parent) | Self::Tool(parent) | Self::Dialog(parent) => Some(parent),
         }
     }
 }
@@ -378,8 +398,11 @@ pub struct SessionWindows {
     /// the one the user is working in, which a window that only took the
     /// keyboard by opening is not.
     worked_in: Option<u64>,
-    /// The alerts applications have up, each holding its window modal.
+    /// The alerts applications have up.
     pub alerts: Alerts,
+    /// Which windows are held modal, and by what: an alert or an owner-modal
+    /// dialog.
+    pub holds: Holds,
 }
 
 /// The reports that move apps told the keyboard rests on `told` to where it
@@ -441,6 +464,56 @@ impl SessionWindows {
     #[must_use]
     pub fn wm_id(&self, ipc: u64) -> Option<WindowId> {
         self.records.get(&ipc).map(|record| record.wm)
+    }
+
+    /// Whether the served window `ipc` is held modal.
+    #[must_use]
+    pub fn is_held(&self, ipc: u64) -> bool {
+        self.wm_id(ipc)
+            .is_some_and(|wm| self.holder_of(wm).is_some())
+    }
+
+    /// What holds compositor window `wm` modal, if anything: its own holder,
+    /// or the holder of the window a popup or tool window of it belongs to,
+    /// since both act on their owner's content.
+    #[must_use]
+    pub fn holder_of(&self, wm: WindowId) -> Option<WindowId> {
+        self.holds.holder(wm).or_else(|| {
+            let record = self.by_wm.get(&wm).and_then(|ipc| self.records.get(ipc))?;
+            match record.standing {
+                Standing::Popup(owner) | Standing::Tool(owner) => self.holds.holder(owner),
+                Standing::TopLevel | Standing::Dialog(_) => None,
+            }
+        })
+    }
+
+    /// Whether `event` may reach the served window it names: nothing that
+    /// starts input reaches a held window, and no press reaches a dialog
+    /// before it has been seen a moment. `now` is read only to decide that.
+    pub fn admits(&self, event: &WindowEvent, now: impl FnOnce() -> u64) -> bool {
+        let Some(record) = event.window_id().and_then(|id| self.records.get(&id)) else {
+            return true;
+        };
+        if !reaches_held_window(event) && self.holder_of(record.wm).is_some() {
+            return false;
+        }
+        match record.armed {
+            Armed::Always => true,
+            Armed::Unseen => !is_press(event),
+            Armed::From(at) => !is_press(event) || now() >= at,
+        }
+    }
+
+    /// Start the arm delay of every dialog whose content the frame about to be
+    /// shown carries for the first time.
+    pub fn stamp_dialogs(&mut self, now_ns: u64) {
+        for record in self.records.values_mut() {
+            if record.armed == Armed::Unseen
+                && matches!(record.first_frame, FirstFrame::Painted | FirstFrame::Shown)
+            {
+                record.armed = Armed::From(now_ns.saturating_add(ALERT_ARM_NS));
+            }
+        }
     }
 
     /// Note that the served window `ipc` was given `state` at a client of
@@ -661,6 +734,10 @@ impl SessionWindows {
                 sized: None,
                 presented_extent: None,
                 owner,
+                armed: match standing {
+                    Standing::Dialog(_) => Armed::Unseen,
+                    Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => Armed::Always,
+                },
             },
         );
         self.by_wm.insert(wm, ipc);
@@ -1107,6 +1184,35 @@ impl LaunchHost for DeskReach<'_, '_> {
 }
 
 impl ShellWindowHost<'_> {
+    /// `titled` applied to whom `owner`'s windows speak for: its bundle's
+    /// signed title, never anything the process says, and one claiming the
+    /// desktop's own word by its bundle path instead.
+    fn titled_by(&self, owner: ProcId, titled: impl FnOnce(Speaker<'_>) -> String) -> String {
+        let identity = self.apps.attested_identity(owner);
+        let bundle = self.apps.attested_bundle(owner);
+        let speaker = match (&identity, &bundle) {
+            (Some(identity), Some(bundle)) => app_speaker(&identity.name, bundle),
+            _ => Speaker::App("an unidentified program"),
+        };
+        titled(speaker)
+    }
+
+    /// The client extent a dialog asking for `asked` opens at: no larger than
+    /// the work area holds inside a dialog's frame.
+    fn dialog_extent(&self, (width, height): (u32, u32)) -> (u32, u32) {
+        let insets = WindowFrame::dialog().insets(self.compositor.scale(), self.compositor.theme());
+        let area = self.shell.work_area(self.compositor);
+        let fit = |side: u32, room: u32, frame: u32| side.min(room.saturating_sub(frame).max(1));
+        (
+            fit(width, area.width, insets.left.saturating_add(insets.right)),
+            fit(
+                height,
+                area.height,
+                insets.top.saturating_add(insets.bottom),
+            ),
+        )
+    }
+
     /// Refuse unless `window_id` holds the keyboard and is the window the
     /// user last pressed a key or a button in: a window that took the
     /// keyboard by opening has had nothing from the user yet.
@@ -1511,8 +1617,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // As for a popup, the offset is from the parent's client origin, the
         // one place an application can name without being told the screen.
         let at = Point::new(
-            client.left().saturating_add(transient.offset_x),
-            client.top().saturating_add(transient.offset_y),
+            client.left().saturating_add(spec.offset_x),
+            client.top().saturating_add(spec.offset_y),
         );
         let Some(wm) =
             self.shell
@@ -1535,6 +1641,64 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             owner,
             FirstFrame::Awaited,
         );
+        Ok(())
+    }
+
+    fn dialog_opened(
+        &mut self,
+        window_id: u64,
+        focus: bool,
+        spec: &DialogSpec,
+    ) -> Result<(), Errno> {
+        let owner_id = spec.transient.parent_window_id;
+        let Some(over) = self.windows.wm_id(owner_id) else {
+            return Err(Errno::NotFound);
+        };
+        let Some(owner) = self.windows.owner_of(owner_id) else {
+            return Err(Errno::NotFound);
+        };
+        // The attested name comes first, so a long title elides itself rather
+        // than the name, and no dialog reads as the desktop's own prompt.
+        let title = self.titled_by(owner, |speaker| dialog_title(speaker, spec.title.as_str()));
+        let asked = (
+            spec.transient.surface.width_px,
+            spec.transient.surface.height_px,
+        );
+        let (width, height) = self.dialog_extent(asked);
+        let Some(content) = Surface::filled(width, height, OPEN_FILL.premultiply()) else {
+            return Err(Errno::OutOfMemory);
+        };
+        let modal = spec.modality == DialogModality::OwnerModal;
+        let Some(wm) = self.shell.open_dialog_window(
+            self.compositor,
+            over,
+            content,
+            &title,
+            (modal, focus, self.seat_held),
+        ) else {
+            return Err(Errno::NotFound);
+        };
+        self.compositor.set_app_presented(wm, true);
+        if modal {
+            self.windows.holds.take(over, wm);
+        }
+        self.windows.insert(
+            window_id,
+            wm,
+            Standing::Dialog(over),
+            owner,
+            FirstFrame::Awaited,
+        );
+        // Larger than the screen holds, it is fitted to it and told so; its
+        // content then scrolls inside it.
+        if (width, height) != asked {
+            self.windows.owed.push(WindowEvent::Resized {
+                window_id,
+                width_px: width,
+                height_px: height,
+                state: WindowSizeState::Restored,
+            });
+        }
         Ok(())
     }
 
@@ -1649,10 +1813,31 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         if self.shell.router().wm().resizing() == Some(record.wm) {
             return Ok(());
         }
-        if self
-            .compositor
-            .resize_window_client(record.wm, surface.width_px, surface.height_px)
-        {
+        let (wm, standing) = (record.wm, record.standing);
+        let asked = (surface.width_px, surface.height_px);
+        // A dialog grown past the screen is fitted to it as it was on opening,
+        // told so, and kept within the work area.
+        let (width, height) = match standing {
+            Standing::Dialog(_) => self.dialog_extent(asked),
+            Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => asked,
+        };
+        if self.compositor.resize_window_client(wm, width, height) {
+            if let Standing::Dialog(_) = standing {
+                let area = self.shell.work_area(self.compositor);
+                if let Some(bounds) = self.compositor.window(wm).map(Window::bounds) {
+                    let _ = self
+                        .compositor
+                        .move_window(wm, bounds.clamped_onto(area).origin);
+                }
+                if (width, height) != asked {
+                    self.windows.owed.push(WindowEvent::Resized {
+                        window_id,
+                        width_px: width,
+                        height_px: height,
+                        state: WindowSizeState::Restored,
+                    });
+                }
+            }
             Ok(())
         } else {
             // An empty client size, or a window the compositor no longer
@@ -1668,14 +1853,25 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // the title bar and the taskbar entry together, so the two can
         // never name different subjects. A popup carries neither, and a
         // window the session no longer knows fails closed.
-        let Some(record) = self.windows.records.get_mut(&window_id) else {
+        let Some(&WindowRecord {
+            wm,
+            standing,
+            owner,
+            ..
+        }) = self.windows.records.get(&window_id)
+        else {
             return Err(Errno::NotFound);
         };
-        // A tool window's band is its only label: it has no taskbar entry.
-        let retitled = match record.standing {
-            Standing::Tool(_) => self.compositor.set_window_title(record.wm, title),
+        // A tool window's band is its only label: it has no taskbar entry. A
+        // dialog's goes on naming its application first.
+        let retitled = match standing {
+            Standing::Tool(_) => self.compositor.set_window_title(wm, title),
+            Standing::Dialog(_) => {
+                let named = self.titled_by(owner, |speaker| dialog_title(speaker, title));
+                self.compositor.set_window_title(wm, &named)
+            }
             Standing::TopLevel | Standing::Popup(_) => {
-                self.shell.retitle_window(self.compositor, record.wm, title)
+                self.shell.retitle_window(self.compositor, wm, title)
             }
         };
         if !retitled {
@@ -1683,7 +1879,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         }
         // A window not yet on screen shows its title with its first frame,
         // which is already announced.
-        record.retitled |= record.first_frame == FirstFrame::Shown;
+        if let Some(record) = self.windows.records.get_mut(&window_id) {
+            record.retitled |= record.first_frame == FirstFrame::Shown;
+        }
         Ok(())
     }
 
@@ -1849,11 +2047,20 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // here rather than needing a teardown path of their own.
         let was_layer = self.windows.layers.closed(window_id);
         if let Some(record) = self.windows.take(window_id) {
+            // A dialog holding the keyboard hands it to the front of its
+            // owner: the holder behind it, else the owner.
+            let holds = &mut self.windows.holds;
+            let next = match record.standing {
+                Standing::Dialog(owner) => holds.release(record.wm).or(Some(holds.front(owner))),
+                Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => None,
+            };
+            holds.forget(record.wm);
             // A transient and a layer surface were never tasks, so they leave
             // through the taskbar-less path; the engine tears a parent's
             // transients down with it, so each arrives here in its own turn.
             let _ = if record.standing.parent().is_some() || was_layer {
-                self.shell.close_popup_window(self.compositor, record.wm)
+                self.shell
+                    .close_transient_window(self.compositor, record.wm, next)
             } else {
                 self.shell.close_window(self.compositor, record.wm)
             };
@@ -1918,25 +2125,18 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn alert_opened(&mut self, open: &AlertOpen<'_>) -> Result<(), Errno> {
-        // The title is the session's: the speaker is the bundle's signed
-        // title, never anything the process says, and a title claiming the
-        // desktop's own word speaks by its bundle path instead.
-        let identity = self.apps.attested_identity(open.owner);
-        let bundle = self.apps.attested_bundle(open.owner);
-        let speaker = match (&identity, &bundle) {
-            (Some(identity), Some(bundle)) => app_speaker(&identity.name, bundle),
-            _ => Speaker::App("an unidentified program"),
-        };
-        let title = alert_title(open.spec.severity(), speaker);
+        let title = self.titled_by(open.owner, |speaker| {
+            alert_title(open.spec.severity(), speaker)
+        });
         let owner = match open.window {
             Some(window_id) => Some(self.windows.wm_id(window_id).ok_or(Errno::NotFound)?),
             None => None,
         };
         let opened = self.windows.alerts.open(
             (open.alert_id, open.window, owner),
-            open.spec,
-            &title,
+            (open.spec, &title),
             (open.focus, self.seat_held),
+            &mut self.windows.holds,
             self.shell,
             self.compositor,
         );
@@ -1948,9 +2148,12 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn alert_withdrawn(&mut self, alert_id: u64) {
-        self.windows
-            .alerts
-            .withdraw(alert_id, self.shell, self.compositor);
+        self.windows.alerts.withdraw(
+            alert_id,
+            &mut self.windows.holds,
+            self.shell,
+            self.compositor,
+        );
     }
 
     fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
@@ -2224,6 +2427,7 @@ mod tests {
 
     use crate::tests::{whole, window_owner, RefusingRelay};
     use alloc::string::String;
+    use alloc::vec;
     use tairix_window::OpenEntry;
 
     /// A resizable window declaring no minimum client extent of its own, so
@@ -2342,6 +2546,8 @@ mod tests {
         withdrawn: Vec<ProcId>,
         /// The resident instance each bundle resolves to, if a test wires one.
         residents: Vec<(alloc::string::String, ProcId)>,
+        /// The name and bundle every owner attests as, if a test wires one.
+        attested: Option<(&'static str, &'static str)>,
     }
 
     impl AppBarBridge for RecordingBar {
@@ -2351,11 +2557,16 @@ mod tests {
         }
 
         fn attested_identity(&self, _owner: ProcId) -> Option<tairix_taskbar::AppIdentity> {
-            None
+            self.attested.map(|(name, _)| tairix_taskbar::AppIdentity {
+                name: String::from(name),
+                version: String::from("1.0.0"),
+                purpose: None,
+                author: None,
+            })
         }
 
         fn attested_bundle(&self, _owner: ProcId) -> Option<String> {
-            None
+            self.attested.map(|(_, bundle)| String::from(bundle))
         }
 
         fn runs_one_instance(&self, _bundle: &str) -> bool {
@@ -3959,6 +4170,362 @@ mod tests {
         assert!(
             host.windows.take_closed().is_empty(),
             "a close was answered twice"
+        );
+    }
+
+    /// Run `body` over a host whose every window attests as `TextEdit`, with
+    /// window 1 a presented 400×300 top-level window at the cascade's start.
+    fn with_owner<R>(
+        (shell, compositor, windows): (&mut DesktopShell, &mut Compositor, &mut SessionWindows),
+        seat_held: bool,
+        body: impl FnOnce(&mut ShellWindowHost<'_>) -> R,
+    ) -> R {
+        let mut picker = RecordingSlot::default();
+        let mut apps = RecordingBar {
+            attested: Some(("TextEdit", "/System/Applications/TextEdit.app")),
+            ..RecordingBar::default()
+        };
+        let mut host = ShellWindowHost {
+            shell,
+            compositor,
+            windows,
+            picker: &mut picker,
+            apps: &mut apps,
+            menu: &mut MenuChain::new(),
+            seat_held,
+            screensaver: None,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
+        };
+        if host.windows.wm_id(1).is_none() {
+            let owner = mode(400, 300, DisplayFormat::Rgba8888);
+            host.window_opened(window_owner(1), 1, &owner, "notes.txt", RESIZABLE)
+                .expect("the owner opens");
+            host.window_presented(1, &owner, &vec![0u8; 400 * 300 * 4], &whole(&owner))
+                .expect("and maps");
+        }
+        body(&mut host)
+    }
+
+    fn dialog(owner: u64, (width, height): (u32, u32), modality: DialogModality) -> DialogSpec {
+        DialogSpec {
+            transient: tairix_window::TransientSpec {
+                parent_window_id: owner,
+                shm_handle: 0,
+                event_endpoint: 0,
+                frame_count: 1,
+                surface: mode(width, height, DisplayFormat::Rgba8888),
+            },
+            modality,
+            title: tairix_abi::window_ipc::WindowTitle::new("Go to line").expect("a title"),
+        }
+    }
+
+    fn pointer(window_id: u64, action: PointerAction) -> WindowEvent {
+        WindowEvent::Pointer {
+            window_id,
+            x: 1,
+            y: 1,
+            action,
+            modifiers: tairix_abi::input::Modifiers::default(),
+        }
+    }
+
+    const PRESS: PointerAction =
+        PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Primary);
+    const RELEASE: PointerAction =
+        PointerAction::Released(tairix_abi::input::PointerButtonCode::Primary);
+
+    #[test]
+    fn a_dialog_is_framed_off_the_taskbar_named_by_its_application_and_over_its_owner() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let spec = dialog(1, (200, 100), DialogModality::OwnerModal);
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.dialog_opened(2, true, &spec)
+                .expect("the dialog opens");
+        });
+        let (owner, wm) = (
+            windows.wm_id(1).expect("live"),
+            windows.wm_id(2).expect("live"),
+        );
+        let frame = comp.window_frame(wm).expect("framed by the window manager");
+        assert_eq!(frame.title_bar().title(), "TextEdit \u{2014} Go to line");
+        assert_eq!(
+            frame.title_bar().commands(),
+            tairix_controls::WindowFrame::dialog()
+                .title_bar()
+                .commands()
+        );
+        assert_eq!(comp.window(wm).and_then(Window::parent), Some(owner));
+        assert_eq!(
+            shell.session().taskbar().tasks().len(),
+            1,
+            "off the taskbar"
+        );
+        let client = comp.window_client_rect(wm).expect("client");
+        assert_eq!(
+            (client.width, client.height),
+            (200, 100),
+            "its content's size"
+        );
+        let (over, at) = (
+            comp.window(owner).expect("live").bounds(),
+            comp.window(wm).expect("live").bounds(),
+        );
+        let centre = |rect: Rect| {
+            (
+                i64::from(rect.left()) * 2 + i64::from(rect.width),
+                i64::from(rect.top()) * 2 + i64::from(rect.height),
+            )
+        };
+        let (a, b) = (centre(over), centre(at));
+        assert!(
+            (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1,
+            "centred over its owner: {over:?} {at:?}"
+        );
+        assert_eq!(shell.router().focused(), Some(wm), "the front it earned");
+        assert!(windows.take_owed_events().is_empty(), "it fits as asked");
+    }
+
+    #[test]
+    fn a_dialog_stays_within_the_work_area_and_one_too_big_is_fitted_and_told() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let near_edge = Point::new(560, 380);
+        let work_area = shell.work_area(&comp);
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            let owner = host.windows.wm_id(1).expect("live");
+            assert!(host.compositor.move_window(owner, near_edge));
+            host.dialog_opened(2, true, &dialog(1, (300, 200), DialogModality::Modeless))
+                .expect("opens");
+            host.dialog_opened(3, true, &dialog(1, (2000, 2000), DialogModality::Modeless))
+                .expect("opens too");
+        });
+        for id in [2, 3] {
+            let at = comp
+                .window(windows.wm_id(id).expect("live"))
+                .expect("live")
+                .bounds();
+            assert!(
+                at.left() >= work_area.left()
+                    && at.top() >= work_area.top()
+                    && at.right() <= work_area.right()
+                    && at.bottom() <= work_area.bottom(),
+                "{at:?} within {work_area:?}"
+            );
+        }
+        let fitted = comp
+            .window_client_rect(windows.wm_id(3).expect("live"))
+            .expect("client");
+        assert!(fitted.width < 2000 && fitted.height < 2000);
+        assert_eq!(
+            windows.take_owed_events(),
+            [WindowEvent::Resized {
+                window_id: 3,
+                width_px: fitted.width,
+                height_px: fitted.height,
+                state: WindowSizeState::Restored,
+            }],
+            "only the one too big is told the extent it was given"
+        );
+    }
+
+    #[test]
+    fn an_owner_modal_dialog_holds_its_owner_as_an_alert_does_and_a_modeless_one_nothing() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.dialog_opened(2, true, &dialog(1, (200, 100), DialogModality::Modeless))
+                .expect("opens");
+        });
+        let owner = windows.wm_id(1).expect("live");
+        assert_eq!(windows.holds.holder(owner), None);
+        assert!(windows.admits(&pointer(1, PRESS), || 0));
+        assert!(!windows.is_held(1));
+
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.dialog_opened(3, true, &dialog(1, (200, 100), DialogModality::OwnerModal))
+                .expect("opens");
+        });
+        let modal = windows.wm_id(3).expect("live");
+        assert_eq!(windows.holds.holder(owner), Some(modal));
+        assert!(windows.is_held(1), "it takes no drop");
+        assert!(!windows.admits(&pointer(1, PRESS), || 0));
+        assert!(!windows.admits(&pointer(1, PointerAction::Moved), || 0));
+        assert!(
+            windows.admits(&pointer(1, RELEASE), || 0),
+            "a press it already saw still ends"
+        );
+
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.window_closed(3);
+        });
+        assert_eq!(windows.holds.holder(owner), None);
+        assert!(windows.admits(&pointer(1, PRESS), || 0));
+        assert_eq!(
+            shell.router().focused(),
+            Some(owner),
+            "the keyboard goes back to the window it held"
+        );
+    }
+
+    /// A palette or a popup of a held window acts on that window's content,
+    /// so the hold covers it too, while the holder itself stays free.
+    #[test]
+    fn a_hold_covers_the_held_windows_tool_windows() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let tool = tairix_window::ToolSpec {
+            transient: tairix_window::TransientSpec {
+                parent_window_id: 1,
+                shm_handle: 0,
+                event_endpoint: 0,
+                frame_count: 1,
+                surface: mode(80, 60, DisplayFormat::Rgba8888),
+            },
+            offset_x: 0,
+            offset_y: 0,
+            carry: None,
+            title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
+        };
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.tool_opened(2, &tool).expect("a tool window");
+            host.dialog_opened(3, true, &dialog(1, (200, 100), DialogModality::OwnerModal))
+                .expect("a form");
+        });
+        let form = windows.wm_id(3).expect("live");
+        assert!(windows.is_held(2), "the palette is held with its window");
+        assert!(!windows.admits(&pointer(2, PRESS), || u64::MAX));
+        assert_eq!(
+            windows.holder_of(windows.wm_id(2).expect("live")),
+            Some(form)
+        );
+        assert!(!windows.is_held(3), "the form is not held by itself");
+    }
+
+    #[test]
+    fn a_dialog_answers_no_press_until_its_content_has_been_seen_a_moment() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let spec = dialog(1, (200, 100), DialogModality::Modeless);
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.dialog_opened(2, true, &spec).expect("opens");
+        });
+        windows.stamp_dialogs(10);
+        assert!(
+            !windows.admits(&pointer(2, PRESS), || u64::MAX),
+            "nothing shown, nothing armed"
+        );
+        assert!(windows.admits(&pointer(2, PointerAction::Moved), || 0));
+        let surface = spec.transient.surface;
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.window_presented(2, &surface, &vec![0u8; 200 * 100 * 4], &whole(&surface))
+                .expect("its content lands");
+        });
+        windows.stamp_dialogs(1_000);
+        windows.stamp_dialogs(9_000_000_000);
+        assert!(!windows.admits(&pointer(2, PRESS), || 1_000 + ALERT_ARM_NS - 1));
+        assert!(windows.admits(&pointer(2, RELEASE), || 1_000));
+        assert!(
+            windows.admits(&pointer(2, PRESS), || 1_000 + ALERT_ARM_NS),
+            "armed from the frame that first showed it"
+        );
+        assert!(
+            windows.admits(&pointer(1, PRESS), || 0),
+            "its owner is free"
+        );
+    }
+
+    #[test]
+    fn a_dialog_that_has_not_earned_the_front_waits_with_its_family() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        let work = with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            let work = mode(640, 480, DisplayFormat::Rgba8888);
+            host.window_opened(window_owner(2), 9, &work, "Work", RESIZABLE)
+                .expect("opens");
+            host.window_presented(9, &work, &vec![0u8; 640 * 480 * 4], &whole(&work))
+                .expect("maps");
+            host.windows.wm_id(9).expect("live")
+        });
+        assert!(shell.raise_window(&mut comp, work));
+        let focused = shell.router().focused();
+        for (id, modality) in [
+            (2, DialogModality::Modeless),
+            (3, DialogModality::OwnerModal),
+        ] {
+            with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+                host.dialog_opened(id, false, &dialog(1, (100, 60), modality))
+                    .expect("opens");
+            });
+            let at = comp
+                .window(windows.wm_id(id).expect("live"))
+                .expect("live")
+                .bounds();
+            assert_eq!(comp.window_at(at.origin), Some(work), "{modality:?}");
+            assert_eq!(shell.router().focused(), focused, "{modality:?}");
+        }
+    }
+
+    #[test]
+    fn a_dialog_grown_past_the_screen_is_fitted_again_and_told() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.dialog_opened(2, true, &dialog(1, (200, 100), DialogModality::Modeless))
+                .expect("opens");
+            host.window_resized(2, &mode(200, 4000, DisplayFormat::Rgba8888))
+                .expect("resized");
+            host.window_resized(2, &mode(220, 120, DisplayFormat::Rgba8888))
+                .expect("resized again");
+        });
+        let wm = windows.wm_id(2).expect("live");
+        let client = comp.window_client_rect(wm).expect("client");
+        assert_eq!(
+            (client.width, client.height),
+            (220, 120),
+            "a size that fits is taken"
+        );
+        let owed = windows.take_owed_events();
+        let [WindowEvent::Resized {
+            window_id: 2,
+            width_px: 200,
+            height_px,
+            ..
+        }] = owed[..]
+        else {
+            panic!("only the size past the screen is told: {owed:?}");
+        };
+        assert!(height_px < 4000);
+        let area = shell.work_area(&comp);
+        let at = comp.window(wm).expect("live").bounds();
+        assert!(at.top() >= area.top() && at.bottom() <= area.bottom());
+    }
+
+    #[test]
+    fn a_retitled_dialog_goes_on_naming_its_application_first() {
+        let (mut shell, mut comp) = desktop();
+        let mut windows = SessionWindows::new();
+        with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
+            host.dialog_opened(2, true, &dialog(1, (200, 100), DialogModality::Modeless))
+                .expect("opens");
+            host.window_retitled(2, "Unlock the Desktop")
+                .expect("retitled");
+        });
+        let frame = comp
+            .window_frame(windows.wm_id(2).expect("live"))
+            .expect("framed");
+        assert_eq!(
+            frame.title_bar().title(),
+            "TextEdit \u{2014} Unlock the Desktop"
+        );
+        assert_eq!(
+            shell.session().taskbar().tasks().len(),
+            1,
+            "a retitle lists nothing"
         );
     }
 

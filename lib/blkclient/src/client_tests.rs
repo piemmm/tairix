@@ -2,6 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
+use tairix_abi::blkio::{BlkReissue, BlkRotation, BlkRotationEvidence, BlkTransport};
 use tairix_abi::driver::block::BlockClass;
 
 /// A scripted serving driver: a device whose block content is a
@@ -28,13 +29,17 @@ struct MemDevice {
 /// The medium the scripted device declares. Deliberately not the
 /// unclassified default, so a test asserting the client's budget proves
 /// the device was asked rather than assumed.
-const DEVICE_MEDIUM: BlkMedium = BlkMedium::UsbFlash;
+const DEVICE_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
+    BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
+);
 
 /// The class [`DEVICE_MEDIUM`] is served as.
 const DEVICE_CLASS: BlkDeviceClass = DEVICE_MEDIUM.class();
 /// The name the doubles declare, so a test asserting what the client reports
 /// proves it adopted the *device's* name rather than the unnamed placeholder.
 const DEVICE_NAME: &str = "fixture-blk";
+/// The binding the scripted device's publication carries.
+const DEVICE_BINDING: u64 = 0xB1D0_0001;
 
 fn fill(buf: &mut [u8], byte_base: u64) {
     for (i, out) in buf.iter_mut().enumerate() {
@@ -43,6 +48,8 @@ fn fill(buf: &mut [u8], byte_base: u64) {
 }
 
 impl BlkCall for MemDevice {
+    fn pause(&mut self, _ns: u64) {}
+
     fn call(
         &mut self,
         request: &[u8],
@@ -60,6 +67,7 @@ impl BlkCall for MemDevice {
                 flags: self.flags,
                 medium: self.medium,
                 name: BlkDeviceName::new(DEVICE_NAME),
+                binding: DEVICE_BINDING,
             }
             .encode(reply),
             BlkOp::Read => {
@@ -285,6 +293,8 @@ fn an_error_completion_surfaces_as_a_typed_fault() {
     /// A device that refuses every read with a permission error.
     struct Refusing;
     impl BlkCall for Refusing {
+        fn pause(&mut self, _ns: u64) {}
+
         fn call(
             &mut self,
             request: &[u8],
@@ -299,6 +309,7 @@ fn an_error_completion_surfaces_as_a_typed_fault() {
                     flags: 0,
                     medium: Some(DEVICE_MEDIUM),
                     name: BlkDeviceName::new(DEVICE_NAME),
+                    binding: 0,
                 }
                 .encode(reply)
             } else {
@@ -320,6 +331,8 @@ fn a_truncated_or_corrupt_reply_fails_closed() {
     /// A device that replies with a truncated success frame.
     struct Truncating;
     impl BlkCall for Truncating {
+        fn pause(&mut self, _ns: u64) {}
+
         fn call(
             &mut self,
             request: &[u8],
@@ -334,6 +347,7 @@ fn a_truncated_or_corrupt_reply_fails_closed() {
                     flags: 0,
                     medium: Some(DEVICE_MEDIUM),
                     name: BlkDeviceName::new(DEVICE_NAME),
+                    binding: 0,
                 }
                 .encode(reply)
             } else {
@@ -357,6 +371,8 @@ fn a_truncated_or_corrupt_completion_on_a_write_fails_closed() {
     /// above but exercised on the write path.
     struct Truncating;
     impl BlkCall for Truncating {
+        fn pause(&mut self, _ns: u64) {}
+
         fn call(
             &mut self,
             request: &[u8],
@@ -371,6 +387,7 @@ fn a_truncated_or_corrupt_completion_on_a_write_fails_closed() {
                     flags: 0,
                     medium: Some(DEVICE_MEDIUM),
                     name: BlkDeviceName::new(DEVICE_NAME),
+                    binding: 0,
                 }
                 .encode(reply)
             } else {
@@ -394,6 +411,8 @@ struct FaultingDevice {
     status: tairix_abi::blkio::BlkStatus,
 }
 impl BlkCall for FaultingDevice {
+    fn pause(&mut self, _ns: u64) {}
+
     fn call(
         &mut self,
         request: &[u8],
@@ -408,6 +427,7 @@ impl BlkCall for FaultingDevice {
                 flags: 0,
                 medium: Some(DEVICE_MEDIUM),
                 name: BlkDeviceName::new(DEVICE_NAME),
+                binding: 0,
             }
             .encode(reply)
         } else {
@@ -423,6 +443,8 @@ struct PromisingDevice {
     status: tairix_abi::blkio::BlkStatus,
 }
 impl BlkCall for PromisingDevice {
+    fn pause(&mut self, _ns: u64) {}
+
     fn call(
         &mut self,
         request: &[u8],
@@ -437,6 +459,7 @@ impl BlkCall for PromisingDevice {
                 flags: 0,
                 medium: Some(DEVICE_MEDIUM),
                 name: BlkDeviceName::new(DEVICE_NAME),
+                binding: 0,
             }
         } else {
             BlkCompletion::default()
@@ -602,8 +625,16 @@ fn a_faulted_device_does_not_disturb_a_healthy_sibling() {
 struct FlakyDevice {
     inner: MemDevice,
     faults: u32,
+    /// What its driver says of when each faulted request may come back.
+    vouch: BlkReissue,
+    /// Each pause the client waited out before a reissue.
+    pauses: Vec<u64>,
 }
 impl BlkCall for FlakyDevice {
+    fn pause(&mut self, ns: u64) {
+        self.pauses.push(ns);
+    }
+
     fn call(
         &mut self,
         request: &[u8],
@@ -614,8 +645,11 @@ impl BlkCall for FlakyDevice {
         let decoded = BlkRequest::decode(request)?;
         if decoded.op != BlkOp::Geometry && self.faults > 0 {
             self.faults -= 1;
-            return BlkCompletion::default()
-                .encode_status(tairix_abi::blkio::BlkStatus::Reset, reply);
+            return BlkCompletion::default().encode_reissuable(
+                tairix_abi::blkio::BlkStatus::Reset,
+                self.vouch,
+                reply,
+            );
         }
         self.inner.call(request, reply, window, deadline_ns)
     }
@@ -632,6 +666,8 @@ fn a_transient_fault_is_reissued_and_then_succeeds() {
         FlakyDevice {
             inner: device(512, 64, 0),
             faults: 2,
+            vouch: BlkReissue::Paced,
+            pauses: Vec::new(),
         },
         &mut window,
     )
@@ -641,6 +677,56 @@ fn a_transient_fault_is_reissued_and_then_succeeds() {
     let mut expected = [0u8; 512];
     fill(&mut expected, 0);
     assert_eq!(buf, expected, "the recovered read returns the real payload");
+    // Neither reissue went at once: each waited out the device's pacing.
+    let pacing = DEVICE_CLASS.budget().reissue_pacing_ns();
+    assert!(pacing > 0);
+    assert_eq!(client.call.pauses, [pacing, pacing]);
+}
+
+#[test]
+fn a_reissue_its_driver_vouches_for_goes_at_once() {
+    // The driver's reset worked and the unit answered ready: nothing is gained
+    // by waiting out the pacing, so neither reissue waits.
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client = RemoteBlock::connect_read_only(
+        FlakyDevice {
+            inner: device(512, 64, 0),
+            faults: 2,
+            vouch: BlkReissue::Now,
+            pauses: Vec::new(),
+        },
+        &mut window,
+    )
+    .expect("connects");
+    let mut buf = [0u8; 512];
+    client.read_blocks(0, &mut buf).expect("read after reissue");
+    let mut expected = [0u8; 512];
+    fill(&mut expected, 0);
+    assert_eq!(buf, expected);
+    assert!(client.call.pauses.is_empty());
+}
+
+#[test]
+fn a_vouched_reissue_still_spends_the_retry_budget() {
+    // A driver's word brings a reissue forward; it never buys one more.
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client = RemoteBlock::connect_read_only(
+        FlakyDevice {
+            inner: device(512, 64, 0),
+            faults: u32::MAX,
+            vouch: BlkReissue::Now,
+            pauses: Vec::new(),
+        },
+        &mut window,
+    )
+    .expect("connects");
+    let mut buf = [0u8; 512];
+    assert_eq!(client.read_blocks(0, &mut buf), Err(DriverError::Busy));
+    assert_eq!(
+        u32::MAX - client.call.faults,
+        1 + DEVICE_CLASS.budget().max_retries,
+        "the first attempt, then exactly the class's reissues"
+    );
 }
 
 #[test]
@@ -653,6 +739,8 @@ fn a_device_that_keeps_reissuing_fails_closed_at_the_retry_budget() {
         FlakyDevice {
             inner: device(512, 64, 0),
             faults: u32::MAX,
+            vouch: BlkReissue::Paced,
+            pauses: Vec::new(),
         },
         &mut window,
     )
@@ -799,6 +887,8 @@ fn a_reissuable_write_is_reissued_and_then_succeeds() {
         FlakyDevice {
             inner: device(512, 64, 0),
             faults: 2,
+            vouch: BlkReissue::Paced,
+            pauses: Vec::new(),
         },
         &mut window,
     )
@@ -824,6 +914,8 @@ fn a_write_that_keeps_reissuing_fails_closed_at_the_retry_budget() {
         FlakyDevice {
             inner: device(512, 64, 0),
             faults: u32::MAX,
+            vouch: BlkReissue::Paced,
+            pauses: Vec::new(),
         },
         &mut window,
     )
@@ -833,4 +925,20 @@ fn a_write_that_keeps_reissuing_fails_closed_at_the_retry_budget() {
         client.call.inner.written.is_empty(),
         "a device that never actually accepts the write never records one"
     );
+}
+
+#[test]
+fn every_request_after_the_geometry_repeats_the_publications_binding() {
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let mut client =
+        RemoteBlock::connect_read_write(device(512, 64, 0), &mut window).expect("connects");
+    let mut buf = [0u8; 512];
+    client.read_blocks(0, &mut buf).expect("read");
+    client.write_blocks(1, &buf).expect("write");
+    client.flush().expect("flush");
+    let calls = &client.call.calls;
+    assert_eq!(calls[0].op, BlkOp::Geometry);
+    assert_eq!(calls[0].binding, 0, "the geometry query names no binding");
+    assert_eq!(calls.len(), 4);
+    assert!(calls[1..].iter().all(|call| call.binding == DEVICE_BINDING));
 }

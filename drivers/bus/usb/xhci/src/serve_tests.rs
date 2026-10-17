@@ -12,22 +12,26 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{attach_transport_grants, Reach, UrbOutcome, UrbReply, UrbService};
+use super::{
+    attach_transport_grants, urb_failure_level, Operation, Reach, UrbOutcome, UrbReply, UrbService,
+};
 use tairix_abi::hwtree::{HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::usb_urb::{
     decode_completion, IsoGrant, UrbRequest, UsbDirection, UsbSpeed, UsbTransferType,
+    USB_CONTROL_TIMEOUT_MAX_MS,
 };
 use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, ProcId, PROC_ID_LEN};
 use tairix_inline::BitSet256;
 use tairix_usb::transport::{UrbEngine, UrbScope};
 
-/// A controllable [`UrbEngine`] double: control-IN copies a fixed response,
-/// interrupt-IN delivers queued reports once each, then "nothing pending",
-/// and the bulk pair mirrors the live engine's arm-then-reap shape (first
-/// drive arms and returns `None`, a later drive completes from the queued
-/// device data). Records its call counts so a test can prove a rejected URB
-/// never reaches it.
+/// A controllable [`UrbEngine`] double: interrupt-IN delivers queued reports
+/// once each, then "nothing pending"; control-IN and the bulk pair mirror the
+/// live engine's queue-then-reap shape (the first drive queues and returns
+/// `None`, a later drive completes — control-IN with a fixed response, bulk
+/// from the queued device data); an interface operation runs for
+/// `operation_drives` drives. Records its call counts so a test can prove a
+/// rejected URB never reaches it.
 struct MockEngine {
     control_response: Vec<u8>,
     reports: Vec<Vec<u8>>,
@@ -41,6 +45,11 @@ struct MockEngine {
     /// The URBs it was told to abandon, and whether it lets them go.
     abandoned: Vec<UrbRequest>,
     abandon_fault: Option<DriverError>,
+    /// A control-IN is queued and not yet reaped.
+    control_queued: bool,
+    /// Drives a set-interface stays running for, and the drives it took.
+    operation_drives: usize,
+    operation_calls: usize,
 }
 
 /// The mock interface's bulk-IN endpoint number.
@@ -58,6 +67,9 @@ impl MockEngine {
             bulk_in_armed: None,
             abandoned: Vec::new(),
             abandon_fault: None,
+            control_queued: false,
+            operation_drives: 0,
+            operation_calls: 0,
         }
     }
 }
@@ -69,24 +81,38 @@ impl UrbEngine for MockEngine {
         self.abandon_fault.take().map_or(Ok(()), Err)
     }
 
-    fn control_in(&mut self, _setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
+    fn control_in(
+        &mut self,
+        _setup: [u8; 8],
+        data: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
         self.control_calls += 1;
+        if !core::mem::replace(&mut self.control_queued, true) {
+            return Ok(None);
+        }
+        self.control_queued = false;
         let n = self.control_response.len().min(data.len());
         data[..n].copy_from_slice(&self.control_response[..n]);
-        Ok(n)
+        Ok(Some(n))
     }
 
-    fn control_no_data(&mut self, _setup: [u8; 8]) -> Result<(), DriverError> {
-        // No serve-level test drives a no-data control-OUT through this
-        // double yet; the seam-level round-trip lives in
-        // `tairix_usb::transport::tests`.
+    fn control_no_data(&mut self, _setup: [u8; 8]) -> Result<Option<()>, DriverError> {
+        // The seam-level round-trip lives in `tairix_usb::transport::tests`.
         Err(DriverError::NotFound)
     }
 
-    fn control_out(&mut self, _setup: [u8; 8], _data: &[u8]) -> Result<(), DriverError> {
-        // As `control_no_data`: the data-stage round-trip is proven at the
-        // seam level, not through this serve-loop double.
+    fn control_out(&mut self, _setup: [u8; 8], _data: &[u8]) -> Result<Option<()>, DriverError> {
+        // As `control_no_data`.
         Err(DriverError::NotFound)
+    }
+
+    fn set_interface(&mut self, _interface: u8, _alternate: u8) -> Result<Option<()>, DriverError> {
+        self.operation_calls += 1;
+        if self.operation_drives > 0 {
+            self.operation_drives -= 1;
+            return Ok(None);
+        }
+        Ok(Some(()))
     }
 
     fn scope(&self) -> Option<UrbScope> {
@@ -302,12 +328,12 @@ fn control_in_urb(length: u8) -> UrbRequest {
         direction: UsbDirection::In,
         length: u32::from(length),
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, length, 0x00],
-        timeout_ms: None,
+        timeout_ms: core::num::NonZeroU32::new(500),
     }
 }
 
 #[test]
-fn a_control_in_is_replied_synchronously() {
+fn a_control_in_is_held_until_a_controller_event_completes_it() {
     let mut engine = MockEngine::new();
     engine.control_response = vec![0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40];
     let mut shm = vec![0u8; 64];
@@ -321,11 +347,65 @@ fn a_control_in_is_replied_synchronously() {
         &mut shm,
         &mut engine,
     );
+    assert_eq!(outcome, UrbOutcome::Held, "queued, never answered inline");
+    assert_eq!(service.deadline(), Some(500_000_000));
+    let outcome = service.on_event(&mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Ok(8));
-    // A control transfer completes within the call — never left outstanding.
     assert!(!service.is_busy());
     assert_eq!(&shm[..8], &engine.control_response[..]);
-    assert_eq!(engine.control_calls, 1);
+    assert_eq!(engine.control_calls, 2);
+}
+
+#[test]
+fn a_control_urb_is_held_no_longer_than_any_device_may_take() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 64];
+    let mut service = UrbService::new();
+    let patient = UrbRequest {
+        timeout_ms: core::num::NonZeroU32::new(60_000),
+        ..control_in_urb(8)
+    };
+    let ceiling = u64::from(USB_CONTROL_TIMEOUT_MAX_MS) * 1_000_000;
+    assert_eq!(
+        service.on_submit(Reach::Served, 0x23, 1_000, &patient, &mut shm, &mut engine),
+        UrbOutcome::Held
+    );
+    assert_eq!(service.deadline(), Some(1_000 + ceiling));
+    assert_eq!(
+        service.expire(1_000 + ceiling - 1, &mut engine),
+        UrbOutcome::Idle
+    );
+    assert_eq!(
+        reply_result(&service.expire(1_000 + ceiling, &mut engine)),
+        Err(Errno::TimedOut)
+    );
+    assert_eq!(engine.abandoned, [patient], "its TD is taken back");
+}
+
+#[test]
+fn an_interface_operation_is_held_until_the_engine_finishes_it() {
+    let mut engine = MockEngine::new();
+    engine.operation_drives = 2;
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+    let select = Operation::SetInterface {
+        interface: 1,
+        alternate: 1,
+    };
+    assert_eq!(
+        service.on_operation(Reach::Served, 0x61, select, &mut engine),
+        UrbOutcome::Held
+    );
+    assert_eq!(service.on_event(&mut shm, &mut engine), UrbOutcome::Held);
+    match service.on_event(&mut shm, &mut engine) {
+        UrbOutcome::Reply(reply) => {
+            assert_eq!(reply.ticket, 0x61);
+            assert_eq!(decode_status_reply(&reply.bytes[..reply.len]), Ok(()));
+        }
+        other => panic!("expected the operation answered, got {other:?}"),
+    }
+    assert_eq!(engine.operation_calls, 3);
+    assert_eq!(service.held_transfer(), None);
 }
 
 #[test]
@@ -480,59 +560,10 @@ fn attach_transport_grants_adds_the_endpoint_and_shared_resources() {
 }
 
 #[test]
-fn a_held_submit_runs_no_synchronous_transfer_the_shared_ring_could_lose() {
-    // The contract the event loop's skip rests on. A submit that runs a
-    // *synchronous* engine wait parks on the shared controller interrupt line
-    // and consumes whatever else that edge carried, so the loop must re-drive
-    // every other transport afterwards to release those stashed completions. A
-    // held interrupt-IN runs no such wait — its report simply was not buffered
-    // yet — so there is nothing stashed and the re-drive is pure waste on the
-    // hot path. `Held` versus `Reply` is exactly that distinction.
-    let mut engine = MockEngine::new();
-    let mut shm = vec![0u8; 8];
-    let mut service = UrbService::new();
-
-    // Nothing buffered: held, and only the non-blocking interrupt-IN probe ran.
-    let outcome = service.on_submit(
-        Reach::Served,
-        0x21,
-        0,
-        &interrupt_urb(1, 8),
-        &mut shm,
-        &mut engine,
-    );
-    assert_eq!(outcome, UrbOutcome::Held);
-    assert_eq!(
-        engine.control_calls, 0,
-        "a held URB issues no synchronous transfer"
-    );
-
-    // A control transfer, by contrast, completes inside the submit: it ran a
-    // synchronous wait, so the loop does re-drive the other transports.
-    let mut engine = MockEngine::new();
-    engine.control_response = vec![0xAA; 4];
-    let mut service = UrbService::new();
-    let outcome = service.on_submit(
-        Reach::Served,
-        0x22,
-        0,
-        &control_in_urb(4),
-        &mut shm,
-        &mut engine,
-    );
-    assert!(matches!(outcome, UrbOutcome::Reply(_)));
-    assert_eq!(
-        engine.control_calls, 1,
-        "a replied control URB did run a synchronous transfer"
-    );
-}
-
-#[test]
 fn a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_controller() {
-    // After a failed reset the device table is not trusted, so even a
-    // buffered report is not read. The poll is held through the next failed
-    // attempt too, and answered reissuably once an attempt brings its device
-    // back.
+    // While the controller recovers the device table is not trusted, so even
+    // a buffered report is not read. The poll is held through the recovery,
+    // and driven once the controller is back.
     let mut engine = MockEngine::new();
     engine.reports = vec![vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]];
     let mut shm = vec![0u8; 8];
@@ -564,39 +595,35 @@ fn a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_contro
         Err(Errno::AlreadyExists),
         "the one held poll is never displaced"
     );
+    assert_eq!(engine.interrupt_calls, 0);
     assert_eq!(
-        service.reissue_held_transfer(),
+        service.reissue_after_reset(),
         UrbOutcome::Held,
-        "a failed attempt keeps the poll waiting rather than having it resubmitted"
+        "a poll the controller never saw is driven, not resubmitted"
     );
-    assert!(service.is_busy());
-
-    match service.abort_outstanding(Errno::WouldBlock) {
+    match service.on_event(&mut shm, &mut engine) {
         UrbOutcome::Reply(reply) => {
             assert_eq!(reply.ticket, 0x41);
-            assert_eq!(
-                decode_completion(&reply.bytes[..reply.len]),
-                Err(Errno::WouldBlock)
-            );
+            assert_eq!(decode_completion(&reply.bytes[..reply.len]), Ok(8));
         }
         other => panic!("expected the held poll answered, got {other:?}"),
     }
     assert!(!service.is_busy());
-    assert_eq!(engine.interrupt_calls, 0);
 }
 
 #[test]
-fn a_transfer_during_recovery_is_answered_reissuably_without_touching_the_controller() {
-    let mut engine = MockEngine::new();
-    engine.control_response = vec![0xAA; 8];
-    engine.bulk_in_data = vec![vec![0xC3; 16]];
-    let mut shm = vec![0u8; 16];
-    let mut service = UrbService::new();
-
+fn a_transfer_during_recovery_is_held_without_touching_the_controller() {
+    // Answered at once, its class driver would submit again at once for as
+    // long as the recovery lasts.
     for (ticket, request) in [
         (0x51, bulk_in_urb(BULK_IN_ENDPOINT, 16)),
         (0x52, control_in_urb(8)),
     ] {
+        let mut engine = MockEngine::new();
+        engine.control_response = vec![0xAA; 8];
+        engine.bulk_in_data = vec![vec![0xC3; 16]];
+        let mut shm = vec![0u8; 16];
+        let mut service = UrbService::new();
         let outcome = service.on_submit(
             Reach::Recovering,
             ticket,
@@ -605,18 +632,22 @@ fn a_transfer_during_recovery_is_answered_reissuably_without_touching_the_contro
             &mut shm,
             &mut engine,
         );
-        assert_eq!(reply_result(&outcome), Err(Errno::WouldBlock));
-        assert!(!service.is_busy(), "a reissuable answer holds nothing");
+        assert_eq!(outcome, UrbOutcome::Held);
+        assert_eq!(engine.control_calls, 0);
+        assert_eq!(engine.bulk_in_armed, None, "no bulk TD was armed");
+        assert_eq!(service.reissue_after_reset(), UrbOutcome::Held);
+        assert_eq!(service.on_event(&mut shm, &mut engine), UrbOutcome::Held);
+        assert!(matches!(
+            service.on_event(&mut shm, &mut engine),
+            UrbOutcome::Reply(reply) if reply.ticket == ticket
+        ));
     }
-    assert_eq!(engine.control_calls, 0);
-    assert_eq!(engine.bulk_in_armed, None, "no bulk TD was armed");
 }
 
 #[test]
-fn a_failed_reset_answers_a_held_transfer_reissuably() {
+fn a_reset_answers_a_transfer_it_discarded_reissuably() {
     // A bulk TD armed before the controller faulted is gone with the reset,
-    // and nothing can run until an attempt succeeds, so its class driver is
-    // told to reissue rather than left blocked through the grace window.
+    // so its class driver is told to reissue it once the controller is back.
     let mut engine = MockEngine::new();
     let mut shm = vec![0u8; 16];
     let mut service = UrbService::new();
@@ -632,7 +663,7 @@ fn a_failed_reset_answers_a_held_transfer_reissuably() {
         UrbOutcome::Held
     );
 
-    match service.reissue_held_transfer() {
+    match service.reissue_after_reset() {
         UrbOutcome::Reply(reply) => {
             assert_eq!(reply.ticket, 0x71);
             assert_eq!(
@@ -643,7 +674,7 @@ fn a_failed_reset_answers_a_held_transfer_reissuably() {
         other => panic!("expected the held transfer answered, got {other:?}"),
     }
     assert!(!service.is_busy());
-    assert_eq!(service.reissue_held_transfer(), UrbOutcome::Idle);
+    assert_eq!(service.reissue_after_reset(), UrbOutcome::Idle);
 }
 
 #[test]
@@ -666,4 +697,13 @@ fn an_operation_answers_with_its_status_or_its_grant() {
     };
     let reply = UrbReply::grant(9, &grant);
     assert_eq!(IsoGrant::decode(&reply.bytes[..reply.len]), Ok(grant));
+}
+
+#[test]
+fn a_stall_is_logged_as_the_devices_answer_and_a_bus_failure_as_a_warning() {
+    use tairix_log::Level;
+    assert_eq!(urb_failure_level(Errno::EndpointStalled), Level::Info);
+    for errno in [Errno::TimedOut, Errno::DeviceFault, Errno::PermissionDenied] {
+        assert_eq!(urb_failure_level(errno), Level::Warn, "{errno:?}");
+    }
 }

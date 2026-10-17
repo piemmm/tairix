@@ -20,7 +20,7 @@
 
 use alloc::vec;
 
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkTransport};
 use tairix_raster::Color;
 
 use crate::symbol;
@@ -173,7 +173,8 @@ pub enum IconKind {
     DiskNvme,
     /// An SD card; shares the disk glyph.
     DiskSdCard,
-    /// A disk in an external enclosure; shares the disk glyph.
+    /// An external USB drive that reported no rotation: the enclosure
+    /// picture claims no medium; shares the disk glyph.
     DiskExternal,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
@@ -794,18 +795,24 @@ impl IconKind {
 
 /// The icon that represents a mounted volume's storage medium.
 ///
-/// An unknown medium and a paravirtual device both resolve to the generic
-/// drive icon rather than a guessed one.
+/// A picture claims only what the device reported: a medium reported
+/// rotating is the hard disk on an ATA bus or behind a USB bridge alike, a
+/// USB unit is a stick once it reported a non-rotating medium, and one that
+/// reported neither is the external drive, which shows no medium. An
+/// undeclared or paravirtual device is the generic drive.
 #[must_use]
 pub const fn disk_icon(medium: Option<BlkMedium>) -> IconKind {
-    match medium {
-        Some(BlkMedium::HardDisk) => IconKind::DiskHard,
-        Some(BlkMedium::SolidState) => IconKind::DiskSolidState,
-        Some(BlkMedium::Nvme) => IconKind::DiskNvme,
-        Some(BlkMedium::UsbFlash) => IconKind::DiskUsb,
-        Some(BlkMedium::UsbDisk) => IconKind::DiskExternal,
-        Some(BlkMedium::SdCard) => IconKind::DiskSdCard,
-        Some(BlkMedium::Virtual) | None => IconKind::Disk,
+    let Some(medium) = medium else {
+        return IconKind::Disk;
+    };
+    match (medium.transport, medium.rotation) {
+        (BlkTransport::Virtual, _) | (BlkTransport::Ata, BlkRotation::Unknown) => IconKind::Disk,
+        (BlkTransport::Nvme, _) => IconKind::DiskNvme,
+        (BlkTransport::Sd, _) => IconKind::DiskSdCard,
+        (BlkTransport::Ata | BlkTransport::Usb, BlkRotation::Rotating { .. }) => IconKind::DiskHard,
+        (BlkTransport::Ata, BlkRotation::NonRotating(_)) => IconKind::DiskSolidState,
+        (BlkTransport::Usb, BlkRotation::NonRotating(_)) => IconKind::DiskUsb,
+        (BlkTransport::Usb, BlkRotation::Unknown) => IconKind::DiskExternal,
     }
 }
 

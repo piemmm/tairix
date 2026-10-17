@@ -4,7 +4,7 @@ Shared resource-reference parser for TAIRiX (`lib/resref`).
 
 TAIRiX has no `/dev`, `/proc`, or `/sys`. Non-filesystem resources — the random
 source, a disk, a serial port, a live metric — are named by typed *resource
-references* such as `sys:random`, `disk:backup@7K2M`, or
+references* such as `sys:random`, `disk:backup@7k2m`, or
 `stats:net/wan/rx.pps?window=1s`. Several components need to turn such a string
 into a structured, validated form: the shell first (redirection targets, command
 arguments, completion, typed shell values), and the resolver services and ABI
@@ -47,9 +47,11 @@ op           = "=" | "!=" | "<" | "<=" | ">" | ">=" | "~"
   (`a-z 0-9 - _`) starting with a letter.
 - Selector parts are case-sensitive (`a-z A-Z 0-9 - _ .`), because full identity
   selectors carry mixed-case tokens (`disk:id/serial/S6XYZ123456789`).
+- A guard fingerprint is ASCII letters and digits, which a dash may group for
+  reading (`@7k2m-q8d3`) but never begins, ends, or doubles.
 - The reserved delimiters `:`, `/`, `@`, `::`, `?`, and `,` never appear inside
   the part they delimit, so a rendered reference always re-parses.
-- `@guard` may stand alone (`disk:@7K2M`, the short-fingerprint shorthand) and a
+- `@guard` may stand alone (`disk:@7k2m`, the short-fingerprint shorthand) and a
   `?params` query may stand alone (`disk:?removable=true`). A reference with an
   empty selector and no guard or query (`disk:`) is rejected.
 

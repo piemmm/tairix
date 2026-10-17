@@ -1327,9 +1327,13 @@ fn exercise_blkio(bytes: &[u8]) {
     // closed to `Fatal`/`DeviceFault` on a truncated or unknown-status frame
     // rather than reading garbage as a valid completion (`plans/FIX-IO.md`
     // IO1). The returned outcome is always self-consistent: a data-valid
-    // status carries the geometry, every other status carries an error.
+    // status carries the geometry, every other status carries an error, and
+    // only a reissuable one can hurry its reissue.
     let outcome = tairix_abi::blkio::decode_outcome(bytes);
     assert_eq!(outcome.status.data_valid(), outcome.data().is_ok());
+    assert!(
+        outcome.status.is_retryable() || outcome.reissue == tairix_abi::blkio::BlkReissue::Paced
+    );
 }
 
 /// The seat's input records: an accepted pointer record, key record or touch
@@ -2057,8 +2061,9 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
 }
 
 /// The seeds of the requests that hang a surface from one of the caller's
-/// windows: a popup, and a tool window carried by a held press.
-fn window_request_transient_seeds() -> [WindowRequest; 2] {
+/// windows: a popup, a tool window carried by a held press, and an
+/// owner-modal dialog.
+fn window_request_transient_seeds() -> [WindowRequest; 3] {
     [
         WindowRequest::CreatePopup {
             parent_window_id: 3,
@@ -2085,6 +2090,18 @@ fn window_request_transient_seeds() -> [WindowRequest; 2] {
             offset_y: 24,
             carry: Some(40),
             title: WindowTitle::new("Tools").expect("a valid title"),
+        },
+        WindowRequest::CreateDialog {
+            owner_window_id: 3,
+            shm_handle: 7,
+            event_endpoint: 0x900d,
+            frame_count: 1,
+            width_px: 120,
+            height_px: 80,
+            stride_bytes: 480,
+            format: DisplayFormat::Bgra8888,
+            modality: tairix_abi::window_ipc::DialogModality::OwnerModal,
+            title: WindowTitle::new("Scale").expect("a valid title"),
         },
     ]
 }

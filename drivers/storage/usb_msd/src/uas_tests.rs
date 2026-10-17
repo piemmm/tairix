@@ -102,7 +102,7 @@ impl UasPipes for ScriptedPipes {
         Ok(buf.len())
     }
 
-    fn begin_exchange(&mut self) {
+    fn begin_exchange(&mut self, _exchange_ns: u64) {
         self.exchanges += 1;
     }
 
@@ -170,7 +170,7 @@ fn a_no_data_command_finishes_on_the_sense_iu_alone() {
     let mut dev = ScriptedPipes::new();
     dev.status.push_back(good());
     let mut scsi = scsi(dev);
-    assert_eq!(scsi.test_unit_ready(0), Ok(true));
+    assert_eq!(scsi.test_unit_ready(0), Ok(crate::ready::Readiness::Ready));
 }
 
 #[test]
@@ -195,7 +195,11 @@ fn check_condition_delivers_autosense_in_descriptor_format() {
     dev.queue_sense(0x02, &sense);
     let mut scsi = scsi(dev);
     let mut buf = [0u8; 512];
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::DeviceOffline));
+    assert_eq!(
+        scsi.take_readiness(0),
+        Some(crate::ready::Readiness::NoMedium)
+    );
     assert_eq!(pipes(&scsi).commands.len(), 1);
 }
 
@@ -238,7 +242,13 @@ fn a_data_pipe_that_fails_on_the_wire_clears_all_four_pipes() {
     let mut buf = [0u8; 512];
     assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
     assert_eq!(pipes(&scsi).clears, 1);
-    assert_eq!(pipes(&scsi).exchanges, 1);
+    // The read, then the one command the clearing owes: whether the unit is
+    // ready. The read is never sent again.
+    let commands = &pipes(&scsi).commands;
+    assert_eq!(pipes(&scsi).exchanges, 2);
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0][16], 0x28, "READ(10)");
+    assert_eq!(&commands[1][16..22], &[0u8; 6], "TEST UNIT READY");
 }
 
 #[test]
@@ -246,7 +256,7 @@ fn a_malformed_request_is_refused_before_any_exchange_or_reset() {
     let mut scsi = scsi(ScriptedPipes::new());
     let mut uas = Uas::new(ScriptedPipes::new());
     assert_eq!(
-        uas.execute(0, &[], crate::scsi::DataPhase::None),
+        uas.execute(0, &[], crate::scsi::DataPhase::None, 5_000_000_000),
         Err(Errno::OutOfRange)
     );
     assert_eq!((uas.pipes().exchanges, uas.pipes().clears), (0, 0));
@@ -330,8 +340,8 @@ fn tags_advance_per_command_and_skip_zero() {
     dev.status.push_back(good());
     dev.status.push_back(good());
     let mut scsi = scsi(dev);
-    assert_eq!(scsi.test_unit_ready(0), Ok(true));
-    assert_eq!(scsi.test_unit_ready(0), Ok(true));
+    assert_eq!(scsi.test_unit_ready(0), Ok(crate::ready::Readiness::Ready));
+    assert_eq!(scsi.test_unit_ready(0), Ok(crate::ready::Readiness::Ready));
     let commands = &pipes(&scsi).commands;
     let tag0 = u16::from_be_bytes([commands[0][2], commands[0][3]]);
     let tag1 = u16::from_be_bytes([commands[1][2], commands[1][3]]);

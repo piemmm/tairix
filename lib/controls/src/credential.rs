@@ -11,8 +11,8 @@
 //! The sheet owns none of that context. It knows nothing of a compositor, a
 //! window, an account database, or IPC: an owner gives it events and a
 //! rectangle, takes back a painted surface and a [`CredentialAction`], and
-//! performs the exchange itself. Whether it is drawn in a window of its own
-//! or over a client's content is the owner's business.
+//! performs the exchange itself. It is always drawn across a window of its
+//! own: the session's prompt, or an application's dialog window.
 //!
 //! # The secret
 //!
@@ -191,24 +191,6 @@ impl CredentialSheet {
         );
         self.secret.clear();
         self.set_focus(Focus::Secret);
-    }
-
-    /// The sheet's rectangle centred in `within`, at its own logical size.
-    ///
-    /// An owner drawing the sheet over its own content places it here; one
-    /// that gives the sheet a window of its own uses the window's whole
-    /// extent instead.
-    #[must_use]
-    pub fn centred_in(within: Rect, scale: Scale) -> Rect {
-        let width = scale.scale_length(CREDENTIAL_WIDTH).min(within.width);
-        let height = scale.scale_length(CREDENTIAL_HEIGHT).min(within.height);
-        let left = within
-            .left()
-            .saturating_add(to_i32(within.width.saturating_sub(width) / 2));
-        let top = within
-            .top()
-            .saturating_add(to_i32(within.height.saturating_sub(height) / 2));
-        Rect::new(left, top, width, height)
     }
 
     /// The physical rectangle of field `index` (`0` account, `1` password)

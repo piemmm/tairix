@@ -313,11 +313,8 @@ mod program {
             if self.mode().is_none() {
                 return;
             }
-            if !self.window.resize(mode) {
-                app::report(
-                    APP_NAME,
-                    "the desktop refused a resize; the window keeps its size",
-                );
+            if self.window.resize(mode) == app::Fitted::Kept {
+                app::report(APP_NAME, app::SIZE_KEPT);
             }
             self.adopt(game, scale, damage);
         }
@@ -618,6 +615,7 @@ mod program {
                 // authenticated session, which is refused rather than guessed
                 // at. Either way the tick above still stands.
                 Ok(None) | Err(EventError::Undecodable(_)) => {}
+                Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
                 Err(EventError::Mailbox(_)) => {
                     return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }

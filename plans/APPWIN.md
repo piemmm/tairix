@@ -82,14 +82,15 @@ exception.
   modal over its owner when asked. An application painting a modal panel,
   veil or sheet over its own window's content is forbidden. Such a panel is
   clipped to the window, cannot be moved or raised, and makes every
-  application re-implement modality. The surfaces that still do it, and the
-  shared helpers that let them, are being removed (`plans/TEMPORARY.md`
-  TMP-7).
+  application re-implement modality. None remains: TextEdit's Go to line,
+  Paint's forms, Settings' credential question and each file operation's
+  progress are dialog windows (`docs/src/desktop/wm.md`), and the shared
+  controls offer no way to place a dialog over an application's own content.
 - **Alerts and dialog windows size to their content.** The width is set by a
   readable measure and the button row; the height is exactly what the
   content needs, capped at the screen's, past which the text scrolls. No
   fixed aspect ratio applies, and nothing within the protocol's bounds is
-  elided (`plans/TEMPORARY.md` TMP-8).
+  elided (`docs/src/desktop/wm.md`).
 - **Not in this plan:** the input-device→seat topology policy
   (`plans/PI.md` P11 / the seat manager), and the GUI widget vocabulary
   (`plans/GUI-CONTROLS-DESIGN.md`).
@@ -558,9 +559,12 @@ application draws the chrome that names who is speaking.
   so every alert can be declined. A spec that breaks a rule is refused whole,
   and a refused request mints no id. The request names the caller's own event
   mailbox or is refused.
-- **The window**: laid out as §0 requires, sized to what it says. The 4:3
-  shape the renderer still forces, and the headline it still cuts at six lines
-  (`plans/OPEN-DEFECTS.md` D1129), are removed by `plans/TEMPORARY.md` TMP-8.
+- **The window**: laid out as §0 requires, sized to what it says: as wide as
+  its text needs up to a readable measure (`MEASURE_EMS` ems of the body
+  face), never narrower than `ALERT_MIN_WIDTH` or its button row, and exactly
+  as tall as its content, each within the screen's share. Past that share the
+  whole text, headline included, scrolls a line at a time and the buttons stay
+  at the foot; nothing is elided. A density change lays the window out again.
   RISC OS's
   error box is the model: the severity mark on the left, the text beside it,
   the buttons along the foot at the right, wrapping to a row above when they
@@ -604,8 +608,10 @@ application draws the chrome that names who is speaking.
 - Coverage: the `lib/abi` round trip and fail-closed decode; the `lib/window`
   loopback suite (answered exactly once, an owner that is the caller's own
   top-level window, an ownerless alert, the per-application bound, a refusal
-  that spends no id, withdrawal); `lib/controls`' `Alert` (every window 4:3,
-  nothing cut, scrolling past the screen, the button row, focus and keys); and
+  that spends no id, withdrawal); `lib/controls`' `Alert` (the content-sized extent, the
+  measure and the minimum, a headline wrapped whole, scrolling past the
+  screen's share with the buttons kept, a density change, the button row,
+  focus and keys); and
   the session suite (title, placement, owner modality, arming, earned focus,
   withdrawal, a density change, desktop notices).
 

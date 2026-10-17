@@ -126,17 +126,27 @@
 #define TAIRIX_MOUNT_RECOVERY_CONFLICT ((uint8_t)3u)
 #define TAIRIX_MOUNT_DEGRADED ((uint8_t)4u)
 #define TAIRIX_MOUNT_RECOVERING ((uint8_t)5u)
-/* Storage medium of the block device backing a mount (uint8_t).
-   UNKNOWN covers both a mount with no declared medium and a medium
-   this ABI does not define: the record never guesses one. */
-#define TAIRIX_MOUNT_MEDIUM_UNKNOWN ((uint8_t)0u)
-#define TAIRIX_MOUNT_MEDIUM_HARD_DISK ((uint8_t)1u)
-#define TAIRIX_MOUNT_MEDIUM_SOLID_STATE ((uint8_t)2u)
-#define TAIRIX_MOUNT_MEDIUM_NVME ((uint8_t)3u)
-#define TAIRIX_MOUNT_MEDIUM_USB_FLASH ((uint8_t)4u)
-#define TAIRIX_MOUNT_MEDIUM_USB_DISK ((uint8_t)5u)
-#define TAIRIX_MOUNT_MEDIUM_SD_CARD ((uint8_t)6u)
-#define TAIRIX_MOUNT_MEDIUM_VIRTUAL ((uint8_t)7u)
+/* The bytes of a tairix_blk_medium_t. A fact nothing established is
+   TAIRIX_BLK_FACT_UNKNOWN with TAIRIX_BLK_EVIDENCE_NONE; a device that
+   declared nothing has TAIRIX_BLK_TRANSPORT_UNDECLARED. */
+#define TAIRIX_BLK_TRANSPORT_ATA ((uint8_t)0u)
+#define TAIRIX_BLK_TRANSPORT_NVME ((uint8_t)1u)
+#define TAIRIX_BLK_TRANSPORT_USB ((uint8_t)2u)
+#define TAIRIX_BLK_TRANSPORT_SD ((uint8_t)3u)
+#define TAIRIX_BLK_TRANSPORT_VIRTUAL ((uint8_t)4u)
+#define TAIRIX_BLK_TRANSPORT_UNDECLARED ((uint8_t)255u)
+#define TAIRIX_BLK_FACT_UNKNOWN ((uint8_t)0u)
+#define TAIRIX_BLK_ROTATION_NON_ROTATING ((uint8_t)1u)
+#define TAIRIX_BLK_ROTATION_ROTATING ((uint8_t)2u)
+#define TAIRIX_BLK_REMOVABILITY_FIXED ((uint8_t)1u)
+#define TAIRIX_BLK_REMOVABILITY_REMOVABLE ((uint8_t)2u)
+#define TAIRIX_BLK_EVIDENCE_NONE ((uint8_t)0u)
+#define TAIRIX_BLK_ROTATION_EVIDENCE_TRANSPORT ((uint8_t)1u)
+#define TAIRIX_BLK_ROTATION_EVIDENCE_ROTATION_RATE_VPD ((uint8_t)2u)
+#define TAIRIX_BLK_ROTATION_EVIDENCE_ATA_IDENTIFY ((uint8_t)3u)
+#define TAIRIX_BLK_REMOVABILITY_EVIDENCE_TRANSPORT ((uint8_t)1u)
+#define TAIRIX_BLK_REMOVABILITY_EVIDENCE_INQUIRY ((uint8_t)2u)
+#define TAIRIX_BLK_REMOVABILITY_EVIDENCE_MEDIUM_ABSENT ((uint8_t)3u)
 #define TAIRIX_MAX_USERNAME_LEN 32u
 #define TAIRIX_MAX_GROUPNAME_LEN 32u
 #define TAIRIX_MAX_DISPLAY_NAME_LEN 64u
@@ -289,12 +299,27 @@ typedef struct tairix_system_identity {
     uint8_t hostname[TAIRIX_HOSTNAME_MAX];
 } tairix_system_identity_t;
 
+/* What a block device is: its transport (TAIRIX_BLK_TRANSPORT_*), then
+* whether its medium rotates and whether it can leave the unit
+* (TAIRIX_BLK_ROTATION_*, TAIRIX_BLK_REMOVABILITY_*), each with the
+* evidence that established it. `rpm` is the nominal rotation rate of a
+* rotating medium and zero otherwise. */
+typedef struct tairix_blk_medium {
+    uint8_t transport;
+    uint8_t rotation;
+    uint8_t rotation_evidence;
+    uint8_t removability;
+    uint8_t removability_evidence;
+    uint8_t reserved;
+    uint16_t rpm;
+} tairix_blk_medium_t;
+
 /* One mount-table entry. `flags` is a MountFlags bitmap (AGENTS.md sec.5.3);
 * its flag bits are defined by the filesystem driver ABI. `availability` is
 * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).
-* `medium` is the storage medium of the block device backing the mount, a
-* TAIRIX_MOUNT_MEDIUM_* value; TAIRIX_MOUNT_MEDIUM_UNKNOWN means no block
-* device backs it or its medium was not recognised -- never a guess.
+* `medium` is the storage medium of the block device backing the mount;
+* its transport is TAIRIX_BLK_TRANSPORT_UNDECLARED when no block device
+* backs it or its medium was not recognised -- never a guess.
 * `usage` is the backing volume's space accounting (all-zero when none is
 * known). `volume_id` is the volume's stable published identity (all-zero
 * when the mount has none), the identity a volume_detach request names.
@@ -306,8 +331,7 @@ typedef struct tairix_mount_record {
     uint8_t target_len;
     uint8_t fstype_len;
     uint8_t availability;
-    uint8_t medium;
-    uint8_t reserved0[7];
+    tairix_blk_medium_t medium;
     tairix_volume_stats_t usage;
     uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];
     uint8_t source[TAIRIX_MOUNT_SOURCE_MAX];

@@ -157,14 +157,19 @@ callee fails closed rather than parking forever. `BlkCompletion` leads with a
 `MediumError`(39)/`DeviceOffline`(40); `BlkDeviceClass::budget()` is the single
 per-class deadline/retry/grace/queue-depth policy, and a consumer *discovers*
 which class to apply rather than assuming one: the driver that binds the
-hardware declares what the device *is* (`Block::medium` → `BlkMedium`: a USB
-LUN a flash drive or a disk by its INQUIRY removable-medium bit, the SD host an
-SD card, virtio-blk a virtual disk; none declared stays unknown), the class is
-derived from that medium (`BlockClass::device_class`, served as the bounded
-unclassified envelope when unknown) so the two cannot disagree, the medium
-travels in the geometry completion (`BlkCompletion::medium`, an unrecognised
-word decoding to unknown), and both consumers adopt it at connect for every
-later request. The class is patience policy, not authority, so an untrusted
+hardware declares what the device *is* (`Block::medium` → `BlkMedium`: its
+transport and, as separate facts each with its evidence, whether the medium
+rotates and whether it can leave the unit — a USB LUN learns its rotation from
+the Block Device Characteristics page or IDENTIFY, never from INQUIRY's RMB
+bit; none declared stays unknown), the class is derived from that medium
+(`BlockClass::device_class`: an unknown rotation is served as rotational, an
+undeclared device the bounded paravirtual envelope) so the two cannot
+disagree, the medium travels in the geometry completion
+(`BlkCompletion::medium`, a malformed record decoding to undeclared), and both
+consumers adopt it at connect for every later request. The class's budget
+derives the deadline, the grace window, and the reissue pacing from per-command
+budgets (`CommandBudget`) rather than choosing them apart
+(`docs/src/drivers/block.md`). The class is patience policy, not authority, so an untrusted
 driver cannot buy itself more than the widest class budget. Every wrapping
 layer forwards its inner device's medium (partition window, block cache,
 `SharedBlock`, the retained-writes journal, both remote clients) and a
@@ -304,12 +309,16 @@ Landed:
   `TransientError`/`Reset`/`Timeout`) a bounded number of times before failing
   closed, so a device that is merely recovering is not punished with a spurious
   I/O error. The cap is the shared per-class policy `IoBudget::max_retries`,
-  read through one definition `IoBudget::should_reissue(status, attempts)` both
+  read through one decision `IoBudget::reissue_wait_ns(outcome, attempts)` both
   consumers call (§2.2), so they cannot drift apart; a device that keeps
   answering reissuably still fails closed deterministically at the budget (no
-  retry-until-it-works, §2.1). Each reissue is a fresh post → park-on-reply
-  exchange (event-driven, never a spin, §2.23); the serving driver owns the
-  grace window and its timers. A hard per-request deadline miss and a torn-down
+  retry-until-it-works, §2.1). A reissue goes at once when the serving driver
+  vouches that its recovery has worked (`BlkReissue::Now`, carried in the
+  completion and asked of the device through `Block::reissue`); any other
+  first parks the consumer out the class's pacing (`IoBudget::reissue_pacing_ns`,
+  the grace window spread over the reissues). Either way it is then a fresh
+  post → park-on-reply exchange (event-driven, never a spin, §2.23); the
+  serving driver owns the grace window and its timers. A hard per-request deadline miss and a torn-down
   endpoint fail closed with no reissue; a non-retryable verdict (`MediumError`/
   `Offline`/`Removed`) surfaces on the first attempt.
 - Object-level isolation regression test (volmgr host doubles): a faulted
@@ -324,14 +333,17 @@ Landed:
   consumers of a single device shared its endpoint but each opened a private
   `BlkClient` over the *same* shared data window, so two partitions of one
   disk (and the detach-time device-cache flush) could stage transfers in that
-  one buffer concurrently and read back each other's bytes. The kernel now
-  connects a device **once per block-service endpoint**
-  (`RuntimeVolumeService::shared_device`) and hands every volume an owned
-  window onto that one client behind `SharedBlock`'s sleeping lock, so whole
-  device operations serialise; the client (and its window hold) is released
-  when the disk's last volume goes, and a later attach connects afresh rather
-  than resurrecting a retired entry — so a torn-down endpoint's client can
-  never be handed to a device that re-uses its id. `SharedBlock` gained the
+  one buffer concurrently and read back each other's bytes. The kernel
+  connects a device **once per block-service endpoint and window**
+  (`RuntimeVolumeService::connected`, in the device's `DeviceSlot`) and hands
+  every volume an owned window onto that one client behind `SharedBlock`'s
+  sleeping lock, so whole device operations serialise. Each attach, recovery
+  and detach holds only its own device's slot lock, so a disk that stops
+  answering holds up no other disk's volumes (invariant 2). The client (and
+  its window hold) is released once the disk's last volume has gone and no
+  operation pins the slot, and window ids are never reused, so a torn-down
+  endpoint's client can never be handed to a device that re-uses its id.
+  `SharedBlock` gained the
   owned (`Arc`-backed) window flavour a long-lived mount needs, sharing the
   one `Block` implementation with the borrowing flavour so the two cannot
   diverge in what they serialise. The device's reported-health overlay and
@@ -426,7 +438,7 @@ Validation, the fail-closed refusals, the success paths, and the grace window
 thus cannot diverge between drivers, and the engine is pure/alloc-free and
 proven host-side over fault-injecting `Block` doubles in `lib/abi`. The first
 consumer is `usb_msd`: its wait-set serve loop hands each per-LUN request to the
-engine with that LUN's `BlkHealth` (the `Removable` class) driven by
+engine with that LUN's `BlkHealth` (its medium's class) driven by
 `clock_get`; only the usb_msd-specific block-service endpoint-id derivation
 (`serve::blk_block_for`) lives in the driver crate. The state
 machine is also complete for the *quiet-device* case (§27): `BlkHealth::

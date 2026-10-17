@@ -1,78 +1,45 @@
-//! Host tests for the running long operation's modal input routing.
-//!
-//! The panel is drawn in what the places rail leaves, so the tests locate the
-//! drawn Cancel button through the renderer's own hit-test — never a second
-//! copy of its geometry — and press it exactly where the user would.
+//! Host tests for an operation's progress window: what its events ask of the
+//! operation, located through the renderer's own hit-test — never a second
+//! copy of its geometry — and pressed exactly where the user would.
 
-use alloc::string::{String, ToString};
-use alloc::vec;
+use alloc::string::String;
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
-use tairix_browse::render::{content_area, progress_cancel_at, progress_dialog_rect, sidebar_view};
-use tairix_browse::{Places, ToolbarBand, Volume};
+use tairix_browse::render::{progress_cancel_at, progress_window_extent};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{
     change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
-    mode_flip_allowed, move_refusal, operation_control, read_refusal, remove_refusal,
-    trash_read_refusal, OperationControl,
+    item_refusal, mode_flip_allowed, move_refusal, progress_control, read_refusal, remove_refusal,
+    trash_read_refusal, ProgressControl,
 };
 use tairix_abi::Errno;
 
-/// The window the operation's panel is laid out in for these tests.
-const WINDOW: Rect = Rect::new(0, 0, 480, 480);
-
-/// The chrome these tests measure against: the command band shown.
-const BAND: ToolbarBand = ToolbarBand::Shown;
-
-/// The window this app is given, addressed by every synthesised event.
+/// The progress window this app is given, addressed by every synthesised
+/// event.
 const WINDOW_ID: u64 = 7;
 
-/// The rail the tests draw beside the panel: the user's places plus one
-/// mounted volume.
-fn places() -> Places {
-    let home: Vec<String> = vec!["Users".to_string(), "ann".to_string()];
-    Places::new(
-        &home,
-        &[Volume {
-            label: "Backup".to_string(),
-            target: "/Storage/Backup".to_string(),
-            medium: Some(BlkMedium::HardDisk),
-        }],
-    )
+/// The client of a progress window at its own extent.
+fn client() -> Rect {
+    let (width, height) = progress_window_extent(Scale::ONE, &Theme::dark());
+    Rect::new(0, 0, width, height)
 }
 
-/// The rail's drawn width in this test's window.
-fn rail_width(places: &Places) -> u32 {
-    sidebar_view(WINDOW, Scale::ONE, &Theme::dark(), Some(places), BAND)
-        .expect("the rail has rows")
-        .width()
-}
-
-/// The trailing-bottom pixel of the Cancel button the progress panel draws
-/// when centred in `area`.
-///
-/// Found by asking the renderer's own hit-test where it put the button, so the
-/// test carries no copy of the panel's geometry. The trailing corner is the
-/// telling pixel: a panel centred in a *narrower* area sits further right, so
-/// its trailing edge is exactly what a hit-test against the whole window
-/// misses.
-fn cancel_corner(area: Rect, theme: &Theme) -> Point {
-    let panel = progress_dialog_rect(area, Scale::ONE, theme);
-    let right = panel.left() + i32::try_from(panel.width).unwrap_or(0);
-    let bottom = panel.top() + i32::try_from(panel.height).unwrap_or(0);
-    for y in (panel.top()..bottom).rev() {
-        for x in (panel.left()..right).rev() {
+/// Where in `client` the Cancel button is drawn, asked of the renderer's own
+/// hit-test.
+fn cancel_point(client: Rect, theme: &Theme) -> Point {
+    for y in 0..i32::try_from(client.height).unwrap_or(0) {
+        for x in 0..i32::try_from(client.width).unwrap_or(0) {
             let point = Point::new(x, y);
-            if progress_cancel_at(area, Scale::ONE, theme, point) {
+            if progress_cancel_at(client, Scale::ONE, theme, point) {
                 return point;
             }
         }
     }
-    panic!("the progress panel draws a Cancel button in a 480px window")
+    panic!("a progress window draws a Cancel button")
 }
 
 /// A primary press at `point`.
@@ -108,107 +75,57 @@ fn named(code: NamedKeyCode) -> WindowEvent {
     }
 }
 
-/// Route `event` to the running operation with this test's window and rail.
-fn route(places: &Places, event: &WindowEvent) -> OperationControl {
-    operation_control(
-        Some(places),
-        Scale::ONE,
-        &Theme::dark(),
-        WINDOW,
-        BAND,
-        event,
-    )
+fn route(client: Rect, event: &WindowEvent) -> ProgressControl {
+    progress_control(client, Scale::ONE, &Theme::dark(), event)
 }
 
 #[test]
 fn a_press_on_the_drawn_cancel_button_cancels_the_operation() {
-    let places = places();
-    let theme = Theme::dark();
-    let panel_area = content_area(WINDOW, Scale::ONE, &theme, Some(&places), BAND);
-    let drawn = cancel_corner(panel_area, &theme);
-
-    assert_eq!(route(&places, &press(drawn)), OperationControl::Cancel);
-    // The button the whole window would place is further left, so this very
-    // press falls outside it: resolving the press against the window rather
-    // than the area the panel is painted in swallows the user's cancel.
-    assert!(!progress_cancel_at(WINDOW, Scale::ONE, &theme, drawn));
+    let client = client();
+    let drawn = cancel_point(client, &Theme::dark());
+    assert_eq!(route(client, &press(drawn)), ProgressControl::Cancel);
     // A motion over the button is not a press, and changes nothing.
-    assert_eq!(route(&places, &motion(drawn)), OperationControl::Ignore);
+    assert_eq!(route(client, &motion(drawn)), ProgressControl::Ignore);
+    assert_eq!(
+        route(client, &press(Point::new(1, 1))),
+        ProgressControl::Ignore,
+        "a press off the button cancels nothing"
+    );
 }
 
 #[test]
-fn a_press_over_the_rail_beside_the_button_leaves_the_operation_running() {
-    let places = places();
-    let theme = Theme::dark();
-    let panel_area = content_area(WINDOW, Scale::ONE, &theme, Some(&places), BAND);
-    let drawn = cancel_corner(panel_area, &theme);
-    let rail = rail_width(&places);
-    assert!(rail > 0, "this window draws a rail");
-
-    // Level with the drawn button, but over the rail the panel is inset past.
-    let on_rail = Point::new(i32::try_from(rail / 2).unwrap_or(0), drawn.y);
-    assert_eq!(route(&places, &press(on_rail)), OperationControl::Ignore);
-    // So is a press inside the panel but off the button (the panel is modal:
-    // nothing behind it acts).
-    let panel = progress_dialog_rect(panel_area, Scale::ONE, &theme);
-    let top_left = Point::new(panel.left(), panel.top());
-    assert_eq!(route(&places, &press(top_left)), OperationControl::Ignore);
-}
-
-#[test]
-fn escape_cancels_a_close_request_closes_and_nothing_else_reaches_the_run() {
-    let places = places();
-
+fn escape_cancels_and_nothing_else_reaches_the_run() {
+    let client = client();
     assert_eq!(
-        route(&places, &named(NamedKeyCode::Escape)),
-        OperationControl::Cancel
+        route(client, &named(NamedKeyCode::Escape)),
+        ProgressControl::Cancel
     );
     assert_eq!(
-        route(&places, &WindowEvent::CloseRequested { window_id: 7 }),
-        OperationControl::Close
-    );
-    // Every other key is swallowed, so nothing navigates behind the panel.
-    assert_eq!(
-        route(&places, &named(NamedKeyCode::Enter)),
-        OperationControl::Ignore
+        route(client, &named(NamedKeyCode::Enter)),
+        ProgressControl::Ignore
     );
     assert_eq!(
         route(
-            &places,
+            client,
             &WindowEvent::Focus {
                 window_id: WINDOW_ID,
                 focused: true,
             }
         ),
-        OperationControl::Ignore
+        ProgressControl::Ignore
     );
 }
 
 #[test]
-fn a_window_too_small_for_the_panel_resolves_no_cancel() {
-    let places = places();
-    let theme = Theme::dark();
+fn a_window_too_small_for_the_button_resolves_no_cancel() {
     let tiny = Rect::new(0, 0, 1, 1);
-
-    // Total on a degenerate window: no button is placed, so no press cancels,
-    // and nothing panics.
     for point in [Point::new(0, 0), Point::new(400, 400)] {
-        assert_eq!(
-            operation_control(Some(&places), Scale::ONE, &theme, tiny, BAND, &press(point)),
-            OperationControl::Ignore
-        );
+        assert_eq!(route(tiny, &press(point)), ProgressControl::Ignore);
     }
     // Escape still stops the run whatever the window's size.
     assert_eq!(
-        operation_control(
-            Some(&places),
-            Scale::ONE,
-            &theme,
-            tiny,
-            BAND,
-            &named(NamedKeyCode::Escape)
-        ),
-        OperationControl::Cancel
+        route(tiny, &named(NamedKeyCode::Escape)),
+        ProgressControl::Cancel
     );
 }
 
@@ -243,6 +160,29 @@ fn a_refused_create_names_its_own_reason() {
             "{other:?}"
         );
     }
+}
+
+/// A refusal names the item it concerned by what the user sees of it, whether
+/// a walk holds its whole path or a New ▸ only its name.
+#[test]
+fn a_refusal_names_the_item_it_concerned() {
+    let path = [
+        String::from("Storage"),
+        String::from("usb_25cm"),
+        String::from("Notes"),
+    ];
+    assert_eq!(
+        item_refusal("delete", &path, remove_refusal(Errno::ReadOnly)),
+        "could not delete \u{201c}Notes\u{201d}: its volume is read-only"
+    );
+    assert_eq!(
+        item_refusal(
+            "make",
+            &["New Folder"],
+            create_refusal(Errno::PermissionDenied)
+        ),
+        "could not make \u{201c}New Folder\u{201d}: the destination folder may not be written to"
+    );
 }
 
 /// A read-only destination is named as one, never as a permission the user
@@ -328,16 +268,12 @@ fn an_empty_confirmation_opens_only_over_the_trash_it_read() {
     );
 }
 
-/// The panel is presented only as its count moves, so a window the desktop
-/// asks to draw again is drawn: a stalled operation would leave it blank.
+/// The window is presented only as its count moves, so one the desktop asks
+/// to draw again is drawn: a stalled operation would leave it blank.
 #[test]
 fn a_redraw_request_during_an_operation_is_answered() {
-    let theme = Theme::dark();
     let event = WindowEvent::RedrawRequested { window_id: 1 };
-    assert_eq!(
-        operation_control(None, Scale::ONE, &theme, WINDOW, BAND, &event),
-        OperationControl::Redraw
-    );
+    assert_eq!(route(client(), &event), ProgressControl::Redraw);
 }
 
 /// A second flip taken from the mode as it was before the first landed would

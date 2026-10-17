@@ -27,8 +27,9 @@
 //! and the `lib/log` edges around it.
 
 use tairix_abi::blkio::{
-    decode_outcome, effective_child_status, serve_request_recovering, BlkCompletion, BlkHealth,
-    BlkHealthState, BlkStatus, FaultDomain, FaultDomainState, BLK_COMPLETION_LEN,
+    decode_outcome, effective_child_status, serve_request_recovering, Answer, BlkCompletion,
+    BlkHealth, BlkHealthState, BlkPublication, BlkStatus, FaultDomain, FaultDomainState,
+    BLK_COMPLETION_LEN,
 };
 use tairix_abi::driver::block::Block;
 
@@ -131,26 +132,28 @@ pub fn transport_alive(status: BlkStatus) -> bool {
 #[must_use]
 pub fn serve_lun_with_domain<B: Block>(
     device: &mut B,
-    read_only: bool,
+    publication: BlkPublication,
     bufs: ServeBuffers<'_>,
     recovery: &mut LunRecovery<'_>,
     now_ns: u64,
     ancestor_status: impl FnOnce() -> BlkStatus,
-) -> usize {
+) -> Answer {
     let ServeBuffers {
         request,
         window,
         reply,
     } = bufs;
-    let len = serve_request_recovering(
+    let Answer::Reply(len) = serve_request_recovering(
         device,
-        read_only,
+        publication,
         request,
         window,
         reply,
         recovery.health,
         now_ns,
-    );
+    ) else {
+        return Answer::Hold;
+    };
     let device_status = decode_outcome(&reply[..len]).status;
     let alive = transport_alive(device_status);
 
@@ -170,11 +173,13 @@ pub fn serve_lun_with_domain<B: Block>(
         effective = effective.combine(ancestor_status());
     }
     if effective == device_status {
-        return len;
+        return Answer::Reply(len);
     }
-    BlkCompletion::default()
-        .encode_status(effective, reply)
-        .unwrap_or(len)
+    Answer::Reply(
+        BlkCompletion::default()
+            .encode_status(effective, reply)
+            .unwrap_or(len),
+    )
 }
 
 /// How a unit failed closed: the edges outside the shared
@@ -309,6 +314,7 @@ mod tests {
             op: BlkOp::Read,
             lba: 0,
             blocks: 1,
+            binding: 0,
         }
         .encode(&mut bytes)
         .expect("encodes");
@@ -342,9 +348,9 @@ mod tests {
         let mut reply = [0u8; BLK_COMPLETION_LEN];
         let request = read_one();
         let mut recovery = LunRecovery { health, domain };
-        let len = serve_lun_with_domain(
+        let Answer::Reply(len) = serve_lun_with_domain(
             device,
-            false,
+            BlkPublication::default(),
             ServeBuffers {
                 request: &request,
                 window: &mut window,
@@ -353,7 +359,9 @@ mod tests {
             &mut recovery,
             now_ns,
             || ancestor,
-        );
+        ) else {
+            panic!("a scripted block that never comes ready was held");
+        };
         decode_outcome(&reply[..len]).status
     }
 

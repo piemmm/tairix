@@ -9,8 +9,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::BlockGeometry;
 
+use crate::ready::Readiness;
 use crate::scsi::{CommandSet, ScsiDevice};
 use crate::testutil::{InStep, ScriptedDevice};
+
+/// The exchange a directly driven command is given.
+const BUDGET: u64 = 5_000_000_000;
 
 /// A UFI floppy: the shared SCSI layer over a CBI transport around
 /// `device` — the shape the `Run` binary builds for interface 1.
@@ -31,7 +35,7 @@ fn a_command_rides_adsc_as_a_twelve_byte_block() {
     let mut dev = ScriptedDevice::new();
     dev.interrupts.push_back(PASSED.to_vec());
     let mut scsi = floppy(dev);
-    assert_eq!(scsi.test_unit_ready(0), Ok(true));
+    assert_eq!(scsi.test_unit_ready(0), Ok(Readiness::Ready));
 
     let (setup, block) = &device(&scsi).control_outs[0];
     // ADSC: class-specific OUT to interface 1 carrying 12 bytes.
@@ -122,8 +126,10 @@ fn a_stalled_data_phase_still_reads_the_completion() {
     let mut scsi = floppy(dev);
     let mut buf = [0u8; 512];
     // The stalled data phase still reads the completion, whose ASC (0x3A,
-    // medium not present) maps to NOT READY in-band — no REQUEST SENSE.
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    // medium not present) says in-band that the medium is gone — no REQUEST
+    // SENSE.
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::DeviceOffline));
+    assert_eq!(scsi.take_readiness(0), Some(Readiness::NoMedium));
     assert_eq!(device(&scsi).control_outs.len(), 1);
 }
 
@@ -176,14 +182,18 @@ fn the_typed_status_spelling_is_honoured() {
     let mut dev = ScriptedDevice::new();
     dev.interrupts.push_back(vec![0x00, 0x00]);
     let mut cbi = typed(dev);
-    let outcome = cbi.execute(0, &[0u8; 12], DataPhase::None).expect("runs");
+    let outcome = cbi
+        .execute(0, &[0u8; 12], DataPhase::None, BUDGET)
+        .expect("runs");
     assert!(outcome.passed);
 
     // Failed.
     let mut dev = ScriptedDevice::new();
     dev.interrupts.push_back(vec![0x00, 0x01]);
     let mut cbi = typed(dev);
-    let outcome = cbi.execute(0, &[0u8; 12], DataPhase::None).expect("runs");
+    let outcome = cbi
+        .execute(0, &[0u8; 12], DataPhase::None, BUDGET)
+        .expect("runs");
     assert!(!outcome.passed);
 
     // Phase error: reset and surface.
@@ -191,7 +201,7 @@ fn the_typed_status_spelling_is_honoured() {
     dev.interrupts.push_back(vec![0x00, 0x02]);
     let mut cbi = typed(dev);
     assert_eq!(
-        cbi.execute(0, &[0u8; 12], DataPhase::None),
+        cbi.execute(0, &[0u8; 12], DataPhase::None, BUDGET),
         Err(Errno::WouldBlock)
     );
     assert_eq!(cbi.transport().control_outs.len(), 2); // command + reset
@@ -201,7 +211,7 @@ fn the_typed_status_spelling_is_honoured() {
     dev.interrupts.push_back(vec![0x11, 0x00]);
     let mut cbi = typed(dev);
     assert_eq!(
-        cbi.execute(0, &[0u8; 12], DataPhase::None),
+        cbi.execute(0, &[0u8; 12], DataPhase::None, BUDGET),
         Err(Errno::WouldBlock)
     );
     assert_eq!(cbi.transport().trail, ["reset", "clear"]);
@@ -224,7 +234,7 @@ fn an_oversize_command_block_is_refused_before_the_wire() {
     let mut cbi = Cbi::new(dev, 0, CbiStatus::UfiSense);
     let thirteen = [0u8; 13];
     assert_eq!(
-        cbi.execute(0, &thirteen, DataPhase::None),
+        cbi.execute(0, &thirteen, DataPhase::None, BUDGET),
         Err(Errno::OutOfRange)
     );
     assert!(cbi.transport().control_outs.is_empty());
@@ -232,19 +242,19 @@ fn an_oversize_command_block_is_refused_before_the_wire() {
 
 #[test]
 fn a_not_ready_floppy_drains_via_in_band_sense_without_request_sense() {
-    // Regression: a real UFI floppy (a Mitsumi SmartDisk FDD) returns a
-    // start-of-day not-ready / UNIT ATTENTION on TEST UNIT READY, and does
-    // not reliably answer a separate REQUEST SENSE. The bounded ready drain
-    // must read the sense in-band from the completion block and keep
-    // draining until the unit is ready, never issuing a REQUEST SENSE whose
-    // failure would abort bring-up (the observed `errno 0xc` metal defect).
+    // Regression (the `errno 0xc` metal defect): a Mitsumi SmartDisk FDD
+    // answers TEST UNIT READY not ready, then UNIT ATTENTION, and does not
+    // reliably answer a separate REQUEST SENSE, so readiness is read from the
+    // completion block alone.
     let mut dev = ScriptedDevice::new();
     // TEST UNIT READY carries no data phase: script completion blocks only.
     dev.interrupts.push_back(vec![0x3A, 0x00]); // not ready (medium not present)
     dev.interrupts.push_back(vec![0x28, 0x00]); // unit attention (media change)
     dev.interrupts.push_back(PASSED.to_vec()); // ready
     let mut scsi = floppy(dev);
-    assert_eq!(scsi.ready_after_drain(0, 8), Ok(true));
+    assert_eq!(scsi.test_unit_ready(0), Ok(Readiness::NoMedium));
+    assert_eq!(scsi.test_unit_ready(0), Ok(Readiness::MediumChanged));
+    assert_eq!(scsi.test_unit_ready(0), Ok(Readiness::Ready));
     // Three TEST UNIT READY commands reached the wire and nothing else: no
     // REQUEST SENSE (which would need a bulk data phase the script never
     // provides and, on the real drive, would fail the command).

@@ -65,9 +65,11 @@ precise icon, and one that does not still shows a meaningful family glyph
 rather than a bare placeholder.
 
 The disk family is one kind per medium a volume can report
-(`tairix_icon::disk_icon(Option<BlkMedium>)`): `DiskHard`, `DiskSolidState`,
-`DiskNvme`, `DiskUsb` (a flash drive), `DiskExternal` (a USB disk), `DiskSdCard`,
-and `Disk` for a virtual or unreported medium. Each ships a raster master in
+(`tairix_icon::disk_icon(Option<BlkMedium>)`): `DiskHard` (a disk reported
+rotating, on an ATA bus or behind a USB bridge), `DiskSolidState`,
+`DiskNvme`, `DiskUsb` (a flash drive), `DiskExternal` (a USB unit that reported
+no rotation), `DiskSdCard`, and `Disk` for a virtual or unreported medium.
+Each ships a raster master in
 `assets/` (`disk-hard`, `disk-solid-state`, `disk-nvme`, `disk-usb`,
 `disk-external`, `disk-sd`, `disk`), held to the same square, trimmed and
 bounded contract as every master.

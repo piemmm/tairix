@@ -214,7 +214,7 @@ side is [Window manager](./wm.md#app-owned-popup-surfaces)).
 
 Uniformly, for every app:
 
-- `WindowClient::create_popup(&TransientSpec { .. })` names the app's own parent
+- `WindowClient::create_popup(&PopupSpec { .. })` names the app's own parent
   window, the popup's granted frame region and event endpoint, its geometry,
   and an offset in physical pixels **from the parent's client origin** — an
   app is never told its own window's screen position, so it never computes a
@@ -559,7 +559,7 @@ command; the `Run` binary routes the chosen command through
 `dispatch_context_command` to the **exact same** app verbs the toolbar and
 keyboard already drive — Open (`activate`), Open and Close (the same activation
 with the window closed behind the hand-off), Open With… (the chooser below),
-Rename, Cut, Copy, Paste, Properties, and Delete (the same modal-confirmed
+Rename, Cut, Copy, Paste, Properties, and Delete (the same alert-confirmed
 `begin_delete` the `Delete` key opens, below) — so the menu can never diverge
 from them (`AGENTS.md` §2.2) and adds no authority (every verb is the user's own
 §5.3-checked action). A refused open is an answer: it is stated on `stderr` and
@@ -1311,10 +1311,13 @@ recovering or read-only conflicted volume stays, only one whose device vanished
 goes — and passes each one's label, target, and `MountRecord::medium()` to the
 model. The serving driver declares the medium (`Block::medium`), a layered
 device composes its members' (`BlkMedium::of_members`), and the icon is
-`tairix_icon::disk_icon(medium)`: a hard disk, a solid-state drive, an NVMe
-drive, a USB flash drive, a USB disk and an SD card each get their own shipped
-artwork, and a virtual or unreported medium the generic drive — never a guessed
-classification.
+`tairix_icon::disk_icon(medium)`, which draws only what the device reported: a
+disk reported rotating is the hard disk whether it sits on an ATA bus or
+behind a USB bridge, a non-rotating ATA disk, an NVMe namespace and an SD card
+each get their own artwork, a USB unit is a flash stick once it reported a
+non-rotating medium and the external drive, which shows no medium, while it
+reported neither, and an undeclared or paravirtual device is the generic drive
+— never a guessed classification.
 
 **A volume's root is drawn as its drive wherever it is listed.**
 `Browser::mark_volume_roots` marks each directory entry that is the mount point
@@ -1804,31 +1807,38 @@ A long removal — and a long copy/paste — shows **progress** and can be
 is handed to an **operations worker**, a thread of its own beside the reader so
 a long copy never holds a listing up, which carries it out one bounded unit at
 a time — one directory read, one unlink, one `fs_mkdir`, one copy chunk, or one
-rename. Operations from several windows run one after another in the order they
-were asked (`operations::OperationDesk`, a host-tested desk holding a fixed
-number waiting): two copies over one disk finish no sooner side by side. The
-worker posts its count after each unit and checks for a cancel between units;
-the loop parks as usual, wakes on the worker's answer, and shows a new count at
-most once a desktop frame, holding the next until then rather than waking per
-unit (`AGENTS.md` §2.23, §28). An answer reaches only the window that asked: a
-window that closes cancels its own operation and its answer is dropped. A
+rename. Each operation has a **progress window of its own**: a modeless dialog
+of the folder window that asked for it, so the folder goes on being browsed,
+and a window may have several running at once. Operations run one after another
+in the order they were asked (`operations::OperationDesk`, a host-tested desk
+holding a fixed number waiting and keyed by each operation's progress window):
+two copies over one disk finish no sooner side by side, so one that touches a
+tree an earlier one is still working in waits behind it, and its window says
+it waits. The worker posts its count after each unit and checks for a cancel
+between units; the loop parks as usual, wakes on the worker's answer, and shows
+a new count at most once a desktop frame, holding the next until then rather
+than waking per unit (`AGENTS.md` §2.23, §28). An answer reaches only the
+operation it belongs to: closing a folder window closes its progress windows
+and cancels their operations, and their answers are dropped. A
 machine that refuses the thread carries an operation out on the loop to its
 end — slower and not cancellable, never wrong. A single `Job` carries a
 `DeleteWalk` (a delete), a `TrashRun` (a move to Trash) or a `Paste` state
 machine (a copy/move), so all three run through one path (`AGENTS.md` §2.2). The
-panel is the shared `lib/browse::progress` model (`ProgressModel` — the
-operation kind, the honest rising `DeleteWalk::removed` / paste-node count, and
-a *latched* cancel) drawn by `render::draw_progress_dialog` as a `lib/controls`
-`Panel`, an indeterminate `Progress` "working" trace (no fabricated percentage,
-since the total is unknown until the reads reveal it, `AGENTS.md` §2.24), and a
-Cancel `Button`; `render::progress_cancel_at` mirrors the button geometry so a
-click resolves to exactly the drawn Cancel (fail closed off it, `AGENTS.md`
-§2.2, §5.4). The app's modal routing lives in the host-testable
-`userland/apps/files/src/operation.rs`, which takes the window plus the drawn
-places rail and derives the panel's rect through the same `content_area` the
-panel is painted in, so the drawn button and the clickable button cannot drift
-apart by the rail's width and a caller cannot hand the routing the wrong
-rectangle. A cancel is latched and stops the walk at the next unit boundary —
+progress window shows the shared `lib/browse::progress` model (`ProgressModel`
+— the operation kind, the honest rising `DeleteWalk::removed` / paste-node
+count, whether it waits for those before it, and a *latched* cancel) drawn
+across its client by `render::draw_progress_window` at
+`render::progress_window_extent`: an indeterminate `Progress` "working" trace
+(no fabricated percentage, since the total is unknown until the reads reveal
+it, `AGENTS.md` §2.24) and a Cancel `Button`. Its band names the operation
+after the application's attested name. `render::progress_cancel_at` mirrors the
+button geometry so a click resolves to exactly the drawn Cancel (fail closed
+off it, `AGENTS.md` §2.2, §5.4); what each event to the window asks of its
+operation is the host-testable `userland/apps/files/src/operation.rs`
+`progress_control`. Nothing filters the folder window's own input for an
+operation. One whose progress window the desktop will not open is not begun,
+since it would have no Cancel, and the refusal is stated in the folder's
+window. A cancel is latched and stops the walk at the next unit boundary —
 never mid-node, and never mid-chunk — and a completed or cancelled/refused run
 alike re-lists so what actually remains is shown honestly. A copy cancelled or
 stopped part-way through a file removes that destination file, which it created
@@ -2435,9 +2445,9 @@ read changes nothing until it lands.
 window ground the Settings and Switchboard windows use: the listing's ground
 lets the blurred desktop through, and it asks the compositor for that blur
 before its first frame and on every desktop change. What it lays over its
-own content — the rename field, the delete and progress dialogs, the "Open
-With…" chooser, a Properties window — keeps the opaque theme
-(`tairix_theme::Grounds`).
+own content — the rename field — and the windows it opens of its own — the
+"Open With…" chooser, a progress window, a Properties window — keep the opaque
+theme (`tairix_theme::Grounds`).
 
 Icon-only buttons size their glyph from the plate itself — the smaller plate
 dimension inside its frame, less a small margin proportional to the plate

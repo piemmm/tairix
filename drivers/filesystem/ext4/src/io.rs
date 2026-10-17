@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkCommandCost;
 use tairix_abi::driver::block::{Block, BlockClass};
 use tairix_abi::DriverError;
 use tairix_writeback::{WritePhase, RUN_BYTES};
@@ -26,7 +26,7 @@ pub(crate) struct Device<B: Block> {
     /// Filesystem block size, once the superblock names it; 1024 until then,
     /// which addresses the superblock itself.
     fs_block: u32,
-    class: BlkDeviceClass,
+    cost: BlkCommandCost,
     /// One sector, for the read-modify-write of a span that does not cover
     /// whole sectors: kept off the small kernel stack the driver nests on.
     partial: Vec<u8>,
@@ -40,13 +40,13 @@ impl<B: Block> Device<B> {
         if sector == 0 || sector > MAX_BLOCK_SIZE || !sector.is_power_of_two() {
             return Err(DriverError::DeviceFault);
         }
-        let class = block.device_class();
+        let cost = block.command_cost();
         Ok(Self {
             block,
             sector,
             sectors: geometry.block_count,
             fs_block: 1024,
-            class,
+            cost,
             partial: scratch(sector as usize)?,
         })
     }
@@ -61,9 +61,9 @@ impl<B: Block> Device<B> {
         u64::from(self.sector).checked_mul(self.sectors)
     }
 
-    /// The class of device the volume sits on.
-    pub(crate) fn class(&self) -> BlkDeviceClass {
-        self.class
+    /// What one command to the device costs.
+    pub(crate) fn command_cost(&self) -> BlkCommandCost {
+        self.cost
     }
 
     /// The device, handed back.

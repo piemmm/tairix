@@ -17,6 +17,15 @@
 //! and a consumer moves larger transfers as multiple bounded requests, so
 //! the per-device cost is fixed rather than a function of request size.
 
+mod medium;
+
+pub use medium::{
+    BlkCommandCost, BlkMedium, BlkRemovability, BlkRemovabilityEvidence, BlkRotation,
+    BlkRotationEvidence, BlkTransport, BLK_EVIDENCE_NONE, BLK_FACT_UNKNOWN, BLK_MEDIUM_LEN,
+    BLK_REMOVABILITY_FIXED, BLK_REMOVABILITY_REMOVABLE, BLK_ROTATION_NON_ROTATING,
+    BLK_ROTATION_ROTATING, BLK_TRANSPORT_UNDECLARED,
+};
+
 use crate::driver::block::Block;
 use crate::le::{put_i32, put_u32, put_u64, read_i32, read_u32, read_u64};
 use crate::sysinfo::MountAvailability;
@@ -214,13 +223,19 @@ pub struct BlkRequest {
     /// (`blocks * block_size` bytes in the shared window, never more than
     /// [`BLK_DATA_LEN`]); zero for the data-less operations.
     pub blocks: u32,
+    /// The publication of the unit this request is for: the binding its
+    /// geometry reply carried ([`BlkCompletion::binding`]). A geometry request
+    /// may carry any; every other request whose binding is not the unit's
+    /// current one is refused [`Errno::Stale`], so a request made for a
+    /// medium that has since left never reaches the one that replaced it.
+    pub binding: u64,
 }
 
 /// Encoded length of a [`BlkRequest`]:
-/// `op(1) || pad(3) || blocks(4) || lba(8)`. Fixed — every request encodes to
-/// the same size, so this is both the encoding length and the endpoint's
-/// maximum request size.
-pub const BLK_REQUEST_LEN: usize = 1 + 3 + 4 + 8;
+/// `op(1) || pad(3) || blocks(4) || lba(8) || binding(8)`. Fixed — every
+/// request encodes to the same size, so this is both the encoding length and
+/// the endpoint's maximum request size.
+pub const BLK_REQUEST_LEN: usize = 1 + 3 + 4 + 8 + 8;
 
 impl BlkRequest {
     /// Encode `self` into `buf`, returning the number of bytes written.
@@ -239,6 +254,7 @@ impl BlkRequest {
         buf[3] = 0;
         put_u32(buf, 4, self.blocks);
         put_u64(buf, 8, self.lba);
+        put_u64(buf, 16, self.binding);
         Ok(BLK_REQUEST_LEN)
     }
 
@@ -268,7 +284,12 @@ impl BlkRequest {
         if matches!(op, BlkOp::Geometry | BlkOp::Flush) && (lba != 0 || blocks != 0) {
             return Err(Errno::OutOfRange);
         }
-        Ok(Self { op, lba, blocks })
+        Ok(Self {
+            op,
+            lba,
+            blocks,
+            binding: read_u64(bytes, 16),
+        })
     }
 }
 
@@ -508,24 +529,67 @@ impl BlkStatus {
     }
 }
 
+/// When a consumer may reissue a request its device answered reissuably
+/// ([`BlkStatus::is_retryable`]): the serving driver's word on whether its own
+/// recovery has already worked.
+///
+/// It can only bring a reissue forward. The consumer never waits longer than
+/// its class's pacing and never reissues more often than its budget allows
+/// ([`IoBudget::reissue_wait_ns`]), so an untrusted driver can neither stall
+/// a consumer with it nor make one storm the device.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum BlkReissue {
+    /// The device is still recovering, or its driver cannot say: wait out the
+    /// class's pacing ([`IoBudget::reissue_pacing_ns`]).
+    #[default]
+    Paced = 0,
+    /// The driver's recovery has completed and the unit answered ready:
+    /// reissue at once.
+    Now = 1,
+}
+
+impl BlkReissue {
+    /// The wire value for this hint.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// The hint `value` names, `None` for one this build does not define,
+    /// which a decoder reads as [`BlkReissue::Paced`].
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Paced),
+            1 => Some(Self::Now),
+            _ => None,
+        }
+    }
+}
+
 /// Byte offsets of the completion frame:
-/// `status(4) || errno(4) || block_size(4) || block_count(8) || flags(4) || medium(4)`.
+/// `status(4) || errno(4) || reissue(4) || block_size(4) || block_count(8) ||
+/// flags(4) || medium(8) || binding(8) || name`.
 const COMPLETION_STATUS_OFF: usize = 0;
 const COMPLETION_ERRNO_OFF: usize = 4;
-const COMPLETION_GEOMETRY_OFF: usize = 8;
-/// Smallest prefix that carries the health axis (`status || errno`); a frame
-/// shorter than this cannot be classified and fails closed.
+const COMPLETION_REISSUE_OFF: usize = 8;
+const COMPLETION_GEOMETRY_OFF: usize = 12;
+/// Smallest prefix that carries the health axis (`status || errno ||
+/// reissue`); a frame shorter than this cannot be classified and fails
+/// closed.
 const COMPLETION_HEADER_LEN: usize = COMPLETION_GEOMETRY_OFF;
+const COMPLETION_MEDIUM_OFF: usize = COMPLETION_GEOMETRY_OFF + 16;
 
 /// Encoded length of a block-service completion: the health/status word, an
-/// [`Errno`] detail word (`0` when none), then the geometry payload
-/// (`block_size(4) || block_count(8) || flags(4) || medium(4) || name`,
-/// zero-filled for the non-geometry operations). Also the endpoint's maximum
-/// reply size.
-pub const BLK_COMPLETION_LEN: usize = COMPLETION_HEADER_LEN + 4 + 8 + 4 + 4 + BLK_DEVICE_NAME_LEN;
+/// [`Errno`] detail word (`0` when none), the [`BlkReissue`] word, then the
+/// geometry payload (`block_size(4) || block_count(8) || flags(4) || medium ||
+/// name`, zero-filled for the non-geometry operations). Also the endpoint's
+/// maximum reply size.
+pub const BLK_COMPLETION_LEN: usize = COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN;
 
+const COMPLETION_BINDING_OFF: usize = COMPLETION_MEDIUM_OFF + BLK_MEDIUM_LEN;
 /// Offset of the declared device name within the geometry payload.
-const COMPLETION_NAME_OFF: usize = COMPLETION_GEOMETRY_OFF + 20;
+const COMPLETION_NAME_OFF: usize = COMPLETION_BINDING_OFF + 8;
 
 /// [`BlkCompletion::flags`] bit: the logical unit is write-protected; a
 /// [`BlkOp::Write`] will be refused [`Errno::PermissionDenied`].
@@ -545,30 +609,21 @@ pub struct BlkCompletion {
     pub block_count: u64,
     /// Device flags ([`BLK_FLAG_READ_ONLY`]).
     pub flags: u32,
-    /// The device's declared [`BlkMedium`]: what it is, and so the class the
-    /// consumer derives its per-request deadline, reissue budget, and recovery
-    /// grace window from ([`BlkDeviceClass::budget`]).
+    /// The device's declared [`BlkMedium`] ([`Block::medium`]), from which the
+    /// consumer derives its budget ([`BlkDeviceClass::of`]). `None` is a
+    /// device that declared nothing, or a record this build does not define,
+    /// so a reader is never told a medium nobody declared.
     ///
-    /// The serving driver is the one component that knows what the hardware
-    /// is, so it declares the medium here (from its [`Block::medium`]) and the
-    /// consumer derives its budget from that one shared policy instead of
-    /// assuming a single envelope for every device.
-    ///
-    /// `None` is a device that declared no medium, or a medium word this
-    /// build does not recognise. It is kept distinct from every named medium
-    /// so a consumer that *reports* what a volume is — the mount table, and
-    /// the drive picture a file manager draws from it — says "unknown"
-    /// rather than asserting a medium nobody declared. Its patience is
-    /// [`BlkDeviceClass::of`] it, which grants an unknown no more than a
-    /// paravirtual device.
-    ///
-    /// The driver is untrusted, and this field needs no trust: it selects
-    /// only how patient the consumer is with *this* device and which picture
-    /// a reader is shown, grants no authority, and is bounded by the widest
-    /// class budget either way. A driver that overstates its patience only
-    /// delays its own deadline; one that understates it only fails itself
-    /// sooner.
+    /// The driver is untrusted and this field needs no trust: it selects only
+    /// how patient the consumer is with this one device and what a reader is
+    /// shown, and grants no authority. Overstating patience only delays the
+    /// driver's own deadline; understating it only fails the device sooner.
     pub medium: Option<BlkMedium>,
+    /// The binding a consumer repeats on every request for this publication
+    /// of the unit ([`BlkRequest::binding`]). It grants nothing — the
+    /// endpoint grant is the authority — it only tells one publication from
+    /// the next.
+    pub binding: u64,
     /// The device's own short name, as the serving driver declares it
     /// ([`Block::device_name`]).
     ///
@@ -582,33 +637,16 @@ pub struct BlkCompletion {
     pub name: BlkDeviceName,
 }
 
-/// The medium word written for a device that declared none, or one this
-/// build does not recognise, so an unknown survives a re-encode as an unknown
-/// instead of being relayed as a medium nobody declared. It is deliberately
-/// outside the defined range, so [`BlkMedium::from_u32`] refuses it.
-const BLK_MEDIUM_UNKNOWN: u32 = u32::MAX;
-
-/// The completion word for a declared medium.
-const fn encode_medium(medium: Option<BlkMedium>) -> u32 {
-    match medium {
-        Some(medium) => medium.as_u32(),
-        None => BLK_MEDIUM_UNKNOWN,
-    }
+/// The medium record a full-length completion frame carries.
+fn medium_record(reply: &[u8]) -> Option<[u8; BLK_MEDIUM_LEN]> {
+    reply
+        .get(COMPLETION_MEDIUM_OFF..COMPLETION_BINDING_OFF)?
+        .try_into()
+        .ok()
 }
 
-/// The declared medium a completion word names, or `None` for any word outside
-/// the defined set.
-///
-/// Every unrecognised word collapses to the one `None`, so a driver cannot
-/// smuggle a value of its choosing through a relaying consumer.
-const fn decode_medium(word: u32) -> Option<BlkMedium> {
-    match BlkMedium::from_u32(word) {
-        Ok(medium) => Some(medium),
-        Err(_) => None,
-    }
-}
-
-/// Write one completion frame (`status || errno || geometry`) into `buf`.
+/// Write one completion frame (`status || errno || reissue || geometry`) into
+/// `buf`.
 ///
 /// The single encoder every public entry point funnels through, so the wire
 /// layout lives in exactly one place. `errno_val` is `0` for a valid
@@ -617,6 +655,7 @@ fn encode_frame(
     buf: &mut [u8],
     status: BlkStatus,
     errno_val: i32,
+    reissue: BlkReissue,
     geometry: BlkCompletion,
 ) -> Result<usize, Errno> {
     if buf.len() < BLK_COMPLETION_LEN {
@@ -624,14 +663,13 @@ fn encode_frame(
     }
     put_u32(buf, COMPLETION_STATUS_OFF, status.as_u32());
     put_i32(buf, COMPLETION_ERRNO_OFF, errno_val);
+    put_u32(buf, COMPLETION_REISSUE_OFF, reissue.as_u32());
     put_u32(buf, COMPLETION_GEOMETRY_OFF, geometry.block_size);
     put_u64(buf, COMPLETION_GEOMETRY_OFF + 4, geometry.block_count);
     put_u32(buf, COMPLETION_GEOMETRY_OFF + 12, geometry.flags);
-    put_u32(
-        buf,
-        COMPLETION_GEOMETRY_OFF + 16,
-        encode_medium(geometry.medium),
-    );
+    buf[COMPLETION_MEDIUM_OFF..COMPLETION_BINDING_OFF]
+        .copy_from_slice(&BlkMedium::encode(geometry.medium));
+    put_u64(buf, COMPLETION_BINDING_OFF, geometry.binding);
     buf[COMPLETION_NAME_OFF..COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN]
         .copy_from_slice(&geometry.name.to_le_bytes());
     Ok(BLK_COMPLETION_LEN)
@@ -646,7 +684,7 @@ impl BlkCompletion {
     /// [`Errno::BufferTooSmall`] if `buf` cannot hold
     /// [`BLK_COMPLETION_LEN`] bytes.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, Errno> {
-        encode_frame(buf, BlkStatus::Ok, 0, *self)
+        encode_frame(buf, BlkStatus::Ok, 0, BlkReissue::Paced, *self)
     }
 
     /// Encode `self` as a completion carrying `status` into `buf`.
@@ -656,23 +694,47 @@ impl BlkCompletion {
     /// error status the geometry is meaningless and the status's implied
     /// [`Errno`] is recorded, so a serving driver reporting a health
     /// transition (a self-reported [`BlkStatus::Degraded`], a
-    /// [`BlkStatus::Offline`] on surprise removal) uses one call.
+    /// [`BlkStatus::Offline`] on surprise removal) uses one call. A
+    /// reissuable status says nothing of when it may come back
+    /// ([`BlkReissue::Paced`]).
     ///
     /// # Errors
     ///
     /// [`Errno::BufferTooSmall`] if `buf` cannot hold
     /// [`BLK_COMPLETION_LEN`] bytes.
     pub fn encode_status(&self, status: BlkStatus, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.encode_reissuable(status, BlkReissue::Paced, buf)
+    }
+
+    /// As [`Self::encode_status`], with the serving driver's word on when a
+    /// reissuable `status` may come back. Any other status carries
+    /// [`BlkReissue::Paced`], since nothing reissues it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `buf` cannot hold
+    /// [`BLK_COMPLETION_LEN`] bytes.
+    pub fn encode_reissuable(
+        &self,
+        status: BlkStatus,
+        reissue: BlkReissue,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
         if status.data_valid() {
-            encode_frame(buf, status, 0, *self)
-        } else {
-            encode_frame(
-                buf,
-                status,
-                status.default_errno().as_i32(),
-                BlkCompletion::default(),
-            )
+            return encode_frame(buf, status, 0, BlkReissue::Paced, *self);
         }
+        let reissue = if status.is_retryable() {
+            reissue
+        } else {
+            BlkReissue::Paced
+        };
+        encode_frame(
+            buf,
+            status,
+            status.default_errno().as_i32(),
+            reissue,
+            BlkCompletion::default(),
+        )
     }
 }
 
@@ -689,13 +751,15 @@ pub fn encode_error_completion(buf: &mut [u8], err: Errno) -> Result<usize, Errn
         buf,
         BlkStatus::for_errno(err),
         err.as_i32(),
+        BlkReissue::Paced,
         BlkCompletion::default(),
     )
 }
 
 /// The fully-decoded outcome of a block-service completion: its health
 /// [`BlkStatus`], the geometry payload (valid only when
-/// [`BlkStatus::data_valid`]), and the specific [`Errno`] an error carries.
+/// [`BlkStatus::data_valid`]), the specific [`Errno`] an error carries, and
+/// when a reissuable one may come back.
 ///
 /// Decoding never fails: a truncated or corrupt frame — or an unknown status
 /// word — resolves to [`BlkStatus::Fatal`] with [`Errno::DeviceFault`], so a
@@ -709,6 +773,9 @@ pub struct BlkOutcome {
     pub geometry: BlkCompletion,
     /// The specific error, meaningful iff `!status.data_valid()`.
     pub error: Errno,
+    /// When the request may be reissued, as its serving driver said:
+    /// [`BlkReissue::Paced`] for any status that is not reissuable.
+    pub reissue: BlkReissue,
 }
 
 impl BlkOutcome {
@@ -739,6 +806,7 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
         status: BlkStatus::Fatal,
         geometry: BlkCompletion::default(),
         error: Errno::DeviceFault,
+        reissue: BlkReissue::Paced,
     };
     if reply.len() < COMPLETION_HEADER_LEN {
         return fatal;
@@ -757,13 +825,10 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
                 block_size: read_u32(reply, COMPLETION_GEOMETRY_OFF),
                 block_count: read_u64(reply, COMPLETION_GEOMETRY_OFF + 4),
                 flags: read_u32(reply, COMPLETION_GEOMETRY_OFF + 12),
-                // An unrecognised medium word is not a reason to discard an
-                // otherwise well-formed completion: the medium selects only
-                // how patient this consumer is and what a reader is shown. It
-                // stays an explicit unknown rather than being folded into a
-                // named medium, so a consumer reporting what the volume is
-                // cannot assert one the device never declared.
-                medium: decode_medium(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16)),
+                // A malformed medium does not discard an otherwise
+                // well-formed completion; it reads as undeclared.
+                medium: medium_record(reply).and_then(|record| BlkMedium::decode(&record)),
+                binding: read_u64(reply, COMPLETION_BINDING_OFF),
                 // Re-validated on the way in, so an unprintable or
                 // overlong declaration reads as the unnamed device rather
                 // than reaching a surface that prints it.
@@ -772,16 +837,22 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
                 ),
             },
             error: status.default_errno(),
+            reissue: BlkReissue::Paced,
         }
     } else {
         // An unknown or absent errno word falls back to the status's implied
         // code, so an error is never read as an unrelated `Errno`.
         let error = Errno::from_i32(read_i32(reply, COMPLETION_ERRNO_OFF))
             .unwrap_or(status.default_errno());
+        // A hint this build does not define is no reason to hurry.
+        let reissue = BlkReissue::from_u32(read_u32(reply, COMPLETION_REISSUE_OFF))
+            .filter(|_| status.is_retryable())
+            .unwrap_or(BlkReissue::Paced);
         BlkOutcome {
             status,
             geometry: BlkCompletion::default(),
             error,
+            reissue,
         }
     }
 }
@@ -799,104 +870,6 @@ pub fn decode_completion(reply: &[u8]) -> Result<BlkCompletion, Errno> {
     decode_outcome(reply).data()
 }
 
-/// What a block device *is*, as the driver that binds it declares: the fact a
-/// reader is shown — the drive picture, the kind a volume's properties state
-/// — and the one its patience follows from ([`class`](Self::class)), so what
-/// a device is said to be and how it is served cannot disagree.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum BlkMedium {
-    /// A spinning hard disk on SATA or SAS.
-    HardDisk = 0,
-    /// A solid-state drive on SATA or SAS.
-    SolidState = 1,
-    /// A solid-state drive on `NVMe`.
-    Nvme = 2,
-    /// A USB flash drive, or a card in a USB reader: a removable medium.
-    UsbFlash = 3,
-    /// A disk in a USB enclosure: a fixed medium on a removable bus.
-    UsbDisk = 4,
-    /// An SD or eMMC card.
-    SdCard = 5,
-    /// A paravirtual or software-backed device.
-    Virtual = 6,
-}
-
-impl BlkMedium {
-    /// The wire value for this medium.
-    #[must_use]
-    pub const fn as_u32(self) -> u32 {
-        self as u32
-    }
-
-    /// Recover a medium from its wire value.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfRange`] if `value` is not a known medium (fail closed).
-    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
-        match value {
-            0 => Ok(Self::HardDisk),
-            1 => Ok(Self::SolidState),
-            2 => Ok(Self::Nvme),
-            3 => Ok(Self::UsbFlash),
-            4 => Ok(Self::UsbDisk),
-            5 => Ok(Self::SdCard),
-            6 => Ok(Self::Virtual),
-            _ => Err(Errno::OutOfRange),
-        }
-    }
-
-    /// The patience a device of this medium is served with.
-    #[must_use]
-    pub const fn class(self) -> BlkDeviceClass {
-        match self {
-            Self::HardDisk => BlkDeviceClass::Rotational,
-            Self::SolidState | Self::Nvme => BlkDeviceClass::SolidState,
-            // A USB unit resets, re-enumerates and is pulled out whatever it
-            // holds, and a card is removable by design.
-            Self::UsbFlash | Self::UsbDisk | Self::SdCard => BlkDeviceClass::Removable,
-            Self::Virtual => BlkDeviceClass::Virtual,
-        }
-    }
-
-    /// The medium of a composition over members of `media`: that of the
-    /// member it must wait on longest, each member waited on as
-    /// [`BlkDeviceClass::of`] its medium, so the composition is served the
-    /// patience of its slowest member and reads as that member. When that
-    /// member declared nothing the composition is unknown too, so a layer
-    /// never asserts a medium no member declared. Equally patient members
-    /// rank a declared medium first, then the greater wire value, so the
-    /// answer does not depend on their order.
-    #[must_use]
-    pub fn of_members(media: impl IntoIterator<Item = Option<Self>>) -> Option<Self> {
-        media
-            .into_iter()
-            .reduce(|held, offered| {
-                if Self::outwaits(offered, held) {
-                    offered
-                } else {
-                    held
-                }
-            })
-            .flatten()
-    }
-
-    /// Whether a member of `offered` must be waited on longer than one of
-    /// `held`: a total order, so a fold over it is order-independent.
-    fn outwaits(offered: Option<Self>, held: Option<Self>) -> bool {
-        let (wider, narrower) = (BlkDeviceClass::of(offered), BlkDeviceClass::of(held));
-        if wider != narrower {
-            return wider.most_patient(narrower) == wider;
-        }
-        match (offered, held) {
-            (Some(offered), Some(held)) => offered.as_u32() > held.as_u32(),
-            (Some(_), None) => true,
-            (None, _) => false,
-        }
-    }
-}
-
 /// The broad performance/behaviour class of a block device, discovered from
 /// its hardware-tree node, that its per-device I/O budget is derived from.
 ///
@@ -908,12 +881,14 @@ impl BlkMedium {
 /// The budget is *policy* sized per class, not a security/validation bound.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BlkDeviceClass {
-    /// A rotational disk (spinning SATA/SAS): a large reset/spin-up budget.
+    /// A medium that rotates, or one not known not to: a large spin-up and
+    /// reset budget, the most patient the tree defines.
     Rotational = 0,
-    /// A solid-state device (`NVMe` / SATA SSD): low latency, deep queue.
+    /// A non-rotating medium on a direct bus (`NVMe`, SATA SSD): low latency,
+    /// deep queue.
     SolidState = 1,
-    /// A removable unit (USB mass storage): moderate latency, shallow queue,
-    /// prone to bus resets and surprise removal.
+    /// A non-rotating medium on a hot-pluggable bus (USB, SD): moderate
+    /// latency, shallow queue, prone to bus resets and surprise removal.
     Removable = 2,
     /// A paravirtual device (virtio-blk) or other software-backed unit: fast,
     /// but bounded so a wedged host backend never stalls forever. Also the
@@ -947,42 +922,64 @@ impl BlkDeviceClass {
     /// The per-device I/O budget this class is served with — the one place
     /// both the serving driver and the consumer read it, so the deadline,
     /// retry count, and queue depth can never silently diverge between them.
+    ///
+    /// Only the command budget and the retry and queue figures are chosen;
+    /// the grace window and the deadline derive from them, as their
+    /// [`IoBudget`] fields state.
     #[must_use]
     pub const fn budget(self) -> IoBudget {
         match self {
-            // A spinning disk may legitimately take tens of seconds to spin
-            // up or complete an internal reset before it answers, and its
-            // grace window is wider still so a full spin-up plus reset is
-            // ridden out rather than punished.
-            Self::Rotational => IoBudget {
-                deadline_ns: 30_000_000_000,
-                max_retries: 3,
-                queue_depth: 4,
-                grace_ns: 60_000_000_000,
-            },
+            // A medium that may rotate may be spinning up on any access, so
+            // each media command covers a spin-up: 30 s, twice that for a
+            // flush, as Linux's `sd` allows.
+            Self::Rotational => IoBudget::serial(
+                CommandBudget {
+                    media_ns: 30_000_000_000,
+                    query_ns: 10_000_000_000,
+                    flush_ns: 60_000_000_000,
+                    ready_ns: 60_000_000_000,
+                    min_bytes_per_s: 1 << 20,
+                },
+                3,
+                2,
+            ),
             // An SSD that has not answered in a few seconds is wedged, not
             // busy; a deep queue keeps it fed.
-            Self::SolidState => IoBudget {
-                deadline_ns: 5_000_000_000,
-                max_retries: 2,
-                queue_depth: 32,
-                grace_ns: 8_000_000_000,
-            },
-            // A removable unit tolerates a bus glitch/reset (which may
-            // re-enumerate the bus) but must fail closed promptly once
-            // genuinely gone.
-            Self::Removable => IoBudget {
-                deadline_ns: 15_000_000_000,
-                max_retries: 3,
-                queue_depth: 2,
-                grace_ns: 20_000_000_000,
-            },
-            Self::Virtual => IoBudget {
-                deadline_ns: 10_000_000_000,
-                max_retries: 2,
-                queue_depth: 16,
-                grace_ns: 12_000_000_000,
-            },
+            Self::SolidState => IoBudget::parallel(
+                CommandBudget {
+                    media_ns: 5_000_000_000,
+                    query_ns: 2_000_000_000,
+                    flush_ns: 10_000_000_000,
+                    ready_ns: 10_000_000_000,
+                    min_bytes_per_s: 32 << 20,
+                },
+                2,
+                32,
+            ),
+            // Flash behind a bridge or a card protocol: a write may wait out
+            // the medium's own housekeeping, but nothing spins up.
+            Self::Removable => IoBudget::serial(
+                CommandBudget {
+                    media_ns: 10_000_000_000,
+                    query_ns: 5_000_000_000,
+                    flush_ns: 20_000_000_000,
+                    ready_ns: 10_000_000_000,
+                    min_bytes_per_s: 1 << 20,
+                },
+                3,
+                2,
+            ),
+            Self::Virtual => IoBudget::parallel(
+                CommandBudget {
+                    media_ns: 10_000_000_000,
+                    query_ns: 10_000_000_000,
+                    flush_ns: 10_000_000_000,
+                    ready_ns: 10_000_000_000,
+                    min_bytes_per_s: 8 << 20,
+                },
+                2,
+                16,
+            ),
         }
     }
 
@@ -1047,18 +1044,93 @@ impl BlkDeviceClass {
     }
 }
 
-/// The per-device I/O budget derived from a device's [`BlkDeviceClass`]: the
-/// deadline a single request is given before it fails closed, the number of
-/// times a *retryable* failure may be reissued, and how many requests may be
-/// in flight to the device at once.
+/// What a command asks of a device, which selects its share of the
+/// [`CommandBudget`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CommandKind {
+    /// It may need the medium: a read, a write, a capacity or mode query, an
+    /// ATA IDENTIFY. Its budget covers a medium spinning up on the access.
+    Media,
+    /// The unit answers it without its medium: INQUIRY, TEST UNIT READY,
+    /// REQUEST SENSE, an immediate START STOP UNIT.
+    Query,
+    /// The device's write cache committed to the medium.
+    Flush,
+}
+
+/// What a device of a class is given to answer one command: the bound a
+/// serving driver puts on every exchange (`docs/src/drivers/block.md`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CommandBudget {
+    /// The fixed allowance of a [`CommandKind::Media`] command.
+    pub media_ns: u64,
+    /// The fixed allowance of a [`CommandKind::Query`] command.
+    pub query_ns: u64,
+    /// The allowance of a [`CommandKind::Flush`].
+    pub flush_ns: u64,
+    /// How long a unit may take to come ready from a stop or a reset.
+    pub ready_ns: u64,
+    /// The slowest throughput a healthy device of the class sustains, which
+    /// sizes a transfer's share of its exchange.
+    pub min_bytes_per_s: u64,
+}
+
+impl CommandBudget {
+    /// The exchange one command of `kind` moving `bytes` is given: its kind's
+    /// allowance plus the transfer at the class's slowest throughput.
+    #[must_use]
+    pub const fn exchange_ns(self, kind: CommandKind, bytes: usize) -> u64 {
+        let base = match kind {
+            CommandKind::Media => self.media_ns,
+            CommandKind::Query => self.query_ns,
+            CommandKind::Flush => self.flush_ns,
+        };
+        let rate = if self.min_bytes_per_s == 0 {
+            1
+        } else {
+            self.min_bytes_per_s
+        };
+        let bytes = bytes as u64;
+        // Whole seconds and the remainder apart, so no length overflows
+        // before it saturates.
+        let whole = (bytes / rate).saturating_mul(1_000_000_000);
+        let part = (bytes % rate).saturating_mul(1_000_000_000).div_ceil(rate);
+        base.saturating_add(whole.saturating_add(part))
+    }
+
+    /// The longest exchange any one command of the class is given: a media or
+    /// query command moving a whole data window, or a flush.
+    #[must_use]
+    pub const fn longest_ns(self) -> u64 {
+        let media = self.exchange_ns(CommandKind::Media, BLK_DATA_LEN);
+        let query = self.exchange_ns(CommandKind::Query, BLK_DATA_LEN);
+        let flush = self.exchange_ns(CommandKind::Flush, 0);
+        let data = if media > query { media } else { query };
+        if data > flush {
+            data
+        } else {
+            flush
+        }
+    }
+}
+
+/// The per-device I/O budget derived from a device's [`BlkDeviceClass`]: what
+/// one command is given, the deadline a single request is given before it
+/// fails closed, the number of times a *retryable* failure may be reissued,
+/// and how many requests may be in flight to the device at once.
 ///
 /// These are scaling *policy* defaults sized for both desktop and server, not
 /// fixed security ceilings: a larger machine or a faster device gets its own
 /// budget from its class, never a hand-picked global constant.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct IoBudget {
-    /// Per-request deadline in nanoseconds. A request unanswered for this
-    /// long is reaped as [`BlkStatus::Timeout`] (`u64::MAX` = no deadline).
+    /// What the device is given to answer one command.
+    pub command: CommandBudget,
+    /// Per-request deadline in nanoseconds: how long a consumer waits for an
+    /// answer before treating the serving driver as wedged and reaping the
+    /// request as [`BlkStatus::Timeout`] (`u64::MAX` = no deadline). It covers
+    /// a request held while its unit comes ready, then served after every
+    /// request a serial endpoint may hold ahead of it.
     pub deadline_ns: u64,
     /// How many times a retryable ([`BlkStatus::is_retryable`]) failure may
     /// be reissued before the device is failed closed.
@@ -1069,12 +1141,69 @@ pub struct IoBudget {
     /// has started stalling/resetting is held [`BlkHealthState::Recovering`]
     /// (its requests answered reissuably) before it is failed closed, so a
     /// transient blip is ridden out rather than punished. `u64::MAX` means
-    /// "ride out indefinitely" (never used by a real class). Sized wider than
-    /// `deadline_ns` so a single reset/spin-up cannot exhaust the window.
+    /// "ride out indefinitely" (never used by a real class). Twice the longest
+    /// command, so a command that fails and its reissue both fit inside it.
     pub grace_ns: u64,
 }
 
 impl IoBudget {
+    /// The budget of a class served one request at a time through an
+    /// endpoint `queue_depth` deep (USB and SD units): a queued request may
+    /// wait out a full grace window for every one ahead of it.
+    const fn serial(command: CommandBudget, max_retries: u32, queue_depth: u32) -> Self {
+        Self::with_answers(command, max_retries, queue_depth, queue_depth)
+    }
+
+    /// The budget of a class whose devices serve their queue in parallel, so
+    /// a request waits out only its own command and the recovery it owes.
+    const fn parallel(command: CommandBudget, max_retries: u32, queue_depth: u32) -> Self {
+        Self::with_answers(command, max_retries, queue_depth, 1)
+    }
+
+    /// A budget whose consumer may wait for `answers` grace windows after its
+    /// unit has come ready.
+    const fn with_answers(
+        command: CommandBudget,
+        max_retries: u32,
+        queue_depth: u32,
+        answers: u32,
+    ) -> Self {
+        let grace_ns = command.longest_ns().saturating_mul(2);
+        Self {
+            command,
+            deadline_ns: command
+                .ready_ns
+                .saturating_add(grace_ns.saturating_mul(answers as u64)),
+            max_retries,
+            queue_depth,
+            grace_ns,
+        }
+    }
+
+    /// How long a consumer waits before reissuing a reissuable answer its
+    /// driver cannot vouch for: the grace window spread evenly over the
+    /// class's reissues, so the device has the whole window to recover in.
+    #[must_use]
+    pub const fn reissue_pacing_ns(self) -> u64 {
+        self.grace_ns / (self.max_retries as u64 + 1)
+    }
+
+    /// How long a consumer waits before reissuing `outcome`, its `attempts`
+    /// reissues made, or `None` when it must fail the request instead: the
+    /// bounded policy of [`Self::should_reissue`], at once when the serving
+    /// driver says its recovery has worked ([`BlkReissue::Now`]) and after
+    /// the class's pacing otherwise.
+    #[must_use]
+    pub const fn reissue_wait_ns(self, outcome: &BlkOutcome, attempts: u32) -> Option<u64> {
+        if !self.should_reissue(outcome.status, attempts) {
+            return None;
+        }
+        Some(match outcome.reissue {
+            BlkReissue::Now => 0,
+            BlkReissue::Paced => self.reissue_pacing_ns(),
+        })
+    }
+
     /// Whether a block consumer should reissue a completion of `status` given
     /// it has already made `attempts` attempts against this device.
     ///
@@ -2524,6 +2653,29 @@ enum Served {
     Refused(Errno),
 }
 
+/// What a serving driver knows of the unit a request is for: the write policy
+/// it enforces and the binding of the unit's current publication.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlkPublication {
+    /// Writes are refused before the device is touched, and the geometry
+    /// reply says so ([`BLK_FLAG_READ_ONLY`]).
+    pub read_only: bool,
+    /// The binding every non-geometry request must carry
+    /// ([`BlkRequest::binding`]).
+    pub binding: u64,
+}
+
+/// What the shared engine did with one request.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Answer {
+    /// The completion is framed in the reply buffer, this many bytes long.
+    Reply(usize),
+    /// The device is coming ready ([`DriverError::NotReady`]): nothing was
+    /// framed and health is untouched. The serving driver keeps the request
+    /// and serves it again once its unit is ready.
+    Hold,
+}
+
 /// A data request's extent could not be resolved: either the request was
 /// refused (health-neutral) or the device's own geometry call failed
 /// (device-level, and so health-relevant).
@@ -2548,10 +2700,11 @@ enum Extent {
 /// that cannot mean what it says is answered with an in-band error completion,
 /// never a partial application.
 ///
-/// `read_only` is the device's write policy (e.g. a MODE SENSE WP bit); a
-/// write against it is refused before the device is touched, and the geometry
-/// reply carries it as [`BLK_FLAG_READ_ONLY`] so a consumer can present the
-/// volume honestly.
+/// `publication` is the unit's write policy (e.g. a MODE SENSE WP bit), which
+/// refuses a write before the device is touched and which the geometry reply
+/// carries as [`BLK_FLAG_READ_ONLY`], and the binding of its current
+/// publication, which refuses any other request made for an earlier one as
+/// [`Errno::Stale`].
 ///
 /// `now_ns` is the monotonic clock reading (the kernel monotonic clock the
 /// driver reads before serving each request) that times the recovery grace
@@ -2562,20 +2715,27 @@ enum Extent {
 /// `health`, so head-of-line freedom holds: the serve loop never parks on one
 /// device's blip.
 ///
+/// A device coming ready ([`DriverError::NotReady`]) is not answered at all:
+/// the engine returns [`Answer::Hold`] so the driver can hold the request
+/// rather than spend a reissue or a recovery on a disk spinning up. A
+/// reissuable answer carries the device's word on when the request may come
+/// back ([`Block::reissue`]).
+///
 /// Framing a completion cannot fail (the buffer is exactly the sized
 /// destination); a defensive `unwrap_or(0)` keeps this panic-free on any path
 /// rather than relying on that invariant.
 pub fn serve_request_recovering<B: Block>(
     device: &mut B,
-    read_only: bool,
+    publication: BlkPublication,
     request: &[u8],
     window: &mut [u8],
     reply: &mut [u8; BLK_COMPLETION_LEN],
     health: &mut BlkHealth,
     now_ns: u64,
-) -> usize {
-    match classify(device, read_only, request, window) {
+) -> Answer {
+    Answer::Reply(match classify(device, publication, request, window) {
         Served::Refused(err) => encode_error_completion(reply, err).unwrap_or(0),
+        Served::Device(Err(DriverError::NotReady)) => return Answer::Hold,
         Served::Device(Ok(completion)) => {
             // A composed device serves a read perfectly well while short of
             // redundancy, so what it can *promise* is asked here rather than
@@ -2589,24 +2749,27 @@ pub fn serve_request_recovering<B: Block>(
             // A device-health error drives the recovery state machine: the
             // status the consumer is told may be softened to reissuable while
             // inside the grace window or hardened to offline once it elapses.
+            // The device is asked when a reissue may come whatever the status,
+            // so what it knew of this failure never speaks for a later one.
             Some(raw) => {
+                let reissue = device.reissue();
                 let status = health.observe(raw, now_ns);
                 BlkCompletion::default()
-                    .encode_status(status, reply)
+                    .encode_reissuable(status, reissue, reply)
                     .unwrap_or(0)
             }
             // A request-level rejection the device raised (an out-of-range
             // LBA) is not about the device's health: frame it verbatim.
             None => encode_error_completion(reply, err.as_errno()).unwrap_or(0),
         },
-    }
+    })
 }
 
 /// Decode, validate, and execute one request on `device`, classifying the
 /// outcome as a device call or a health-neutral request refusal.
 fn classify<B: Block>(
     device: &mut B,
-    read_only: bool,
+    publication: BlkPublication,
     request: &[u8],
     window: &mut [u8],
 ) -> Served {
@@ -2614,6 +2777,10 @@ fn classify<B: Block>(
         Ok(request) => request,
         Err(err) => return Served::Refused(err),
     };
+    if request.op != BlkOp::Geometry && request.binding != publication.binding {
+        return Served::Refused(Errno::Stale);
+    }
+    let read_only = publication.read_only;
     match request.op {
         BlkOp::Geometry => {
             // The geometry reply is where a consumer learns what this device
@@ -2630,6 +2797,7 @@ fn classify<B: Block>(
                 block_count: geometry.block_count,
                 flags: if read_only { BLK_FLAG_READ_ONLY } else { 0 },
                 medium,
+                binding: publication.binding,
                 name,
             }))
         }
@@ -2683,6 +2851,15 @@ fn data_extent<B: Block>(device: &B, blocks: u32, window_len: usize) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The length of the completion the engine framed; a test whose device
+    /// never comes ready expects no hold.
+    fn reply_len(answer: Answer) -> usize {
+        let Answer::Reply(len) = answer else {
+            panic!("the engine held a request its device never made it hold");
+        };
+        len
+    }
 
     #[test]
     fn a_device_name_admits_only_printable_ascii() {
@@ -2772,8 +2949,9 @@ mod tests {
             block_size: 512,
             block_count: 8,
             flags: 0,
-            medium: Some(BlkMedium::HardDisk),
+            medium: Some(USB_DISK),
             name: BlkDeviceName::new("fixture-blk"),
+            binding: 0,
         };
         let mut frame = [0u8; BLK_COMPLETION_LEN];
         completion.encode(&mut frame).expect("the frame fits");
@@ -2958,6 +3136,7 @@ mod tests {
             op: BlkOp::Read,
             lba: 0,
             blocks: 1,
+            binding: 0,
         }
         .encode(&mut request)
         .expect("the request frame is exactly this long");
@@ -2968,15 +3147,15 @@ mod tests {
             promise: MountAvailability::Available,
         };
         let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
-        let got = serve_request_recovering(
+        let got = reply_len(serve_request_recovering(
             &mut healthy,
-            false,
+            BlkPublication::default(),
             &request[..len],
             &mut window,
             &mut reply,
             &mut health,
             0,
-        );
+        ));
         assert_eq!(decode_outcome(&reply[..got]).status, BlkStatus::Ok);
         assert_eq!(health.state(), BlkHealthState::Healthy);
 
@@ -2987,15 +3166,15 @@ mod tests {
             promise: MountAvailability::Degraded,
         };
         let mut health = BlkHealth::new(BlkDeviceClass::Virtual);
-        let got = serve_request_recovering(
+        let got = reply_len(serve_request_recovering(
             &mut degraded,
-            false,
+            BlkPublication::default(),
             &request[..len],
             &mut window,
             &mut reply,
             &mut health,
             0,
-        );
+        ));
         let outcome = decode_outcome(&reply[..got]);
         assert_eq!(outcome.status, BlkStatus::Degraded);
         assert!(outcome.status.data_valid(), "the transfer did succeed");
@@ -3095,6 +3274,7 @@ mod tests {
             op: BlkOp::Read,
             lba: 0x1_0000_0001,
             blocks: 64,
+            binding: 0,
         };
         let mut buf = [0u8; BLK_REQUEST_LEN];
         let n = req.encode(&mut buf).expect("encodes");
@@ -3108,6 +3288,7 @@ mod tests {
             op: BlkOp::Flush,
             lba: 0,
             blocks: 0,
+            binding: 0,
         };
         let mut buf = [0u8; BLK_REQUEST_LEN - 1];
         assert_eq!(req.encode(&mut buf), Err(Errno::BufferTooSmall));
@@ -3133,6 +3314,7 @@ mod tests {
                 op,
                 lba: 0,
                 blocks: 1,
+                binding: 0,
             };
             let mut buf = [0u8; BLK_REQUEST_LEN];
             req.encode(&mut buf).expect("encodes");
@@ -3142,11 +3324,20 @@ mod tests {
                 op,
                 lba: 1,
                 blocks: 0,
+                binding: 0,
             };
             req.encode(&mut buf).expect("encodes");
             assert_eq!(BlkRequest::decode(&buf), Err(Errno::OutOfRange));
         }
     }
+
+    /// A USB disk whose bridge reported its rotation rate and removable bit.
+    const USB_DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb)
+        .with_rotation(BlkRotation::from_rate_field(
+            7200,
+            BlkRotationEvidence::RotationRateVpd,
+        ))
+        .with_removability(BlkRemovability::from_rmb(true));
 
     #[test]
     fn completion_round_trips() {
@@ -3154,8 +3345,9 @@ mod tests {
             block_size: 512,
             block_count: 0x2_0000_0000,
             flags: BLK_FLAG_READ_ONLY,
-            medium: Some(BlkMedium::HardDisk),
+            medium: Some(USB_DISK),
             name: BlkDeviceName::UNNAMED,
+            binding: 0,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         let n = completion.encode(&mut buf).expect("encodes");
@@ -3163,28 +3355,22 @@ mod tests {
         assert_eq!(decode_completion(&buf[..n]), Ok(completion));
     }
 
-    /// Every medium a driver may declare.
-    const MEDIA: [BlkMedium; 7] = [
-        BlkMedium::HardDisk,
-        BlkMedium::SolidState,
-        BlkMedium::Nvme,
-        BlkMedium::UsbFlash,
-        BlkMedium::UsbDisk,
-        BlkMedium::SdCard,
-        BlkMedium::Virtual,
-    ];
-
     #[test]
-    fn completion_round_trips_every_medium() {
-        // The medium a device declares survives the wire unchanged, so the
-        // consumer derives the same budget the driver serves it with.
-        for medium in MEDIA {
+    fn completion_carries_what_each_transport_establishes() {
+        // The medium survives the wire unchanged, so the consumer derives the
+        // budget the driver serves it with.
+        for medium in BlkTransport::ALL
+            .into_iter()
+            .map(BlkMedium::of_transport)
+            .chain([USB_DISK])
+        {
             let completion = BlkCompletion {
                 block_size: 4096,
                 block_count: 9,
                 flags: 0,
                 medium: Some(medium),
                 name: BlkDeviceName::UNNAMED,
+                binding: 0,
             };
             let mut buf = [0u8; BLK_COMPLETION_LEN];
             completion.encode(&mut buf).expect("encodes");
@@ -3194,102 +3380,30 @@ mod tests {
                 BlkDeviceClass::of(decoded.medium).budget(),
                 medium.class().budget()
             );
-            assert_eq!(BlkMedium::from_u32(medium.as_u32()), Ok(medium));
-        }
-        assert_eq!(BlkMedium::from_u32(7), Err(Errno::OutOfRange));
-    }
-
-    #[test]
-    fn every_medium_is_served_as_what_it_is() {
-        assert_eq!(BlkMedium::HardDisk.class(), BlkDeviceClass::Rotational);
-        assert_eq!(BlkMedium::SolidState.class(), BlkDeviceClass::SolidState);
-        assert_eq!(BlkMedium::Nvme.class(), BlkDeviceClass::SolidState);
-        for removable in [BlkMedium::UsbFlash, BlkMedium::UsbDisk, BlkMedium::SdCard] {
-            assert_eq!(removable.class(), BlkDeviceClass::Removable);
-        }
-        assert_eq!(BlkMedium::Virtual.class(), BlkDeviceClass::Virtual);
-        for medium in MEDIA {
-            assert_eq!(BlkDeviceClass::of(Some(medium)), medium.class());
-        }
-        assert_eq!(BlkDeviceClass::of(None), BlkDeviceClass::Virtual);
-    }
-
-    /// A composition reads as the member it must wait on longest, whatever
-    /// order the members are in.
-    #[test]
-    fn a_composition_reads_as_its_most_patient_member() {
-        let hdd = Some(BlkMedium::HardDisk);
-        let nvme = Some(BlkMedium::Nvme);
-        let ssd = Some(BlkMedium::SolidState);
-        assert_eq!(BlkMedium::of_members([nvme, hdd]), hdd);
-        assert_eq!(BlkMedium::of_members([hdd, nvme]), hdd);
-        assert_eq!(
-            BlkMedium::of_members([ssd, nvme]),
-            BlkMedium::of_members([nvme, ssd]),
-            "equally patient members answer the same either way round"
-        );
-        assert_eq!(
-            BlkMedium::of_members([nvme, None, hdd]),
-            hdd,
-            "a disk is waited on longer than an undeclared member"
-        );
-        assert_eq!(BlkMedium::of_members([None, None]), None);
-        assert_eq!(BlkMedium::of_members([]), None);
-        let every: Vec<Option<BlkMedium>> = MEDIA.iter().copied().map(Some).chain([None]).collect();
-        for &a in &every {
-            for &b in &every {
-                assert_eq!(
-                    BlkMedium::of_members([a, b]),
-                    BlkMedium::of_members([b, a]),
-                    "{a:?} and {b:?}"
-                );
-            }
         }
     }
 
-    /// An undeclared member is served the paravirtual envelope, longer than a
-    /// solid-state member's, so an array holding both must wait as long as
-    /// the undeclared one may take — and reads as unknown, which it is.
-    #[test]
-    fn an_undeclared_member_is_waited_on_as_paravirtual() {
-        let nvme = Some(BlkMedium::Nvme);
-        let composed = BlkMedium::of_members([nvme, None]);
-        assert_eq!(composed, None);
-        assert_eq!(BlkDeviceClass::of(composed), BlkDeviceClass::Virtual);
-        assert_eq!(BlkMedium::of_members([None, nvme]), None);
-        assert_eq!(
-            BlkMedium::of_members([None, Some(BlkMedium::Virtual)]),
-            Some(BlkMedium::Virtual),
-            "an equally patient declared member names the array"
-        );
-        assert_eq!(
-            BlkMedium::of_members([None, Some(BlkMedium::UsbFlash)]),
-            Some(BlkMedium::UsbFlash),
-            "a removable member outwaits the paravirtual envelope"
-        );
-    }
-
-    /// A completion whose medium word names nothing this build defines.
-    fn completion_with_unknown_class_word() -> [u8; BLK_COMPLETION_LEN] {
+    /// A completion whose medium record names nothing this build defines.
+    fn completion_with_malformed_medium() -> [u8; BLK_COMPLETION_LEN] {
         let completion = BlkCompletion {
             block_size: 512,
             block_count: 4,
             flags: 0,
-            medium: Some(BlkMedium::HardDisk),
+            medium: Some(USB_DISK),
             name: BlkDeviceName::UNNAMED,
+            binding: 0,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         completion.encode(&mut buf).expect("encodes");
-        put_u32(&mut buf, COMPLETION_GEOMETRY_OFF + 16, 0xDEAD_BEEF);
+        buf[COMPLETION_MEDIUM_OFF] = 0xEE;
         buf
     }
 
     #[test]
-    fn an_unknown_class_word_is_served_the_bounded_unclassified_envelope() {
-        // A device claiming a class this build does not know buys no extra
-        // patience: it is served the same envelope a paravirtual device gets,
-        // and its otherwise well-formed completion is not discarded.
-        let buf = completion_with_unknown_class_word();
+    fn a_malformed_medium_is_served_the_bounded_unclassified_envelope() {
+        // A device claiming a medium this build does not know buys no extra
+        // patience, and its otherwise well-formed completion is not discarded.
+        let buf = completion_with_malformed_medium();
         let decoded = decode_completion(&buf).expect("valid completion");
         assert_eq!(
             BlkDeviceClass::of(decoded.medium).budget(),
@@ -3299,16 +3413,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_class_word_stays_unknown_rather_than_becoming_virtual() {
-        // "The driver said something I do not understand" must not be
-        // reported as "this is a paravirtual device": the mount table and the
-        // drive icon drawn from it would then assert a medium nobody
-        // declared. The unknown also survives a re-encode as an unknown, so a
-        // relaying consumer cannot launder it into a named class.
-        let buf = completion_with_unknown_class_word();
+    fn a_malformed_medium_stays_undeclared_through_a_relay() {
+        // Not understood is not paravirtual: the mount table and its drive
+        // picture would then assert a medium nobody declared, and a relaying
+        // consumer must not launder the record into one.
+        let buf = completion_with_malformed_medium();
         let decoded = decode_completion(&buf).expect("valid completion");
         assert_eq!(decoded.medium, None);
-        assert_ne!(decoded.medium, Some(BlkMedium::Virtual));
 
         let mut relayed = [0u8; BLK_COMPLETION_LEN];
         decoded.encode(&mut relayed).expect("encodes");
@@ -3396,8 +3507,9 @@ mod tests {
             block_size: 4096,
             block_count: 7,
             flags: BLK_FLAG_READ_ONLY,
-            medium: Some(BlkMedium::UsbFlash),
+            medium: Some(USB_DISK),
             name: BlkDeviceName::UNNAMED,
+            binding: 0,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         geometry
@@ -3555,12 +3667,29 @@ mod tests {
         ] {
             let b = class.budget();
             assert!(b.deadline_ns > 0 && b.queue_depth > 0);
-            // The grace window rides out at least one full deadline's worth of
-            // stall/reset, so a single reset cannot exhaust it.
+            // A command that fails and its reissue both fit in the grace
+            // window, and the consumer waits at least that long for an answer.
             assert!(
-                b.grace_ns > b.deadline_ns,
-                "{class:?} grace must exceed its per-request deadline"
+                b.grace_ns >= 2 * b.command.longest_ns(),
+                "{class:?} grace must hold a failed command and its reissue"
             );
+            assert!(
+                b.deadline_ns >= b.grace_ns,
+                "{class:?} deadline must outlast what the driver may owe"
+            );
+            assert!(
+                b.deadline_ns > b.command.ready_ns + b.command.longest_ns(),
+                "{class:?} a request held while its unit comes ready is still answered in time"
+            );
+            for (kind, bytes) in [
+                (CommandKind::Media, BLK_DATA_LEN),
+                (CommandKind::Query, BLK_DATA_LEN),
+                (CommandKind::Flush, 0),
+            ] {
+                assert!(b.command.exchange_ns(kind, bytes) <= b.command.longest_ns());
+            }
+            let pacing = b.reissue_pacing_ns();
+            assert!(pacing > 0 && pacing * u64::from(b.max_retries) < b.grace_ns);
         }
         // A rotational disk is given a longer spin-up/reset budget than an SSD,
         // and the SSD a deeper queue — no single global constant fits both.
@@ -3571,6 +3700,43 @@ mod tests {
         assert!(
             BlkDeviceClass::SolidState.budget().queue_depth
                 > BlkDeviceClass::Rotational.budget().queue_depth
+        );
+    }
+
+    #[test]
+    fn a_medium_that_may_rotate_is_given_a_spin_up_on_every_access() {
+        // The 2026-10-17 witness: enclosure disks spinning up on their first
+        // read answered after about 8 s, and a 3.75 s exchange reset each.
+        let unknown = BlkMedium::of_transport(BlkTransport::Usb).class().budget();
+        assert!(unknown.command.exchange_ns(CommandKind::Media, 512) >= 30_000_000_000);
+        assert!(unknown.command.ready_ns >= 60_000_000_000);
+        let flush = unknown.command.exchange_ns(CommandKind::Flush, 0);
+        assert_eq!(
+            flush,
+            2 * unknown.command.exchange_ns(CommandKind::Media, 0)
+        );
+        // A query is answered by the unit itself, so it gets less.
+        assert!(
+            unknown.command.exchange_ns(CommandKind::Query, 36)
+                < unknown.command.exchange_ns(CommandKind::Media, 36)
+        );
+    }
+
+    #[test]
+    fn an_exchange_grows_with_its_transfer() {
+        let command = BlkDeviceClass::Removable.budget().command;
+        let small = command.exchange_ns(CommandKind::Media, 4096);
+        let large = command.exchange_ns(CommandKind::Media, BLK_DATA_LEN);
+        assert!(large > small);
+        assert_eq!(
+            large - small,
+            ((BLK_DATA_LEN - 4096) as u64 * 1_000_000_000).div_ceil(command.min_bytes_per_s),
+            "the difference is the extra bytes at the slowest throughput"
+        );
+        assert_eq!(command.exchange_ns(CommandKind::Media, 0), command.media_ns);
+        assert_eq!(
+            command.exchange_ns(CommandKind::Media, usize::MAX),
+            u64::MAX
         );
     }
 
@@ -4539,7 +4705,7 @@ mod tests {
     /// The medium the double declares. Deliberately *not* the trait default,
     /// so a test asserting it proves the engine asked the device rather than
     /// falling back.
-    const MEM_BLOCK_MEDIUM: BlkMedium = BlkMedium::HardDisk;
+    const MEM_BLOCK_MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata);
 
     /// An in-memory 512-byte-block device with a flush counter.
     struct MemBlock {
@@ -4619,15 +4785,18 @@ mod tests {
     ) -> Result<BlkCompletion, Errno> {
         let mut reply = [0u8; BLK_COMPLETION_LEN];
         let mut health = BlkHealth::new(BlkDeviceClass::Removable);
-        let len = serve_request_recovering(
+        let len = reply_len(serve_request_recovering(
             device,
-            read_only,
+            BlkPublication {
+                read_only,
+                binding: 0,
+            },
             &encode_request(request),
             window,
             &mut reply,
             &mut health,
             0,
-        );
+        ));
         decode_completion(&reply[..len])
     }
 
@@ -4639,6 +4808,7 @@ mod tests {
             op: BlkOp::Geometry,
             lba: 0,
             blocks: 0,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &request, &mut window),
@@ -4648,6 +4818,7 @@ mod tests {
                 flags: 0,
                 medium: Some(MEM_BLOCK_MEDIUM),
                 name: BlkDeviceName::UNNAMED,
+                binding: 0,
             })
         );
         assert_eq!(
@@ -4658,6 +4829,7 @@ mod tests {
                 flags: BLK_FLAG_READ_ONLY,
                 medium: Some(MEM_BLOCK_MEDIUM),
                 name: BlkDeviceName::UNNAMED,
+                binding: 0,
             })
         );
     }
@@ -4675,6 +4847,7 @@ mod tests {
                 op: BlkOp::Geometry,
                 lba: 0,
                 blocks: 0,
+                binding: 0,
             },
             &mut window,
         )
@@ -4696,6 +4869,7 @@ mod tests {
             op: BlkOp::Write,
             lba: 3,
             blocks: 1,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &write, &mut window),
@@ -4707,6 +4881,7 @@ mod tests {
             op: BlkOp::Read,
             lba: 3,
             blocks: 1,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &read, &mut window),
@@ -4724,6 +4899,7 @@ mod tests {
             op: BlkOp::Write,
             lba: 0,
             blocks: 1,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, true, &write, &mut window),
@@ -4742,6 +4918,7 @@ mod tests {
             op: BlkOp::Read,
             lba: 0,
             blocks,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &read, &mut window),
@@ -4757,6 +4934,7 @@ mod tests {
             op: BlkOp::Read,
             lba: 0,
             blocks: 0,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &read, &mut window),
@@ -4772,6 +4950,7 @@ mod tests {
             op: BlkOp::Read,
             lba: BLOCK_COUNT,
             blocks: 1,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &read, &mut window),
@@ -4785,15 +4964,15 @@ mod tests {
         let mut window = vec![0u8; BLK_DATA_LEN];
         let mut reply = [0u8; BLK_COMPLETION_LEN];
         let mut health = BlkHealth::new(BlkDeviceClass::Removable);
-        let len = serve_request_recovering(
+        let len = reply_len(serve_request_recovering(
             &mut device,
-            false,
+            BlkPublication::default(),
             &[0u8; BLK_REQUEST_LEN - 1],
             &mut window,
             &mut reply,
             &mut health,
             0,
-        );
+        ));
         assert_eq!(
             decode_completion(&reply[..len]),
             Err(Errno::LengthOutOfRange)
@@ -4810,6 +4989,7 @@ mod tests {
             op: BlkOp::Flush,
             lba: 0,
             blocks: 0,
+            binding: 0,
         };
         assert_eq!(
             serve(&mut device, false, &flush, &mut window),
@@ -4866,17 +5046,208 @@ mod tests {
             op: BlkOp::Read,
             lba: 0,
             blocks: 1,
+            binding: 0,
         });
-        let len = serve_request_recovering(
+        let len = reply_len(serve_request_recovering(
             device,
-            false,
+            BlkPublication::default(),
             &read,
             &mut window,
             &mut reply,
             health,
             now_ns,
-        );
+        ));
         decode_outcome(&reply[..len]).status
+    }
+
+    #[test]
+    fn a_reissue_hint_rides_only_a_reissuable_answer() {
+        let decode = |status: BlkStatus, reissue: BlkReissue| {
+            let mut frame = [0u8; BLK_COMPLETION_LEN];
+            let len = BlkCompletion::default()
+                .encode_reissuable(status, reissue, &mut frame)
+                .expect("encodes");
+            decode_outcome(&frame[..len])
+        };
+        for status in [
+            BlkStatus::Reset,
+            BlkStatus::Timeout,
+            BlkStatus::TransientError,
+        ] {
+            let outcome = decode(status, BlkReissue::Now);
+            assert_eq!((outcome.status, outcome.reissue), (status, BlkReissue::Now));
+            assert_eq!(decode(status, BlkReissue::Paced).reissue, BlkReissue::Paced);
+        }
+        // Nothing reissues these, so a hint cannot travel with them.
+        for status in [
+            BlkStatus::Ok,
+            BlkStatus::Degraded,
+            BlkStatus::MediumError,
+            BlkStatus::Offline,
+            BlkStatus::Removed,
+            BlkStatus::Fatal,
+        ] {
+            assert_eq!(
+                decode(status, BlkReissue::Now).reissue,
+                BlkReissue::Paced,
+                "{status:?}"
+            );
+        }
+        let mut frame = [0u8; BLK_COMPLETION_LEN];
+        let len = BlkCompletion::default()
+            .encode_status(BlkStatus::Reset, &mut frame)
+            .expect("encodes");
+        assert_eq!(decode_outcome(&frame[..len]).reissue, BlkReissue::Paced);
+        let len = encode_error_completion(&mut frame, Errno::TimedOut).expect("encodes");
+        assert_eq!(decode_outcome(&frame[..len]).reissue, BlkReissue::Paced);
+    }
+
+    #[test]
+    fn an_unknown_reissue_word_is_no_reason_to_hurry() {
+        let mut frame = [0u8; BLK_COMPLETION_LEN];
+        let len = BlkCompletion::default()
+            .encode_reissuable(BlkStatus::Reset, BlkReissue::Now, &mut frame)
+            .expect("encodes");
+        frame[COMPLETION_REISSUE_OFF..COMPLETION_REISSUE_OFF + 4]
+            .copy_from_slice(&7u32.to_le_bytes());
+        let outcome = decode_outcome(&frame[..len]);
+        assert_eq!(outcome.status, BlkStatus::Reset);
+        assert_eq!(outcome.reissue, BlkReissue::Paced);
+    }
+
+    #[test]
+    fn a_frame_cut_short_of_its_reissue_word_fails_closed() {
+        let mut frame = [0u8; BLK_COMPLETION_LEN];
+        let len = BlkCompletion::default()
+            .encode_reissuable(BlkStatus::Reset, BlkReissue::Now, &mut frame)
+            .expect("encodes");
+        assert!(len > COMPLETION_HEADER_LEN);
+        let outcome = decode_outcome(&frame[..COMPLETION_HEADER_LEN - 1]);
+        assert_eq!(
+            (outcome.status, outcome.error, outcome.reissue),
+            (BlkStatus::Fatal, Errno::DeviceFault, BlkReissue::Paced)
+        );
+    }
+
+    #[test]
+    fn a_reissue_waits_out_the_pacing_unless_its_driver_vouches_for_it() {
+        let budget = BlkDeviceClass::Rotational.budget();
+        let outcome = |status, reissue| BlkOutcome {
+            status,
+            geometry: BlkCompletion::default(),
+            error: status.default_errno(),
+            reissue,
+        };
+        assert_eq!(
+            budget.reissue_wait_ns(&outcome(BlkStatus::Reset, BlkReissue::Now), 0),
+            Some(0)
+        );
+        assert_eq!(
+            budget.reissue_wait_ns(&outcome(BlkStatus::Reset, BlkReissue::Paced), 0),
+            Some(budget.reissue_pacing_ns())
+        );
+        // A driver's word buys no reissue the budget does not allow.
+        assert_eq!(
+            budget.reissue_wait_ns(
+                &outcome(BlkStatus::Reset, BlkReissue::Now),
+                budget.max_retries
+            ),
+            None
+        );
+        assert_eq!(
+            budget.reissue_wait_ns(&outcome(BlkStatus::Offline, BlkReissue::Now), 0),
+            None
+        );
+    }
+
+    /// A device whose every data transfer fails with `fault`, and which
+    /// answers `vouch` when asked when the request may come back.
+    struct VouchingBlock {
+        fault: DriverError,
+        vouch: BlkReissue,
+        asked: usize,
+    }
+
+    impl Block for VouchingBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            Ok(BlockGeometry {
+                block_size: BLOCK_SIZE_U32,
+                block_count: BLOCK_COUNT,
+            })
+        }
+
+        fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+            Err(self.fault)
+        }
+
+        fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+            Err(self.fault)
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn reissue(&mut self) -> BlkReissue {
+            self.asked += 1;
+            self.vouch
+        }
+    }
+
+    #[test]
+    fn a_reissuable_answer_carries_its_devices_word_on_when_to_reissue() {
+        let mut device = VouchingBlock {
+            fault: DriverError::Busy,
+            vouch: BlkReissue::Now,
+            asked: 0,
+        };
+        let mut health = BlkHealth::new(BlkDeviceClass::Rotational);
+        let grace = health.budget().grace_ns;
+        let mut serve = |device: &mut VouchingBlock, now_ns| {
+            let mut window = vec![0u8; BLK_DATA_LEN];
+            let mut reply = [0u8; BLK_COMPLETION_LEN];
+            let read = encode_request(&BlkRequest {
+                op: BlkOp::Read,
+                lba: 0,
+                blocks: 1,
+                binding: 0,
+            });
+            let len = reply_len(serve_request_recovering(
+                device,
+                BlkPublication::default(),
+                &read,
+                &mut window,
+                &mut reply,
+                &mut health,
+                now_ns,
+            ));
+            decode_outcome(&reply[..len])
+        };
+        let recovering = serve(&mut device, 0);
+        assert_eq!(
+            (recovering.status, recovering.reissue),
+            (BlkStatus::Reset, BlkReissue::Now)
+        );
+        // Past the window the answer is not reissuable, yet the device is still
+        // asked, so what it knew of this failure never speaks for a later one.
+        let failed = serve(&mut device, grace + 1);
+        assert_eq!(
+            (failed.status, failed.reissue),
+            (BlkStatus::Offline, BlkReissue::Paced)
+        );
+        assert_eq!(device.asked, 2);
+    }
+
+    #[test]
+    fn a_window_onto_a_device_forwards_its_word_on_when_to_reissue() {
+        let mut device = VouchingBlock {
+            fault: DriverError::Busy,
+            vouch: BlkReissue::Now,
+            asked: 0,
+        };
+        let mut borrowed: &mut VouchingBlock = &mut device;
+        assert_eq!(Block::reissue(&mut borrowed), BlkReissue::Now);
+        assert_eq!(device.asked, 1);
     }
 
     #[test]
@@ -4959,20 +5330,145 @@ mod tests {
             op: BlkOp::Read,
             lba: BLOCK_COUNT,
             blocks: 1,
+            binding: 0,
         });
-        let len = serve_request_recovering(
+        let len = reply_len(serve_request_recovering(
             &mut device,
-            false,
+            BlkPublication::default(),
             &read,
             &mut window,
             &mut reply,
             &mut health,
             0,
-        );
+        ));
         assert_eq!(
             decode_completion(&reply[..len]),
             Err(Errno::LengthOutOfRange)
         );
         assert_eq!(health.state(), BlkHealthState::Healthy);
+    }
+    /// A device coming ready is held, never answered and never charged: no
+    /// reply is framed and the unit's health does not move.
+    #[test]
+    fn a_unit_coming_ready_is_held_not_answered() {
+        struct ComingReady;
+        impl Block for ComingReady {
+            fn geometry(&self) -> Result<crate::driver::block::BlockGeometry, DriverError> {
+                Ok(crate::driver::block::BlockGeometry {
+                    block_size: 512,
+                    block_count: 8,
+                })
+            }
+            fn read_blocks(&mut self, _lba: u64, _buf: &mut [u8]) -> Result<(), DriverError> {
+                Err(DriverError::NotReady)
+            }
+            fn write_blocks(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), DriverError> {
+                Err(DriverError::NotReady)
+            }
+            fn flush(&mut self) -> Result<(), DriverError> {
+                Err(DriverError::NotReady)
+            }
+        }
+        let mut health = BlkHealth::new(BlkDeviceClass::Rotational);
+        let mut window = [0u8; 512];
+        let mut reply = [0xA5u8; BLK_COMPLETION_LEN];
+        let mut request = [0u8; BLK_REQUEST_LEN];
+        let len = BlkRequest {
+            op: BlkOp::Read,
+            lba: 0,
+            blocks: 1,
+            binding: 0,
+        }
+        .encode(&mut request)
+        .expect("encodes");
+        let answer = serve_request_recovering(
+            &mut ComingReady,
+            BlkPublication::default(),
+            &request[..len],
+            &mut window,
+            &mut reply,
+            &mut health,
+            0,
+        );
+        assert_eq!(answer, Answer::Hold);
+        assert_eq!(health.state(), BlkHealthState::Healthy);
+        assert!(reply.iter().all(|&byte| byte == 0xA5), "nothing was framed");
+    }
+
+    /// A request made for an earlier publication of a unit never reaches the
+    /// medium that replaced it, and the geometry reply hands a consumer the
+    /// current binding.
+    #[test]
+    fn a_request_for_an_earlier_publication_is_refused_stale() {
+        let mut device = MemBlock::new();
+        let publication = BlkPublication {
+            read_only: false,
+            binding: 0x5EED_0002,
+        };
+        let mut health = BlkHealth::new(BlkDeviceClass::Rotational);
+        let mut window = vec![0u8; BLK_DATA_LEN];
+        let serve = |device: &mut MemBlock,
+                     health: &mut BlkHealth,
+                     window: &mut [u8],
+                     request: BlkRequest| {
+            let mut bytes = [0u8; BLK_REQUEST_LEN];
+            request.encode(&mut bytes).expect("encodes");
+            let mut reply = [0u8; BLK_COMPLETION_LEN];
+            let len = reply_len(serve_request_recovering(
+                device,
+                publication,
+                &bytes,
+                window,
+                &mut reply,
+                health,
+                0,
+            ));
+            decode_outcome(&reply[..len])
+        };
+        let geometry = serve(
+            &mut device,
+            &mut health,
+            &mut window,
+            BlkRequest {
+                op: BlkOp::Geometry,
+                lba: 0,
+                blocks: 0,
+                binding: 0,
+            },
+        );
+        assert_eq!(geometry.geometry.binding, publication.binding);
+        let read = |binding| BlkRequest {
+            op: BlkOp::Read,
+            lba: 0,
+            blocks: 1,
+            binding,
+        };
+        let stale = serve(&mut device, &mut health, &mut window, read(0x5EED_0001));
+        assert_eq!(stale.error, Errno::Stale);
+        assert_eq!(
+            health.state(),
+            BlkHealthState::Healthy,
+            "a refusal is not a fault"
+        );
+        let current = serve(
+            &mut device,
+            &mut health,
+            &mut window,
+            read(publication.binding),
+        );
+        assert_eq!(current.status, BlkStatus::Ok);
+    }
+
+    #[test]
+    fn a_request_carries_its_binding_on_the_wire() {
+        let request = BlkRequest {
+            op: BlkOp::Write,
+            lba: 77,
+            blocks: 3,
+            binding: u64::MAX - 1,
+        };
+        let mut bytes = [0u8; BLK_REQUEST_LEN];
+        assert_eq!(request.encode(&mut bytes), Ok(BLK_REQUEST_LEN));
+        assert_eq!(BlkRequest::decode(&bytes), Ok(request));
     }
 }

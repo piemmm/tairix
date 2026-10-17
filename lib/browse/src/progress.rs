@@ -45,6 +45,7 @@ pub struct ProgressModel {
     op: ProgressOp,
     done: usize,
     cancel_requested: bool,
+    waiting: bool,
 }
 
 impl ProgressModel {
@@ -56,7 +57,19 @@ impl ProgressModel {
             op,
             done: 0,
             cancel_requested: false,
+            waiting: false,
         }
+    }
+
+    /// Whether it waits for the operations asked before it, which run first.
+    #[must_use]
+    pub const fn is_waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// Note whether it is still waiting for the operations before it.
+    pub fn set_waiting(&mut self, waiting: bool) {
+        self.waiting = waiting;
     }
 
     /// Which operation this reports.
@@ -124,9 +137,13 @@ impl ProgressModel {
     /// The running caption: the honest count of nodes processed so far with the
     /// operation's verb (`"3 items removed"`, `"1 item copied"`) — never a
     /// fabricated percentage, since the total is unknown until the walk reveals
-    /// it.
+    /// it — or, while it waits for the operations asked before it, that it
+    /// waits.
     #[must_use]
     pub fn status_line(&self) -> String {
+        if self.waiting {
+            return String::from("Waiting for the operations before it");
+        }
         let verb = match self.op {
             ProgressOp::Delete => "removed",
             ProgressOp::Copy => "copied",

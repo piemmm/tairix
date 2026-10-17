@@ -47,7 +47,7 @@ const DATA: u8 = 0x01;
 const FEEDBACK: u8 = 0x81;
 
 /// Enumerate the audio function on root port 1.
-fn audio_device(mem: &SharedMem) -> UsbDevice<'static, ModelXhci, MockDma> {
+fn audio_device(mem: &SharedMem) -> TestHost {
     let mut mock = MockXhci::with_device(mem);
     mock.keyboard_config = &AUDIO_CONFIG;
     mock.mfindex = 1000;
@@ -58,13 +58,13 @@ fn audio_device(mem: &SharedMem) -> UsbDevice<'static, ModelXhci, MockDma> {
 
 /// The audio function with streaming interface 1 claimed and setting 1
 /// selected.
-fn streaming_device(mem: &SharedMem) -> UsbDevice<'static, ModelXhci, MockDma> {
+fn streaming_device(mem: &SharedMem) -> TestHost {
     let mut device = audio_device(mem);
-    let mut engine = device.engine_for(0);
-    engine
+    device
+        .engine_for(0)
         .claim_interface(1)
         .expect("the streaming interface is free");
-    engine.set_interface(1, 1).expect("the bus has room");
+    device.set_interface(0, 1, 1).expect("the bus has room");
     device
 }
 
@@ -101,19 +101,27 @@ fn out_region(layout: IsoLayout, slot: u16, lengths: &[u32]) -> Vec<u8> {
 fn an_audio_function_publishes_its_control_interface_and_leaves_streaming_to_claim() {
     let mem = shared_mem();
     let device = audio_device(&mem);
-    let identity = device.device_identity(0).expect("the control interface");
+    let identity = device
+        .core()
+        .device_identity(0)
+        .expect("the control interface");
     assert_eq!(identity.interface_number, 0);
     assert_eq!(identity.interface_class, 0x01_01_00);
     assert_eq!(
-        device.describe_device(0, 0, 9).expect("described").class(),
+        device
+            .core()
+            .describe_device(0, 0, 9)
+            .expect("described")
+            .class(),
         Some(HwDeviceClass::Audio)
     );
     let vendor = device
+        .core()
         .device_identity(1)
         .expect("the control-only vendor interface");
     assert_eq!(vendor.interface_number, 2);
     assert!(
-        !device.device_live(2),
+        !device.core().device_live(2),
         "neither interface with settings to choose has a node"
     );
 }
@@ -150,17 +158,17 @@ fn a_sibling_interface_is_claimed_once_and_only_if_it_exists() {
 fn selecting_a_setting_reserves_its_endpoints_before_the_device_is_told() {
     let mem = shared_mem();
     let mut device = audio_device(&mem);
-    let mut engine = device.engine_for(0);
     assert_eq!(
-        engine.set_interface(1, 1),
+        device.set_interface(0, 1, 1),
         Err(DriverError::NotFound),
         "not claimed"
     );
-    engine.claim_interface(1).expect("free");
-    assert_eq!(engine.set_interface(1, 1), Ok(()));
-    let endpoints = engine.scope().expect("served").endpoints;
+    device.engine_for(0).claim_interface(1).expect("free");
+    assert_eq!(device.set_interface(0, 1, 1), Ok(()));
+    let endpoints = device.engine_for(0).scope().expect("served").endpoints;
     assert_eq!(endpoints, 1 << 2 | 1 << 3);
-    let mock = device.host_mut().model_mut();
+    let mut host = device.host_mut();
+    let mock = host.model_mut();
     assert_eq!(mock.set_interfaces, [(1, 1)]);
     let mut iso = mock.iso.clone();
     iso.sort_by_key(|iso| iso.dci);
@@ -179,13 +187,15 @@ fn a_setting_the_bus_cannot_schedule_is_refused_and_leaves_nothing_behind() {
     let mut device = audio_device(&mem);
     let chunks = device.dma_ref().chunks.len();
     device.host_mut().model_mut().iso_configure_refusal = Some(CompletionCode::BandwidthError);
-    let mut engine = device.engine_for(0);
-    engine.claim_interface(1).expect("free");
-    assert_eq!(engine.set_interface(1, 1), Err(DriverError::NoBandwidth));
-    assert_eq!(engine.scope().expect("served").endpoints, 0);
-    let mock = device.host_mut().model_mut();
-    assert!(mock.set_interfaces.is_empty(), "the device was never told");
-    assert!(mock.iso.is_empty());
+    device.engine_for(0).claim_interface(1).expect("free");
+    assert_eq!(device.set_interface(0, 1, 1), Err(DriverError::NoBandwidth));
+    assert_eq!(device.engine_for(0).scope().expect("served").endpoints, 0);
+    {
+        let mut host = device.host_mut();
+        let mock = host.model_mut();
+        assert!(mock.set_interfaces.is_empty(), "the device was never told");
+        assert!(mock.iso.is_empty());
+    }
     assert_eq!(device.dma_ref().chunks.len(), chunks, "no ring stranded");
 }
 
@@ -196,7 +206,7 @@ fn a_device_refusing_a_setting_keeps_the_one_it_had() {
     let chunks = device.dma_ref().chunks.len();
     device.host_mut().model_mut().stall_set_interface = true;
     assert_eq!(
-        device.engine_for(0).set_interface(1, 2),
+        device.set_interface(0, 1, 2),
         Err(DriverError::EndpointStalled)
     );
     let mut iso = device.host_mut().model_mut().iso.clone();
@@ -215,10 +225,9 @@ fn switching_settings_drops_the_old_endpoints_and_their_rings() {
     let mem = shared_mem();
     let mut device = audio_device(&mem);
     let baseline = device.dma_ref().chunks.len();
-    let mut engine = device.engine_for(0);
-    engine.claim_interface(1).expect("free");
-    engine.set_interface(1, 1).expect("room");
-    engine.set_interface(1, 2).expect("room");
+    device.engine_for(0).claim_interface(1).expect("free");
+    device.set_interface(0, 1, 1).expect("room");
+    device.set_interface(0, 1, 2).expect("room");
     let held: Vec<_> = device
         .host_mut()
         .model_mut()
@@ -228,7 +237,7 @@ fn switching_settings_drops_the_old_endpoints_and_their_rings() {
         .collect();
     assert_eq!(held, [(2, 400)]);
     assert_eq!(device.dma_ref().chunks.len(), baseline + 1);
-    device.engine_for(0).set_interface(1, 0).expect("room");
+    device.set_interface(0, 1, 0).expect("room");
     assert!(device.host_mut().model_mut().iso.is_empty());
     assert_eq!(device.dma_ref().chunks.len(), baseline);
     assert_eq!(
@@ -254,7 +263,8 @@ fn a_stream_places_each_interval_at_its_frame_and_raises_one_interrupt_a_slot() 
         .engine_for(0)
         .iso_queue(DATA, 0, &region)
         .expect("queued");
-    let mock = device.host_mut().model_mut();
+    let mut host = device.host_mut();
+    let mock = host.model_mut();
     // The mock's scheduling threshold is zero: 1000 + 8 rounds to frame 126.
     let tds: Vec<_> = mock
         .iso_tds
@@ -283,7 +293,8 @@ fn a_stream_places_each_interval_at_its_frame_and_raises_one_interrupt_a_slot() 
     for _ in 0..4 {
         mock.complete_iso(CompletionCode::Success, 0);
     }
-    device.pump_reports().expect("the ring drains");
+    drop(host);
+    device.settle();
     let mut region = vec![0u8; layout.region_len()];
     let done = device
         .engine_for(0)
@@ -327,7 +338,8 @@ fn an_in_stream_delivers_what_each_interval_received() {
         .engine_for(0)
         .iso_queue(FEEDBACK, 1, &region)
         .expect("queued");
-    let mock = device.host_mut().model_mut();
+    let mut host = device.host_mut();
+    let mock = host.model_mut();
     let tds: Vec<_> = mock
         .iso_tds
         .iter()
@@ -340,7 +352,8 @@ fn an_in_stream_delivers_what_each_interval_received() {
     mock.write_mem(tds[0].0, &[0x66, 0x66, 0x0B]);
     mock.complete_iso(CompletionCode::ShortPacket, 1);
     mock.complete_iso(CompletionCode::UsbTransactionError, 0);
-    device.pump_reports().expect("drains");
+    drop(host);
+    device.settle();
     let mut region = vec![0u8; layout.region_len()];
     let done = device
         .engine_for(0)
@@ -376,7 +389,7 @@ fn a_late_slot_restarts_and_reports_the_gap() {
         .engine_for(0)
         .iso_queue(DATA, 0, &region)
         .expect("queued");
-    device.pump_reports().expect("drains");
+    device.settle();
     let mut taken = vec![0u8; layout.region_len()];
     let first = device
         .engine_for(0)
@@ -391,7 +404,7 @@ fn a_late_slot_restarts_and_reports_the_gap() {
         .engine_for(0)
         .iso_queue(DATA, 1, &region)
         .expect("queued");
-    device.pump_reports().expect("drains");
+    device.settle();
     let second = device
         .engine_for(0)
         .iso_take(DATA, &mut taken)
@@ -474,11 +487,8 @@ fn a_running_stream_holds_its_setting_until_stopped() {
         .engine_for(0)
         .iso_queue(DATA, 0, &region)
         .expect("queued");
-    assert_eq!(
-        device.engine_for(0).set_interface(1, 0),
-        Err(DriverError::Busy)
-    );
-    assert_eq!(device.engine_for(0).iso_stop(DATA), Ok(()));
+    assert_eq!(device.set_interface(0, 1, 0), Err(DriverError::Busy));
+    assert_eq!(device.iso_stop(0, DATA), Ok(()));
     assert_eq!(
         device.dma_ref().chunks.len(),
         chunks,
@@ -489,10 +499,7 @@ fn a_running_stream_holds_its_setting_until_stopped() {
         device.engine_for(0).iso_take(DATA, &mut taken),
         Err(DriverError::NotFound)
     );
-    assert_eq!(
-        device.engine_for(0).iso_stop(DATA),
-        Err(DriverError::NotFound)
-    );
+    assert_eq!(device.iso_stop(0, DATA), Err(DriverError::NotFound));
     // The repositioned ring serves the next stream from its start.
     device.engine_for(0).iso_start(DATA, layout).expect("fits");
     device
@@ -500,14 +507,11 @@ fn a_running_stream_holds_its_setting_until_stopped() {
         .iso_queue(DATA, 1, &out_region(layout, 1, &[8, 8]))
         .expect("queued");
     assert_eq!(device.host_mut().model_mut().iso_tds.len(), 4);
-    assert_eq!(
-        device.engine_for(0).set_interface(1, 0),
-        Err(DriverError::Busy)
-    );
+    assert_eq!(device.set_interface(0, 1, 0), Err(DriverError::Busy));
 }
 
 #[test]
-fn starting_a_stream_again_replaces_the_one_left_running() {
+fn starting_a_stream_on_a_running_endpoint_is_refused_and_leaves_it_running() {
     let mem = shared_mem();
     let mut device = streaming_device(&mem);
     device.host_mut().model_mut().iso_hold = true;
@@ -518,17 +522,19 @@ fn starting_a_stream_again_replaces_the_one_left_running() {
         .engine_for(0)
         .iso_queue(DATA, 0, &out_region(layout, 0, &[8, 8]))
         .expect("queued");
-    device
-        .engine_for(0)
-        .iso_start(DATA, layout)
-        .expect("replaced");
     assert_eq!(
-        device.dma_ref().chunks.len(),
-        chunks,
-        "one data chunk, not two"
+        device.engine_for(0).iso_start(DATA, layout),
+        Err(DriverError::AlreadyExists),
+        "a stream is stopped before another starts"
     );
-    let mut taken = vec![0u8; layout.region_len()];
-    assert_eq!(device.engine_for(0).iso_take(DATA, &mut taken), Ok(None));
+    assert_eq!(device.dma_ref().chunks.len(), chunks, "one data chunk");
+    assert_eq!(
+        device
+            .engine_for(0)
+            .iso_queue(DATA, 1, &out_region(layout, 1, &[8, 8])),
+        Ok(()),
+        "the running stream still takes slots"
+    );
 }
 
 #[test]
@@ -543,10 +549,7 @@ fn a_departing_device_takes_its_settings_and_streams_with_it() {
         .iso_queue(DATA, 0, &out_region(layout, 0, &[8, 8]))
         .expect("queued");
     root_port_change(&mut device, 0, regs::PORTSC_PP | regs::PORTSC_CSC);
-    assert_eq!(
-        device.next_root_change(&TestDelay::default()),
-        Ok(HubEvent::Detached(0))
-    );
+    assert_eq!(device.next_change(), Some(HubEvent::Detached(0)));
     assert_eq!(
         device.dma_ref().chunks.len(),
         1,

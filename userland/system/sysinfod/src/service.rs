@@ -816,7 +816,7 @@ mod tests {
         AudioDeviceDescriptor, ControlAccess, DefaultChoice, StreamDescriptor,
     };
     use tairix_abi::blkio::{
-        BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkMedium, BlkQueueCounters,
+        BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkMedium, BlkQueueCounters, BlkTransport,
     };
     use tairix_abi::display_ipc::DisplayStats;
     use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
@@ -1160,7 +1160,7 @@ mod tests {
                         MountVolumeState {
                             usage: VolumeStats::default(),
                             availability: MountAvailability::Available,
-                            medium: Some(BlkMedium::Nvme),
+                            medium: Some(BlkMedium::of_transport(BlkTransport::Nvme)),
                         },
                         [0u8; 16],
                     )
@@ -2311,7 +2311,10 @@ mod tests {
         assert!(first.flags().contains(MountFlags::READ_ONLY));
         // The medium the source reported is relayed unchanged, and a volume
         // whose backing medium is unknown stays unknown rather than guessed.
-        assert_eq!(first.medium(), Some(BlkMedium::Nvme));
+        assert_eq!(
+            first.medium(),
+            Some(BlkMedium::of_transport(BlkTransport::Nvme))
+        );
         let second =
             MountRecord::from_bytes(&resp[MountRecord::WIRE_LEN..2 * MountRecord::WIRE_LEN])
                 .unwrap();

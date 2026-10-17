@@ -868,6 +868,10 @@ mod program {
                     app::report(APP_NAME, "dropped a malformed window event");
                     continue;
                 }
+                Err(EventError::Refused(refused)) => {
+                    app::report(APP_NAME, refused);
+                    continue;
+                }
                 // The mailbox will refuse the same way again, so reading on
                 // would spin; the notice states it once and the drain ends.
                 Err(EventError::Mailbox(err)) => {

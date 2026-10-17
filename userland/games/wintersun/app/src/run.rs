@@ -826,6 +826,10 @@ mod program {
             }
             // A malformed frame is consumed and refused; the stream goes on.
             Err(EventError::Undecodable(_)) => Served::Applied,
+            Err(EventError::Refused(refused)) => {
+                app::report(APP_NAME, refused);
+                Served::Applied
+            }
             Ok(None) => Served::Empty,
             Err(EventError::Mailbox(_)) => {
                 Served::Stop(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost"))

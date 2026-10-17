@@ -19,7 +19,8 @@ fn operations_run_one_at_a_time_in_the_order_asked() {
         desk.standing(2),
         Some(Standing {
             done: 0,
-            cancelling: false
+            cancelling: false,
+            waiting: true,
         }),
         "the second waits"
     );
@@ -28,7 +29,7 @@ fn operations_run_one_at_a_time_in_the_order_asked() {
 }
 
 #[test]
-fn an_answer_reaches_only_the_window_that_asked() {
+fn an_answer_reaches_only_the_operation_it_belongs_to() {
     let mut desk = desk();
     desk.submit(1, "copy").expect("taken");
     desk.submit(2, "delete").expect("taken");
@@ -58,7 +59,8 @@ fn a_cancel_stops_a_running_operation_before_its_next_step() {
         desk.standing(1),
         Some(Standing {
             done: 0,
-            cancelling: true
+            cancelling: true,
+            waiting: false,
         })
     );
     desk.finish(Ending::Cancelled);
@@ -78,7 +80,7 @@ fn a_cancelled_waiting_operation_ends_at_once_having_done_nothing() {
 }
 
 #[test]
-fn a_closed_windows_operation_stops_and_its_answer_is_dropped() {
+fn a_forgotten_operation_stops_and_its_answer_is_dropped() {
     let mut desk = desk();
     desk.submit(1, "copy").expect("taken");
     desk.submit(2, "delete").expect("taken");
@@ -90,16 +92,12 @@ fn a_closed_windows_operation_stops_and_its_answer_is_dropped() {
     assert!(!desk.report(3), "nobody is owed a wake for it");
     assert!(!desk.finish(Ending::Cancelled));
     assert_eq!(desk.take(1), None);
-    assert_eq!(
-        desk.next_job(),
-        None,
-        "a closed window's waiting job never runs"
-    );
+    assert_eq!(desk.next_job(), None, "a forgotten waiting job never runs");
     assert!(!desk.holds(1) && !desk.holds(2));
 }
 
 #[test]
-fn a_window_holds_one_operation_and_a_full_desk_refuses_with_its_reason() {
+fn an_id_is_held_once_and_a_full_desk_refuses_with_its_reason() {
     let mut desk = desk();
     desk.submit(1, "copy").expect("taken");
     assert_eq!(desk.submit(1, "again"), Err(("again", Refusal::Busy)));
@@ -111,7 +109,7 @@ fn a_window_holds_one_operation_and_a_full_desk_refuses_with_its_reason() {
 }
 
 #[test]
-fn a_window_whose_answer_waits_uncollected_still_holds_its_operation() {
+fn an_answer_waiting_uncollected_still_holds_its_id() {
     let mut desk = desk();
     desk.submit(1, "copy").expect("taken");
     let _ = desk.next_job();

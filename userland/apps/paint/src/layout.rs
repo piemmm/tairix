@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::{TitleBar, TitleBarCommands};
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Region, Scale};
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::SpriteName;
 use tairix_theme::{TextRole, Theme};
 
@@ -362,6 +362,18 @@ impl Layout {
     #[must_use]
     pub fn floating(&self) -> &[PaneSlot] {
         &self.floating
+    }
+
+    /// Where a form is laid out in the drawing for its dialog window: below
+    /// the window's own area and every floating pane, overlapping none.
+    #[must_use]
+    pub fn dialog_origin(&self) -> Point {
+        let below = self
+            .floating
+            .iter()
+            .map(|slot| slot.frame.bottom())
+            .fold(self.window.bottom(), i32::max);
+        Point::new(self.window.left(), below)
     }
 
     /// The window pane `kind`'s open lists are held within: its own tool

@@ -167,13 +167,23 @@ pub(crate) fn click(shell: &mut Shell, at: Point, viewport: Rect, theme: &Theme)
     let _ = clicked(shell, at, viewport, theme, &mut damage());
 }
 
-/// Offer an account to the question standing over the window, and hand
-/// back the elevation the shell asked for.
+/// The client of the credential question's own window, while one is up.
+pub(crate) fn question_client(shell: &Shell) -> Rect {
+    let (width, height) = shell.question_extent(Scale::ONE).expect("a question is up");
+    Rect::new(0, 0, width, height)
+}
+
+/// Press `key` in the credential question's own window.
+pub(crate) fn question_key(shell: &mut Shell, key: Key) -> ShellOutcome {
+    let client = question_client(shell);
+    shell.on_question_key(keystroke(key), client, Scale::ONE, &theme(), &mut damage())
+}
+
+/// Offer an account to the question up in its own window, and hand back
+/// the elevation the shell asked for.
 pub(crate) fn offer_account(shell: &mut Shell) -> Elevation {
-    let theme = theme();
-    let mut sink = damage();
     assert!(shell.asking(), "the pane asks for an account");
-    let mut key = |key: Key| shell.on_key(keystroke(key), WIDE, Scale::ONE, &theme, &mut sink);
+    let mut key = |key: Key| question_key(shell, key);
     for ch in "root".chars() {
         key(Key::Char(ch));
     }

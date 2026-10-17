@@ -2,7 +2,7 @@
 //!
 //! TAIRiX has no `/dev`, `/proc`, or `/sys`. Non-filesystem resources — the
 //! random source, a disk, a serial port, a live metric — are named instead by
-//! typed *resource references* such as `sys:random`, `disk:backup@7K2M`, or
+//! typed *resource references* such as `sys:random`, `disk:backup@7k2m`, or
 //! `stats:net/wan/rx.pps?window=1s`. Several components need to turn such a
 //! string into a structured, validated form: the shell first (redirection
 //! targets, command arguments, completion, typed shell values), and the
@@ -38,7 +38,7 @@
 //! part they delimit, so a rendered reference always re-parses to the same
 //! value.
 //!
-//! The `@guard` shorthand may stand alone (`disk:@7K2M`), selecting by short
+//! The `@guard` shorthand may stand alone (`disk:@7k2m`), selecting by short
 //! fingerprint within the namespace, and a `?params` query may stand alone
 //! (`disk:?removable=true`); a reference with an empty selector and neither a
 //! guard nor a query (`disk:`) is rejected.
@@ -72,8 +72,8 @@
 //! assert_eq!(r.to_string(), "stats:net/wan/rx.pps?window=1s");
 //!
 //! // A guarded destructive target and a stand-alone fingerprint shorthand.
-//! assert_eq!(parse("disk:backup@7K2M::raw").unwrap().to_string(), "disk:backup@7K2M::raw");
-//! assert_eq!(parse("disk:@7K2M").unwrap().to_string(), "disk:@7K2M");
+//! assert_eq!(parse("disk:backup@7k2m::raw").unwrap().to_string(), "disk:backup@7k2m::raw");
+//! assert_eq!(parse("disk:@7k2m").unwrap().to_string(), "disk:@7k2m");
 //! ```
 
 #![no_std]
@@ -657,7 +657,7 @@ impl Param {
 /// A parsed, validated TAIRiX resource reference.
 ///
 /// A reference is `namespace:selector[@guard][::facet][?params]`. The selector
-/// may be empty when a `guard` (the `disk:@7K2M` fingerprint shorthand) or a
+/// may be empty when a `guard` (the `disk:@7k2m` fingerprint shorthand) or a
 /// `params` query (`disk:?removable=true`) is present.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceRef {
@@ -766,8 +766,8 @@ pub enum RefError {
     EmptyGuard,
     /// The guard fingerprint exceeded [`MAX_GUARD_LEN`] bytes.
     GuardTooLong,
-    /// The guard fingerprint contained a character that is not ASCII
-    /// alphanumeric.
+    /// The guard fingerprint contained a character that is neither ASCII
+    /// alphanumeric nor a dash grouping two of them.
     GuardInvalidChar,
     /// A facet delimiter (`::`) was present but the facet name was empty.
     EmptyFacet,
@@ -812,7 +812,7 @@ impl fmt::Display for RefError {
             RefError::EmptyGuard => "identity guard fingerprint is empty",
             RefError::GuardTooLong => "identity guard fingerprint exceeds the maximum length",
             RefError::GuardInvalidChar => {
-                "identity guard fingerprint contains a non-alphanumeric character"
+                "identity guard fingerprint contains a character other than a letter, a digit, or a grouping dash"
             }
             RefError::EmptyFacet => "facet name is empty",
             RefError::FacetTooLong => "facet name exceeds the maximum length",
@@ -1044,7 +1044,17 @@ fn validate_guard(fingerprint: &str) -> Result<String, RefError> {
     if fingerprint.len() > MAX_GUARD_LEN {
         return Err(RefError::GuardTooLong);
     }
-    if fingerprint.chars().any(|c| !c.is_ascii_alphanumeric()) {
+    // A dash only groups characters for reading (`7k2m-q8`), so it is never
+    // first, last, or doubled; comparison ignores it.
+    let bytes = fingerprint.as_bytes();
+    let grouped = bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && !fingerprint.contains("--");
+    if !grouped
+        || bytes
+            .iter()
+            .any(|&b| !b.is_ascii_alphanumeric() && b != b'-')
+    {
         return Err(RefError::GuardInvalidChar);
     }
     Ok(String::from(fingerprint))
@@ -1322,7 +1332,21 @@ mod tests {
 
     #[test]
     fn guard_invalid_char_rejected() {
-        assert_eq!(parse("disk:backup@7-K"), Err(RefError::GuardInvalidChar));
+        for bad in [
+            "disk:backup@7_K",
+            "disk:backup@-7K",
+            "disk:backup@7K-",
+            "disk:backup@7--K",
+        ] {
+            assert_eq!(parse(bad), Err(RefError::GuardInvalidChar), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_dash_grouping_a_guard_for_reading_is_kept() {
+        let r = parse("disk:backup@7k2m-q8d3").unwrap();
+        assert_eq!(r.guard(), Some("7k2m-q8d3"));
+        assert_eq!(r.to_string(), "disk:backup@7k2m-q8d3");
     }
 
     #[test]

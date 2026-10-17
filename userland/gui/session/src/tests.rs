@@ -13903,19 +13903,40 @@ fn session_surfaces_adapt_to_display_scale() {
     let (mut shell, mut comp) = headless_desktop();
     let scale_200 = Scale::from_percent(200).expect("200% is in range");
 
-    // 1. The confirmation prompt's window grows with the density: its
-    // fixed logical extents are scaled at paint time.
+    // 1. The confirmation prompt's window is laid out again at the density:
+    // it takes the extent its content asks for at each, which on a screen
+    // this small is wider only up to the screen's share but always taller.
     let mut confirm = ConfirmPrompt::new();
     assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
     let confirm_id = confirm.wm_id().expect("confirm window exists");
+    let prompt = tairix_controls::Alert::from_spec(
+        &crate::confirm::build_spec(PowerAction::Restart).expect("the prompt fits an alert"),
+    );
+    let wanted = |comp: &Compositor, shell: &DesktopShell, scale| {
+        crate::alert::extent(
+            &prompt,
+            comp.screen_rect(),
+            scale,
+            shell.session().active_theme(),
+        )
+    };
     let size_100 = window_rect(&comp, confirm_id);
+    assert_eq!(
+        (size_100.width, size_100.height),
+        wanted(&comp, &shell, Scale::ONE)
+    );
 
     assert!(comp.set_scale(scale_200));
     confirm.repaint(&mut shell, &mut comp);
     let size_200 = window_rect(&comp, confirm_id);
+    assert_eq!(
+        (size_200.width, size_200.height),
+        wanted(&comp, &shell, scale_200),
+        "laid out again at the density"
+    );
     assert!(
-        size_200.width > size_100.width && size_200.height > size_100.height,
-        "it grows with the density"
+        size_200.height > size_100.height,
+        "it grows with the density: {size_100:?} then {size_200:?}"
     );
     let screen = comp.screen_rect();
     assert!(size_200.width <= screen.width && size_200.height <= screen.height);
@@ -14160,9 +14181,9 @@ fn open_parent_and_tool(
                 event_endpoint: 0,
                 frame_count: 1,
                 surface: served_mode(size.0, size.1),
-                offset_x: offset.0,
-                offset_y: offset.1,
             },
+            offset_x: offset.0,
+            offset_y: offset.1,
             carry,
             title: tairix_abi::window_ipc::WindowTitle::new("Colour").expect("a title"),
         };
@@ -14257,9 +14278,9 @@ fn a_tool_window_torn_out_under_a_held_press_follows_it_and_reports_its_moves() 
             event_endpoint: 0,
             frame_count: 1,
             surface: served_mode(80, 60),
-            offset_x: 400,
-            offset_y: 400,
         },
+        offset_x: 400,
+        offset_y: 400,
         carry: Some(40),
         title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
     };
@@ -14327,9 +14348,9 @@ fn no_tool_window_opens_while_the_seat_is_held() {
             event_endpoint: 0,
             frame_count: 1,
             surface: served_mode(80, 60),
-            offset_x: 0,
-            offset_y: 0,
         },
+        offset_x: 0,
+        offset_y: 0,
         carry: None,
         title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
     };
@@ -16050,7 +16071,7 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
 
     // The dismissing click: the popup goes and the terminal takes focus back.
     let popup = windows.wm_id(2).expect("popup live");
-    assert!(shell.close_popup_window(&mut comp, popup));
+    assert!(shell.close_transient_window(&mut comp, popup, None));
     assert!(comp.set_active_frame(parent, true));
     comp.composite();
     let closed = comp.frame_stats();

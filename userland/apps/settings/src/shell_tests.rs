@@ -8,7 +8,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
@@ -33,6 +33,10 @@ use crate::shell::{Shell, ShellOutcome};
 use crate::test_support::{click, clicked, damage, opaque, row_at, rows, theme, WIDE};
 use crate::volumes::VolumeReading;
 use tairix_controls::testkit::covers;
+
+/// A solid-state disk on an ATA bus.
+const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
+    .with_rotation(BlkRotation::NonRotating(BlkRotationEvidence::AtaIdentify));
 
 /// A window too narrow to seat the strip at all.
 const NARROW: Rect = Rect::new(0, 0, 360, 640);
@@ -2603,7 +2607,7 @@ fn volume(source: &[u8], target: &[u8], blocks: u64, free: u64) -> VolumeReading
                 ..VolumeStats::default()
             },
             availability: MountAvailability::Available,
-            medium: Some(BlkMedium::SolidState),
+            medium: Some(SSD),
         },
         [0; 16],
     )

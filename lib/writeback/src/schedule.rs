@@ -1,24 +1,24 @@
 //! When an open transaction must be published: the dirty-age window by
-//! device class, and the scheduler that reports it to the host's timer.
+//! command cost, and the scheduler that reports it to the host's timer.
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkCommandCost;
 use tairix_abi::driver::filesystem::VolumeHost;
 use tairix_abi::driver::DriverHandle;
 use tairix_reclaim::PressureBand;
 
-/// How long a transaction may stay open before it is published, by the
-/// class of device the volume sits on and how tight memory is.
+/// How long a transaction may stay open before it is published, by what a
+/// command to the volume's device costs and how tight memory is.
 ///
 /// Operations inside the window fold into one commit, and a crash costs the
 /// operations it folded, so the window is widest where a device command is
-/// dearest. This is the one policy over the class; nothing tunes it per
+/// dearest. This is the one policy over the cost; nothing tunes it per
 /// volume.
 #[must_use]
-pub const fn writeback_window_ns(class: BlkDeviceClass, band: PressureBand) -> u64 {
-    let base = match class {
-        BlkDeviceClass::Removable => 30_000_000_000,
-        BlkDeviceClass::Rotational => 15_000_000_000,
-        BlkDeviceClass::SolidState | BlkDeviceClass::Virtual => 5_000_000_000,
+pub const fn writeback_window_ns(cost: BlkCommandCost, band: PressureBand) -> u64 {
+    let base = match cost {
+        BlkCommandCost::Bridged => 30_000_000_000,
+        BlkCommandCost::Seek => 15_000_000_000,
+        BlkCommandCost::Cheap => 5_000_000_000,
     };
     // Pressure only ever buys recency back: each deeper band halves the
     // window, so a quiet volume returns its pinned bytes sooner.
@@ -35,9 +35,9 @@ pub const fn writeback_window_ns(class: BlkDeviceClass, band: PressureBand) -> u
 /// publishes every operation: nothing would come back for a deferred one.
 pub struct CommitScheduler {
     host: Option<(DriverHandle, &'static dyn VolumeHost)>,
-    class: BlkDeviceClass,
+    cost: BlkCommandCost,
     /// The band the last operation read; `Normal` until a gauge-carrying
-    /// bound is installed, so an ungoverned handle keeps its class's window.
+    /// bound is installed, so an ungoverned handle keeps its cost's window.
     band: PressureBand,
     /// Kept apart from `opened_ns`, which is absent when the host's clock
     /// declined to read.
@@ -49,12 +49,13 @@ pub struct CommitScheduler {
 }
 
 impl CommitScheduler {
-    /// A scheduler for a volume on a device of `class`, with no host yet.
+    /// A scheduler for a volume on a device whose commands cost `cost`, with
+    /// no host yet.
     #[must_use]
-    pub const fn new(class: BlkDeviceClass) -> Self {
+    pub const fn new(cost: BlkCommandCost) -> Self {
         Self {
             host: None,
-            class,
+            cost,
             band: PressureBand::Normal,
             open: false,
             opened_ns: None,
@@ -63,7 +64,7 @@ impl CommitScheduler {
     }
 
     const fn window_ns(&self) -> u64 {
-        writeback_window_ns(self.class, self.band)
+        writeback_window_ns(self.cost, self.band)
     }
 
     /// Note the memory-pressure band the running operation read.

@@ -112,6 +112,18 @@ pub const MAX_COMPONENT_LEN: usize = 255;
 /// Largest alias name, in bytes.
 pub const MAX_ALIAS_LEN: usize = 64;
 
+/// The resolver an alias expands to: `alias::Name/path`.
+const ALIAS_RESOLVER: &str = "alias";
+
+/// The resolver naming a volume root by its stable identity:
+/// `id::<volume-id>/path`.
+const ID_RESOLVER: &str = "id";
+
+/// Every resolver the storage namespace defines
+/// (`docs/src/filesystem/drives.md` §6), whether or not this parser accepts
+/// it yet: a name spelled as one reads as that resolver.
+pub const RESOLVER_NAMES: [&str; 6] = [ALIAS_RESOLVER, ID_RESOLVER, "fs", "net", "dev", "view"];
+
 /// Exact byte length of a canonical volume-id spelling
 /// (`8-4-4-4-12` lowercase hex, e.g.
 /// `b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001`).
@@ -452,10 +464,10 @@ fn parse_rooted(input: &str, colon: usize) -> Result<Path, PathError> {
         if resolver.is_empty() {
             return Err(PathError::ResolverEmpty);
         }
-        if resolver == "alias" {
+        if resolver == ALIAS_RESOLVER {
             return parse_expanded_alias(rest);
         }
-        if resolver == "id" {
+        if resolver == ID_RESOLVER {
             return parse_volume_id(rest);
         }
         return Err(PathError::UnsupportedResolver);

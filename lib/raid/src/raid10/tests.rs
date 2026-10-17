@@ -5,7 +5,9 @@ use super::{Raid10Array, Raid10Error};
 use crate::mirror::MirrorMember;
 use crate::superblock::ArrayProgress;
 use core::cell::Cell;
-use tairix_abi::blkio::{BlkDeviceClass, BlkMedium};
+use tairix_abi::blkio::{
+    BlkDeviceClass, BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport,
+};
 use tairix_abi::driver::block::{Block, BlockClass, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState};
@@ -14,6 +16,13 @@ use tairix_abi::sysinfo::MountAvailability;
 // Small blocks keep the test doubles' backing arrays well under clippy's
 // large-stack-array threshold even for a four-member array.
 const BS: u32 = 64;
+
+/// A disk on an ATA bus not known to rotate or not: served as rotational.
+const DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata);
+
+/// A solid-state disk on an ATA bus.
+const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
+    .with_rotation(BlkRotation::NonRotating(BlkRotationEvidence::AtaIdentify));
 const NBLK: u64 = 8;
 const CAP: usize = BS as usize * 8;
 const CHUNK: u32 = 2;
@@ -43,7 +52,7 @@ impl FaultBlock {
             read_fault: Cell::new(None),
             write_fault: Cell::new(None),
             health: Cell::new(DeviceHealth::Unavailable),
-            medium: Cell::new(BlkMedium::SolidState),
+            medium: Cell::new(SSD),
         }
     }
 
@@ -640,7 +649,7 @@ fn device_class_declares_the_most_patient_live_member() {
     // spinning disk earns the whole array a spinning disk's patience.
     let mut members = [
         MirrorMember::new(FaultBlock::new(0)),
-        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::HardDisk)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(DISK)),
         MirrorMember::new(FaultBlock::new(0)),
         MirrorMember::new(FaultBlock::new(0)),
     ];

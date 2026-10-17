@@ -49,6 +49,11 @@ pub trait BlkCall {
         window: &mut [u8],
         deadline_ns: u64,
     ) -> Result<usize, Errno>;
+
+    /// Wait `ns` before the next exchange: the pacing a reissue waits out so
+    /// a recovering device is given time, not a burst of requests. Off the
+    /// CPU, on a one-shot timer.
+    fn pause(&mut self, ns: u64);
 }
 
 /// Which authority a [`RemoteBlock`] was opened with.
@@ -102,6 +107,9 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     /// volumes on it. Validated on decode, so an untrusted driver cannot
     /// reach a reader's screen through it.
     device_name: BlkDeviceName,
+    /// The binding of the publication this client connected to, repeated on
+    /// every request so none reaches a medium that has since replaced it.
+    binding: u64,
     /// What the served device last said it could promise, reflected from each
     /// completion's health status through the one shared mapping. The serving
     /// driver owns the state machine and its grace window; this client only
@@ -160,6 +168,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             // envelope; the device's own medium is adopted below.
             declared_medium: None,
             device_name: BlkDeviceName::UNNAMED,
+            binding: 0,
             budget: BlkDeviceClass::of(None).budget(),
             // Nothing has been served yet, so there is nothing to stand
             // background work down for until a completion says otherwise.
@@ -169,6 +178,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             op: BlkOp::Geometry,
             lba: 0,
             blocks: 0,
+            binding: 0,
         })?;
         let block_size = completion.block_size;
         if !block_size.is_power_of_two() || !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size)
@@ -193,6 +203,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
         client.declared_medium = completion.medium;
         client.device_name = completion.name;
+        client.binding = completion.binding;
         client.budget = BlkDeviceClass::of(completion.medium).budget();
         Ok(client)
     }
@@ -211,18 +222,22 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
     /// client: when the serving driver rides out a device blip it answers
     /// reissuably rather than with a hard fault, and this client reissues
     /// rather than failing an attempt for a device that is merely recovering.
-    /// The reissue count is bounded, so a device that keeps answering
-    /// reissuably still fails closed deterministically. Each reissue is a
-    /// fresh request/reply exchange — event-driven, never a busy spin.
+    /// A reissue the driver says its recovery has made ready goes at once;
+    /// any other first waits out the device's pacing
+    /// ([`IoBudget::reissue_wait_ns`]), so the retries are spread over its
+    /// grace window instead of spent at once, and their count is bounded, so
+    /// a device that keeps answering reissuably still fails closed.
     fn transfer(&mut self, request: BlkRequest) -> Result<BlkCompletion, Errno> {
         let mut attempts: u32 = 0;
         loop {
             let outcome = self.transfer_once(request)?;
-            if self.budget.should_reissue(outcome.status, attempts) {
-                attempts += 1;
-                continue;
+            let Some(wait_ns) = self.budget.reissue_wait_ns(&outcome, attempts) else {
+                return outcome.data();
+            };
+            attempts += 1;
+            if wait_ns > 0 {
+                self.call.pause(wait_ns);
             }
-            return outcome.data();
         }
     }
 
@@ -310,6 +325,7 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
                 op: BlkOp::Read,
                 lba: lba + done as u64,
                 blocks: u32::try_from(chunk_blocks).map_err(|_| DriverError::OutOfRange)?,
+                binding: self.binding,
             };
             self.transfer(request).map_err(DriverError::from_errno)?;
             let chunk_bytes = chunk_blocks * block_size;
@@ -341,6 +357,7 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
                 op: BlkOp::Write,
                 lba: lba + done as u64,
                 blocks: u32::try_from(chunk_blocks).map_err(|_| DriverError::OutOfRange)?,
+                binding: self.binding,
             };
             self.transfer(request).map_err(DriverError::from_errno)?;
             done += chunk_blocks;
@@ -358,6 +375,7 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
             op: BlkOp::Flush,
             lba: 0,
             blocks: 0,
+            binding: self.binding,
         })
         .map_err(DriverError::from_errno)?;
         Ok(())

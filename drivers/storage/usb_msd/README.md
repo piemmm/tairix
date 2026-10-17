@@ -32,30 +32,50 @@ binary works behind any host controller that speaks the URB transport
    completion interrupt for CBI, or the four Pipe-Usage-named bulk pipes for
    UAS (`src/desc.rs`, fail-closed on every hostile length).
 3. Discovers the units (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS,
-   exactly one for CBI), then per LUN: `INQUIRY` (non-disk units are
-   skipped), a **bounded** `TEST UNIT READY` ready drain (sense consumed
-   per failed attempt — UAS and CBI/UFI deliver it in-band, the transport's
-   own completion carrying the sense; BOT via `REQUEST SENSE`),
-   `READ CAPACITY(10)`/`(16)` (validated geometry;
-   16-byte form past the 32-bit LBA horizon), and the write-protect bit
-   (`MODE SENSE(6)` for the transparent set, `MODE SENSE(10)` for UFI).
+   exactly one for CBI) and sends each `INQUIRY` (non-disk units are
+   skipped). Every disk then comes up on its own one-shot timers inside the
+   serve loop (`src/ready.rs`), so one disk spinning up never holds back its
+   siblings. `TEST UNIT READY`'s sense (consumed per failed attempt — UAS and
+   CBI/UFI deliver it in-band, BOT via `REQUEST SENSE`) is classified by key,
+   ASC and ASCQ: a unit coming ready is re-tested every second, one needing an
+   initializing command is sent `START STOP UNIT` (IMMED) once, one needing a
+   person is given up on, a unit attention is consumed and re-tested at once
+   (a few in a row at most), and a unit that does not come ready within its
+   class's ready budget is given up on with its reason logged. A ready unit
+   is probed for what it is — the VPD pages it supports, Block Limits (the
+   most one command moves), the Block Device Characteristics rotation rate,
+   else IDENTIFY DEVICE word 217 through `ATA PASS-THROUGH(16)` — each probe
+   sent once and a refusal reporting nothing. INQUIRY's RMB bit records only
+   whether the medium can leave the unit (many bridges set it for a fixed
+   disk), so it never decides the unit's patience. Then
+   `READ CAPACITY(10)`/`(16)` (validated geometry; 16-byte form past the
+   32-bit LBA horizon) and the write-protect bit (`MODE SENSE(6)` for the
+   transparent set, `MODE SENSE(10)` for UFI); a unit ready to a test whose
+   geometry cannot be read is re-tried within its ready budget, then given
+   up on.
 4. Publishes one **storage-class** hardware-tree node per ready LUN, carrying
-   a `tairix,usb-msd-lun` compatible key and two grants: a block-service call
+   a `tairix,usb-msd-lun` compatible key, two grants — a block-service call
    endpoint and a 32 KiB shared data window (`tairix_abi::blkio` — the
    request/completion frames a consumer such as the D3 volume manager
-   drives).
+   drives) — and the unit's medium record. A unit with no medium (an empty
+   card slot) is present, not failed: it is tested for a medium every two
+   seconds and published when one arrives. A removable unit whose medium was
+   given up on waits for that medium to leave or change before it is brought
+   up again; a fixed one is refused. Once every unit present at attach is
+   published, empty, or given up on, the driver settles its subtree, so a
+   unit published later is a hot arrival.
 5. Parks on a kernel wait-set over the LUN endpoints and serves each
    `BlkRequest` (geometry / read / write / flush) through the shared SCSI
    command layer (`src/scsi.rs`) on the device's wire transport, each LUN
-   carrying a per-unit `blkio::BlkHealth` (the `Removable` device class) so a
+   carrying a per-unit `blkio::BlkHealth` of its medium's class so a
    transient stall or bus reset is ridden out through its recovery grace
    window — answered reissuably while `Recovering`, failed closed only once
    the window elapses without the unit returning (`plans/FIX-IO.md` IO3). A
    recovering unit also drives a per-LUN `blkio::RecoveryLadder`: after each
    reply the serve loop escalates the shared ladder from the unit's health —
    a gentle retry first, then a transport reset (`ScsiDevice::reset_transport`:
-   the transport's own reset recovery) on the next attempt, bounded by the same removable-class
-   `IoBudget::max_retries` so a wedged unit is never reset forever — nudging a
+   the transport's own reset recovery) on the next attempt, bounded by the unit's
+   class's `IoBudget::max_retries` so a wedged unit is never reset forever — nudging a
    stalling unit back before the grace window is left to fail it closed:
    - **BOT** (`src/bot.rs`): CBW/CSW framing with every device field
      validated, per-transfer halt recovery below (the HCD), CSW-stall retry,
@@ -83,10 +103,31 @@ binary works behind any host controller that speaks the URB transport
      operation), with autosense delivered in-band, every hostile IU
      refused closed, and all four pipes cleared when an exchange breaks.
 
-   Every command exchange is bounded: its transfers carry what remains of a
-   budget derived from the class's per-request deadline, so a device that
-   stops answering fails the command and has its transport reset, and the
-   failure is answered reissuably for the unit's health to ride out.
+   Every command exchange is bounded by its own budget
+   (`CommandBudget::exchange_ns`: a media command, a query, or a flush, plus
+   its transfer at the class's slowest throughput), so a disk spinning up on
+   a read is given its spin-up while a query is not, and a device that stops
+   answering fails the command and has its transport reset, the failure
+   answered reissuably for the unit's health to ride out. Once the reset has
+   put the transport back in step the unit is asked `TEST UNIT READY`: one
+   answering ready, or with a unit attention the test consumes, has its
+   request answered `BlkReissue::Now`, so its consumer reissues at once rather
+   than waiting out its pacing; one coming ready has the request held, and one
+   without its medium is retracted. Every transfer of
+   an exchange, its control requests included, runs within what the
+   exchange has left; the reset recovery a broken exchange owes runs in an
+   exchange of its own, as long as the command it serves, so a command that
+   spent its exchange still gets its reset. A media command
+   answered with a unit attention is sent once more. One answered "coming
+   ready" is held — `DriverError::NotReady`, which the shared engine answers
+   `Answer::Hold` — with no health folded and no reissue spent: the unit's
+   endpoint leaves the serve set, so the calls queued behind it wait in the
+   kernel, and the request is served once the unit is ready, or answered
+   through its health when the unit is given up on. One answered with no
+   medium, or a changed medium, retracts the unit's node, revoking the grants
+   its consumers inherited, and the next medium is published afresh under a
+   new publication binding, so a request made for the old medium is refused
+   `Stale` rather than served the new one's blocks.
 
    Every LUN behind one device shares the *same* bulk pipe pair, so a
    transport reset is a **transport-wide** event, not a per-LUN one. The serve
@@ -131,23 +172,27 @@ optical), UAS command queueing / task-management IUs / SuperSpeed bulk
 streams (one command in flight serves the synchronous block service; a
 protocol violation fails the exchange closed), and the BOT→UAS alternate-
 setting switch (a dual BOT+UAS device runs its default BOT setting; UAS
-serves devices exposing it as the default interface). A medium inserted
-after bring-up is picked up on re-plug, not polled for. Runtime unload is
+serves devices exposing it as the default interface). Media are polled for
+with `TEST UNIT READY` every two seconds, as Linux's `sd` does; the media event
+notification MMC defines is an optical-drive command outside the served set. Runtime unload is
 driven by `devmgr` through the kernel driver-unload mechanism; the driver
 also exits by itself when its interface vanishes.
 
 ## Tests
 
 The device logic is host-proven in this crate over scripted doubles:
-`src/scsi_tests.rs` (per-set CDB spelling, MODE SENSE forms, flush
-semantics, the bounded ready drain, autosense vs `REQUEST SENSE`, LunBlock
+`src/ready_tests.rs` (readiness classification by key/ASC/ASCQ, paced
+re-tests, the one start, the ready budget, attention storms, a unit ready but
+unservable), `src/scsi_tests.rs` (per-set CDB spelling, the medium probe and
+its refusals, per-command budgets, MODE SENSE forms, flush semantics, the
+unit-attention retry, autosense vs `REQUEST SENSE`, LunBlock
 validation/chunking/scrub), `src/bot_tests.rs` (CBW/CSW framing, tag
 mismatch and corrupt-CSW reset recovery, CSW-stall retry, stalled data
 phases, short reads, sense mapping, capacity validation including a
 100 TB-class unit, multi-LUN), `src/cbi_tests.rs` (ADSC framing, the
 stall-as-refusal answer, both completion spellings, Command Block Reset,
-the floppy geometry, in-band UFI sense with no `REQUEST SENSE`, and the
-not-ready ready drain), `src/uas_tests.rs` (IU sequencing, tag checking,
+the floppy geometry, in-band UFI sense with no `REQUEST SENSE`, and a
+not-ready floppy's readiness read in-band), `src/uas_tests.rs` (IU sequencing, tag checking,
 autosense in both sense formats, hostile IUs, `REPORT LUNS`),
 `src/desc_tests.rs` (transport classification and hostile descriptor
 streams, including UAS Pipe Usage validation), `src/serve.rs` (the per-LUN

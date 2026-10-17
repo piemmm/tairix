@@ -243,7 +243,12 @@ fn the_two_fields_do_not_overlap_and_sit_inside_the_sheet() {
     // The paint and the hit test read the same rectangles, so the geometry
     // being sane is what stops a press landing on a field drawn elsewhere.
     for scale in [Scale::ONE, Scale::from_percent(200).expect("a scale")] {
-        let placed = CredentialSheet::centred_in(Rect::new(0, 0, 1024, 768), scale);
+        let placed = Rect::new(
+            0,
+            0,
+            scale.scale_length(CREDENTIAL_WIDTH),
+            scale.scale_length(CREDENTIAL_HEIGHT),
+        );
         let account = CredentialSheet::field_rect(placed, scale, 0);
         let secret = CredentialSheet::field_rect(placed, scale, 1);
         assert!(account.bottom() <= secret.top());
@@ -251,23 +256,6 @@ fn the_two_fields_do_not_overlap_and_sit_inside_the_sheet() {
         assert!(account.left() >= placed.left());
         assert!(account.right() <= placed.right());
     }
-}
-
-#[test]
-fn a_sheet_centres_itself_and_never_outgrows_what_holds_it() {
-    let scale = Scale::ONE;
-    let client = Rect::new(10, 20, 1000, 800);
-    let placed = CredentialSheet::centred_in(client, scale);
-    assert_eq!(placed.width, scale.scale_length(CREDENTIAL_WIDTH));
-    assert_eq!(placed.height, scale.scale_length(CREDENTIAL_HEIGHT));
-    assert_eq!(
-        placed.left() - client.left(),
-        client.right() - placed.right()
-    );
-    // A client smaller than the sheet clamps rather than hanging outside it.
-    let cramped = CredentialSheet::centred_in(Rect::new(0, 0, 100, 60), scale);
-    assert_eq!(cramped.width, 100);
-    assert_eq!(cramped.height, 60);
 }
 
 #[test]

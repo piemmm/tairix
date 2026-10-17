@@ -657,6 +657,7 @@ impl MountTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::blkio::BlkTransport;
 
     fn p(text: &str) -> Path {
         Path::parse(text).expect("valid path")
@@ -974,8 +975,8 @@ mod tests {
     fn an_attachment_records_the_medium_the_device_reported() {
         let mut table = MountTable::new(MountFlags::default());
         for (raw, medium) in [
-            (0x5ED0, Some(BlkMedium::HardDisk)),
-            (0x5ED1, Some(BlkMedium::SolidState)),
+            (0x5ED0, Some(BlkMedium::of_transport(BlkTransport::Ata))),
+            (0x5ED1, Some(BlkMedium::of_transport(BlkTransport::Nvme))),
             (0x5ED2, None),
         ] {
             table
@@ -1045,7 +1046,7 @@ mod tests {
         let mut table = MountTable::new(MountFlags::default());
         let volume = Attachment::new(
             handle(0x564F),
-            Some(BlkMedium::UsbFlash),
+            Some(BlkMedium::of_transport(BlkTransport::Usb)),
             MountFlags::NOEXEC,
         );
         let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));

@@ -41,11 +41,11 @@ use tairix_controls::state::{
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    ground_fill, paint_icon_slot, stack, withheld, Chart, Checkbox, ChromeLayer, CompositionBar,
-    CompositionRing, CompositionSegment, Fact, FactList, FieldAction, FieldControl, FieldGroup,
-    FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow, Panel,
-    PressureKind, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout, Toolbar, FULL_COLOUR,
-    FULL_PERMILLE,
+    fill_area, ground_fill, paint_icon_slot, stack, withheld, Chart, Checkbox, ChromeLayer,
+    CompositionBar, CompositionRing, CompositionSegment, Fact, FactList, FieldAction, FieldControl,
+    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow,
+    Panel, PressureKind, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout, Toolbar,
+    FULL_COLOUR, FULL_PERMILLE,
 };
 use tairix_font::{BitmapFont, Cut, ELLIPSIS};
 use tairix_geometry::{to_i32, GridFill, Point, Rect, Region, Scale};
@@ -53,7 +53,7 @@ use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_procinfo::display::{format_bytes, format_rate, percent};
 use tairix_procinfo::VolumeBytes;
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::browser::Browser;
@@ -4092,43 +4092,54 @@ pub fn delete_alert(plan: &DeletePlan, disposition: DeleteDisposition) -> Option
     AlertSpec::fitted(severity, &headline, detail, &[cancel, confirm]).ok()
 }
 
-/// The centered, clamped bounds of the long-operation progress panel within
-/// `viewport`: a title bar and six rows high and four-fifths of the window
-/// wide, clamped so a small window still yields a drawable — if clipped —
-/// panel rather than a panic.
-///
-/// One definition so [`draw_progress_dialog`] and [`progress_cancel_at`] place
-/// and hit-test the same rectangle.
+/// The width of an operation's progress window, in logical pixels: room for
+/// its running count beside nothing else.
+const PROGRESS_WIDTH: u32 = 360;
+
+/// The client extent of an operation's progress window at `scale` in `theme`:
+/// its running count on a bar, the Cancel button beneath it, and a pad about
+/// both. The window's own band names the operation.
 #[must_use]
-pub fn progress_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    const ROWS: u32 = 6;
+pub fn progress_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
+    let pad = progress_pad(scale, theme);
     let line = row_height(scale, theme);
-    let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
-    let height = title
-        .saturating_add(line.saturating_mul(ROWS))
-        .min(viewport.height.max(1));
-    let width = viewport
-        .width
-        .saturating_mul(4)
-        .checked_div(5)
-        .unwrap_or(viewport.width)
-        .clamp(1, viewport.width.max(1));
-    let x = viewport
-        .origin
-        .x
-        .saturating_add(to_i32(viewport.width.saturating_sub(width) / 2));
-    let y = viewport
-        .origin
-        .y
-        .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
-    Rect::new(x, y, width, height)
+    (
+        scale.scale_length(PROGRESS_WIDTH),
+        pad.saturating_mul(3).saturating_add(line.saturating_mul(2)),
+    )
 }
 
-/// The Cancel-button rectangle within the progress panel's `content` area —
+/// The pad about a progress window's content.
+fn progress_pad(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().control_inset).max(1)
+}
+
+/// Where a progress window whose client is `client` draws its bar and its
+/// Cancel button: the one layout [`draw_progress_window`] paints and
+/// [`progress_cancel_at`] hit-tests.
+fn progress_layout(client: Rect, scale: Scale, theme: &Theme) -> (Rect, Rect) {
+    let pad = progress_pad(scale, theme);
+    let content = Rect::new(
+        client.left().saturating_add(to_i32(pad)),
+        client.top().saturating_add(to_i32(pad)),
+        client.width.saturating_sub(pad.saturating_mul(2)),
+        client.height.saturating_sub(pad.saturating_mul(2)),
+    );
+    let bar = Rect::new(
+        content.left(),
+        content.top(),
+        content.width,
+        row_height(scale, theme).min(content.height),
+    );
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    (bar, progress_cancel_rect(content, scale, theme, font))
+}
+
+/// The Cancel-button rectangle within the progress window's `content` area —
 /// bottom-right, sized to the "Cancel" label plus padding, clamped to the
-/// content so a small window never places it off the panel. The one definition
-/// [`draw_progress_dialog`] paints and [`progress_cancel_at`] hit-tests, so a
-/// click resolves to exactly the drawn button.
+/// content so a small window never places it off the window. The one
+/// definition [`draw_progress_window`] paints and [`progress_cancel_at`]
+/// hit-tests, so a click resolves to exactly the drawn button.
 fn progress_cancel_rect(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Rect {
     let pad = font.text_width("  ").max(scale.scale_length(LABEL_PADDING));
     let width = font
@@ -4145,7 +4156,7 @@ fn progress_cancel_rect(content: Rect, scale: Scale, theme: &Theme, font: Bitmap
     Rect::new(x, y, width, height)
 }
 
-/// Build the progress panel's [`Progress`] trace for `model`: an indeterminate
+/// Build the progress window's [`Progress`] trace for `model`: an indeterminate
 /// "working" bar captioned with the model's honest running count.
 ///
 /// The total is unknown until the driving walk's reads reveal it, so the trace
@@ -4164,7 +4175,7 @@ pub fn build_progress(model: &ProgressModel) -> Progress {
     progress
 }
 
-/// Build the progress panel's Cancel [`Button`] for `model`: enabled while the
+/// Build the progress window's Cancel [`Button`] for `model`: enabled while the
 /// run is in progress, disabled once a cancel has already been latched (so a
 /// second press cannot re-request what is already stopping).
 #[must_use]
@@ -4179,64 +4190,38 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
     button
 }
 
-/// Draw the long-operation progress panel for `model` centered in `viewport`,
-/// on top of the current view: a titled [`Panel`], an indeterminate progress
-/// trace captioned with the honest running count, and a Cancel button.
+/// Draw `model`'s progress across its own window's `client`: the honest
+/// running count on an indeterminate bar, and a Cancel button beneath.
 ///
-/// Every blit clips, so a window too small for the whole panel simply shows
-/// what fits rather than panicking. It reads only the passed-in model and draws
-/// — it performs no I/O and holds no authority. Only the write-capable file
-/// manager drives a long operation, so only it draws this; the read-only picker
-/// never does.
-pub fn draw_progress_dialog(
+/// Every blit clips, so a window the desktop fitted smaller than its extent
+/// shows what fits rather than panicking. It reads only the passed-in model
+/// and draws — it performs no I/O and holds no authority. Only the
+/// write-capable file manager drives a long operation, so only it draws this;
+/// the read-only picker never does.
+pub fn draw_progress_window(
     surface: &mut Surface,
     model: &ProgressModel,
     scale: Scale,
     theme: &Theme,
-    viewport: Rect,
+    client: Rect,
 ) {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let bounds = progress_dialog_rect(viewport, scale, theme);
-    let panel = Panel::new(model.title());
-    panel.render(surface, bounds, scale, theme);
-    let Some(content) = panel.content_rect(bounds, scale, theme) else {
-        return;
-    };
-    let bar = Rect::new(
-        content.left(),
-        content.top(),
-        content.width,
-        row_height(scale, theme),
-    );
+    let (bar, cancel) = progress_layout(client, scale, theme);
+    fill_area(surface, client, Color::from(theme.palette().surface));
     build_progress(model).render(surface, bar, scale, theme);
-    let cancel_rect = progress_cancel_rect(content, scale, theme, font);
-    build_progress_cancel(model).render(surface, cancel_rect, scale, theme);
+    build_progress_cancel(model).render(surface, cancel, scale, theme);
 }
 
-/// Whether the progress panel's Cancel button is drawn at window-local pixel
-/// `point`.
+/// Whether the Cancel button of a progress window whose client is `client`
+/// is drawn at window-local pixel `point`.
 ///
-/// Mirrors [`draw_progress_dialog`]'s placement through the shared
-/// [`progress_dialog_rect`] and the same private cancel-button rectangle it
+/// Mirrors [`draw_progress_window`]'s placement through the one layout it
 /// paints, so a click resolves to exactly the drawn button. A click anywhere
-/// but the button — or on a panel too small to place it — returns `false`,
+/// but the button — or in a window too small to place it — returns `false`,
 /// changing nothing (fail closed).
 #[must_use]
-pub fn progress_cancel_at(viewport: Rect, scale: Scale, theme: &Theme, point: Point) -> bool {
-    let bounds = progress_dialog_rect(viewport, scale, theme);
-    // The content area is title-text-independent, so an empty-title panel
-    // mirrors the titled panel [`draw_progress_dialog`] draws.
-    let Some(content) = Panel::new(String::new()).content_rect(bounds, scale, theme) else {
-        return false;
-    };
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let rect = progress_cancel_rect(content, scale, theme, font);
-    if rect.width == 0 || rect.height == 0 {
-        return false;
-    }
-    let right = rect.left().saturating_add(to_i32(rect.width));
-    let bottom = rect.top().saturating_add(to_i32(rect.height));
-    point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
+pub fn progress_cancel_at(client: Rect, scale: Scale, theme: &Theme, point: Point) -> bool {
+    let (_, rect) = progress_layout(client, scale, theme);
+    rect.width != 0 && rect.height != 0 && rect.contains(point)
 }
 
 /// Most candidate rows the "Open With…" chooser's popup is sized to show at

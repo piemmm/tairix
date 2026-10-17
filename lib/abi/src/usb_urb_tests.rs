@@ -42,6 +42,7 @@ fn every_request_round_trips_at_its_own_length() {
         transfer_type: UsbTransferType::Control,
         endpoint: 0,
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00],
+        timeout_ms: NonZeroU32::new(500),
         ..interrupt_in()
     }));
     round_trip(UsbRequest::Transfer(interrupt_in()));
@@ -69,7 +70,7 @@ fn every_request_round_trips_at_its_own_length() {
 }
 
 #[test]
-fn a_bulk_transfer_carries_a_deadline_and_a_control_transfer_none() {
+fn bulk_and_control_transfers_carry_a_deadline() {
     let mut buf = [0u8; USB_REQUEST_MAX_LEN];
     let mut frame = |urb: UrbRequest| {
         let n = UsbRequest::Transfer(urb).encode(&mut buf).expect("encodes");
@@ -83,14 +84,23 @@ fn a_bulk_transfer_carries_a_deadline_and_a_control_transfer_none() {
         Err(Errno::OutOfRange),
         "no silent device may hold a bulk transfer forever"
     );
+    let control = UrbRequest {
+        transfer_type: UsbTransferType::Control,
+        endpoint: 0,
+        ..bulk_in()
+    };
     assert_eq!(
         frame(UrbRequest {
-            transfer_type: UsbTransferType::Control,
-            endpoint: 0,
-            ..bulk_in()
+            timeout_ms: None,
+            ..control
         }),
         Err(Errno::OutOfRange),
-        "a control transfer runs within the controller's own bound"
+        "nor a control transfer"
+    );
+    assert_eq!(frame(control), Ok(UsbRequest::Transfer(control)));
+    assert_eq!(
+        frame(interrupt_in()),
+        Ok(UsbRequest::Transfer(interrupt_in()))
     );
 }
 

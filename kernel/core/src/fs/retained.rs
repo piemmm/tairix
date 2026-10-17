@@ -581,6 +581,7 @@ impl<B: Block> Block for JournaledBlock<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::blkio::BlkTransport;
 
     extern crate std;
     use std::boxed::Box;
@@ -675,7 +676,7 @@ mod tests {
 
     impl Block for RamFlushBlock {
         fn medium(&self) -> Option<BlkMedium> {
-            Some(BlkMedium::SdCard)
+            Some(BlkMedium::of_transport(BlkTransport::Sd))
         }
 
         fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -735,7 +736,10 @@ mod tests {
     #[test]
     fn the_journal_reports_the_medium_of_the_device_it_wraps() {
         let (device, _journal) = journaled(8, small_budget());
-        assert_eq!(device.medium(), Some(BlkMedium::SdCard));
+        assert_eq!(
+            device.medium(),
+            Some(BlkMedium::of_transport(BlkTransport::Sd))
+        );
     }
 
     #[test]

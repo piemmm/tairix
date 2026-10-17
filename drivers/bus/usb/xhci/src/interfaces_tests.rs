@@ -30,7 +30,7 @@ use tairix_abi::{
     DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId, PROC_ID_LEN,
 };
 use tairix_inline::BitSet256;
-use tairix_usb::device::{DeviceIdentity, HubEvent, SerialNumber};
+use tairix_usb::device::{DeviceIdentity, SerialNumber};
 use tairix_usb::transport::{IsoSlotDone, IsoStreamShape, UrbEngine, UrbScope};
 
 /// The id the mock binds transport slot 0's endpoint at; slot `n` is
@@ -113,6 +113,33 @@ struct Script {
     queued_regions: Vec<usize>,
     /// The URBs the engine was told to abandon at their deadline.
     abandoned: Vec<UrbRequest>,
+    /// How many more drives the operation the engine was asked for stays
+    /// running before it finishes.
+    running_for: usize,
+    /// The operation the engine is running, which a later drive collects.
+    running: Option<UsbRequest>,
+    /// The engine is still looking at whether the device left.
+    looking: bool,
+}
+
+impl Script {
+    /// Carry out `request`: asked once, then collected on later drives until
+    /// it has run for [`Self::running_for`] of them.
+    fn operate(&mut self, request: UsbRequest) -> Result<Option<()>, DriverError> {
+        if self.running != Some(request) {
+            self.operations.push(request);
+            if let Some(refusal) = self.refusal.take() {
+                return Err(refusal);
+            }
+            self.running = Some(request);
+        }
+        if self.running_for > 0 {
+            self.running_for -= 1;
+            return Ok(None);
+        }
+        self.running = None;
+        Ok(Some(()))
+    }
 }
 
 struct Engine<'a>(&'a mut Script);
@@ -123,9 +150,8 @@ impl UrbEngine for Engine<'_> {
         Ok(())
     }
 
-    fn clear_halt(&mut self, endpoint: u8) -> Result<(), DriverError> {
-        self.0.operations.push(UsbRequest::ClearHalt { endpoint });
-        self.0.refusal.take().map_or(Ok(()), Err)
+    fn clear_halt(&mut self, endpoint: u8) -> Result<Option<()>, DriverError> {
+        self.0.operate(UsbRequest::ClearHalt { endpoint })
     }
 
     fn discard_reports(&mut self, endpoint: u8) -> Result<(), DriverError> {
@@ -135,15 +161,19 @@ impl UrbEngine for Engine<'_> {
         self.0.refusal.take().map_or(Ok(()), Err)
     }
 
-    fn control_in(&mut self, _setup: [u8; 8], _data: &mut [u8]) -> Result<usize, DriverError> {
-        Ok(0)
+    fn control_in(
+        &mut self,
+        _setup: [u8; 8],
+        _data: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
+        Ok(Some(0))
     }
 
-    fn control_no_data(&mut self, _setup: [u8; 8]) -> Result<(), DriverError> {
+    fn control_no_data(&mut self, _setup: [u8; 8]) -> Result<Option<()>, DriverError> {
         Err(DriverError::NotFound)
     }
 
-    fn control_out(&mut self, _setup: [u8; 8], _data: &[u8]) -> Result<(), DriverError> {
+    fn control_out(&mut self, _setup: [u8; 8], _data: &[u8]) -> Result<Option<()>, DriverError> {
         Err(DriverError::NotFound)
     }
 
@@ -183,12 +213,11 @@ impl UrbEngine for Engine<'_> {
         Err(DriverError::NotFound)
     }
 
-    fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<(), DriverError> {
-        self.0.operations.push(UsbRequest::SetInterface {
+    fn set_interface(&mut self, interface: u8, alternate: u8) -> Result<Option<()>, DriverError> {
+        self.0.operate(UsbRequest::SetInterface {
             interface,
             alternate,
-        });
-        self.0.refusal.take().map_or(Ok(()), Err)
+        })
     }
 
     fn claim_interface(&mut self, interface: u8) -> Result<(), DriverError> {
@@ -223,9 +252,8 @@ impl UrbEngine for Engine<'_> {
         self.0.refusal.take().map_or(Ok(()), Err)
     }
 
-    fn iso_stop(&mut self, endpoint: u8) -> Result<(), DriverError> {
-        self.0.operations.push(UsbRequest::IsoStop { endpoint });
-        Ok(())
+    fn iso_stop(&mut self, endpoint: u8) -> Result<Option<()>, DriverError> {
+        self.0.operate(UsbRequest::IsoStop { endpoint })
     }
 
     fn iso_take(
@@ -345,17 +373,16 @@ impl Seam for Mock {
         Engine(self.script(index))
     }
 
-    fn detach_if_gone(&mut self, index: usize) -> Result<bool, DriverError> {
-        if !self.script(index).gone {
-            return Ok(false);
+    fn confirm_departure(&mut self, index: usize) -> Result<(), DriverError> {
+        if self.script(index).gone {
+            self.table[index] = None;
+            self.faulted |= self.detach_faults;
         }
-        self.table[index] = None;
-        self.faulted |= self.detach_faults;
-        Ok(true)
+        Ok(())
     }
 
-    fn next_hub_change(&mut self) -> Result<HubEvent, DriverError> {
-        Ok(HubEvent::None)
+    fn departure_settled(&self, index: usize) -> bool {
+        self.scripts.get(index).is_none_or(|script| !script.looking)
     }
 
     fn faulted(&mut self) -> bool {
@@ -508,6 +535,20 @@ impl Seam for Mock {
     }
 }
 
+/// A controller recovery as the serve loop runs it: the reset, then the
+/// close once its walk settles.
+fn recover(
+    interfaces: &mut Interfaces<Buffer>,
+    health: &mut ControllerHealth,
+    mock: &mut Mock,
+) -> bool {
+    let attempted = interfaces.recover(health, mock);
+    if interfaces.is_resetting() {
+        interfaces.finish_recovery(health, mock);
+    }
+    attempted
+}
+
 /// A node the steps published: `(node, index, endpoint, region)`.
 type Emitted = (u32, usize, u64, u64);
 
@@ -569,7 +610,7 @@ fn urb(transfer_type: UsbTransferType, endpoint: u8) -> Vec<u8> {
         direction: UsbDirection::In,
         length: 8,
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x08, 0x00],
-        timeout_ms: (transfer_type == UsbTransferType::Bulk).then_some(NonZeroU32::MIN),
+        timeout_ms: (transfer_type != UsbTransferType::Interrupt).then_some(NonZeroU32::MIN),
     }))
 }
 
@@ -597,7 +638,7 @@ fn report_poll() -> Vec<u8> {
     urb(UsbTransferType::Interrupt, 1)
 }
 
-/// A control-IN URB, which runs synchronously.
+/// A control-IN URB, which the mock engine finishes at once.
 fn control_transfer() -> Vec<u8> {
     urb(UsbTransferType::Control, 0)
 }
@@ -674,7 +715,7 @@ fn a_device_a_reset_moved_to_another_index_keeps_its_node_and_buffer() {
 
     mock.faulted = true;
     mock.reset_table = vec![None, Some(keyboard(2)), Some(serial_stick(4, "AA0001"))];
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     let steps = mock.steps();
     assert_eq!(
         steps,
@@ -707,7 +748,7 @@ fn devices_a_reset_reordered_keep_their_nodes() {
     let mut health = ControllerHealth::new(0);
     mock.faulted = true;
     mock.reset_table = vec![Some(keyboard(2)), Some(serial_stick(4, "AA0001"))];
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     assert_eq!(mock.steps(), [Step::Reset]);
 }
 
@@ -720,7 +761,7 @@ fn a_moving_node_never_takes_an_index_another_node_serves() {
     let (was_first, was_second) = (emitted[0].2, emitted[1].2);
     mock.faulted = true;
     mock.reset_table = vec![None, Some(twin), Some(twin)];
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     assert_eq!(mock.steps(), [Step::Reset]);
 
     mock.script(1).reports = vec![vec![1; 8]];
@@ -890,7 +931,7 @@ fn a_device_that_came_back_unchanged_keeps_its_node() {
     ]);
     let mut health = ControllerHealth::new(0);
     mock.faulted = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     assert_eq!(mock.steps(), [Step::Reset]);
     assert_eq!(
         mock.domain_notes(),
@@ -979,7 +1020,7 @@ fn two_devices_of_one_model_that_traded_places_are_told_apart_by_serial_number()
         Some(serial_stick(2, "AA0002")),
         Some(serial_stick(4, "AA0001")),
     ];
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     let steps = mock.steps();
     assert_eq!(removes(&steps), [emitted[0].0, emitted[1].0]);
     assert_eq!(emits(&steps).len(), 2);
@@ -992,7 +1033,7 @@ fn a_storage_device_without_a_serial_number_is_replaced_across_a_reset() {
     let (mut mock, mut interfaces, emitted) = published(vec![Some(stick(2)), Some(keyboard(4))]);
     let mut health = ControllerHealth::new(0);
     mock.faulted = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     let steps = mock.steps();
     assert_eq!(removes(&steps), [emitted[0].0], "only the stick");
     assert_eq!(emits(&steps).len(), 1, "republished on a fresh node");
@@ -1016,7 +1057,7 @@ fn a_device_back_with_the_same_serial_number_keeps_its_node() {
     let (mut mock, mut interfaces, _) = published(vec![Some(serial_stick(2, "AA0001"))]);
     let mut health = ControllerHealth::new(0);
     mock.faulted = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     assert_eq!(mock.steps(), [Step::Reset]);
 }
 
@@ -1083,7 +1124,7 @@ fn a_shrunken_table_retracts_every_node_past_its_end() {
     let mut health = ControllerHealth::new(0);
     mock.faulted = true;
     mock.reset_table = vec![None, Some(serial_stick(2, "AA0001"))];
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     assert_eq!(removes(&mock.steps()), [emitted[1].0]);
 }
 
@@ -1124,10 +1165,14 @@ fn a_device_leaving_on_the_submit_path_recovers_the_controller_it_halted() {
     mock.script(0).gone = true;
     mock.detach_faults = true;
     mock.reset_table = vec![None, Some(stick(3))];
-    // The stick's control transfer runs synchronously, so the held poll is
-    // driven after it.
     mock.post(stick_endpoint, 0x22, control_transfer());
     interfaces.serve_submit(slot_of(stick_endpoint), &mut health, &mut mock);
+    // Two passes of the loop: the fault asks the engine to look, the next
+    // finds the device gone, and the halted controller is recovered.
+    interfaces.drive_busy(&mut mock);
+    interfaces.drive_busy(&mut mock);
+    assert!(mock.faulted);
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     let steps = mock.steps();
     let retracted = position(&steps, &Step::Remove(keyboard_node));
     let answered = position(
@@ -1154,7 +1199,16 @@ fn a_transfer_fault_from_a_device_still_attached_reaches_its_driver() {
     mock.post(endpoint, 0x12, report_poll());
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
     mock.script(0).fault = Some(DriverError::DeviceFault);
-    interfaces.drive_busy(&mut health, &mut mock);
+    mock.script(0).looking = true;
+    interfaces.drive_busy(&mut mock);
+    interfaces.drive_busy(&mut mock);
+    assert_eq!(
+        mock.steps(),
+        [],
+        "held while the engine looks at whether its device left"
+    );
+    mock.script(0).looking = false;
+    interfaces.drive_busy(&mut mock);
     assert_eq!(
         mock.steps(),
         [reply(endpoint, 0x12, Err(Errno::DeviceFault))]
@@ -1176,12 +1230,12 @@ fn a_held_urb_past_its_deadline_is_abandoned_answered_and_noted() {
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
     assert_eq!(interfaces.next_deadline(), Some(1_000 + 100_000_000));
 
-    interfaces.expire_overdue(1_000 + 99_999_999, &mut health, &mut mock);
+    interfaces.expire_overdue(1_000 + 99_999_999, &health, &mut mock);
     assert!(
         mock.script(0).abandoned.is_empty(),
         "nothing is abandoned early"
     );
-    interfaces.expire_overdue(1_000 + 100_000_000, &mut health, &mut mock);
+    interfaces.expire_overdue(1_000 + 100_000_000, &health, &mut mock);
     assert!(mock
         .steps()
         .contains(&reply(endpoint, 0x51, Err(Errno::TimedOut))));
@@ -1203,7 +1257,7 @@ fn a_recovering_controller_is_not_driven_to_expire_a_held_urb() {
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
     health.begin_recovery(0);
     let polls = mock.script(0).interrupt_calls;
-    interfaces.expire_overdue(u64::MAX, &mut health, &mut mock);
+    interfaces.expire_overdue(u64::MAX, &health, &mut mock);
     assert!(mock
         .steps()
         .contains(&reply(endpoint, 0x53, Err(Errno::TimedOut))));
@@ -1223,7 +1277,7 @@ fn a_held_urb_the_controller_finished_in_time_is_delivered_not_abandoned() {
     mock.post(endpoint, 0x52, bounded_report_poll());
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
     mock.script(0).reports.push(vec![7u8; 8]);
-    interfaces.expire_overdue(u64::MAX, &mut health, &mut mock);
+    interfaces.expire_overdue(u64::MAX, &health, &mut mock);
     assert!(mock.steps().contains(&reply(endpoint, 0x52, Ok(8))));
     assert!(mock.script(0).abandoned.is_empty());
 }
@@ -1314,7 +1368,7 @@ fn a_controller_that_misses_its_grace_window_retracts_every_node_and_is_never_re
 
     mock.faulted = true;
     mock.reset_fails = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     assert_eq!(
         mock.steps(),
         [Step::Reset],
@@ -1323,7 +1377,7 @@ fn a_controller_that_misses_its_grace_window_retracts_every_node_and_is_never_re
     assert!(health.is_recovering());
 
     mock.now = CONTROLLER_GRACE_NS + 1;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     let steps = mock.steps();
     assert_eq!(removes(&steps), [emitted[0].0, emitted[1].0]);
     assert!(steps.contains(&reply(endpoint, 0x41, Err(Errno::NotFound))));
@@ -1336,7 +1390,7 @@ fn a_controller_that_misses_its_grace_window_retracts_every_node_and_is_never_re
         ]
     );
 
-    assert!(!interfaces.recover(&mut health, &mut mock));
+    assert!(!recover(&mut interfaces, &mut health, &mut mock));
     assert!(
         mock.steps().is_empty(),
         "a failed-closed controller is left alone"
@@ -1364,7 +1418,7 @@ fn a_report_poll_while_the_controller_recovers_waits_without_reaching_it() {
     let endpoint = emitted[0].2;
     mock.faulted = true;
     mock.reset_fails = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     mock.steps();
     mock.post(endpoint, 0x91, report_poll());
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
@@ -1421,7 +1475,7 @@ fn a_malformed_frame_is_answered_fail_closed_and_reaches_nothing() {
     );
     mock.faulted = true;
     mock.reset_fails = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     mock.steps();
     mock.post(endpoint, 0x62, truncated);
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
@@ -1701,7 +1755,7 @@ fn a_departing_device_ends_its_streams_before_its_node_goes() {
 fn a_controller_reset_ends_every_stream_reissuably() {
     let (mut mock, mut interfaces, mut health, endpoint, port) = streaming();
     mock.faulted = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     let steps = mock.steps();
     assert!(steps.contains(&Step::Notified {
         port,
@@ -1732,7 +1786,7 @@ fn stream_operations_wait_out_a_recovery() {
     let (mut mock, mut interfaces, mut health, endpoint, _port) = streaming();
     mock.faulted = true;
     mock.reset_fails = true;
-    assert!(interfaces.recover(&mut health, &mut mock));
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
     mock.steps();
     mock.post(
         endpoint,
@@ -1745,6 +1799,36 @@ fn stream_operations_wait_out_a_recovery() {
     interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
     assert_eq!(
         mock.steps(),
-        [reply(endpoint, 0x73, Err(Errno::WouldBlock))]
+        [],
+        "held while the controller recovers: answered, its driver would ask again at once"
+    );
+    mock.reset_fails = false;
+    assert!(recover(&mut interfaces, &mut health, &mut mock));
+    let steps = mock.steps();
+    assert!(
+        steps.contains(&reply(endpoint, 0x73, Err(Errno::WouldBlock))),
+        "and answered once it is back: {steps:?}"
+    );
+}
+
+#[test]
+fn an_interface_operation_the_engine_runs_is_held_until_it_finishes() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(keyboard(2))]);
+    let mut health = ControllerHealth::new(0);
+    let endpoint = emitted[0].2;
+    mock.script(0).running_for = 1;
+    let select = UsbRequest::SetInterface {
+        interface: 0,
+        alternate: 1,
+    };
+    mock.post(endpoint, 0x81, request(select));
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(mock.steps(), [], "held while the engine runs it");
+    interfaces.drive_busy(&mut mock);
+    assert_eq!(mock.steps(), [reply(endpoint, 0x81, Ok(0))]);
+    assert_eq!(
+        mock.script(0).operations,
+        [select],
+        "asked once, then collected"
     );
 }

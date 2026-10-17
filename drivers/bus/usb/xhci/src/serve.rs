@@ -20,12 +20,16 @@
 //! [`UrbEngine`]; the live wait-set loop that drives it is in `main.rs` and is
 //! the on-metal acceptance item (QEMU models no Pi USB).
 
+use core::num::NonZeroU32;
+
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::usb_urb::{
-    decode_completion, IsoGrant, UrbRequest, UsbDirection, UsbTransferType, USB_REPLY_MAX_LEN,
+    decode_completion, IsoGrant, UrbRequest, UsbTransferType, USB_CONTROL_TIMEOUT_MAX_MS,
+    USB_REPLY_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwNode, HwResource};
-use tairix_usb::transport::{drive_urb, frame_completion, UrbEngine};
+use tairix_log::Level;
+use tairix_usb::transport::{drive_urb, frame_completion, on_own_endpoint, UrbEngine};
 
 /// Whether a URB submitted on an interface's transport can reach its device.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -98,29 +102,125 @@ pub enum UrbOutcome {
     Idle,
 }
 
-/// One USB interface's URB-service state: at most one outstanding interrupt-IN
-/// URB.
+/// One USB interface's URB-service state: at most one outstanding URB or
+/// interface operation.
 ///
-/// The class driver submits one URB at a time (it blocks on the reply), so a
+/// The class driver submits one call at a time (it blocks on the reply), so a
 /// single outstanding slot is the whole protocol. A second submit arriving
 /// while one is already outstanding is a class-driver protocol violation; it
 /// is answered fail-closed with [`Errno::AlreadyExists`] and never displaces
-/// the URB in flight (a hostile class driver cannot steal another submit's
+/// the one in flight (a hostile class driver cannot steal another submit's
 /// completion).
 pub struct UrbService {
-    /// The in-flight URB, re-driven on each controller event. `None` when
+    /// The call in flight, re-driven on each controller event. `None` when
     /// idle.
     outstanding: Option<Held>,
 }
 
-/// A URB held for a later controller event.
+/// An interface operation the engine carries out over several commands, held
+/// as a URB is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Operation {
+    /// Select `alternate` on `interface`.
+    SetInterface {
+        /// The interface.
+        interface: u8,
+        /// The setting.
+        alternate: u8,
+    },
+    /// Clear the halt on one of the interface's own endpoints.
+    ClearHalt {
+        /// The endpoint address.
+        endpoint: u8,
+    },
+    /// Stop the stream on an endpoint.
+    IsoStop {
+        /// The endpoint address.
+        endpoint: u8,
+    },
+}
+
+/// A call held for a later controller event.
 #[derive(Copy, Clone, Debug)]
 struct Held {
     /// The `call_recv` ticket its reply answers.
     ticket: u64,
-    urb: UrbRequest,
-    /// The monotonic instant it is abandoned at, when its request bounds it.
+    work: Work,
+    /// The monotonic instant it is abandoned at, when it is bounded.
     deadline_ns: Option<u64>,
+    /// Whether the engine has been asked for it. One asked before a
+    /// controller reset is gone with the reset.
+    driven: bool,
+}
+
+/// What a held call carries out.
+#[derive(Copy, Clone, Debug)]
+enum Work {
+    Transfer(UrbRequest),
+    Operation(Operation),
+    /// An operation that needs no engine work, received while the
+    /// controller recovers: answered reissuable once it is back.
+    Deferred,
+}
+
+impl Held {
+    /// Its answer, framed as its kind is: a completion for a transfer, a
+    /// status for an operation.
+    fn reply(&self, result: Result<u32, Errno>) -> UrbReply {
+        match self.work {
+            Work::Transfer(_) => UrbReply::new(self.ticket, result),
+            Work::Operation(_) | Work::Deferred => {
+                UrbReply::status(self.ticket, result.map(|_| ()))
+            }
+        }
+    }
+
+    /// Ask `engine` for it, recording that it was asked.
+    fn drive<E: UrbEngine>(
+        &mut self,
+        shm: &mut [u8],
+        engine: &mut E,
+    ) -> Result<Option<u32>, Errno> {
+        self.driven = true;
+        match self.work {
+            Work::Transfer(urb) => drive_urb(&urb, shm, engine),
+            Work::Operation(operation) => {
+                drive_operation(operation, engine).map(|done| done.map(|()| 0))
+            }
+            Work::Deferred => Err(Errno::WouldBlock),
+        }
+    }
+}
+
+/// Carry `operation` out through `engine`: `None` while it runs.
+fn drive_operation<E: UrbEngine>(
+    operation: Operation,
+    engine: &mut E,
+) -> Result<Option<()>, Errno> {
+    match operation {
+        Operation::SetInterface {
+            interface,
+            alternate,
+        } => engine
+            .set_interface(interface, alternate)
+            .map_err(DriverError::as_errno),
+        Operation::ClearHalt { endpoint } => {
+            on_own_endpoint(endpoint, engine, UrbEngine::clear_halt)
+        }
+        Operation::IsoStop { endpoint } => engine.iso_stop(endpoint).map_err(DriverError::as_errno),
+    }
+}
+
+/// When a URB received at `now_ns` is abandoned: at its own deadline, a
+/// control transfer's never past the protocol's ceiling on a request.
+fn deadline_of(urb: &UrbRequest, now_ns: u64) -> Option<u64> {
+    let ms = match urb.transfer_type {
+        UsbTransferType::Control => Some(urb.timeout_ms.map_or(USB_CONTROL_TIMEOUT_MAX_MS, |ms| {
+            ms.get().min(USB_CONTROL_TIMEOUT_MAX_MS)
+        })),
+        UsbTransferType::Bulk | UsbTransferType::Interrupt => urb.timeout_ms.map(NonZeroU32::get),
+    };
+    ms.map(|ms| now_ns.saturating_add(u64::from(ms) * 1_000_000))
 }
 
 impl Default for UrbService {
@@ -149,10 +249,13 @@ impl UrbService {
         self.outstanding.and_then(|held| held.deadline_ns)
     }
 
-    /// The transfer type of the held URB, if one is held.
+    /// The transfer type of the held URB, if a URB is held.
     #[must_use]
     pub fn held_transfer(&self) -> Option<UsbTransferType> {
-        self.outstanding.map(|held| held.urb.transfer_type)
+        self.outstanding.and_then(|held| match held.work {
+            Work::Transfer(urb) => Some(urb.transfer_type),
+            Work::Operation(_) | Work::Deferred => None,
+        })
     }
 
     /// Service a freshly received URB (`ticket` + its decoded `urb`) over the
@@ -160,11 +263,12 @@ impl UrbService {
     ///
     /// A [`Reach::Served`] URB is driven once: replied at once when it
     /// completes synchronously, [`UrbOutcome::Held`] — until its own deadline
-    /// at most — when it has not. A [`Reach::Recovering`] URB never touches
-    /// the controller: a report poll is held, any other transfer answered the
-    /// reissuable [`Errno::WouldBlock`]. A [`Reach::Retracted`] submit is
-    /// refused [`Errno::NotFound`], and one arriving while a URB is
-    /// outstanding [`Errno::AlreadyExists`], leaving the held URB alone.
+    /// at most — when it has not. A [`Reach::Recovering`] URB is held without
+    /// touching the controller, since answering it would have its class
+    /// driver submit again at once for as long as the recovery lasts. A
+    /// [`Reach::Retracted`] submit is refused [`Errno::NotFound`], and one
+    /// arriving while a call is outstanding [`Errno::AlreadyExists`], leaving
+    /// the held call alone.
     pub fn on_submit<E: UrbEngine>(
         &mut self,
         reach: Reach,
@@ -174,76 +278,114 @@ impl UrbService {
         shm: &mut [u8],
         engine: &mut E,
     ) -> UrbOutcome {
-        if reach == Reach::Retracted {
-            return UrbOutcome::Reply(UrbReply::new(ticket, Err(Errno::NotFound)));
-        }
-        if self.outstanding.is_some() {
-            return UrbOutcome::Reply(UrbReply::new(ticket, Err(Errno::AlreadyExists)));
-        }
         let held = Held {
             ticket,
-            urb: *urb,
-            deadline_ns: urb
-                .timeout_ms
-                .map(|ms| now_ns.saturating_add(u64::from(ms.get()) * 1_000_000)),
+            work: Work::Transfer(*urb),
+            deadline_ns: deadline_of(urb, now_ns),
+            driven: false,
         };
-        if reach == Reach::Recovering {
-            // Answering a report poll would have its class driver submit
-            // again at once, a busy loop across the two processes for as long
-            // as the recovery lasts.
-            if is_report_poll(urb) {
-                self.outstanding = Some(held);
-                return UrbOutcome::Held;
-            }
-            return UrbOutcome::Reply(UrbReply::new(ticket, Err(Errno::WouldBlock)));
+        self.accept(reach, held, shm, engine)
+    }
+
+    /// Service a freshly received interface `operation` for `ticket`, as
+    /// [`Self::on_submit`] a URB: carried out at once when it can be, held
+    /// while the engine runs it.
+    pub fn on_operation<E: UrbEngine>(
+        &mut self,
+        reach: Reach,
+        ticket: u64,
+        operation: Operation,
+        engine: &mut E,
+    ) -> UrbOutcome {
+        let held = Held {
+            ticket,
+            work: Work::Operation(operation),
+            deadline_ns: None,
+            driven: false,
+        };
+        self.accept(reach, held, &mut [], engine)
+    }
+
+    /// Hold an operation that needs no engine work, received for `ticket`
+    /// while the controller recovers.
+    pub fn on_deferred(&mut self, ticket: u64) -> UrbOutcome {
+        let held = Held {
+            ticket,
+            work: Work::Deferred,
+            deadline_ns: None,
+            driven: false,
+        };
+        if self.outstanding.is_some() {
+            return UrbOutcome::Reply(held.reply(Err(Errno::AlreadyExists)));
         }
-        match drive_urb(urb, shm, engine) {
-            Ok(Some(transferred)) => UrbOutcome::Reply(UrbReply::new(ticket, Ok(transferred))),
+        self.outstanding = Some(held);
+        UrbOutcome::Held
+    }
+
+    fn accept<E: UrbEngine>(
+        &mut self,
+        reach: Reach,
+        mut held: Held,
+        shm: &mut [u8],
+        engine: &mut E,
+    ) -> UrbOutcome {
+        if reach == Reach::Retracted {
+            return UrbOutcome::Reply(held.reply(Err(Errno::NotFound)));
+        }
+        if self.outstanding.is_some() {
+            return UrbOutcome::Reply(held.reply(Err(Errno::AlreadyExists)));
+        }
+        if reach == Reach::Recovering {
+            self.outstanding = Some(held);
+            return UrbOutcome::Held;
+        }
+        match held.drive(shm, engine) {
+            Ok(Some(done)) => UrbOutcome::Reply(held.reply(Ok(done))),
             Ok(None) => {
                 self.outstanding = Some(held);
                 UrbOutcome::Held
             }
-            Err(err) => UrbOutcome::Reply(UrbReply::new(ticket, Err(err))),
+            Err(err) => UrbOutcome::Reply(held.reply(Err(err))),
         }
     }
 
     /// Service a controller event over the shared `shm` buffer and `engine`.
     ///
-    /// If a URB is outstanding it is re-driven: a completed transfer is
-    /// [`UrbOutcome::Reply`]-now (clearing the slot); a still-pending
-    /// interrupt-IN report leaves it [`UrbOutcome::Held`]; a fault is answered
-    /// fail-closed (clearing the slot). With nothing outstanding the event is
-    /// [`UrbOutcome::Idle`] (e.g. a PORTSC change the caller handles
-    /// separately).
+    /// The held call is driven: a finished one is [`UrbOutcome::Reply`]-now
+    /// (clearing the slot), one still running stays [`UrbOutcome::Held`], a
+    /// fault is answered fail-closed (clearing the slot). With nothing
+    /// outstanding the event is [`UrbOutcome::Idle`].
     pub fn on_event<E: UrbEngine>(&mut self, shm: &mut [u8], engine: &mut E) -> UrbOutcome {
-        let Some(held) = self.outstanding.take() else {
+        let Some(mut held) = self.outstanding.take() else {
             return UrbOutcome::Idle;
         };
-        match drive_urb(&held.urb, shm, engine) {
-            Ok(Some(transferred)) => UrbOutcome::Reply(UrbReply::new(held.ticket, Ok(transferred))),
+        match held.drive(shm, engine) {
+            Ok(Some(done)) => UrbOutcome::Reply(held.reply(Ok(done))),
             Ok(None) => {
-                // Still in flight — keep the URB outstanding for the next event.
                 self.outstanding = Some(held);
                 UrbOutcome::Held
             }
-            Err(err) => UrbOutcome::Reply(UrbReply::new(held.ticket, Err(err))),
+            Err(err) => UrbOutcome::Reply(held.reply(Err(err))),
         }
     }
 
-    /// Abandon the held URB through `engine` if its deadline has passed at
-    /// `now_ns`, answering it [`Errno::TimedOut`] — or
-    /// [`Errno::DeviceFault`] when the controller would not let it go, its
-    /// pipe now in a state no later transfer should trust. Anything else is
-    /// left as it is.
+    /// Answer the held URB [`Errno::TimedOut`] if its deadline has passed at
+    /// `now_ns`, abandoning it through `engine` when the engine was asked for
+    /// it — [`Errno::DeviceFault`] when the controller would not let it go,
+    /// its pipe now in a state no later transfer should trust. Anything else
+    /// is left as it is.
     pub fn expire<E: UrbEngine>(&mut self, now_ns: u64, engine: &mut E) -> UrbOutcome {
         let Some(held) = self.take_overdue(now_ns) else {
             return UrbOutcome::Idle;
         };
-        let errno = match engine.abandon(&held.urb) {
-            Ok(()) => Errno::TimedOut,
-            Err(_) => Errno::DeviceFault,
+        let errno = match held.work {
+            Work::Transfer(urb) if held.driven => match engine.abandon(&urb) {
+                Ok(()) => Errno::TimedOut,
+                Err(_) => Errno::DeviceFault,
+            },
+            Work::Transfer(_) | Work::Operation(_) | Work::Deferred => Errno::TimedOut,
         };
-        UrbOutcome::Reply(UrbReply::new(held.ticket, Err(errno)))
+        UrbOutcome::Reply(held.reply(Err(errno)))
     }
 
     /// Answer the held URB [`Errno::TimedOut`] if its deadline has passed at
@@ -251,7 +393,7 @@ impl UrbService {
     /// nothing queued its reset does not discard.
     pub fn expire_unserved(&mut self, now_ns: u64) -> UrbOutcome {
         match self.take_overdue(now_ns) {
-            Some(held) => UrbOutcome::Reply(UrbReply::new(held.ticket, Err(Errno::TimedOut))),
+            Some(held) => UrbOutcome::Reply(held.reply(Err(Errno::TimedOut))),
             None => UrbOutcome::Idle,
         }
     }
@@ -261,40 +403,43 @@ impl UrbService {
             .take_if(|held| held.deadline_ns.is_some_and(|at| at <= now_ns))
     }
 
-    /// Answer the in-flight URB, if any, with `errno`, clearing the slot.
-    ///
-    /// [`Errno::NotFound`] when the interface is retracted: its endpoint
-    /// outlives it, so a stale request must not survive to block the next
-    /// class driver served there. The reissuable [`Errno::WouldBlock`]
-    /// once a controller reset has brought the interface's device back, since
-    /// the reset discarded whatever transfer the URB had armed.
+    /// Answer the held call, if any, with `errno`, clearing the slot:
+    /// [`Errno::NotFound`] when the interface is retracted, since its
+    /// endpoint outlives it and a stale request must not block the next class
+    /// driver served there.
     #[must_use]
     pub fn abort_outstanding(&mut self, errno: Errno) -> UrbOutcome {
         let Some(held) = self.outstanding.take() else {
             return UrbOutcome::Idle;
         };
-        UrbOutcome::Reply(UrbReply::new(held.ticket, Err(errno)))
+        UrbOutcome::Reply(held.reply(Err(errno)))
     }
 
-    /// Answer a held transfer with the reissuable [`Errno::WouldBlock`] after
-    /// a controller reset that did not bring the controller back, leaving a
-    /// held report poll [`UrbOutcome::Held`] for the next attempt: a transfer
-    /// cannot run until then, while a report poll is answered by the device's
-    /// next report whenever that comes.
+    /// Answer the held call the reissuable [`Errno::WouldBlock`] if the
+    /// engine was asked for it before a controller reset discarded it, or it
+    /// needs no engine work. One held without touching the controller stays
+    /// held, to be driven now that it is back.
     #[must_use]
-    pub fn reissue_held_transfer(&mut self) -> UrbOutcome {
-        match &self.outstanding {
+    pub fn reissue_after_reset(&mut self) -> UrbOutcome {
+        match self.outstanding {
+            Some(held) if held.driven || matches!(held.work, Work::Deferred) => {
+                self.abort_outstanding(Errno::WouldBlock)
+            }
+            Some(_) => UrbOutcome::Held,
             None => UrbOutcome::Idle,
-            Some(held) if is_report_poll(&held.urb) => UrbOutcome::Held,
-            Some(_) => self.abort_outstanding(Errno::WouldBlock),
         }
     }
 }
 
-/// Whether `urb` polls for the device's next report — an interrupt-IN URB,
-/// which the device answers whenever it next has one.
-fn is_report_poll(urb: &UrbRequest) -> bool {
-    urb.transfer_type == UsbTransferType::Interrupt && urb.direction == UsbDirection::In
+/// The level a failed URB is logged at. A STALL is the device's own answer,
+/// which its class driver reads — a single-LUN stick refusing GET MAX LUN is
+/// no failure of the bus — so it is information; anything else is a warning.
+#[must_use]
+pub const fn urb_failure_level(errno: Errno) -> Level {
+    match errno {
+        Errno::EndpointStalled => Level::Info,
+        _ => Level::Warn,
+    }
 }
 
 /// Extend the enumerated device's interface [`HwNode`] (from

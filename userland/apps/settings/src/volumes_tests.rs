@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_controls::{
@@ -13,6 +13,15 @@ use tairix_icon::IconKind;
 use tairix_theme::SignalRole;
 
 use crate::volumes::{Readings, VolumeReading, VOLUME_FACTS};
+
+/// A disk on an ATA bus that reported its rotation.
+const HARD_DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata).with_rotation(
+    BlkRotation::from_rate_field(7200, BlkRotationEvidence::AtaIdentify),
+);
+
+/// A solid-state disk on an ATA bus.
+const SSD: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata)
+    .with_rotation(BlkRotation::NonRotating(BlkRotationEvidence::AtaIdentify));
 
 /// A volume of `total` blocks with `free` unallocated, of which `avail` may
 /// still be handed out. A 4 KiB block, as every real format here uses.
@@ -58,7 +67,7 @@ fn system() -> MountRecord {
         b"arxfs",
         usage(1024, 768, 768),
         MountAvailability::Available,
-        Some(BlkMedium::SolidState),
+        Some(SSD),
     )
 }
 
@@ -160,7 +169,7 @@ fn a_withheld_reserve_is_used_up_by_neither_figure() {
         b"arxfs",
         usage(1000, 200, 100),
         MountAvailability::Available,
-        Some(BlkMedium::HardDisk),
+        Some(HARD_DISK),
     )]);
     // The reserve is unallocated, so it is not *used*; it is not offered
     // either, so it is not *available*. The bar is of the whole medium.

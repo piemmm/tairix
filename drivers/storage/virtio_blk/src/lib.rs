@@ -49,7 +49,7 @@
 extern crate alloc;
 
 use core::convert::TryFrom;
-use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium, BlkTransport, CommandKind};
 use tairix_abi::driver::block::BlockClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::BufferClass;
@@ -69,7 +69,7 @@ const QUEUE_SIZE: u16 = 8;
 
 /// What a virtio block device is: paravirtual, fast but bounded, so a wedged
 /// host backend never stalls a consumer for a spinning disk's spin-up budget.
-const MEDIUM: BlkMedium = BlkMedium::Virtual;
+const MEDIUM: BlkMedium = BlkMedium::of_transport(BlkTransport::Virtual);
 
 /// The virtio device id of a block device (virtio 1.1 §5.2 — `virtio-blk`
 /// is device type 2). This driver's [`BIND_KEYS`] match key is built from
@@ -484,7 +484,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                 direction: Direction::DeviceWrite,
             },
         ];
-        let token = self.submit_and_wait(&segments)?;
+        let token = self.submit_and_wait(&segments, CommandKind::Media, payload_len)?;
         // The data staging persists across requests, so nothing is copied
         // back that the device has not vouched for: a refused request, or a
         // read whose completion does not cover the payload and the status
@@ -499,17 +499,27 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         Ok(())
     }
 
-    /// Publish `segments` on the requestq and wait for their completion.
+    /// Publish `segments`, a command of `kind` moving `bytes`, on the requestq
+    /// and wait for their completion.
     ///
-    /// The per-request deadline is the shared per-class I/O policy every
-    /// consumer of a block device already obeys, following from the medium
-    /// this driver declares — not a constant of this driver's own, which a
-    /// bigger machine or a slower device would outgrow. A request the device
-    /// never answers fails closed rather than being reissued, since the device
-    /// may still own its staging; reissue policy belongs to the consumer
-    /// above, which knows whether the request is safe to repeat.
-    fn submit_and_wait(&mut self, segments: &[ChainSegment]) -> Result<UsedToken, DriverError> {
-        let deadline_ns = self.device_class().budget().deadline_ns;
+    /// The wait is the command's exchange in the shared per-class budget,
+    /// following from the medium this driver declares — not a constant of
+    /// this driver's own, which a bigger machine or a slower device would
+    /// outgrow. A request the device never answers fails closed rather than
+    /// being reissued, since the device may still own its staging; reissue
+    /// policy belongs to the consumer above, which knows whether the request
+    /// is safe to repeat.
+    fn submit_and_wait(
+        &mut self,
+        segments: &[ChainSegment],
+        kind: CommandKind,
+        bytes: usize,
+    ) -> Result<UsedToken, DriverError> {
+        let deadline_ns = self
+            .device_class()
+            .budget()
+            .command
+            .exchange_ns(kind, bytes);
         self.queue
             .submit_and_wait(&mut self.transport, self.host, segments, deadline_ns)
     }
@@ -553,7 +563,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
                 direction: Direction::DeviceWrite,
             },
         ];
-        self.submit_and_wait(&segments)?;
+        self.submit_and_wait(&segments, CommandKind::Flush, 0)?;
         status_to_result(status_bb.full_region_mut()[0])
     }
 }

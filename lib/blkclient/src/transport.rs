@@ -112,4 +112,8 @@ impl BlkCall for RtBlkCall {
             }
         }
     }
+
+    fn pause(&mut self, ns: u64) {
+        tairix_rt::park_ns(ns);
+    }
 }

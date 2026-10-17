@@ -78,6 +78,10 @@ pub const CONFIG: usize = 0x38;
 /// starts the command ring with.
 pub const CRCR_RCS: u32 = 1 << 0;
 
+/// `CRCR` Command Abort: aborts the command executing and stops the ring,
+/// each reported by a Command Completion Event (xHCI 1.2 §4.6.1.2).
+pub const CRCR_CA: u32 = 1 << 2;
+
 /// `USBCMD` Run/Stop: `1` runs the controller, `0` halts it.
 pub const USBCMD_RUN: u32 = 1 << 0;
 
@@ -151,6 +155,11 @@ pub const PORTSC_PEC: u32 = 1 << 18;
 /// finishes the reset software requested. Left latched, the port carries a
 /// stale change the next reset cannot be distinguished from.
 pub const PORTSC_PRC: u32 = 1 << 21;
+
+/// `PORTSC` change bits, all write-1-to-clear: connect, enable, warm reset,
+/// over-current, reset, link state and config error (§5.4.8). A latch left
+/// set raises no Port Status Change Event again for its change.
+pub const PORTSC_CHANGES: u32 = 0x00FE_0000;
 
 /// `PORTSC` Device Removable (read-only): set when the device on the port is
 /// built in rather than plugged in (§5.4.8).

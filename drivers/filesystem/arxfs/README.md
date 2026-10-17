@@ -465,9 +465,11 @@ barrier, and one write of each metadata block they all rewrite — the same
 call does. It closes on an explicit `fs_sync`, on the dirty-age window expiring,
 on an operation that needs the committed state to be the whole truth (`trim`,
 `grow`, `scrub`, `check`, `health`, or one that widens the incompatible-feature
-word), or on the volume being handed on. The window is one policy over the
-device class the block seam reports — 30 s removable, 15 s rotational, 5 s
-solid-state and paravirtual, widest where a command is dearest.
+word), or on the volume being handed on. The window is one policy over what a
+command to the device costs, read from the medium the block seam reports — 30 s
+behind a USB bridge or an SD card protocol, 15 s for a disk that seeks (or is
+not known not to), 5 s for a non-rotating medium on a direct bus or a
+paravirtual device — widest where a command is dearest.
 
 Between operations nothing in the driver runs, so the **host** enforces that
 window: the driver names each transaction's deadline through the

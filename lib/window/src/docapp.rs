@@ -3,8 +3,9 @@
 //!
 //! This half is the contract the host drives a window's engine through —
 //! [`DocumentView`], the [`Outcome`] an input comes to, the [`Request`]s
-//! every document window makes alike, and the [`ToolWindow`]s it tears out —
-//! so an engine is host-tested against the very interface it runs under. On
+//! every document window makes alike, the [`ToolWindow`]s it tears out and
+//! the [`DialogWindow`] it asks a question in — so an engine is host-tested
+//! against the very interface it runs under. On
 //! the bare-metal targets the
 //! module is also the host itself (`Host`, `run`): the windows and the events
 //! that reach them, each window's file and the saves and choosers it waits on,
@@ -14,7 +15,7 @@
 
 use alloc::string::String;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveEndings};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality, SaveEndings};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
@@ -27,6 +28,8 @@ mod closing;
 mod host;
 #[cfg(all(freestanding, feature = "rt"))]
 pub use host::*;
+#[cfg(any(test, all(freestanding, feature = "rt")))]
+mod scroll;
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 mod title;
 
@@ -154,16 +157,40 @@ pub struct ToolWindow<'a> {
 
 impl ToolWindow<'_> {
     /// Whether it may show its rectangle of a window whose own area is
-    /// `area`: one with pixels in it, neither left of nor above the drawing's
-    /// origin, and overlapping nothing of the window's, so every pixel and
-    /// every input belongs to one of them alone. The host opens no tool
-    /// window that does not fit.
+    /// `area` ([`fits_beside`]). The host opens no tool window that does not
+    /// fit.
     #[must_use]
     pub fn fits_beside(&self, area: Rect) -> bool {
-        self.rect.surface_origin().is_some()
-            && !self.rect.is_empty()
-            && self.rect.intersection(&area).is_empty()
+        fits_beside(self.rect, area)
     }
+}
+
+/// Whether `rect` of a window's drawing may be shown in a window of its own
+/// beside the window's own `area`: one with pixels in it, neither left of nor
+/// above the drawing's origin, and overlapping nothing of the window's, so
+/// every pixel and every input belongs to one of them alone.
+#[must_use]
+pub fn fits_beside(rect: Rect, area: Rect) -> bool {
+    rect.surface_origin().is_some() && !rect.is_empty() && rect.intersection(&area).is_empty()
+}
+
+/// The dialog a document window wants open: a form or a question about its
+/// document, in a window of its own that the desktop frames, centres over the
+/// document's, and lets hold it as `modality` says
+/// ([`DocumentView::dialog_window`]).
+///
+/// It shows `rect` of the window's own drawing, laid out beside the window's
+/// area as a tool window's is and overlapping no tool window's, and what
+/// reaches it goes to [`DocumentView::dialog_input`], so the window's own
+/// input is never filtered for it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DialogWindow<'a> {
+    /// What its band reads after the application's name.
+    pub title: &'a str,
+    /// The part of the window's drawing it shows, in the window's pixels.
+    pub rect: Rect,
+    /// Whether it holds the window until it closes.
+    pub modality: DialogModality,
 }
 
 /// Where a tool window opens ([`DocumentView::tool_opening`]).
@@ -375,6 +402,54 @@ pub trait DocumentView: SavedDocument {
         &mut self,
         _id: u32,
         _why: ToolGone,
+        _layout: &Self::Layout,
+        _damage: &mut Region,
+    ) -> ViewOutcome<Self> {
+        Outcome::none()
+    }
+
+    /// The dialog the window wants open as laid out by `layout` at `scale`
+    /// in `theme`, if any. Asked after every round, as tool windows are, so
+    /// the host opens, resizes, retitles and closes it to match. By default
+    /// none.
+    fn dialog_window(
+        &self,
+        _layout: &Self::Layout,
+        _scale: Scale,
+        _theme: &Theme,
+    ) -> Option<DialogWindow<'_>> {
+        None
+    }
+
+    /// Feed `input` that reached the window's dialog — a key while it holds
+    /// the keyboard, or the pointer over it in the drawing's pixels — at
+    /// `now_ns`.
+    fn dialog_input(
+        &mut self,
+        _input: &InputEvent,
+        _now_ns: u64,
+        _layout: &Self::Layout,
+        _scale: Scale,
+        _theme: &Theme,
+        _damage: &mut Region,
+    ) -> ViewOutcome<Self> {
+        Outcome::none()
+    }
+
+    /// The dialog gained or lost the keyboard; the host repaints it whole.
+    fn dialog_focus_changed(
+        &mut self,
+        _focused: bool,
+        _layout: &Self::Layout,
+        _damage: &mut Region,
+    ) {
+    }
+
+    /// The desktop would not open the dialog, for `why`. The view stops
+    /// wanting it, or it is asked for again.
+    fn dialog_refused(
+        &mut self,
+        _why: &str,
         _layout: &Self::Layout,
         _damage: &mut Region,
     ) -> ViewOutcome<Self> {

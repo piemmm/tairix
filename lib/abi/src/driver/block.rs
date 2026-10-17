@@ -4,26 +4,33 @@
 //! first driver is `virtio_blk`; the trait carries only the minimum
 //! the filesystem layer needs.
 
-use crate::blkio::{BlkDeviceClass, BlkDeviceName, BlkMedium};
+use crate::blkio::{BlkCommandCost, BlkDeviceClass, BlkDeviceName, BlkMedium, BlkReissue};
 use crate::sysinfo::MountAvailability;
 
 use super::{BufferClass, DriverError};
 
-/// The patience a block device is served with, derived from what it is.
+/// How a block device is served, derived from what it is.
 ///
-/// A blanket extension rather than a method of [`Block`], so no device can
-/// declare a class that disagrees with its medium: every device's class is
-/// [`BlkDeviceClass::of`] its [`Block::medium`].
+/// A blanket extension rather than methods of [`Block`], so no device can
+/// declare a class or a cost that disagrees with its [`Block::medium`].
 pub trait BlockClass {
     /// The device's broad performance/behaviour class, from which its
     /// per-request deadline, reissue budget, and recovery grace window are
     /// derived ([`BlkDeviceClass::budget`]).
     fn device_class(&self) -> BlkDeviceClass;
+
+    /// What one command to the device costs, which a write-back window
+    /// amortises ([`BlkCommandCost::of`]).
+    fn command_cost(&self) -> BlkCommandCost;
 }
 
 impl<B: Block + ?Sized> BlockClass for B {
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::of(self.medium())
+    }
+
+    fn command_cost(&self) -> BlkCommandCost {
+        BlkCommandCost::of(self.medium())
     }
 }
 
@@ -397,11 +404,10 @@ pub trait Block {
         Ok(DeviceHealth::Unavailable)
     }
 
-    /// What the device is — a hard disk, an `NVMe` drive, a USB flash drive,
-    /// an SD card — declared by the one component that knows: the driver that
-    /// binds the hardware. The patience the device is served with follows from
-    /// it ([`BlockClass::device_class`]), so what a device is said to be and
-    /// how it is served cannot disagree.
+    /// What the device is — its transport, and whether its medium rotates and
+    /// can leave the unit, each with the evidence that established it —
+    /// declared by the one component that knows: the driver that binds the
+    /// hardware. How the device is served follows from it ([`BlockClass`]).
     ///
     /// The default is `None`, a device whose driver says nothing about itself:
     /// a reader is shown an unknown drive, and it is served the bounded
@@ -487,6 +493,28 @@ pub trait Block {
     fn backing_availability(&self) -> MountAvailability {
         MountAvailability::Available
     }
+
+    /// When a consumer may reissue the request this device has just failed
+    /// with a device-health error, as its driver knows it:
+    /// [`BlkReissue::Now`] once the device's own recovery from the failure has
+    /// completed and the unit answered ready, so the reissue need not wait out
+    /// the class's pacing.
+    ///
+    /// Asked once, right after such a failure, by the block-service engine
+    /// serving the device ([`crate::blkio::serve_request_recovering`]);
+    /// answering clears what the device recorded, so it never speaks for a
+    /// later failure. The default, [`BlkReissue::Paced`], is the answer of a
+    /// device that cannot vouch for its recovery, and a window that wraps one
+    /// device forwards that device's answer.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn reissue(&mut self) -> BlkReissue {
+        BlkReissue::Paced
+    }
 }
 
 /// A `&mut B` is itself a [`Block`], forwarding every method to the
@@ -555,6 +583,10 @@ impl<B: Block + ?Sized> Block for &mut B {
 
     fn backing_availability(&self) -> MountAvailability {
         (**self).backing_availability()
+    }
+
+    fn reissue(&mut self) -> BlkReissue {
+        (**self).reissue()
     }
 }
 

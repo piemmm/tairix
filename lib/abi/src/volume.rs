@@ -82,24 +82,34 @@ pub const VOLUME_ATTACH_MAX_LEN: usize = ATTACH_FIXED_LEN + VOLUME_NAME_MAX;
 /// the force byte.
 pub const VOLUME_DETACH_LEN: usize = VOLUME_ID_LEN + 1;
 
-/// `true` if `byte` may appear in a volume catalog name.
-///
-/// The structural subset of the alias character rules: ASCII letters,
-/// digits, `-`, and `_`. Anything else — separators, dots, control bytes,
-/// non-ASCII — is refused, so a name can never spell a path component
-/// like `..`, an empty segment, or a terminal escape.
-const fn name_byte_ok(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+/// `true` if `byte` may begin or end a volume catalog name: a lowercase
+/// ASCII letter or a digit, as the alias grammar asks of an alias.
+const fn name_edge_ok(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit()
 }
 
-/// Validate a volume catalog name's structural spelling.
+/// `true` if `byte` may appear inside a volume catalog name: the alias
+/// character set, lowercase ASCII letters, digits, `-` and `_`. Anything else
+/// — separators, dots, control bytes, non-ASCII — is refused, so a name can
+/// never spell a path component like `..`, an empty segment, or a terminal
+/// escape.
+const fn name_byte_ok(byte: u8) -> bool {
+    name_edge_ok(byte) || byte == b'-' || byte == b'_'
+}
+
+/// Validate a volume catalog name's spelling: an alias, as the alias grammar
+/// spells one (`plans/ALIAS.md` §5.2).
 ///
 /// # Errors
 ///
 /// [`Errno::OutOfRange`] when the name is empty, longer than
-/// [`VOLUME_NAME_MAX`], or contains a byte outside the permitted set.
+/// [`VOLUME_NAME_MAX`], contains a byte outside the alias character set, or
+/// begins or ends with anything but a lowercase letter or a digit.
 pub fn validate_volume_name(name: &[u8]) -> Result<(), Errno> {
-    if name.is_empty() || name.len() > VOLUME_NAME_MAX {
+    let (Some(&first), Some(&last)) = (name.first(), name.last()) else {
+        return Err(Errno::OutOfRange);
+    };
+    if name.len() > VOLUME_NAME_MAX || !name_edge_ok(first) || !name_edge_ok(last) {
         return Err(Errno::OutOfRange);
     }
     let mut i = 0;
@@ -320,12 +330,20 @@ mod tests {
             b"a b",
             b"..",
             b"caf\xC3\xA9",
+            b"Backup",
+            b"-backup",
+            b"_backup",
+            b"backup-",
+            b"backup_",
         ] {
             let req = VolumeAttachRequest {
                 name: bad,
                 ..attach()
             };
             assert_eq!(req.encode(&mut buf), Err(Errno::OutOfRange), "{bad:?}");
+        }
+        for good in [&b"my-backup_2"[..], b"7", b"usb_25cm"] {
+            assert_eq!(validate_volume_name(good), Ok(()), "{good:?}");
         }
         // A maximum-length name is fine.
         let req = VolumeAttachRequest {

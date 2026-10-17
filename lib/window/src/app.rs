@@ -30,8 +30,10 @@ use core::fmt;
 
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
-use tairix_abi::window_ipc::{LayerDepth, WindowEvent, WindowSizing, WindowTitle, WINDOW_ENDPOINT};
-use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
+use tairix_abi::window_ipc::{
+    DialogModality, LayerDepth, WindowEvent, WindowSizing, WindowTitle, WINDOW_ENDPOINT,
+};
+use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
 use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
 use tairix_theme::{Accessibility, ThemeRegistry};
@@ -39,7 +41,7 @@ use tairix_theme::{Accessibility, ThemeRegistry};
 use crate::client::{refusal_alert, retained_damage, WindowClient, WindowTransport};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
-use crate::server::{LayerSpec, ToolSpec, TransientSpec};
+use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec};
 
 /// Exit code when the shared frame region could not be created or granted to
 /// the window endpoint. A reserved, fail-closed value.
@@ -73,11 +75,16 @@ pub const PRESSURE_TOKEN: u64 = 2;
 /// the user just left.
 pub const DESKTOP_TOKEN: u64 = 3;
 
+/// The wait-set token of the window-reply member: the kernel wakes the park
+/// when a request the client posted to the session is answered, which the
+/// event drain takes in ([`crate::client::WindowEvents::try_wait`]).
+pub const REPLY_TOKEN: u64 = 4;
+
 /// The lowest token an application may give a wait-set member of its own.
 ///
 /// The shell's own members hold every value below it, so an app numbering from
 /// here cannot collide with them however many it adds.
-pub const FIRST_APP_TOKEN: u64 = 4;
+pub const FIRST_APP_TOKEN: u64 = 5;
 
 /// A bring-up refusal: the reserved exit code, the reason to state, and the
 /// typed error a caller that must answer in [`Errno`] hands on.
@@ -160,8 +167,25 @@ pub fn fail(name: &str, code: i32, reason: impl fmt::Display) -> i32 {
     code
 }
 
-/// The production [`WindowTransport`]: one synchronous `ipc_call` to the
-/// reserved window endpoint per request.
+/// What an application states when a window keeps its size
+/// ([`Fitted::Kept`]).
+pub const SIZE_KEPT: &str = "the window's new size could not be made; it keeps the size it had";
+
+/// What a window did with a size it was asked to take.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Fitted {
+    /// It has the size: repaint at it.
+    Adopted,
+    /// An earlier resize is unanswered; the size is delivered again as a
+    /// `Resized` event once it is. Nothing to report.
+    Deferred,
+    /// It keeps the size it had and stays drawable: no region could be made
+    /// for the new one, or the session could not be asked.
+    Kept,
+}
+
+/// The production [`WindowTransport`]: the reserved window endpoint, called
+/// or posted to.
 ///
 /// The session attests the caller kernel-side on every request, so the
 /// transport carries no claimed authority.
@@ -170,6 +194,21 @@ pub struct RtWindowTransport;
 impl WindowTransport for RtWindowTransport {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
+    }
+
+    fn post(&mut self, request: &[u8]) -> Result<u64, Errno> {
+        tairix_rt::call_post(WINDOW_ENDPOINT, request, CALL_DEADLINE_NONE)
+            .map_err(Errno::from_syscall)
+    }
+
+    fn reap(&mut self, ticket: u64, reply: &mut [u8]) -> Result<Option<usize>, Errno> {
+        match tairix_rt::call_reap(WINDOW_ENDPOINT, ticket, reply) {
+            Ok(len) => Ok(Some(len)),
+            Err(ret) => match Errno::from_syscall(ret) {
+                Errno::WouldBlock => Ok(None),
+                err => Err(err),
+            },
+        }
     }
 }
 
@@ -194,7 +233,9 @@ pub enum Wake {
 
 fn classify(token: u64) -> Wake {
     match token {
-        EVENT_TOKEN => Wake::Event,
+        // An answer to a posted request is taken in by the same drain that
+        // reads events, so it wakes the loop as one.
+        EVENT_TOKEN | REPLY_TOKEN => Wake::Event,
         PRESSURE_TOKEN => {
             if tairix_procinfo::pressure::refresh() {
                 Wake::PressureChanged
@@ -396,6 +437,20 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
         return Err(ShellError::new(
             EXIT_NO_EVENTS,
             "desktop-change wake refused",
+            Errno::NotFound,
+        ));
+    }
+    if tairix_rt::waitset_ctl(
+        set,
+        WaitSetOp::Add,
+        WaitSourceKind::CallReply,
+        WINDOW_ENDPOINT,
+        REPLY_TOKEN,
+    ) != 0
+    {
+        return Err(ShellError::new(
+            EXIT_NO_EVENTS,
+            "window-reply wake refused",
             Errno::NotFound,
         ));
     }
@@ -626,12 +681,14 @@ impl WindowPane {
     ) -> Result<Self, ShellError> {
         let (frames, grant) = Self::region(mode)?;
         let (window, replied) = client
-            .create_popup(&TransientSpec {
-                parent_window_id: parent,
-                shm_handle: grant,
-                event_endpoint,
-                frame_count: FRAME_COUNT,
-                surface: *mode,
+            .create_popup(&PopupSpec {
+                transient: TransientSpec {
+                    parent_window_id: parent,
+                    shm_handle: grant,
+                    event_endpoint,
+                    frame_count: FRAME_COUNT,
+                    surface: *mode,
+                },
                 offset_x: offset.0,
                 offset_y: offset.1,
             })
@@ -684,9 +741,9 @@ impl WindowPane {
                     event_endpoint,
                     frame_count: FRAME_COUNT,
                     surface: *mode,
-                    offset_x: offset.0,
-                    offset_y: offset.1,
                 },
+                offset_x: offset.0,
+                offset_y: offset.1,
                 carry,
                 title,
             })
@@ -702,6 +759,57 @@ impl WindowPane {
             return Err(ShellError::new(
                 EXIT_NO_WINDOW,
                 "tool-window reply came from another sender",
+                Errno::PermissionDenied,
+            ));
+        }
+        Ok(Self {
+            window,
+            frames,
+            mode: *mode,
+        })
+    }
+
+    /// Open a dialog window of client `mode` titled `title`, owned by `owner`
+    /// and holding it as `modality` says, refusing a create reply that did
+    /// not come from `server` exactly as [`Self::open_popup`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
+    /// title or create, and [`Errno::PermissionDenied`] under
+    /// [`EXIT_NO_WINDOW`] for an imposter reply.
+    pub fn open_dialog<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        (owner, server): (u64, ProcId),
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        modality: DialogModality,
+        title: &str,
+    ) -> Result<Self, ShellError> {
+        let title = WindowTitle::new(title).map_err(|err| {
+            ShellError::new(EXIT_NO_WINDOW, "the dialog's title was refused", err)
+        })?;
+        let (frames, grant) = Self::region(mode)?;
+        let (window, replied) = client
+            .create_dialog(&DialogSpec {
+                transient: TransientSpec {
+                    parent_window_id: owner,
+                    shm_handle: grant,
+                    event_endpoint,
+                    frame_count: FRAME_COUNT,
+                    surface: *mode,
+                },
+                modality,
+                title,
+            })
+            .map_err(|err| {
+                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the dialog", err)
+            })?;
+        if replied != server {
+            let _ = client.close(window);
+            return Err(ShellError::new(
+                EXIT_NO_WINDOW,
+                "dialog reply came from another sender",
                 Errno::PermissionDenied,
             ));
         }
@@ -861,59 +969,72 @@ impl WindowPane {
         client.present(window, 0, *damage)
     }
 
-    /// Re-map the frame region onto `new_mode`, answering whether the new
-    /// geometry was adopted.
+    /// Re-map the frame region onto `new_mode`.
     ///
-    /// Fail-closed by ordering: the fresh region is created and granted first
-    /// and adopted only once the session has accepted the resize, so the old
-    /// region stays mapped — and the window drawable at its current size —
-    /// through every refusal, while the fresh one is unmapped by its own drop.
-    ///
-    /// `false` therefore means "still at the old size, and still drawable",
-    /// never "broken".
+    /// The resize is posted, not awaited: the fresh region is adopted at once
+    /// and painted into, and the session serves the resize before any present
+    /// made after it. A refusal arrives later, as an
+    /// [`EventError::Refused`](crate::client::EventError::Refused) followed by
+    /// the size the session kept, which this is asked to take again. A size
+    /// asked while an earlier resize is unanswered is
+    /// [`Fitted::Deferred`]: no region is made for it, and it is delivered
+    /// again once that one is answered.
     pub fn resize<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
         new_mode: &DisplayMode,
-    ) -> bool {
+    ) -> Fitted {
+        if client.resize_in_flight(self.window) {
+            return Fitted::Deferred;
+        }
+        self.remap(client, new_mode)
+    }
+
+    /// Post the resize onto a fresh region for `new_mode` and adopt it.
+    fn remap<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        new_mode: &DisplayMode,
+    ) -> Fitted {
         let Some(len) = region_bytes(new_mode, FRAME_COUNT) else {
-            return false;
+            return Fitted::Kept;
         };
         let Some(spare) = WindowFrames::create(len) else {
-            return false;
+            return Fitted::Kept;
         };
         let Some(grant) = spare.grant() else {
-            return false;
+            return Fitted::Kept;
         };
         if client
             .resize(self.window, grant, FRAME_COUNT, new_mode)
             .is_err()
         {
-            return false;
+            return Fitted::Kept;
         }
         self.frames = spare;
         self.mode = *new_mode;
-        true
+        Fitted::Adopted
     }
 
     /// [`resize`](Self::resize) together with `surface`, the one the window
-    /// is drawn into: the fresh surface is allocated before the session is
-    /// asked and adopted only once it has accepted, so every refusal leaves
-    /// the window at the size it had and still drawable.
+    /// is drawn into, adopted with the region.
     pub fn resize_with<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
         new_mode: &DisplayMode,
         surface: &mut Surface,
-    ) -> bool {
-        let Some(fresh) = Surface::new(new_mode.width_px, new_mode.height_px) else {
-            return false;
-        };
-        if !self.resize(client, new_mode) {
-            return false;
+    ) -> Fitted {
+        if client.resize_in_flight(self.window) {
+            return Fitted::Deferred;
         }
-        *surface = fresh;
-        true
+        let Some(fresh) = Surface::new(new_mode.width_px, new_mode.height_px) else {
+            return Fitted::Kept;
+        };
+        let fitted = self.remap(client, new_mode);
+        if fitted == Fitted::Adopted {
+            *surface = fresh;
+        }
+        fitted
     }
 
     /// Answer the session's release of its own copy by giving this side's
@@ -1130,31 +1251,24 @@ impl AppWindow {
         Ok(Ok(()))
     }
 
-    /// Re-map the frame region onto `new_mode`, answering whether the new
-    /// geometry was adopted.
-    ///
-    /// The fresh surface is allocated before the session is asked, and the pane
-    /// adopts the fresh region only once the session has accepted it, so every
-    /// refusal leaves the current geometry standing and still drawable.
-    ///
-    /// `false` therefore means "still at the old size, and still drawable", not
-    /// "broken". The caller repaints the whole window either way, since even a
-    /// refused resize leaves the reported client size unchanged and the current
-    /// picture already matches it.
-    pub fn resize(&mut self, new_mode: DisplayMode) -> bool {
+    /// Re-map the open window onto `new_mode`, as [`WindowPane::resize_with`]
+    /// does: [`Fitted::Adopted`] repaints at it, [`Fitted::Deferred`] waits
+    /// for the size to be delivered again, and [`Fitted::Kept`] — no window
+    /// open, or none of its region could be made — leaves the window at the
+    /// size it had and still drawable.
+    pub fn resize(&mut self, new_mode: DisplayMode) -> Fitted {
         let Some(held) = self.retained.as_mut() else {
-            return false;
+            return Fitted::Kept;
         };
-        if !held
+        let fitted = held
             .pane
-            .resize_with(&mut self.client, &new_mode, &mut held.surface)
-        {
-            return false;
+            .resize_with(&mut self.client, &new_mode, &mut held.surface);
+        if fitted == Fitted::Adopted {
+            // The old geometry's torn rectangle names pixels of a surface
+            // that is gone, and the caller repaints the fresh one whole.
+            held.torn = None;
         }
-        // The old geometry's torn rectangle names pixels of a surface that is
-        // gone, and the caller repaints the fresh one whole.
-        held.torn = None;
-        true
+        fitted
     }
 
     /// Restate the range the window manager may resize the open window

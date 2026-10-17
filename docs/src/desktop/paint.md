@@ -265,6 +265,15 @@ name `sprite`, numbered with the least number free when taken. A TIFF holds any
 number of pages, and for one the Pages menu does the same; a page has no name.
 A document of several pictures read from any other format is a sprite area.
 
+Every form Paint asks — New picture, the page and sprite questions, Scale,
+Canvas, Convert, Save As and a layer's properties — is a dialog window of its
+own, centred over the picture's window and holding it until the form is
+answered: a form's rows are filled from the picture as it stood when it
+opened, which an edit made behind it would make untrue. A form is laid out at
+the size its rows need, and a list one of its rows opens stays within the
+dialog. The window's own input is never filtered for it: the desktop holds the
+window while the form is up.
+
 **New picture** asks first which format the picture is for, and offers the
 colours that format holds (`SaveFormat::admits`) — a JPEG and OpenRaster have
 no palette, a GIF nothing else — and a clear background only where the format

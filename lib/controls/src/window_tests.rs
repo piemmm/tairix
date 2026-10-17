@@ -1546,6 +1546,17 @@ fn title_is_sanitised() {
     assert_eq!(bar.title(), "a b c");
 }
 
+/// A character that draws nothing yet reorders or hides the text beside it
+/// cannot make a title read as another: it shows as the gap it is.
+#[test]
+fn a_title_cannot_hide_or_reorder_what_it_says() {
+    let mut bar = TitleBar::new(furniture());
+    bar.set_title("Desk\u{200b}top \u{202e}etomer");
+    assert_eq!(bar.title(), "Desk top  etomer");
+    bar.set_app_name("Desk\u{2066}top");
+    assert_eq!(bar.app_name(), "Desk top");
+}
+
 #[test]
 fn press_on_drag_region_activates() {
     let theme = Theme::dark();

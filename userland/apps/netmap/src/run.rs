@@ -1011,14 +1011,14 @@ mod program {
                     ..
                 } => {
                     let mode = app::mode_for(width_px, height_px);
-                    if !self.window.resize(mode) {
-                        app::report(
-                            APP_NAME,
-                            "the desktop refused a resize; the window keeps its size",
-                        );
+                    match self.window.resize(mode) {
+                        app::Fitted::Adopted => {
+                            self.mode = mode;
+                            self.view.resize(self.canvas());
+                        }
+                        app::Fitted::Deferred => {}
+                        app::Fitted::Kept => app::report(APP_NAME, app::SIZE_KEPT),
                     }
-                    self.mode = mode;
-                    self.view.resize(self.canvas());
                     true
                 }
                 WindowEvent::RedrawRequested { .. } => true,
@@ -1208,6 +1208,10 @@ mod program {
                 match events.wait(app_state.window.client()) {
                     Ok(event) => event,
                     Err(EventError::Undecodable(_)) => None,
+                    Err(EventError::Refused(refused)) => {
+                        app::report(APP_NAME, refused);
+                        None
+                    }
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                     }
@@ -1219,6 +1223,7 @@ mod program {
                 match events.try_wait(app_state.window.client()) {
                     Ok(Some(event)) => burst.push(event),
                     Ok(None) | Err(EventError::Undecodable(_)) => break,
+                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                     }

@@ -7,12 +7,15 @@ use alloc::vec::Vec;
 use super::*;
 use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_ARXFS_ROOT, TYPE_GUID_EFI_SYSTEM};
 use crate::mbr::{self, MbrError, MBR_SECTOR_LEN};
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkTransport};
 use tairix_abi::driver::block::BlockClass;
 use tairix_abi::driver::block::{
     Block, BlockGeometry, DeviceHealth, DiscardCapability, HealthSnapshot,
 };
 use tairix_abi::DriverError;
+
+/// A disk on an ATA bus not known to rotate or not: served as rotational.
+const DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata);
 
 /// An in-memory [`Block`] device over a byte vector, for building and
 /// parsing disk images in tests.
@@ -512,7 +515,7 @@ impl Block for TelemetryBlock {
     }
 
     fn medium(&self) -> Option<BlkMedium> {
-        Some(BlkMedium::HardDisk)
+        Some(DISK)
     }
 
     fn backing_availability(&self) -> MountAvailability {
@@ -651,7 +654,7 @@ fn window_reports_the_underlying_disks_class_and_health() {
     };
     let win = PartitionBlock::new(dev, 10, 4).expect("window fits");
 
-    assert_eq!(win.medium(), Some(BlkMedium::HardDisk));
+    assert_eq!(win.medium(), Some(DISK));
     assert_eq!(win.device_class(), BlkDeviceClass::Rotational);
     let DeviceHealth::Available(snapshot) = win.device_health().expect("health forwards") else {
         panic!("the window must not swallow the disk's telemetry");

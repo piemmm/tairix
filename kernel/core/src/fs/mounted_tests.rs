@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU8;
-use tairix_abi::blkio::BlkMedium;
+use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
 
 use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
 use tairix_abi::driver::filesystem::{
@@ -44,7 +44,10 @@ use crate::fs::{Attachment, FinalLink, Listing, Mode, Path, Vfs, VfsError};
 /// A removable volume served by `driver`, attached with the flags every
 /// runtime volume carries.
 fn removable(driver: DriverHandle) -> Attachment {
-    Attachment::new(driver, Some(BlkMedium::UsbFlash), MountFlags::NOEXEC)
+    let stick = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(BlkRotation::NonRotating(
+        BlkRotationEvidence::RotationRateVpd,
+    ));
+    Attachment::new(driver, Some(stick), MountFlags::NOEXEC)
 }
 
 /// Back the `/Storage` catalog with the volume `driver` serves, so a listing
@@ -499,6 +502,79 @@ fn create_write_read_back_under_attested_identity() {
     let mut buf = [0u8; 16];
     let n = svc.read(TEST_UID, &caps, &p, 0, &mut buf).expect("read");
     assert_eq!(&buf[..n], b"hello");
+}
+
+/// A file's bytes are the file's to grant, never its directory's: one the
+/// caller may not write is refused at open, at every write and at a
+/// truncate though its directory is the caller's to write.
+#[test]
+fn a_file_its_caller_may_not_write_is_refused_in_a_writable_directory() {
+    let svc = ready();
+    let caps = caps();
+    let p = create_file(&svc, "locked");
+    svc.write(TEST_UID, &caps, &p, 0, false, b"kept")
+        .expect("write");
+    svc.set_mode(TEST_UID, &caps, &p, 0o444).expect("chmod");
+
+    let denied = Err(Errno::PermissionDenied);
+    assert_eq!(svc.open(TEST_UID, &caps, &p, OpenFlags::WRITE), denied);
+    assert_eq!(
+        svc.open(
+            TEST_UID,
+            &caps,
+            &p,
+            OpenFlags::WRITE.union(OpenFlags::TRUNCATE)
+        ),
+        denied
+    );
+    assert_eq!(
+        svc.write(TEST_UID, &caps, &p, 0, false, b"over")
+            .map(|_| ()),
+        denied
+    );
+    assert_eq!(svc.truncate(TEST_UID, &caps, &p, 0), denied);
+    assert_eq!(svc.open(TEST_UID, &caps, &p, OpenFlags::READ), Ok(()));
+    let mut buf = [0u8; 8];
+    let n = svc.read(TEST_UID, &caps, &p, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"kept", "nothing was written or cut");
+}
+
+/// The other half: a file the caller may write is written though the
+/// directory holding it refuses the caller new names.
+#[test]
+fn a_writable_file_is_written_in_a_directory_its_caller_may_not_write() {
+    let svc = ready();
+    let caps = caps();
+    let dir = path("d");
+    svc.mkdir(TEST_UID, &caps, &dir).expect("mkdir");
+    svc.set_mode(TEST_UID, &caps, &dir, 0o755)
+        .expect("traversable");
+    let file = alloc::format!("{dir}/f");
+    svc.open(
+        TEST_UID,
+        &caps,
+        &file,
+        OpenFlags::CREATE.union(OpenFlags::WRITE),
+    )
+    .expect("create");
+    svc.set_mode(TEST_UID, &caps, &dir, 0o555).expect("closed");
+
+    assert_eq!(svc.open(TEST_UID, &caps, &file, OpenFlags::WRITE), Ok(()));
+    assert_eq!(svc.write(TEST_UID, &caps, &file, 0, false, b"edit"), Ok(4));
+    assert_eq!(svc.truncate(TEST_UID, &caps, &file, 2), Ok(()));
+    let mut buf = [0u8; 8];
+    let n = svc.read(TEST_UID, &caps, &file, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"ed");
+    assert_eq!(
+        svc.open(
+            TEST_UID,
+            &caps,
+            &alloc::format!("{dir}/g"),
+            OpenFlags::CREATE.union(OpenFlags::WRITE)
+        ),
+        Err(Errno::PermissionDenied),
+        "the directory still governs its names"
+    );
 }
 
 #[test]

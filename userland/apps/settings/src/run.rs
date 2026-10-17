@@ -59,7 +59,7 @@ mod program {
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
-    use tairix_abi::window_ipc::{PreviewOutcome, PreviewSubject, WindowEvent};
+    use tairix_abi::window_ipc::{DialogModality, PreviewOutcome, PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId};
     use tairix_abi::{NoticeTopic, WaitSetOp, WaitSourceKind};
     use tairix_appconf::Registry;
@@ -73,6 +73,7 @@ mod program {
     };
     use tairix_input::InputEvent;
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
+    use tairix_raster::Surface;
     use tairix_reclaim::PressureBand;
     use tairix_settings::SoundReading;
     use tairix_settings::{
@@ -86,7 +87,7 @@ mod program {
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_users::{Salt, SALT_LEN};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
-    use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
         Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target,
@@ -1296,6 +1297,21 @@ mod program {
         /// The built-in pictures the shell draws — the categories' badges —
         /// rasterised once per side rather than once per frame.
         artwork: ArtworkCache,
+        /// Where the window's events are sent, and the session that serves
+        /// it, once it is open: what the question's window opens with.
+        opened: Option<(u64, ProcId)>,
+        /// The credential question's dialog window, while one is up.
+        question: Option<QuestionWindow>,
+    }
+
+    /// The credential question's dialog window: its pane and the surface the
+    /// question is drawn on.
+    struct QuestionWindow {
+        pane: WindowPane,
+        surface: Surface,
+        /// The extent it was last asked to be, which the desktop may have
+        /// fitted to a smaller screen: only a change of this resizes it.
+        asked: DisplayMode,
     }
 
     impl SettingsWindow {
@@ -1314,6 +1330,7 @@ mod program {
                 .window
                 .open(event_endpoint, &self.mode, self.title, win_sizing(scale))
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
+            self.opened = Some((event_endpoint, server));
             // Before the first present, so no frame is shown unfrosted.
             self.apply_backdrop(themes);
             if self
@@ -1328,7 +1345,119 @@ mod program {
 
         /// Close the open window, leaving the app on the icon bar.
         fn close(&mut self) {
+            if let Some(question) = self.question.take() {
+                let _ = question.pane.close(self.window.client());
+            }
             let _ = self.window.close();
+        }
+
+        /// The session's id for the question's dialog window, while it is up.
+        fn question_id(&self) -> Option<u64> {
+            self.question.as_ref().map(|question| question.pane.id())
+        }
+
+        /// The question window's client, in its own pixels.
+        fn question_client(&self) -> Option<Rect> {
+            let mode = self.question.as_ref()?.pane.mode();
+            Some(Rect::new(0, 0, mode.width_px, mode.height_px))
+        }
+
+        /// Bring the question's dialog window into line with the shell: open
+        /// it for a question just asked, fit it to a density that moved, and
+        /// close it once the question is answered. One newly opened or fitted
+        /// is presented whole. A window the desktop will not open turns the
+        /// question down with the reason said, rather than leave it unseen.
+        fn settle_question(&mut self, shell: &mut Shell, themes: &ThemeRegistry, scale: Scale) {
+            let wanted = shell.question_extent(scale);
+            let Some((width, height)) = wanted else {
+                if let Some(question) = self.question.take() {
+                    let _ = question.pane.close(self.window.client());
+                }
+                return;
+            };
+            let mode = app::mode_for(width, height);
+            let fitted = match self.question.as_mut() {
+                Some(question) if question.asked == mode => return,
+                Some(question) => {
+                    question.asked = mode;
+                    question
+                        .pane
+                        .resize_with(self.window.client(), &mode, &mut question.surface)
+                }
+                None => match self.open_question(shell, &mode) {
+                    Ok(()) => app::Fitted::Adopted,
+                    Err(why) => {
+                        shell.decline_question(&why);
+                        app::report(APP_NAME, format_args!("the question was not shown: {why}"));
+                        return;
+                    }
+                },
+            };
+            if fitted == app::Fitted::Kept {
+                app::report(APP_NAME, app::SIZE_KEPT);
+            }
+            if self.present_question(shell, themes, scale, None).is_err() {
+                app::report(APP_NAME, "the question's window refused its frame");
+            }
+        }
+
+        /// Open the question's dialog window at `mode`, holding the settings
+        /// window until it is answered.
+        fn open_question(&mut self, shell: &Shell, mode: &DisplayMode) -> Result<(), String> {
+            let (Some(owner), Some((endpoint, server))) = (self.window.window_id(), self.opened)
+            else {
+                return Err(String::from("the settings window is not open"));
+            };
+            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
+                return Err(String::from("no memory to draw it"));
+            };
+            let pane = WindowPane::open_dialog(
+                self.window.client(),
+                (owner, server),
+                endpoint,
+                mode,
+                DialogModality::OwnerModal,
+                shell.question_title(),
+            )
+            .map_err(|err| alloc::format!("{err}"))?;
+            self.question = Some(QuestionWindow {
+                pane,
+                surface,
+                asked: *mode,
+            });
+            Ok(())
+        }
+
+        /// Draw the question and present `damage` of its window, or the
+        /// whole of it for `None`.
+        fn present_question(
+            &mut self,
+            shell: &Shell,
+            themes: &ThemeRegistry,
+            scale: Scale,
+            damage: Option<&Region>,
+        ) -> Result<(), Errno> {
+            let Some(question) = self.question.as_mut() else {
+                return Ok(());
+            };
+            let mode = *question.pane.mode();
+            let repaint = match damage {
+                Some(_) => Repaint::Reported,
+                None => Repaint::Whole,
+            };
+            let empty = Region::new();
+            let Some(area) = present_damage(&mode, repaint, damage.unwrap_or(&empty)) else {
+                return Ok(());
+            };
+            let client = Rect::new(0, 0, mode.width_px, mode.height_px);
+            question
+                .surface
+                .with_clip(area.x, area.y, area.width_px, area.height_px, |surface| {
+                    shell.render_question(surface, client, scale, themes.active());
+                });
+            question
+                .pane
+                .present(self.window.client(), &question.surface, area)
         }
 
         /// Ask the compositor for the blur the window's ground is drawn over.
@@ -1442,18 +1571,7 @@ mod program {
         damage: &mut Region,
     ) -> Acted {
         let viewport = surface.viewport();
-        let concluded = |outcome: ShellOutcome| match outcome {
-            ShellOutcome::Idle => Acted::Idle,
-            ShellOutcome::Changed => Acted::Changed,
-            ShellOutcome::Apply(document) => Acted::Apply(document),
-            ShellOutcome::Elevate(asked) => Acted::Elevate(asked),
-            ShellOutcome::LockScreen => Acted::LockScreen,
-            ShellOutcome::PreviewScreensaver(document) => Acted::PreviewScreensaver(document),
-            ShellOutcome::Sound {
-                device_id, control, ..
-            } => Acted::Sound { device_id, control },
-            ShellOutcome::Effects(ask) => Acted::Effects(ask),
-        };
+        let concluded = acted_of;
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Quit,
             // The desktop resized the client: re-map the frame region to the
@@ -1464,15 +1582,10 @@ mod program {
                 ..
             } => {
                 let mode = app::mode_for(*width_px, *height_px);
-                if surface.window.resize(mode) {
-                    surface.mode = mode;
-                } else {
-                    // A refused resize leaves the old geometry standing and
-                    // still drawable, so the window keeps the size it had.
-                    app::report(
-                        APP_NAME,
-                        "the desktop refused a resize; the window keeps its size",
-                    );
+                match surface.window.resize(mode) {
+                    app::Fitted::Adopted => surface.mode = mode,
+                    app::Fitted::Deferred => {}
+                    app::Fitted::Kept => app::report(APP_NAME, app::SIZE_KEPT),
                 }
                 // The reported client extent is what the shell lays out to
                 // either way, so the whole window is redrawn regardless.
@@ -1487,20 +1600,14 @@ mod program {
                     concluded(shell.on_key(stroke, viewport, scale, theme, damage))
                 }),
             WindowEvent::Pointer { x, y, action, .. } => concluded(apply_pointer(
-                shell,
                 pointer_input_events(*action, pointer_point(*x, *y)),
-                viewport,
-                scale,
-                theme,
                 damage,
+                |input, damage| shell.on_pointer(input, viewport, scale, theme, damage),
             )),
             WindowEvent::Scrolled { x, y, dx, dy, .. } => concluded(apply_pointer(
-                shell,
                 scroll_input_events(pointer_point(*x, *y), *dx, *dy),
-                viewport,
-                scale,
-                theme,
                 damage,
+                |input, damage| shell.on_pointer(input, viewport, scale, theme, damage),
             )),
             // The desktop queued at least one target for this instance.
             WindowEvent::OpenRequested => Acted::Opened,
@@ -1609,23 +1716,125 @@ mod program {
         }
     }
 
-    /// Route one wire pointer event: a move to `at` to sync the pointer, then
-    /// the press or release the action names.
+    /// Apply one delivered event to the window it names: the credential
+    /// question's, or the settings window's.
+    fn apply_delivered(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        scale: Scale,
+        event: &WindowEvent,
+        damage: &mut Region,
+    ) -> Acted {
+        if event.window_id().is_some() && event.window_id() == surface.question_id() {
+            apply_question_event(surface, shell, themes, scale, event)
+        } else {
+            apply_event(surface, shell, themes.active(), scale, event, damage)
+        }
+    }
+
+    /// What the loop does with what the shell concluded.
+    fn acted_of(outcome: ShellOutcome) -> Acted {
+        match outcome {
+            ShellOutcome::Idle => Acted::Idle,
+            ShellOutcome::Changed => Acted::Changed,
+            ShellOutcome::Apply(document) => Acted::Apply(document),
+            ShellOutcome::Elevate(asked) => Acted::Elevate(asked),
+            ShellOutcome::LockScreen => Acted::LockScreen,
+            ShellOutcome::PreviewScreensaver(document) => Acted::PreviewScreensaver(document),
+            ShellOutcome::Sound {
+                device_id, control, ..
+            } => Acted::Sound { device_id, control },
+            ShellOutcome::Effects(ask) => Acted::Effects(ask),
+        }
+    }
+
+    /// Apply one event delivered to the credential question's window,
+    /// presenting what it drew there. Only what the question asks for is
+    /// the loop's to carry out: its drawing never reaches the settings
+    /// window.
+    fn apply_question_event(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        scale: Scale,
+        event: &WindowEvent,
+    ) -> Acted {
+        let Some(client) = surface.question_client() else {
+            return Acted::Idle;
+        };
+        let theme = themes.active();
+        let mut damage = tairix_controls::damage::sink();
+        let outcome = match event {
+            WindowEvent::Key {
+                key: pressed @ KeyInput::Pressed { .. },
+                ..
+            } => Keystroke::pressed(key_input_event(*pressed), tairix_rt::clock_get())
+                .map(|stroke| shell.on_question_key(stroke, client, scale, theme, &mut damage)),
+            WindowEvent::Pointer { x, y, action, .. } => Some(apply_pointer(
+                pointer_input_events(*action, pointer_point(*x, *y)),
+                &mut damage,
+                |input, damage| shell.on_question_pointer(input, client, scale, theme, damage),
+            )),
+            WindowEvent::Scrolled { x, y, dx, dy, .. } => Some(apply_pointer(
+                scroll_input_events(pointer_point(*x, *y), *dx, *dy),
+                &mut damage,
+                |input, damage| shell.on_question_pointer(input, client, scale, theme, damage),
+            )),
+            // The desktop fitted it to the screen: the question is drawn
+            // across what it was given.
+            WindowEvent::Resized {
+                width_px,
+                height_px,
+                ..
+            } => {
+                if let Some(question) = surface.question.as_mut() {
+                    let mode = app::mode_for(*width_px, *height_px);
+                    let window = &mut surface.window;
+                    if question
+                        .pane
+                        .resize_with(window.client(), &mode, &mut question.surface)
+                        == app::Fitted::Kept
+                    {
+                        app::report(APP_NAME, app::SIZE_KEPT);
+                    }
+                }
+                None
+            }
+            WindowEvent::RedrawRequested { .. } => None,
+            WindowEvent::ContentReleased { .. } => {
+                if let Some(question) = surface.question.as_mut() {
+                    question.pane.release_frames();
+                }
+                return Acted::Idle;
+            }
+            _ => return Acted::Idle,
+        };
+        let whole = outcome.is_none();
+        let shown = surface.present_question(shell, themes, scale, (!whole).then_some(&damage));
+        if shown.is_err() {
+            app::report(APP_NAME, "the question's window refused its frame");
+        }
+        match outcome.map_or(Acted::Idle, acted_of) {
+            Acted::Changed => Acted::Idle,
+            acted => acted,
+        }
+    }
+
+    /// Route one wire pointer event through `feed`: a move to `at` to sync
+    /// the pointer, then the press or release the action names.
     ///
     /// A press and its release are two inputs of one gesture, so the
     /// stronger of what they concluded is the gesture's: an apply the
     /// release asked for is not lost behind the press's bare repaint.
     fn apply_pointer(
-        shell: &mut Shell,
         inputs: impl Iterator<Item = InputEvent>,
-        viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
         damage: &mut Region,
+        mut feed: impl FnMut(&InputEvent, &mut Region) -> ShellOutcome,
     ) -> ShellOutcome {
         let mut concluded = ShellOutcome::Idle;
         for input in inputs {
-            let acted = shell.on_pointer(&input, viewport, scale, theme, damage);
+            let acted = feed(&input, damage);
             // A conclusion the caller must act on outranks a repaint: a
             // press and its release are two events, and the one that asked
             // for something must not be lost to the one that did not.
@@ -2019,6 +2228,17 @@ mod program {
         }
         let mut damage = tairix_controls::damage::sink();
         let place = (desktop.scale(), themes.active());
+        if let Some(client) = surface.question_client() {
+            let mut asked = tairix_controls::damage::sink();
+            shell.advance_question(now_ns, client, desktop.scale(), &mut asked);
+            if !asked.is_empty()
+                && surface
+                    .present_question(shell, themes, desktop.scale(), Some(&asked))
+                    .is_err()
+            {
+                app::report(APP_NAME, "the question's window refused its frame");
+            }
+        }
         shell.advance_secrets(now_ns, surface.viewport(), place, &mut damage);
         if damage.is_empty() {
             return true;
@@ -2217,6 +2437,8 @@ mod program {
             ) {
                 return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
+            // A verdict that landed while parked may have answered it.
+            surface.settle_question(shell, themes, desktop.scale());
             secret_due.set(shell.secret_deadline_ns());
             let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
@@ -2237,6 +2459,10 @@ mod program {
                     }
                     continue;
                 }
+                Err(EventError::Refused(refused)) => {
+                    app::report(APP_NAME, refused);
+                    continue;
+                }
                 Err(EventError::Mailbox(_)) => {
                     return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }
@@ -2248,14 +2474,8 @@ mod program {
                 pictures.restart();
             }
             let mut damage = tairix_controls::damage::sink();
-            let acted = apply_event(
-                surface,
-                shell,
-                themes.active(),
-                desktop.scale(),
-                &event,
-                &mut damage,
-            );
+            let acted =
+                apply_delivered(surface, shell, themes, desktop.scale(), &event, &mut damage);
             let carried = act(
                 &acted,
                 (surface, shell),
@@ -2266,6 +2486,7 @@ mod program {
             if carried == Carried::Quit {
                 return 0;
             }
+            surface.settle_question(shell, themes, desktop.scale());
             let landed = request_readings(shell, &mut desks);
             if landed {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
@@ -2655,6 +2876,8 @@ mod program {
             mode,
             title: "",
             artwork: icon_cache(frame_bytes),
+            opened: None,
+            question: None,
         };
 
         let binding = match app::bind_event_mailbox() {

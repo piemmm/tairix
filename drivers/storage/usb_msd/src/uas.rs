@@ -27,7 +27,11 @@
 
 use tairix_abi::Errno;
 
-use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
+use tairix_abi::blkio::CommandKind;
+
+use crate::scsi::{
+    unknown_unit_budget, CommandOutcome, DataPhase, ResetRecord, ScsiTransport, Sense, MAX_LUNS,
+};
 
 /// The four UAS pipes (UAS §7): one logical transfer seam per pipe. The
 /// `Run` binary implements it over the URB transport client, addressing
@@ -66,9 +70,9 @@ pub trait UasPipes {
     /// As [`Self::data_in`].
     fn data_out(&mut self, buf: &[u8]) -> Result<usize, Errno>;
 
-    /// Start one command exchange: every transfer until the next begins is
-    /// bounded by what remains of the exchange's budget.
-    fn begin_exchange(&mut self);
+    /// Start one command exchange of `exchange_ns`: every transfer until the
+    /// next begins is bounded by what remains of it.
+    fn begin_exchange(&mut self, exchange_ns: u64);
 
     /// Clear the halt of all four pipes, on the device and in the
     /// controller, so each restarts empty at `DATA0`.
@@ -121,6 +125,8 @@ pub struct Uas<T: UasPipes> {
     next_tag: u16,
     /// Autosense captured from the last failed command's Sense IU.
     sense: Option<Sense>,
+    /// How the last broken exchange's pipe clearing went.
+    reset: ResetRecord,
 }
 
 impl<T: UasPipes> Uas<T> {
@@ -130,6 +136,7 @@ impl<T: UasPipes> Uas<T> {
             pipes,
             next_tag: 1,
             sense: None,
+            reset: ResetRecord::default(),
         }
     }
 
@@ -322,7 +329,8 @@ impl<T: UasPipes> Uas<T> {
         if cause == Errno::NotFound {
             return cause;
         }
-        after_reset(cause, self.pipes.clear_halts())
+        let reset = self.pipes.clear_halts();
+        self.reset.after(cause, reset)
     }
 }
 
@@ -333,13 +341,15 @@ impl<T: UasPipes> ScsiTransport for Uas<T> {
         lun: u8,
         cb: &[u8],
         data: DataPhase<'_>,
+        exchange_ns: u64,
     ) -> Result<CommandOutcome, Errno> {
+        self.reset.begin();
         if cb.is_empty() || cb.len() > 16 || lun as usize >= MAX_LUNS {
             return Err(Errno::OutOfRange);
         }
         // A stale capture must never explain a later command.
         self.sense = None;
-        self.pipes.begin_exchange();
+        self.pipes.begin_exchange(exchange_ns);
         self.exchange(lun, cb, data)
             .map_err(|cause| self.fail(cause))
     }
@@ -358,7 +368,8 @@ impl<T: UasPipes> ScsiTransport for Uas<T> {
         cdb[0] = 0xA0; // REPORT LUNS
         let alloc = u32::try_from(ALLOCATION).map_err(|_| Errno::LengthOutOfRange)?;
         cdb[6..10].copy_from_slice(&alloc.to_be_bytes());
-        let outcome = self.execute(0, &cdb, DataPhase::In(&mut data))?;
+        let exchange_ns = unknown_unit_budget().exchange_ns(CommandKind::Query, ALLOCATION);
+        let outcome = self.execute(0, &cdb, DataPhase::In(&mut data), exchange_ns)?;
         if !outcome.passed || outcome.transferred < 8 {
             // The command layer never sees this failure; drop the capture.
             self.sense = None;
@@ -392,6 +403,10 @@ impl<T: UasPipes> ScsiTransport for Uas<T> {
 
     fn scrub(&mut self) {
         self.pipes.scrub();
+    }
+
+    fn take_resynced(&mut self) -> bool {
+        self.reset.take()
     }
 }
 
