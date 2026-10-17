@@ -10,7 +10,7 @@ files — grafischer Dateisystem-Browser
 
 Öffnet ein Desktop-Fenster, das das Dateisystem auflistet, beginnend mit dem
 auf der Befehlszeile genannten `verzeichnis` oder, wenn keines genannt ist,
-mit dem Ordner `UserFiles` des startenden Benutzers (seinem
+mit dem Ordner `Home` des startenden Benutzers (seinem
 Heimatverzeichnis, wenn dieser nicht aufgelistet werden kann). Der
 Fenstertitel nennt das aktuelle Verzeichnis; das Fenster listet seine
 Einträge, jeder ausgewählte Eintrag mit der Akzentfarbe des aktiven Themas
@@ -21,7 +21,7 @@ Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt, niemals erraten.
 Der Desktop startet den Browser für Sie und hält ihn auf der Symbolleiste:
 das Menü seines Platzes listet Ihre eigenen Orte und alles Eingebundene, und
 die Wahl eines Eintrags öffnet dort ein Fenster. Ein Klick auf den Platz
-öffnet eines im Ordner `UserFiles`. Wer einen Ordner verlangt, für den schon
+öffnet eines im Ordner `Home`. Wer einen Ordner verlangt, für den schon
 ein Fenster offen ist, holt dieses Fenster nach vorn, statt ein weiteres zu
 öffnen. Diese Instanz hat keine Zeile *Beenden* — sie ist Teil des Desktops,
 und das Schließen ihrer Fenster räumt sie einfach weg.
@@ -75,6 +75,14 @@ Das Untermenü *Neu* des Rechtsklickmenüs legt einen Ordner oder ein leeres
 Dokument jeder Art an, die ein installierter Editor schreibt, und öffnet
 seinen Namen zum Bearbeiten.
 
+Das Untermenü *Anzeige* des Rechtsklickmenüs zeigt die Einträge als große
+Symbole, die Voreinstellung; als kleine Symbole, jeder Name in einer Zeile
+neben seinem Bild; oder als Liste, eine Zeile je Eintrag mit seiner Größe,
+dem Zeitpunkt der letzten Änderung und seinem Typ. Ein darin aufgeführtes
+Laufwerk zeigt stattdessen seinen freien Speicher, sein Dateisystem und wie
+gut es arbeitet. Ein Klick auf den Titel einer Spalte ordnet die Liste
+danach, ein zweiter Klick kehrt die Reihenfolge um.
+
 `Alt+Enter` öffnet ein Fenster *Eigenschaften* für den ausgewählten Eintrag,
 ebenso die Zeile *Eigenschaften* des Rechtsklickmenüs. Es ist ein eigenes
 Fenster, sodass mehrere zugleich offen sein können und die Auflistung
@@ -102,7 +110,7 @@ Schreibweise nie etwas anderes bedeuten kann, als sie zu lesen gibt.
 Ein Verzeichnis, das eine dieser Regeln verletzt oder das der startende
 Benutzer nicht auflisten darf, wird mit dem Grund auf dem
 Standardfehlerstrom abgelehnt, und das Fenster öffnet stattdessen den
-Ordner `UserFiles`, sodass ein falsches Argument den Benutzer nie ohne
+Ordner `Home`, sodass ein falsches Argument den Benutzer nie ohne
 Fenster lässt. Ein zweiter Operand wird rundweg abgelehnt statt
 ignoriert.
 

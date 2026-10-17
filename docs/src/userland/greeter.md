@@ -76,11 +76,18 @@ Compromising it therefore yields a screen, not an account.
    authority's answer is input like any other; a page that repeats an
    offset, overruns the total, or never says it is last ends the walk
    rather than spinning.
-5. **Raise the ribbon of light** behind the column, painted whole once.
-6. **Open**: put the chrome up and begin the entry fade, so the first frame
+5. **Start the authority's worker**, the thread every offered secret goes to
+   the session authority on, and add its wake to the wait set. The authority
+   derives a key from every secret on purpose — about a second on a Pi 4 — so
+   the screen asks and goes on drawing; the answer wakes the loop, which
+   adopts it. A kernel that grants no thread, or no way to wait on its wake,
+   leaves each check on the screen's own thread, audited `AUTHORITY_ON_LOOP`:
+   the screen then pauses for every answer, slower and never wrong.
+6. **Raise the ribbon of light** behind the column, painted whole once.
+7. **Open**: put the chrome up and begin the entry fade, so the first frame
    the display receives is full black.
-7. **Paint that frame** and audit `SCREEN_READY`.
-8. **Park**, which uncovers the chooser out of the black.
+8. **Paint that frame** and audit `SCREEN_READY`.
+9. **Park**, which uncovers the chooser out of the black.
 
 The output can move while the screen is up (`plans/DISPLAY.md` D12): the
 greeter parks on its announcement beside the seat's input. With no output it
@@ -370,6 +377,7 @@ authority's own records for the same login are in its `10000..11000` range.
 | 19008 | `DISPLAY_ASLEEP`        | the screen sat untouched for thirty minutes, so its display was switched off |
 | 19009 | `DISPLAY_KEPT_BLACK`    | the display could not or would not switch off, so the sleeping screen is kept black |
 | 19010 | `DISPLAY_WAKE_REFUSED`  | the display would not switch back on; the next input asks again |
+| 19011 | `AUTHORITY_ON_LOOP`     | no worker can carry checks to the authority, so the screen waits for each answer |
 
 ## Tests
 

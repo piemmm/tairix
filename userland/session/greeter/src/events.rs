@@ -52,6 +52,10 @@ pub const DISPLAY_KEPT_BLACK: EventId = EventId(19_009);
 /// next input asks again.
 pub const DISPLAY_WAKE_REFUSED: EventId = EventId(19_010);
 
+/// No worker thread could carry checks to the authority, so each is carried
+/// on the screen's own thread, which pauses for the answer.
+pub const AUTHORITY_ON_LOOP: EventId = EventId(19_011);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +71,7 @@ mod tests {
         DISPLAY_ASLEEP,
         DISPLAY_KEPT_BLACK,
         DISPLAY_WAKE_REFUSED,
+        AUTHORITY_ON_LOOP,
     ];
 
     #[test]

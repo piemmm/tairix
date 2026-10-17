@@ -2312,8 +2312,9 @@ impl Shell {
     ///
     /// A cancellation takes it down and changes nothing anywhere. An offer
     /// is handed to the caller as the one run to ask the broker for, and
-    /// the question stays up: only the caller's verdict takes it down, so a
-    /// refusal can be corrected without retyping the account.
+    /// the question stays up, checking, its password erased: only the
+    /// caller's verdict takes it down, so a refusal can be corrected without
+    /// retyping the account.
     fn asked(
         &mut self,
         client: Rect,
@@ -2331,18 +2332,20 @@ impl Shell {
             // The sheet refuses an unofferable password itself, so this only
             // ever elevates with one.
             Some(CredentialAction::Offered) => {
-                asking
-                    .sheet
-                    .secret()
-                    .map_or(ShellOutcome::Changed, |secret| {
-                        ShellOutcome::Elevate(Elevation {
-                            account: String::from(asking.sheet.account()),
-                            password: secret.as_bytes().to_vec(),
-                            program: asking.program,
-                            argv: asking.argv.clone(),
-                            mode: asking.mode,
-                        })
-                    })
+                let offered = asking.sheet.secret().map(|secret| Elevation {
+                    account: String::from(asking.sheet.account()),
+                    password: secret.as_bytes().to_vec(),
+                    program: asking.program,
+                    argv: asking.argv.clone(),
+                    mode: asking.mode,
+                });
+                match offered {
+                    Some(elevation) => {
+                        asking.sheet.check();
+                        ShellOutcome::Elevate(elevation)
+                    }
+                    None => ShellOutcome::Changed,
+                }
             }
             None => ShellOutcome::Changed,
         }
@@ -2897,12 +2900,15 @@ impl Shell {
             CATEGORIES
                 .iter()
                 .map(|row| {
-                    let item = MenuItem::new(row.label).with_group_break(row.breaks_from(above));
+                    let item = MenuItem::new(row.label)
+                        .with_icon(row.icon)
+                        .with_group_break(row.breaks_from(above));
                     above = Some(row);
                     item
                 })
                 .collect(),
         );
+        menu.resolve_glyphs(scale, theme);
         menu.adopt_current(
             CATEGORIES
                 .iter()
@@ -3155,6 +3161,12 @@ impl Shell {
         self.categories
             .as_ref()
             .map(|menu| Self::list_rect(menu, &frame, viewport, scale, theme))
+    }
+
+    /// The open category list's rows, for a test that reads what each shows.
+    #[cfg(test)]
+    pub(crate) fn category_items_for_test(&self) -> Option<&[MenuItem]> {
+        self.categories.as_ref().map(Menu::items)
     }
 
     /// The strip, for a test that asks it where it seated a row.

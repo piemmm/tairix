@@ -203,7 +203,7 @@ the trailing edge, growing a new column inward as it fills, and keeping the
 pitch rather than spreading a column's leftover space as the resizable file
 manager does, so an icon does not drift when the work area's extent changes
 (`lib/browse::layout`). It paints through the shared
-`grid_tile`/`grid_metrics` and the shell's own icon-artwork lookup, so
+`render::Tiles::Large` tile and metrics and the shell's own icon-artwork lookup, so
 a folder shows the shipped folder artwork and a file its content-class
 artwork, falling back to built-in glyphs exactly as the file manager's grid
 does.

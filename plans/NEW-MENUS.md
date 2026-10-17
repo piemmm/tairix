@@ -21,6 +21,7 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M7 | Submenus survive the crossing: no-row points keep the child and its row's highlight, and aim intent with a settle deadline (§1.3) | **done** |
 | M8 | A row may name class artwork by asset id (`AppMenuItem::with_icon_asset`) | **done** |
 | M9 | The *Info* child is a sheet, and dies with its application | **done** |
+| M10 | Every row states its function: the closed `AppMenuSymbol` vocabulary, a mark gutter beside the icon column, the danger hue on a destructive row's symbol, glyphs rasterised once per chain | done |
 
 Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
 moves to 80% opacity as one shared value, and the blur stays the one the
@@ -58,7 +59,7 @@ stage that closes it carries its regression test (§2.18, §7).
 | D17 | **No QEMU vertical opened a menu**, so the chain's drain, grab and answer paths in `userland/gui/session/src/run.rs` — and the terminal's own open/answer path — were exercised by nothing, and no one had ever seen a plate on screen. **Closed**: the session now announces `MENU_SHOWN` ("menu chain on screen", `EventId(20_006)`) beside `WINDOW_SHOWN`, once per open and only after a frame carrying the chain reached the display — the only honest gate, since the reply an application gets says the open was *accepted*, never that a plate was drawn. `tests/integration/menu_qemu_aarch64` then launches the terminal from the program library, right-clicks its client, photographs the plate at the rectangle the production chain reports, and clicks its *Settings…* row; the guest latches `APP_LOADED` for the bundle, the 12-byte minted-id reply only `OpenMenu` produces, and a create observed *after* it — the sheet the chosen row opens, which the terminal opens on nothing but the one `MenuClosed` naming that row. | **closed in M3.2** |
 | D18 | Raising a window gave the keyboard to *that* window even when its own live transient sat above it. A raise brings a window's transients up with it (`Compositor::raise` restacks the family), so `show_raise_focus` — the one path `TaskBridge::open` and `TaskBridge::raise` share — left the focused window *underneath* its own modal sheet: the bar's hover window picker could focus a terminal behind its open settings sheet, with no client press to dismiss it, and the next accelerator ran in the client instead of the sheet. That is the route that made D16 live. **Fixed** by focusing the front of the family that rose (`Compositor::family_front`, one rule shared with `family_top`); a window with no transient open is its own family front, so the ordinary case is unchanged. | **closed in M3.2** |
 | D19 | `AppMenuRow::Panel`, `WindowRequest::CreateMenuPanel` and `WindowEvent::MenuPanelRequested` had **no production client** — only a fuzz seed declared a panel row. M1d landed the attached window for the shape decision 2 turned out not to want. **Closed by deletion.** None of the bar's four subjects is its client, and the reason is structural rather than a judgement: an attached window is a surface the *owning application* draws, and a bar chain's owner is the desktop itself, so there is no client to ask. A presentation child the desktop would draw itself — a calendar under the clock — is the `Info` row's kind, not this one's. So the row kind, its `AppMenuRowView` and `RowKind` cases, `APP_MENU_KIND_PANEL`, `APP_MENU_PANEL_MAX_PX`, `WindowRequest::CreateMenuPanel`, `WindowEvent::MenuPanelRequested`, `MenuOutcome::detaches`, `WindowHost::menu_panel_opened`, `MenuPanelSpec`, the engine's `MenuAttachment` lifetime and `close_menu_panel`, `WindowClient::create_menu_panel`/`settle_menu_chain`, the chain's `ChainChild::Panel`/`Attached`/`place_panel`/`PanelRefused`/`SurfaceKind::Attached`/`ChainAction::RequestPanel`, and the fuzz seed are all gone. `deliver_event` lost the `host` parameter M1d gave it for the teardown, and §1.4 collapses to the one child a chain hangs: the desktop-drawn information panel. | **closed in M3.4** |
-| D20 | The chain holds the seat's grab, so a press outside it is consumed and never delivered — which makes the second press of `files.app`'s FM12 **right-double-click** ("activate, then close this window") structurally unreachable the moment its first press opens a desktop menu. Not an implementation cost: an application deliberately cannot see a press inside chrome it does not own. **Resolved by re-spelling the capability rather than dropping it**: `ContextCommand::OpenAndClose` carries the same `AfterHandoff::CloseWindow` activation as a menu row — discoverable, and reachable from the keyboard, which the gesture never was — and `gesture.rs`'s `secondary_press`/`SecondaryPress`/`MenuOnSingle` are deleted with the gesture. A right-press still breaks a half-finished left pair (the app resets the tracker). | **closed in M3.3** |
+| D20 | The chain holds the seat's grab, so a press outside it is consumed and never delivered — which makes the second press of `files.app`'s FM12 **right-double-click** ("activate, then close this window") structurally unreachable the moment its first press opens a desktop menu. Not an implementation cost: an application deliberately cannot see a press inside chrome it does not own. **Closed by deleting the gesture**: `gesture.rs`'s `secondary_press`/`SecondaryPress`/`MenuOnSingle` are gone, and the file manager offers no activate-then-close command (`plans/FILES-INTERACTION.md` FI30). A right-press still breaks a half-finished left pair (the app resets the tracker). | **closed in M3.3** |
 | D21 | Threading the chain through `files.app` grew three of its routers (`apply_event`, `apply_nav_event`, `apply_pointer`) past the argument threshold, so each carried a justified `#[allow(clippy::too_many_arguments)]`. **Closed**: one bundle per side — `WindowState` for what a round acts *on* (browser, overlays, places) and `Acts` for what it acts *through* (the menu link, the launcher). All three routers are back under the threshold and all three allows are gone. | **closed in M3.4** |
 | D22 | The one-based `index ↔ AppMenuItemId` numbering every command-list menu uses was spelled twice — `lib/browse::chrome`'s `row_id`/`context_command_from_item` and `session::pinboard`'s `PinboardCommand::row_id`/`from_item` — and M3.4 needed it a third time for the bar's three table-driven menus. **Closed**: `AppMenuItemId::for_index` / `AppMenuItemId::index` are the one definition, beside the id type whose non-zero invariant is the reason the numbering is one-based at all. | **closed in M3.4** |
 | D23 | The bar's own menus were reachable only through the bar: no host test could open one *and* read its answer back, because the plate and the grab were the bar's own shell and the answer never left it. Migrating them made the round trip host-testable in two halves — the model and the id→response inverse in the taskbar suite, the plate, grab and one answer in the session suite (`choose_bar_menu_row` drives the whole path the serve loop drives). The end-to-end wiring stays witnessed by the two QEMU verticals that already click a bar menu row: `appbar_qemu_aarch64` (a slot's declared *New window*) and `datetime_elevate_qemu_aarch64` (the clock's *Set Date & Time…*), both of which now pass only if the chain path is right. | **closed in M3.4** |
@@ -693,9 +694,9 @@ columns route a press through **one** rule (`ScrollColumn::route`), so they
 cannot come to behave differently.
 
 D20 is the migration's own finding: the chain's grab took the right-double-click
-gesture's second press away, so that capability is a menu row now
-(`ContextCommand::OpenAndClose`) and `gesture.rs` loses the three types that
-spelled the gesture. Nothing else in the tree drew or clicked the file manager's
+gesture's second press away, so `gesture.rs` loses the three types that spelled
+the gesture, and the file manager offers no activate-then-close command at all
+(`plans/FILES-INTERACTION.md` FI30). Nothing else in the tree drew or clicked the file manager's
 context menu — no QEMU vertical reconstructed it — so the migration broke no
 end-to-end test; `PLAN.md`'s claim that the FM9-c right-click→Delete
 click-through was wired into the `autoload_input` vertical was already stale and
@@ -937,6 +938,42 @@ all inset by the plate's padding and sized to what it states between a floor
 and a ceiling. A bar chain whose application exits is dismissed, and a bar
 chain names its application by its group, never by its index in a strip that
 may move under it.
+
+### M10 — every row states its function
+
+Every chooseable row and every submenu row names what it does from one closed
+vocabulary, `AppMenuSymbol` (`lib/abi/src/window_ipc/symbol.rs`), and the
+desktop chooses the picture (`tairix_icon::menu_symbol_icon`). An application
+names a function, never a picture: Delete looks the same in every application,
+and a redrawn picture lands in every menu at once.
+
+- **Mandatory.** `AppMenuItem::new` and `AppMenuRow::Submenu` take a symbol,
+  as do the desktop's own `ChainRow`s; there is no row without one. A separator
+  and the information row state none — the desktop draws `Info` beside the
+  latter. The decoder refuses an item or submenu whose symbol is zero or
+  unknown, and any other row whose symbol is not zero, so a decoded menu is one
+  a builder could have made.
+- **Two bytes of the row record, no text.** The symbol is a `u16` closing the
+  fixed-width record, so it costs nothing of `APP_MENU_TEXT_BYTES`, which
+  Paint's menu already spends almost wholly on labels.
+- **Artwork over a symbol.** A row naming a bundle's icon or a class asset
+  draws that artwork; its symbol is the fallback, so a picture that will not
+  resolve still says what the row does.
+- **Chrome, theme-tinted.** A symbol is drawn from its built-in glyph in the
+  row's foreground — `on_surface`, dark on a light theme and light on a dark
+  one — never from a raster or badge tier.
+- **A destructive row's symbol is the danger hue**: `danger` at rest,
+  `on_accent` on the row's solid danger highlight, the muted foreground while
+  disabled. The label keeps the plate's foreground and the danger rail stays.
+- **A mark keeps its own gutter.** A plate whose rows carry both a mark and
+  a picture reserves a gutter for the tick or bullet before the icon column,
+  so a toggle or an alternative still shows its function and every label on
+  the plate lines up. Elsewhere the mark takes the one leading column.
+- **A glyph is rasterised once per chain, not per paint.** Every row's
+  coverage mask is resolved once when the chain opens
+  (`ChainModel::resolve_glyphs`; `Menu::resolve_glyphs` for a menu built
+  alone) and kept on the model row, so a highlight move tints two retained
+  masks and a submenu reopened at the same side rasterises nothing.
 
 ## 6. Decisions required (§15.7)
 

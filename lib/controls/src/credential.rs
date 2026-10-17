@@ -87,6 +87,10 @@ pub const CREDENTIAL_REFUSED_REASON: &str = "That account and password were not 
 pub const CREDENTIAL_NOT_STARTED_REASON: &str =
     "The account was accepted, but the application did not start.";
 
+/// What the surface states while the authority checks the account it was
+/// offered.
+pub const CREDENTIAL_CHECKING_REASON: &str = "Checking the account\u{2026}";
+
 /// What one input event concluded for a [`CredentialSheet`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CredentialAction {
@@ -134,6 +138,9 @@ pub struct CredentialSheet {
     /// Where the pointer last was, in the sheet's own space, so a press
     /// resolves against the field rectangles it was actually over.
     pointer: Point,
+    /// Whether the authority is checking what was offered: the sheet takes
+    /// no input until it is refused or taken down.
+    checking: bool,
 }
 
 impl CredentialSheet {
@@ -152,6 +159,7 @@ impl CredentialSheet {
             secret: SecretField::new(MAX_PASSWORD_LEN).with_message(SECRET_LABEL),
             focus: Focus::Account,
             pointer: Point::ORIGIN,
+            checking: false,
         }
     }
 
@@ -184,13 +192,34 @@ impl CredentialSheet {
     /// it would only make a correct name harder to keep. Discarding the
     /// password's buffer zeroises it.
     pub fn refuse(&mut self, reason: &str) {
+        self.state(reason);
+        self.checking = false;
+        self.set_focus(Focus::Secret);
+    }
+
+    /// Say the offered account is being checked, clearing the password the
+    /// owner has handed over: the sheet takes no input — not even a cancel,
+    /// which could not recall what the authority may already be doing —
+    /// until the owner [`refuse`](Self::refuse)s it or takes it down.
+    pub fn check(&mut self) {
+        self.state(CREDENTIAL_CHECKING_REASON);
+        self.checking = true;
+    }
+
+    /// Whether the authority is checking what was offered, for the tests.
+    #[cfg(test)]
+    const fn is_checking(&self) -> bool {
+        self.checking
+    }
+
+    /// State `reason` with the password cleared.
+    fn state(&mut self, reason: &str) {
         self.dialog = build_dialog(
             self.dialog.title(),
             self.dialog.message().unwrap_or_default(),
             Some(reason),
         );
         self.secret.clear();
-        self.set_focus(Focus::Secret);
     }
 
     /// The physical rectangle of field `index` (`0` account, `1` password)
@@ -228,7 +257,8 @@ impl CredentialSheet {
     /// `Escape` cancels outright. `Tab` moves the keyboard on. `Enter`
     /// offers the credentials from either field, so a password can be
     /// submitted without reaching for the button. Everything else edits
-    /// whichever field holds the keyboard.
+    /// whichever field holds the keyboard. A sheet that is checking takes
+    /// none of it.
     pub fn on_key(
         &mut self,
         stroke: Keystroke,
@@ -237,6 +267,9 @@ impl CredentialSheet {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<CredentialAction> {
+        if self.checking {
+            return None;
+        }
         match stroke.key {
             Key::Named(NamedKey::Escape) => Some(CredentialAction::Cancelled),
             Key::Named(NamedKey::Tab) => {
@@ -295,6 +328,9 @@ impl CredentialSheet {
     ) -> Option<CredentialAction> {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
+        }
+        if self.checking {
+            return None;
         }
         if let InputEvent::PointerPressed {
             button: PointerButton::Primary,

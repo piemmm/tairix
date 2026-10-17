@@ -22,7 +22,7 @@
 //! desktop-drawn panel of the bundle's **signed** manifest, so an application
 //! cannot state an identity that is not its own.
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuSymbol};
 use tairix_abi::ProcId;
 use tairix_controls::{
     AboutSheet, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement, PlateSide,
@@ -38,13 +38,20 @@ use crate::input::TaskbarResponse;
 use crate::network_menu;
 use crate::system::{self, SystemPermits};
 
-/// One row a bar menu's own table produced: its position in that table, what
-/// the row draws, and why it cannot be chosen.
-///
-/// The reason is the seat's tooltip text, shown on dwell — never drawn beside
-/// the label, which is what used to make a plate as wide as its longest
-/// excuse.
-pub(crate) type BarMenuRow = (usize, MenuItem, Option<&'static str>);
+/// One row a bar menu's own table produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BarMenuRow {
+    /// The row's position in its table, which numbers its id.
+    pub index: usize,
+    /// The function the row's picture shows.
+    pub symbol: AppMenuSymbol,
+    /// What the row draws.
+    pub item: MenuItem,
+    /// Why it cannot be chosen: the seat's tooltip text, shown on dwell —
+    /// never drawn beside the label, which is what used to make a plate as
+    /// wide as its longest excuse.
+    pub why: Option<&'static str>,
+}
 
 /// Which of the bar's menus a chain belongs to, and what a chosen row of it
 /// acts on.
@@ -162,6 +169,14 @@ impl EntryRow {
         }
     }
 
+    /// The function this row's picture shows.
+    const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Open => AppMenuSymbol::Open,
+            Self::Shortcut => AppMenuSymbol::Shortcut,
+        }
+    }
+
     /// The row at `index` of the menu, or `None` for an index it never drew.
     fn at(index: usize) -> Option<Self> {
         ENTRY_ROWS.get(index).copied()
@@ -178,7 +193,7 @@ pub(crate) fn entry_menu() -> ChainModel {
     let mut model = ChainModel::new(ENTRY_TITLE);
     for (index, row) in ENTRY_ROWS.into_iter().enumerate() {
         if let Some(id) = AppMenuItemId::for_index(index) {
-            model.push(ChainRow::item(id, MenuItem::new(row.label())));
+            model.push(ChainRow::item(id, row.symbol(), MenuItem::new(row.label())));
         }
     }
     model
@@ -231,11 +246,17 @@ pub(crate) fn network_menu(settings_installed: bool) -> ChainModel {
 /// id, so the numbering and [`MenuSubject::chosen`]'s inverse cannot drift.
 fn rows_from(title: &str, rows: alloc::vec::Vec<BarMenuRow>) -> ChainModel {
     let mut model = ChainModel::new(title);
-    for (index, item, why) in rows {
+    for BarMenuRow {
+        index,
+        symbol,
+        item,
+        why,
+    } in rows
+    {
         let Some(id) = AppMenuItemId::for_index(index) else {
             continue;
         };
-        let row = ChainRow::item(id, item);
+        let row = ChainRow::item(id, symbol, item);
         model.push(match why {
             Some(why) => row.explained(why),
             None => row,

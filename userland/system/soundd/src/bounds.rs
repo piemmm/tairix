@@ -14,6 +14,11 @@ use tairix_abi::sound_cue::SoundEvent;
 /// noise.
 pub const MAX_CONCURRENT_CUES: usize = 4;
 
+/// Callers waiting on one sounding cue to play out, beyond the one that asked
+/// for it. A repeat of a sound already sounding joins it rather than sounding
+/// over it; past this a joiner is answered at once as coalesced.
+pub const MAX_JOINED_CUES: usize = 16;
+
 /// A repeat of one event by one principal sooner than this after it last
 /// sounded is the same occurrence, not a second one: two identical
 /// notification sounds 20 ms apart are one notification and one bug.

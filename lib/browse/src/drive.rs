@@ -332,7 +332,7 @@ const IN_RESERVE: &str = "down to its reserve: ordinary writes may be refused";
 
 /// The availability as the health fact reads it: the volume's banded health,
 /// refined to its own state where that says more.
-fn health_word(availability: MountAvailability) -> String {
+pub(crate) fn health_word(availability: MountAvailability) -> String {
     let band = volume_health_name(availability.health());
     let state = availability_name(availability);
     if availability == MountAvailability::Available || state.eq_ignore_ascii_case(band) {

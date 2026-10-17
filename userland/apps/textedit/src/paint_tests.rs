@@ -178,6 +178,48 @@ fn the_hex_view_draws_digits_and_ascii_by_byte_class() {
     assert_eq!(cell(&surface, &layout, 0, 0), muted, "the offset column");
 }
 
+/// A picture shown as data draws its report's lines, the heading over its
+/// bytes in the accent, and then the bytes as the hex view draws them.
+#[test]
+fn the_data_display_draws_the_report_then_the_bytes() {
+    let (mut view, layout, registry) = window(b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR");
+    let theme = registry.active();
+    let (id, _) = view.data_want().expect("a report is wanted");
+    let report = alloc::vec![
+        tairix_image::inspect::ReportLine {
+            text: String::from("PNG"),
+            heading: true,
+        },
+        tairix_image::inspect::ReportLine {
+            text: String::from("ok"),
+            heading: false,
+        },
+    ];
+    view.data_reported(id, Ok(report), &layout, &mut Region::new());
+    let surface = paint(&view, &layout, theme, false);
+    let accent = Color::from(theme.palette().accent).premultiply();
+    let plain = Color::from(theme.palette().on_surface).premultiply();
+    let muted = Color::from(theme.palette().on_surface_muted).premultiply();
+    assert_eq!(
+        cell(&surface, &layout, 0, 0),
+        accent,
+        "the report's heading"
+    );
+    assert_eq!(cell(&surface, &layout, 1, 0), plain, "a line of it");
+    assert_eq!(cell(&surface, &layout, 2, 0), accent, "Bytes: …");
+    assert_eq!(
+        cell(&surface, &layout, 3, 0),
+        muted,
+        "the first row's offset"
+    );
+    let hex = crate::hex::HexLayout::for_len(view.editor().document().len());
+    assert_eq!(
+        cell(&surface, &layout, 3, hex.ascii_column(1)),
+        plain,
+        "the P of PNG, as its letter"
+    );
+}
+
 /// A question is drawn beside the window for its dialog window, never over
 /// the window's own content.
 #[test]

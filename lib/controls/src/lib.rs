@@ -361,8 +361,8 @@ pub use colour_model::{ChannelSpec, ColourModel, PickerView, MOST_CHANNELS};
 pub use colour_picker::{ColourPicker, PickerOutcome};
 pub use combo::{ComboAction, ComboBox};
 pub use credential::{
-    CredentialAction, CredentialSheet, CREDENTIAL_HEIGHT, CREDENTIAL_NOT_STARTED_REASON,
-    CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
+    CredentialAction, CredentialSheet, CREDENTIAL_CHECKING_REASON, CREDENTIAL_HEIGHT,
+    CREDENTIAL_NOT_STARTED_REASON, CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};

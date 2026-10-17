@@ -1,13 +1,15 @@
 //! The places / devices sidebar model: the shortcut rail the file manager
 //! draws down the left edge of its window.
 //!
-//! Two kinds of row share one list. The **user's own places** — Home, Desktop,
-//! `UserFiles`, and the machine's system root — are fixed: they
-//! are always offered, in one order, because they are where a session's work
-//! lives. The **volumes** are whatever is mounted right now, learned from the
-//! live mount table and each carrying the storage medium it actually sits on
-//! (`tairix_icon::disk_icon` turns that medium into the shipped drive artwork),
-//! so a USB stick never masquerades as an internal disk.
+//! Two kinds of row share one list. The **user's own places** — their `Home`
+//! and `Desktop` folders — are fixed: they are always offered, in one order,
+//! because they are where a session's work lives. The **storage** rows are
+//! whatever is attached right now — the storage catalog and each volume
+//! beneath it — learned from the live mount table and each carrying the
+//! storage medium it actually sits on (`tairix_icon::disk_icon` turns that
+//! medium into the shipped drive artwork), so a USB stick never masquerades as
+//! an internal disk. The system's own tree is no place: it is reached by
+//! navigating, as any folder is.
 //!
 //! # Data in, no I/O
 //!
@@ -31,8 +33,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkMedium;
-use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_USER_FILES_DIR};
+use tairix_abi::fs::STORAGE_CATALOG;
+use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_FILES_DIR};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_icon::{disk_icon, IconKind};
+use tairix_procinfo::list::field_lossy;
+use tairix_procinfo::VolumeBytes;
 
 use crate::column::ScrollColumn;
 use crate::vfs::components_from_absolute_path;
@@ -47,14 +53,12 @@ use crate::vfs::components_from_absolute_path;
 /// draw.
 pub const MAX_PLACE_LABEL: usize = 64;
 
-/// The label of the row that opens the user's home.
-const HOME_LABEL: &str = "Home";
-
-/// The folders inside the user's home the rail offers, in rail order.
-const USER_FOLDERS: [&str; 2] = [HOME_DESKTOP_DIR, HOME_USER_FILES_DIR];
-
-/// The OS-provided system tree's root component.
-const SYSTEM_ROOT: &str = "System";
+/// The folders inside the user's home the rail offers, in rail order, each
+/// labelled with its own name and drawn with its own picture.
+const USER_FOLDERS: [(&str, PlaceKind, IconKind); 2] = [
+    (HOME_FILES_DIR, PlaceKind::Home, IconKind::Home),
+    (HOME_DESKTOP_DIR, PlaceKind::UserFolder, IconKind::Folder),
+];
 
 /// Every fixed row's label.
 ///
@@ -62,15 +66,15 @@ const SYSTEM_ROOT: &str = "System";
 /// body face at the desktop scale, so every fixed row's label fits without
 /// truncation at any UI density. A volume whose label is longer simply
 /// truncates in its row, as any over-long label does.
-pub const FIXED_LABELS: [&str; 4] = [HOME_LABEL, USER_FOLDERS[0], USER_FOLDERS[1], SYSTEM_ROOT];
+pub const FIXED_LABELS: [&str; 2] = [USER_FOLDERS[0].0, USER_FOLDERS[1].0];
 
 /// The places a bare open — one naming no location — tries in turn for the
-/// user whose home is `home`: their `UserFiles`, then the home itself. A
+/// user whose home is `home`: their `Home` folder, then the home itself. A
 /// caller falls back to the root view when neither can be listed.
 #[must_use]
 pub fn bare_open_places(home: &[String]) -> [Vec<String>; 2] {
     let mut files = home.to_vec();
-    files.push(String::from(HOME_USER_FILES_DIR));
+    files.push(String::from(HOME_FILES_DIR));
     [files, home.to_vec()]
 }
 
@@ -82,13 +86,12 @@ pub fn bare_open_places(home: &[String]) -> [Vec<String>; 2] {
 /// refreshing the mount table replaces exactly the volume rows.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum PlaceKind {
-    /// The user's own home directory.
+    /// The user's own files: the `Home` folder in their home.
     Home,
-    /// A fixed folder inside the user's home (`Desktop`, `UserFiles`).
+    /// Another fixed folder inside the user's home (`Desktop`).
     UserFolder,
-    /// The machine-wide system tree.
-    SystemRoot,
-    /// A mounted volume, learned from the live mount table.
+    /// The storage catalog or a volume attached beneath it, learned from the
+    /// live mount table.
     Volume,
 }
 
@@ -101,6 +104,8 @@ pub struct Place {
     components: Vec<String>,
     kind: PlaceKind,
     available: bool,
+    /// What the volume is and how it is doing, for a storage row.
+    facts: Option<VolumeFacts>,
 }
 
 impl Place {
@@ -129,6 +134,13 @@ impl Place {
         self.kind
     }
 
+    /// What the volume a storage row opens is and how it is doing, or `None`
+    /// for a folder of the user's.
+    #[must_use]
+    pub const fn facts(&self) -> Option<&VolumeFacts> {
+        self.facts.as_ref()
+    }
+
     /// Whether the row can still be navigated to.
     ///
     /// Every row starts available: this model performs no I/O, so it cannot
@@ -141,6 +153,20 @@ impl Place {
     pub const fn is_available(&self) -> bool {
         self.available
     }
+}
+
+/// What a mounted volume is and how it is doing, as its mount record states:
+/// what a listing says about the volume's root where another entry states its
+/// size, modification and type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeFacts {
+    /// The filesystem's name as its driver reports it, empty when none.
+    pub filesystem: String,
+    /// The bytes an ordinary write may still take, or `None` for a volume that
+    /// keeps no accounting.
+    pub free: Option<u64>,
+    /// Whether the volume is serving, and how well.
+    pub availability: MountAvailability,
 }
 
 /// One mounted volume offered to [`Places::new`].
@@ -159,14 +185,46 @@ pub struct Volume {
     /// does not know). `None` draws the generic drive icon — never a guessed
     /// medium.
     pub medium: Option<BlkMedium>,
+    /// What the volume is and how it is doing.
+    pub facts: VolumeFacts,
 }
 
-/// The ordered rail: the user's fixed places, then every accepted volume.
+impl Volume {
+    /// The volume `record` reports, labelled by its mount point's leaf, or
+    /// `None` for one this session cannot navigate to: a mount whose device
+    /// has gone, or whose target is not valid text or names no leaf.
+    ///
+    /// A degraded, recovering or read-only conflicted volume still serves its
+    /// data, so it is offered, its facts saying how it is doing.
+    #[must_use]
+    pub fn from_mount(record: &MountRecord) -> Option<Self> {
+        let availability = record.availability();
+        if matches!(
+            availability,
+            MountAvailability::UnavailableDirty | MountAvailability::UnavailableLost
+        ) {
+            return None;
+        }
+        let target = core::str::from_utf8(record.target_bytes()).ok()?;
+        let label = target.rsplit('/').find(|part| !part.is_empty())?;
+        Some(Self {
+            label: String::from(label),
+            target: String::from(target),
+            medium: record.medium(),
+            facts: VolumeFacts {
+                filesystem: field_lossy(record.fstype_bytes()),
+                free: VolumeBytes::of(&record.usage()).map(|bytes| bytes.available),
+                availability,
+            },
+        })
+    }
+}
+
+/// The ordered rail: the user's fixed places, then the attached storage.
 ///
-/// The order is fixed and deterministic — Home, Desktop, `UserFiles`, the
-/// application root, the system root, then the volumes sorted by label — so
-/// the rail never reshuffles under the user between two paints of the same
-/// state.
+/// The order is fixed and deterministic — `Home`, `Desktop`, then the storage
+/// rows sorted by label — so the rail never reshuffles under the user between
+/// two paints of the same state.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Places {
     rows: Vec<Place>,
@@ -187,45 +245,34 @@ impl Places {
     /// it cannot know, and a user's Desktop shortcut is expected to be there
     /// even on the day the directory is missing (navigating to it then fails
     /// closed and says so, which is honest — a silently absent shortcut is
-    /// not). The three home-derived rows need a home to hang off, so an empty
-    /// `home` drops them rather than spelling a row that navigates nowhere.
+    /// not). They need a home to hang off, so an empty `home` drops them
+    /// rather than spelling a row that navigates nowhere.
     ///
-    /// The volumes follow, sorted by label (stably, so equal labels keep the
-    /// caller's order) after every malformed and duplicate entry has been
-    /// dropped. A volume is rejected when its label is empty, longer than
-    /// [`MAX_PLACE_LABEL`], or carries a control character; when its target
-    /// does not parse as an absolute path; or when an already-accepted row —
-    /// fixed or volume — already navigates to that same target.
+    /// The storage rows follow, sorted by label (stably, so equal labels keep
+    /// the caller's order) after every malformed, foreign and duplicate entry
+    /// has been dropped. A volume is rejected when its label is empty, longer
+    /// than [`MAX_PLACE_LABEL`], or carries a control character; when its
+    /// target does not parse as an absolute path; when it is neither the
+    /// storage catalog nor directly beneath it — the root volume and the
+    /// system tree's own mounts are not the user's storage; or when an
+    /// already-accepted row already navigates to that same target.
     #[must_use]
     pub fn new(home: &[String], volumes: &[Volume]) -> Self {
         let mut rows: Vec<Place> = Vec::new();
         if !home.is_empty() {
-            rows.push(Place {
-                label: String::from(HOME_LABEL),
-                icon: IconKind::Folder,
-                components: home.to_vec(),
-                kind: PlaceKind::Home,
-                available: true,
-            });
-            for leaf in USER_FOLDERS {
+            for (leaf, kind, icon) in USER_FOLDERS {
                 let mut components = home.to_vec();
                 components.push(String::from(leaf));
                 rows.push(Place {
                     label: String::from(leaf),
-                    icon: IconKind::Folder,
+                    icon,
                     components,
-                    kind: PlaceKind::UserFolder,
+                    kind,
                     available: true,
+                    facts: None,
                 });
             }
         }
-        rows.push(Place {
-            label: String::from(SYSTEM_ROOT),
-            icon: IconKind::Folder,
-            components: alloc::vec![String::from(SYSTEM_ROOT)],
-            kind: PlaceKind::SystemRoot,
-            available: true,
-        });
 
         let mut accepted: Vec<Place> = volumes.iter().filter_map(volume_row).collect();
         // Sorting before deduplicating makes the surviving row of a duplicated
@@ -387,11 +434,17 @@ fn volume_row(volume: &Volume) -> Option<Place> {
         return None;
     }
     let components = components_from_absolute_path(&volume.target).ok()?;
+    let storage =
+        matches!(components.as_slice(), [catalog] | [catalog, _] if catalog == STORAGE_CATALOG);
+    if !storage {
+        return None;
+    }
     Some(Place {
         label: volume.label.clone(),
         icon: disk_icon(volume.medium),
         components,
         kind: PlaceKind::Volume,
         available: true,
+        facts: Some(volume.facts.clone()),
     })
 }

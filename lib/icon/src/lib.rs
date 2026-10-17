@@ -53,6 +53,7 @@ extern crate alloc;
 pub mod account;
 pub mod artwork;
 pub mod badge;
+mod command;
 pub mod desk;
 pub mod folder;
 pub mod glyph;
@@ -76,6 +77,7 @@ pub use artwork::{
     MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
 pub use badge::{badge, BadgeHue, PlateShape};
+pub use command::menu_symbol_icon;
 pub use desk::{ArtworkDesk, ArtworkJob, Delivered, Landed};
 pub use folder::{DrawnCard, FolderSample, SampleCard};
 pub use glyph::{builtin_icon, disk_icon, IconKind};

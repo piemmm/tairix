@@ -60,7 +60,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::render::{entry_body, grid_metrics, grid_tile, TILE_LAYOUT};
+use tairix_browse::render::{entry_body, Tiles};
 use tairix_browse::{
     applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
     DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, LinkTarget, Listing,
@@ -866,7 +866,7 @@ impl<S: DirectorySource> Desktop<S> {
         // file manager's spreading grid deliberately does.
         GridView::new(
             viewport,
-            grid_metrics(scale, theme),
+            Tiles::Large.metrics(scale, theme),
             0,
             self.entries.len(),
             grid_flow(self.settings.icons),
@@ -905,7 +905,7 @@ impl<S: DirectorySource> Desktop<S> {
             theme,
             |bounds| !bounds.intersection(&area).is_empty(),
             |icon| {
-                let tile = grid_tile(icon.entry, self.icon_state(icon.index), icon.kind);
+                let tile = Tiles::Large.tile(icon.entry, self.icon_state(icon.index), icon.kind);
                 let art = artwork.shadowed(icon.request, icon.side, shadow);
                 tile.render(surface, icon.bounds, scale, theme, art);
             },
@@ -941,7 +941,7 @@ impl<S: DirectorySource> Desktop<S> {
                 entry,
                 bounds,
                 kind,
-                side: TILE_LAYOUT.icon_side(bounds, scale, theme),
+                side: Tiles::Large.layout().icon_side(bounds, scale, theme),
                 request,
             });
         }
@@ -953,7 +953,7 @@ impl<S: DirectorySource> Desktop<S> {
     fn icon_at(&self, layout: &GridView, at: Point, scale: Scale, theme: &Theme) -> Option<usize> {
         let index = layout.index_at(DESKTOP_SCROLL, at)?;
         let cell = shown_whole(layout, index)?;
-        entry_body(self.entries.get(index)?, cell, scale, theme)?
+        entry_body(Tiles::Large, self.entries.get(index)?, cell, scale, theme)?
             .contains(at)
             .then_some(index)
     }

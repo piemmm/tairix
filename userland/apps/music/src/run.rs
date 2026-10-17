@@ -1050,7 +1050,7 @@ mod program {
             while !self.alerts_full {
                 match self
                     .notices
-                    .raise(&mut self.client, endpoint, self.pane.id())
+                    .raise(&mut self.client, endpoint, Some(self.pane.id()))
                 {
                     Raised::Nothing | Raised::Up => return,
                     Raised::Full => self.alerts_full = true,

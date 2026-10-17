@@ -19,17 +19,19 @@
 //! desktop's backdrop builds one, and an application's wire declaration
 //! decodes into one. One model, beside the rows and plates it is made of.
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuIconView, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView,
+    AppMenuSymbol,
 };
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::{glyph_mask, IconKind, IconPicture};
+use tairix_icon::{glyph_mask, menu_symbol_icon, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, RingInk, Surface};
 use tairix_theme::{edge_weight, Palette, TextRole, Theme};
@@ -247,7 +249,8 @@ pub enum MenuMark {
 /// One row of a menu (spec §11.10): a label with an optional leading icon,
 /// trailing shortcut, and submenu marker.
 ///
-/// A [`ControlRole::Destructive`] item draws a danger rail on its own row only.
+/// A [`ControlRole::Destructive`] item draws a danger rail on its own row only,
+/// and its glyph in the danger hue.
 /// A denied item keeps its slot and shows an Authority Mark rather than looking
 /// merely disabled (spec §13). The row renders state and never dispatches.
 ///
@@ -264,6 +267,10 @@ pub struct MenuItem {
     shortcut: Option<String>,
     icon: Option<IconKind>,
     artwork: Option<Surface>,
+    /// The glyph's coverage, rasterised once by [`Menu::resolve_glyphs`]
+    /// rather than per paint. Derived from `icon` and the row's side, so it
+    /// takes no part in equality.
+    glyph: RenderInvariant<Option<Surface>>,
     mark: MenuMark,
     submenu: bool,
     role: ControlRole,
@@ -280,6 +287,7 @@ impl MenuItem {
             shortcut: None,
             icon: None,
             artwork: None,
+            glyph: RenderInvariant::new(None),
             mark: MenuMark::None,
             submenu: false,
             role: ControlRole::Neutral,
@@ -298,6 +306,9 @@ impl MenuItem {
     /// This item with a leading icon glyph.
     #[must_use]
     pub fn with_icon(mut self, icon: IconKind) -> Self {
+        if self.icon != Some(icon) {
+            *self.glyph = None;
+        }
         self.icon = Some(icon);
         self
     }
@@ -341,10 +352,11 @@ impl MenuItem {
         self.artwork.as_ref()
     }
 
-    /// This item drawing `mark` in its leading icon column.
+    /// This item drawing `mark` beside its label.
     ///
-    /// A row states either an icon or a mark, never both: they share the one
-    /// reserved column, so a mark replaces the icon rather than crowding it.
+    /// A plate whose rows carry icons gives the marks a gutter of their own
+    /// before the icon column, so a marked row still shows what it does; on a
+    /// plate with no icons the mark takes the one leading column.
     #[must_use]
     pub fn with_mark(mut self, mark: MenuMark) -> Self {
         self.mark = mark;
@@ -431,8 +443,8 @@ impl MenuItem {
         self.state.is_actionable()
     }
 
-    /// The side, in physical pixels, of the leading column a row `h` pixels
-    /// tall reserves for an icon, a mark or artwork.
+    /// The side, in physical pixels, of each leading column a row `h` pixels
+    /// tall reserves: the mark gutter and the icon column.
     ///
     /// The one derivation: [`Self::paint_content`] draws into it and
     /// [`Menu::icon_side`] reports it, so an owner rasterising artwork for a
@@ -441,6 +453,65 @@ impl MenuItem {
         role_font(theme, scale, TextRole::Body)
             .glyph_height()
             .min(h.saturating_sub(plate_border(theme, scale).saturating_mul(2)))
+    }
+
+    /// Rasterise this row's glyph at `side` unless it already holds it, so a
+    /// paint only tints what is retained. A row drawing artwork needs none.
+    fn resolve_glyph(&mut self, side: u32) {
+        let held = self.glyph.as_ref().is_some_and(|mask| mask.width() == side);
+        if self.artwork.is_some() || held {
+            return;
+        }
+        *self.glyph = self.icon.and_then(|kind| glyph_mask(kind, side));
+    }
+
+    /// The side of the glyph this row holds, for a test that the paint path
+    /// is left nothing to rasterise.
+    #[cfg(test)]
+    pub(crate) fn held_glyph_side(&self) -> Option<u32> {
+        self.glyph.as_ref().map(Surface::width)
+    }
+
+    /// The colour this row's glyph is tinted: the row's foreground, the
+    /// danger hue for a destructive row that can act, and the foreground the
+    /// danger highlight itself carries when current.
+    fn glyph_color(&self, palette: &Palette, current: bool, label: Rgba) -> Rgba {
+        let on_emphasis = current && self.emphasis_fill(palette).is_some();
+        if self.role == ControlRole::Destructive && self.is_actionable() && !on_emphasis {
+            palette.danger
+        } else {
+            label
+        }
+    }
+
+    /// Paint the row's picture into `slot`: its artwork as it is, else its
+    /// glyph in `ink` — the retained mask, or one rasterised here for an owner
+    /// that resolved none. Answers whether there was a picture to paint.
+    fn paint_picture(&self, surface: &mut Surface, slot: (u32, u32, u32), ink: Color) -> bool {
+        let (x, y, side) = slot;
+        if let Some(art) = self.artwork.as_ref() {
+            paint_icon_slot(
+                surface,
+                slot,
+                IconKind::AppBundle,
+                ink,
+                Some(IconPicture::coloured(art)),
+                FULL_COLOUR,
+            );
+            return true;
+        }
+        let Some(kind) = self.icon else {
+            return false;
+        };
+        let held = self.glyph.as_ref().filter(|mask| mask.width() == side);
+        let drawn = held.map_or_else(
+            || glyph_mask(kind, side).map(Cow::Owned),
+            |mask| Some(Cow::Borrowed(mask)),
+        );
+        if let Some(mask) = drawn {
+            surface.blit_tinted(to_i32(x), to_i32(y), &mask, ink);
+        }
+        true
     }
 
     /// The emphasis colour this row's highlight must be drawn in rather than a
@@ -461,26 +532,26 @@ impl MenuItem {
         }
     }
 
-    /// Paint this row into `surface` at `rect` of the plate whose interior is
-    /// `plate`, for the active theme.
+    /// Paint this row into `surface` at `rect` as `look` describes it, for the
+    /// active theme.
     ///
-    /// `current` marks the highlighted row; `focused` additionally marks that
-    /// the highlight came from the keyboard, drawing a distinct focus ring so
-    /// keyboard focus reads differently from a pointer hover (spec §15). A row
-    /// against the plate's top or bottom edge lays its marks to the plate's
-    /// corners rather than squaring them off.
-    #[allow(clippy::too_many_arguments)]
+    /// A row against the plate's top or bottom edge lays its marks to the
+    /// plate's corners rather than squaring them off.
     fn paint(
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
-        plate: PlateInterior,
+        look: RowLook,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-        current: bool,
-        focused: bool,
     ) {
+        let RowLook {
+            plate,
+            leading,
+            current,
+            focused,
+        } = look;
         let (x, y, w, h) = rect;
         if w == 0 || h == 0 {
             return;
@@ -528,20 +599,20 @@ impl MenuItem {
             );
         }
 
-        self.paint_content(surface, rect, scale, theme, font, current);
+        self.paint_content(surface, rect, (leading, current), scale, theme, font);
     }
 
-    /// Paint the row foreground — icon, label, caption, Signal Bead, and the
-    /// submenu chevron — over whatever background [`MenuItem::paint`] has
+    /// Paint the row foreground — mark, icon, label, caption, Signal Bead, and
+    /// the submenu chevron — over whatever background [`MenuItem::paint`] has
     /// already laid down.
     fn paint_content(
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
+        (leading, current): (Leading, bool),
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
-        current: bool,
     ) {
         let (x, y, w, h) = rect;
         let palette = theme.palette();
@@ -567,40 +638,27 @@ impl MenuItem {
         let mut cursor = left;
         let icon_slot = Self::icon_side(h, scale, theme);
 
-        // Leading artwork, icon or mark (all optional, and mutually exclusive:
-        // they share the one column). The column is reserved even for a row
-        // with none of them, so a menu's labels line up (text stability,
-        // spec §14).
+        // The leading columns are the plate's, so every label on it lines up
+        // (text stability, spec §14): a mark keeps a gutter of its own where
+        // the plate's rows carry pictures, and shares the one column where
+        // they carry none.
         if icon_slot > 0 {
             let iy = y + (h.saturating_sub(icon_slot)) / 2;
-            match (self.artwork.as_ref(), self.icon) {
-                (Some(art), _) => paint_icon_slot(
-                    surface,
-                    (cursor, iy, icon_slot),
-                    IconKind::AppBundle,
-                    Color::from(label_color),
-                    Some(IconPicture::coloured(art)),
-                    FULL_COLOUR,
-                ),
-                (None, Some(kind)) => {
-                    if let Some(mask) = glyph_mask(kind, icon_slot) {
-                        surface.blit_tinted(
-                            to_i32(cursor),
-                            to_i32(iy),
-                            &mask,
-                            Color::from(label_color),
-                        );
-                    }
-                }
-                (None, None) => paint_menu_mark(
-                    surface,
-                    (cursor, iy, icon_slot),
-                    self.mark,
-                    Color::from(label_color),
-                ),
+            let mark_ink = Color::from(label_color);
+            let glyph_ink = Color::from(self.glyph_color(palette, current, label_color));
+            if leading.gutter {
+                paint_menu_mark(surface, (cursor, iy, icon_slot), self.mark, mark_ink);
+                let at = cursor
+                    .saturating_add(icon_slot)
+                    .saturating_add(Leading::gap(pad));
+                self.paint_picture(surface, (at, iy, icon_slot), glyph_ink);
+            } else if !self.paint_picture(surface, (cursor, iy, icon_slot), glyph_ink) {
+                paint_menu_mark(surface, (cursor, iy, icon_slot), self.mark, mark_ink);
             }
         }
-        cursor = cursor.saturating_add(icon_slot).saturating_add(pad);
+        cursor = cursor
+            .saturating_add(leading.width(icon_slot, pad))
+            .saturating_add(pad);
 
         // Trailing region: the submenu chevron sits at the far edge; the
         // shortcut sits just inside it.
@@ -656,6 +714,61 @@ impl MenuItem {
                 ChevronDir::Right,
                 Color::from(label_color),
             );
+        }
+    }
+}
+
+/// How one row is to be drawn: where on its plate, beside which leading
+/// columns, and whether it is the current row and the keyboard's.
+#[derive(Copy, Clone, Debug)]
+struct RowLook {
+    /// The plate the row lies on.
+    plate: PlateInterior,
+    /// The columns every row of the plate reserves before its label.
+    leading: Leading,
+    /// Whether the row is highlighted.
+    current: bool,
+    /// Whether the highlight came from the keyboard, drawing a focus ring so
+    /// keyboard focus reads differently from a pointer hover (spec §15).
+    focused: bool,
+}
+
+/// The columns a plate's rows reserve before their labels.
+///
+/// Decided once per plate from all of its rows, so a row that carries no
+/// mark or no picture still lines its label up with those that do.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Leading {
+    /// Whether the marks keep a gutter of their own before the icon column:
+    /// only where the plate's rows carry both.
+    gutter: bool,
+}
+
+impl Leading {
+    /// The columns `items` need.
+    fn of(items: &[MenuItem]) -> Self {
+        let marked = items.iter().any(|item| item.mark != MenuMark::None);
+        let pictured = items
+            .iter()
+            .any(|item| item.icon.is_some() || item.artwork.is_some());
+        Self {
+            gutter: marked && pictured,
+        }
+    }
+
+    /// The space between the mark gutter and the icon column, from the row's
+    /// padding.
+    fn gap(pad: u32) -> u32 {
+        pad.div_ceil(2)
+    }
+
+    /// The width the columns take for `side`-pixel columns and `pad` of row
+    /// padding.
+    fn width(self, side: u32, pad: u32) -> u32 {
+        if self.gutter {
+            side.saturating_mul(2).saturating_add(Self::gap(pad))
+        } else {
+            side
         }
     }
 }
@@ -851,6 +964,19 @@ impl Menu {
         MenuItem::icon_side(Self::row_height(scale, theme), scale, theme)
     }
 
+    /// Rasterise every row's glyph at the side it is drawn, keeping it on
+    /// the row, so a paint — a whole plate or the two rows a highlight moves
+    /// between — tints what is held rather than rasterising per row per paint.
+    ///
+    /// A row already holding its glyph at this side, or drawing artwork,
+    /// costs a comparison.
+    pub fn resolve_glyphs(&mut self, scale: Scale, theme: &Theme) {
+        let side = Self::icon_side(scale, theme);
+        for item in &mut self.items {
+            item.resolve_glyph(side);
+        }
+    }
+
     /// The scaled height of the band a group divider occupies: the rule with
     /// a gap either side, so groups read as separated bands rather than a
     /// hairline crowded between two labels.
@@ -936,7 +1062,7 @@ impl Menu {
         let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let icon_slot = Self::icon_side(scale, theme);
+        let leading = Leading::of(&self.items).width(Self::icon_side(scale, theme), pad);
         let mut widest = 0;
         for item in &self.items {
             let label_w = font.text_width(&item.label);
@@ -944,7 +1070,7 @@ impl Menu {
             let chevron = if item.submenu { font.glyph_height() } else { 0 };
             let w = border
                 .saturating_add(pad)
-                .saturating_add(icon_slot)
+                .saturating_add(leading)
                 .saturating_add(pad)
                 .saturating_add(label_w)
                 .saturating_add(pad)
@@ -1121,6 +1247,7 @@ impl Menu {
         let rule = Self::divider_rule(scale, theme);
         let gap = Self::divider_gap(scale, theme);
         let inset_x = Self::divider_inset(scale, theme).min(iw / 2);
+        let leading = Leading::of(&self.items);
         for band in self.layout(scale, theme) {
             let row_top = iy.saturating_add(band.top);
             if row_top.saturating_add(band.height) > iy + ih {
@@ -1139,16 +1266,19 @@ impl Menu {
                 break;
             };
             let current = self.current == Some(band.index);
-            let focused = current && self.keyboard_focus;
+            let look = RowLook {
+                plate,
+                leading,
+                current,
+                focused: current && self.keyboard_focus,
+            };
             item.paint(
                 surface,
                 (ix, row_top, iw, band.height),
-                plate,
+                look,
                 scale,
                 theme,
                 font,
-                current,
-                focused,
             );
         }
     }
@@ -1387,29 +1517,31 @@ pub struct ChainRow {
 }
 
 impl ChainRow {
-    /// A chooseable row: choosing it answers the chain with `id`.
+    /// A chooseable row doing `symbol`'s function: choosing it answers the
+    /// chain with `id`.
     #[must_use]
-    pub fn item(id: AppMenuItemId, item: MenuItem) -> Self {
+    pub fn item(id: AppMenuItemId, symbol: AppMenuSymbol, item: MenuItem) -> Self {
         Self {
             parent: None,
             id: Some(id),
             child: ChainChild::None,
             icon: None,
             tip: None,
-            item,
+            item: item.with_icon(menu_symbol_icon(symbol)),
         }
     }
 
-    /// A row whose child is the plate holding the rows filed under it.
+    /// A row whose child is the plate holding the rows filed under it, which
+    /// are for `symbol`'s function.
     #[must_use]
-    pub fn submenu(item: MenuItem) -> Self {
+    pub fn submenu(symbol: AppMenuSymbol, item: MenuItem) -> Self {
         Self {
             parent: None,
             id: None,
             child: ChainChild::Submenu,
             icon: None,
             tip: None,
-            item: item.with_submenu(true),
+            item: item.with_submenu(true).with_icon(menu_symbol_icon(symbol)),
         }
     }
 
@@ -1422,7 +1554,9 @@ impl ChainRow {
             child: ChainChild::Info(Box::new(sheet)),
             icon: None,
             tip: None,
-            item: item.with_submenu(true),
+            item: item
+                .with_submenu(true)
+                .with_icon(menu_symbol_icon(AppMenuSymbol::Info)),
         }
     }
 
@@ -1434,9 +1568,9 @@ impl ChainRow {
     /// rule, so an owner reading one back can never mistake it for the other.
     #[must_use]
     pub fn entry(
-        id: AppMenuItemId,
-        entry: AppMenuItemId,
+        (id, entry): (AppMenuItemId, AppMenuItemId),
         initial: impl Into<String>,
+        symbol: AppMenuSymbol,
         item: MenuItem,
     ) -> Self {
         Self {
@@ -1445,7 +1579,7 @@ impl ChainRow {
             child: ChainChild::Entry(entry, initial.into()),
             icon: None,
             tip: None,
-            item: item.with_submenu(true),
+            item: item.with_submenu(true).with_icon(menu_symbol_icon(symbol)),
         }
     }
 
@@ -1495,12 +1629,10 @@ impl ChainRow {
     }
 
     /// This row whose icon comes from the application bundle at `path`. Until
-    /// that resolves, or where it never does, the row draws the built-in
-    /// application glyph rather than an empty column.
+    /// that resolves, or where it never does, the row draws its symbol.
     #[must_use]
     pub fn from_bundle(mut self, path: impl Into<String>) -> Self {
         self.icon = Some(RowIcon::Bundle(path.into()));
-        self.item = self.item.with_icon(IconKind::AppBundle);
         self
     }
 
@@ -1607,6 +1739,16 @@ impl ChainModel {
         &mut self.rows
     }
 
+    /// Rasterise every row's glyph at the side a plate draws it, once for
+    /// the chain: each plate built from the model, a submenu reopened
+    /// included, then carries the mask rather than rasterising it again.
+    pub fn resolve_glyphs(&mut self, scale: Scale, theme: &Theme) {
+        let side = Menu::icon_side(scale, theme);
+        for row in &mut self.rows {
+            row.item.resolve_glyph(side);
+        }
+    }
+
     /// Decode an application's wire menu into the model a chain renders,
     /// titled `title`.
     ///
@@ -1701,9 +1843,13 @@ fn wire_row(
             // A declared field *is* the row's child, and the model forbids a
             // row holding both, so the two cases cannot overlap.
             let mut row = match item.entry {
-                Some(entry) => ChainRow::entry(item.id, entry.id, entry.initial, built),
-                None if opens_children => ChainRow::item(item.id, built).opening_a_plate(),
-                None => ChainRow::item(item.id, built),
+                Some(entry) => {
+                    ChainRow::entry((item.id, entry.id), entry.initial, item.symbol, built)
+                }
+                None if opens_children => {
+                    ChainRow::item(item.id, item.symbol, built).opening_a_plate()
+                }
+                None => ChainRow::item(item.id, item.symbol, built),
             };
             row = match item.icon {
                 AppMenuIconView::None => row,
@@ -1715,7 +1861,12 @@ fn wire_row(
             }
             Some(row)
         }
-        AppMenuRowView::Submenu { label, enabled } => Some(ChainRow::submenu(
+        AppMenuRowView::Submenu {
+            label,
+            enabled,
+            symbol,
+        } => Some(ChainRow::submenu(
+            symbol,
             MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
         )),
         // Without an attested identity there is nothing truthful to put in the

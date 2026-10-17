@@ -43,7 +43,7 @@ reach it.
 The optional `directory` operand is the location to open — the desktop
 opens a folder by launching the file manager with that folder's path.
 With no operand the window opens among the launching user's own files
-(`$HOME/UserFiles`), then at their home when that cannot be listed, and at
+(`$HOME/Home`), then at their home when that cannot be listed, and at
 the root view when `HOME` is unset or neither can be listed; each refusal
 is stated with the place tried next. A request for a folder a window
 already shows brings that window forward instead of opening a second
@@ -168,9 +168,10 @@ A shortcut rail runs down the leading edge of the window, below the toolbar
 band: the user's own places above, every mounted volume below, with the
 listing and its scrollbar gutter inset beside it. A place name too long for
 the rail ends in the shared ellipsis, so hidden text is never silent. The
-row order is fixed, so the rail never reshuffles under the user: Home,
-Desktop, UserFiles, `Apps`, `System`, a drawn separation, then the volumes
-sorted by label. A rail longer than the window scrolls, with a bar of its own,
+row order is fixed, so the rail never reshuffles under the user: Home (the
+`Home` folder of their own files), Desktop, a drawn separation, then the
+storage catalog and the volumes attached beneath it, sorted by label; the
+system's own tree is reached by navigating, not offered as a place. A rail longer than the window scrolls, with a bar of its own,
 so a machine with many volumes reaches every one of them.
 
 The volumes are **real mount data, not a guess**. The app reads the

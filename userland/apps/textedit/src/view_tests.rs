@@ -581,11 +581,12 @@ fn the_window_menu_holds_every_menu_whole() {
         ]
     );
 
-    // Only an executable's window offers its code.
+    // Only an executable's window offers its code, and only a picture's its
+    // data.
     let mut every: Vec<Action> = PLAIN_ACTIONS
         .iter()
         .copied()
-        .filter(|action| *action != Action::ShowCode)
+        .filter(|action| !matches!(action, Action::ShowCode | Action::ShowData))
         .collect();
     every.extend(MODES.map(Action::Mode));
     every.extend(Format::ALL.map(Action::Format));
@@ -1493,4 +1494,78 @@ fn the_code_display_is_read_only_and_text_or_hex_leaves_it() {
         "the hex shortcut leaves the code"
     );
     assert_eq!(harness.view.editor().mode(), Mode::Hex);
+}
+
+/// The opening of a PNG file, and more bytes after it.
+const PNG_HEAD: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR and the rest of the picture";
+
+#[test]
+fn a_picture_opens_as_data_and_its_menu_offers_data_beside_text_and_hex() {
+    let harness = Harness::new(PNG_HEAD, Format::PlainText);
+    assert!(
+        harness.view.data_shown().is_some(),
+        "a picture opens as data"
+    );
+    assert!(harness.view.code_shown().is_none());
+    let ids = offered(&harness.view, MenuKind::Mode);
+    assert!(ids.contains(&Action::ShowData.id()));
+    assert!(!ids.contains(&Action::ShowCode.id()));
+    for mode in [Mode::Text, Mode::Hex] {
+        assert!(ids.contains(&Action::Mode(mode).id()), "{mode:?}");
+    }
+    let text = Harness::new(b"plain words\n", Format::PlainText);
+    assert!(text.view.data_shown().is_none());
+    assert!(!offered(&text.view, MenuKind::Mode).contains(&Action::ShowData.id()));
+}
+
+#[test]
+fn the_data_display_asks_once_and_shows_what_lands_before_the_bytes() {
+    let mut harness = Harness::new(PNG_HEAD, Format::PlainText);
+    let (id, named) = harness.view.data_want().expect("a report is wanted");
+    assert_eq!(named, None);
+    assert_eq!(harness.view.data_want(), None, "asked once");
+    assert_eq!(harness.view.code_want(), None, "a picture is no code");
+    let report = alloc::vec![tairix_image::inspect::ReportLine {
+        text: String::from("PNG image, 41 bytes"),
+        heading: true,
+    }];
+    let mut damage = Region::new();
+    harness
+        .view
+        .data_reported(id, Ok(report), &harness.layout, &mut damage);
+    assert!(!damage.is_empty(), "the report repaints the grid");
+    let len = harness.view.editor().document().len();
+    let data = harness.view.data_shown().expect("shown");
+    assert_eq!(data.row_count(len), 1 + 1 + len.div_ceil(16));
+}
+
+#[test]
+fn the_data_display_is_read_only_and_text_or_hex_leaves_it() {
+    let mut harness = Harness::new(PNG_HEAD, Format::PlainText);
+    let before = harness.text();
+    harness.press(Key::Char('x'));
+    assert_eq!(harness.text(), before, "typing edits nothing");
+    assert!(harness
+        .view
+        .message()
+        .is_some_and(|message| message.starts_with("Data is read-only")));
+    let mut damage = Region::new();
+    harness
+        .view
+        .act(Action::Mode(Mode::Hex), &harness.layout, &mut damage);
+    assert!(harness.view.data_shown().is_none(), "Hex leaves the data");
+    assert_eq!(harness.view.editor().mode(), Mode::Hex);
+    let outcome = harness
+        .view
+        .act(Action::ShowData, &harness.layout, &mut damage);
+    assert_eq!(outcome.relayout, Relayout::Whole);
+    assert!(harness.view.data_shown().is_some(), "and Data comes back");
+    let outcome = harness
+        .view
+        .act(Action::ShowCode, &harness.layout, &mut damage);
+    assert_eq!(
+        outcome.relayout,
+        Relayout::None,
+        "a picture has no code to show"
+    );
 }

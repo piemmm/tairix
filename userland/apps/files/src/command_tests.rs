@@ -264,10 +264,10 @@ fn end_of_options_lets_a_dash_leading_directory_through() {
 #[test]
 fn an_unlistable_location_states_the_place_why_and_the_fallback() {
     let home = ["Users".to_string(), "ada".to_string()];
-    let files = ["Users", "ada", "UserFiles"].map(String::from);
+    let files = ["Users", "ada", "Home"].map(String::from);
     assert_eq!(
         unlistable_reason(&files, "it does not exist", &home),
-        "could not list /Users/ada/UserFiles (it does not exist); opening /Users/ada instead"
+        "could not list /Users/ada/Home (it does not exist); opening /Users/ada instead"
     );
     // The root view spells as `/` rather than as nothing.
     assert_eq!(
@@ -327,7 +327,7 @@ fn a_named_place_is_tried_first_then_the_bare_open_places_then_the_root() {
         )),
         vec![
             place(&["Storage", "Backup"]),
-            place(&["Users", "ada", "UserFiles"]),
+            place(&["Users", "ada", "Home"]),
             home.clone(),
             Vec::new(),
         ]
@@ -340,7 +340,7 @@ fn a_named_place_is_tried_first_then_the_bare_open_places_then_the_root() {
 #[test]
 fn a_place_reached_twice_is_tried_once() {
     let home = place(&["Users", "ada"]);
-    let files = place(&["Users", "ada", "UserFiles"]);
+    let files = place(&["Users", "ada", "Home"]);
     assert_eq!(
         tried(Ladder::new(Some(home.clone()), Some(&home))),
         vec![home.clone(), files.clone(), Vec::new()]
@@ -377,14 +377,12 @@ fn a_step_states_its_hop_and_the_window_states_the_whole_move() {
         ladder.step("its device was removed").as_deref(),
         Some(
             "could not list /Storage/Backup (its device was removed); \
-             opening /Users/ada/UserFiles instead"
+             opening /Users/ada/Home instead"
         )
     );
     assert_eq!(
         ladder.step("you may not read it").as_deref(),
-        Some(
-            "could not list /Users/ada/UserFiles (you may not read it); opening /Users/ada instead"
-        )
+        Some("could not list /Users/ada/Home (you may not read it); opening /Users/ada instead")
     );
     assert_eq!(
         ladder.moved().as_deref(),

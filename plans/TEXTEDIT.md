@@ -22,6 +22,8 @@ address space and I/O off its loop.
 | TE12 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
 | TE14 | Any file opens, and an executable's code is listed in a sandboxed worker | done |
 | TE13 | A save that a crash cannot tear | blocked: no VFS primitive replaces a file's content atomically through a held descriptor |
+| TE15 | A document on a read-only volume is handed over read-only, and an open the hand-over refuses is stated in a window | done |
+| TE16 | Data: a picture opens as a report of its structure and metadata, then its bytes as a hex dump, parsed by a worker of its own | done |
 
 ## What it is
 
@@ -31,8 +33,8 @@ graphical editor for any file, text or not. The curses `edit` command is a
 separate program and stays one; neither links the other.
 
 Single instance, a window per document, resident on the icon bar. The manifest
-requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN` (its two sandbox
-workers, and no other process) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
+requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN` (its three sandbox
+workers — code, syntax and data — and no other process) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
 **no filesystem capability**: every document reaches it through a
 user-mediated grant (Files, the desktop, the picker, a drop), and every write
 goes through the grant the user's act conferred.
@@ -98,6 +100,18 @@ text view shows.
   as the instruction set the user picks, else the one the container names,
   else the system's own; picking the set already listed lists nothing again.
   Showing Code closes the find bar, as nothing it does reaches code.
+- **Data.** A picture — any format `tairix_image` recognises, by its media
+  type or its opening signature — opens read-only as a report of its
+  structure: the container's records in file order with their offsets and
+  lengths, what each declares (dimensions, colour model, density, palette,
+  frames, colour profile, text, and every EXIF tag by name with its value
+  rendered), then the whole file as a hex dump. The report is built by
+  `tairix_image::inspect` in a data worker of its own
+  (`tairix_sandbox::imageinspect::InspectService`), so a hostile picture is
+  parsed neither in the editor nor beside the code or syntax parsers; the hex
+  rows are drawn straight from the document. The report is bounded
+  (`MAX_REPORT_LINES`, `MAX_LINE_BYTES` a line) and says where it stopped.
+  Hex stays the raw dump; Text stays the bytes as text.
 - **Format** (orthogonal to the mode): the syntax colouring and validation
   applied in Text mode — plain text, HTML, XML/SVG, CSS, JavaScript, JSON,
   Markdown, Rust, C, Python, shell, TOML, and the TAIRiX settings formats.
@@ -163,7 +177,11 @@ answers, never a parser.
   documents it may write; absent, it is handed read-only ones.
 - Files, the desktop and the trusted picker open a document read-write for
   such an application when the user may write it, and read-only otherwise
-  (`tairix_browse::document::open_for`); the editor shows which. A fresh
+  (`tairix_browse::document::open_for`); the editor shows which. "Otherwise"
+  is both refusals a write can meet — the user may not write the file
+  (`PermissionDenied`), or its volume is read-only (`ReadOnly`), which is
+  every picture `/System` ships. Any other refusal ends the open, and the file
+  manager states it in an alert rather than on `stderr` alone. A fresh
   launch is wired the descriptor with `--document-writable`, a live instance
   receives a `Target::Document` carrying `writable`, and a pick's
   `FilePicked` carries `writable`. The picker resolves the requester's claim

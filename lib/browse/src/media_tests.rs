@@ -485,6 +485,22 @@ fn every_textual_type_reaches_plain_text_and_a_codec_its_container() {
     }
 }
 
+/// A listing's type column orders by these names, so no two types may read
+/// alike, and none is empty or longer than the column shows whole.
+#[test]
+fn every_type_has_a_name_of_its_own_that_a_type_column_shows_whole() {
+    let mut seen: Vec<&str> = Vec::new();
+    for media in ALL {
+        let name = media.name();
+        assert!(!name.is_empty() && name.len() <= 32, "{media:?}: {name:?}");
+        assert!(
+            !seen.contains(&name),
+            "{media:?} reads as another type: {name}"
+        );
+        seen.push(name);
+    }
+}
+
 #[test]
 fn every_file_is_at_last_bytes_and_nothing_else_is() {
     for media in ALL {
@@ -656,7 +672,7 @@ fn every_type_but_a_directory_and_unknown_content_has_a_family() {
     }
 }
 
-const PICTURES: &str = "/Users/ann/UserFiles/Pictures";
+const PICTURES: &str = "/Users/ann/Home/Pictures";
 
 /// The file every listed picture names.
 const LISTED: FileId = FileId {
@@ -758,7 +774,14 @@ fn a_volume_root_is_pictured_as_its_drive() {
     root.set_occupancy(crate::entry::Occupancy::NonEmpty(
         tairix_icon::FolderSample::default(),
     ));
-    root.set_drive(Some(IconKind::DiskNvme));
+    root.set_drive(Some(&crate::entry::DriveMark {
+        icon: IconKind::DiskNvme,
+        facts: crate::places::VolumeFacts {
+            filesystem: String::from("arxfs"),
+            free: Some(1 << 30),
+            availability: tairix_abi::sysinfo::MountAvailability::Available,
+        },
+    }));
     let mut scratch = String::new();
     let (kind, request) = entry_icon("/Storage", &storage, &root, &mut scratch);
     assert_eq!(kind, IconKind::DiskNvme);

@@ -19,7 +19,7 @@
 //! stops the two from drifting.
 
 use tairix_abi::window_ipc::{
-    AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
 };
 use tairix_abi::Errno;
 use tairix_window::QUIT_ROW;
@@ -75,6 +75,7 @@ pub fn declaration(endpoint: u64) -> Result<AppBar, Errno> {
     let new_window = AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(ROW_NEW_WINDOW)?,
         AppMenuLabel::new("New window")?,
+        AppMenuSymbol::NewWindow,
     ));
     tairix_window::declaration(endpoint, SLOT_CLICK, &[new_window])
 }

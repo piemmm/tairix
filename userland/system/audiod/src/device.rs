@@ -609,14 +609,25 @@ fn device_format(facts: &AudioEndpointFacts, wanted: SampleFormat) -> Result<Sam
         .ok_or(Errno::NotSupported)
 }
 
-/// The period an endpoint is programmed with for a client wanting
-/// `target_frames` of latency at the device's own rate.
+/// The longest period, in milliseconds, an endpoint is programmed with.
 ///
-/// Derived from the device's own reported bounds and the client's target,
-/// never a constant: half the target, so the ring sized from it holds the
-/// whole target, clamped into what the endpoint will actually do.
-fn device_period(facts: &AudioEndpointFacts, target_frames: u32) -> u32 {
+/// The period is every stream's on the endpoint, and the first client fixes
+/// it, so a client buffering deeply — a notification queueing its whole sound,
+/// a player saving power — must not make every later stream that late. This
+/// is a latency bound, not a capacity: a client's own ring still holds all it
+/// asked for.
+const MAX_PERIOD_MS: u32 = 20;
+
+/// The period an endpoint running at `rate` is programmed with for a first
+/// client wanting `target_frames` of latency there.
+///
+/// Half the target, so a ring two periods deep holds it, and never longer
+/// than [`MAX_PERIOD_MS`], clamped into what the endpoint will actually do.
+fn device_period(facts: &AudioEndpointFacts, target_frames: u32, rate: Rate) -> u32 {
+    let longest =
+        u32::try_from(u64::from(rate.hz()) * u64::from(MAX_PERIOD_MS) / 1_000).unwrap_or(u32::MAX);
     (target_frames / 2)
+        .min(longest)
         .max(1)
         .clamp(facts.min_period_frames, facts.max_period_frames)
 }
@@ -740,7 +751,7 @@ pub(crate) fn configure_endpoint<H: RegionHost>(
         rate: device_rate,
         format: device_format,
         channel_map,
-        period_frames: device_period(&facts, target),
+        period_frames: device_period(&facts, target, device_rate),
     })?;
     let resolution = facts.resolved_bits(grant.format);
     match attach_ring(device, regions, index, grant, resolution, dither_seed) {
@@ -1275,4 +1286,56 @@ fn advance(position: Frames, frames: u64) -> Frames {
     position
         .checked_add(frames)
         .unwrap_or_else(|| Frames::new(u64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use tairix_abi::driver::audio::{
+        AudioEndpointFacts, AudioName, ChannelMap, JackState, Rate, RateSupport, SampleFormat,
+        SampleFormats, StreamDirection,
+    };
+
+    use super::device_period;
+
+    fn facts(min: u32, max: u32) -> AudioEndpointFacts {
+        AudioEndpointFacts {
+            index: 0,
+            direction: StreamDirection::Playback,
+            jack: JackState::Present,
+            formats: SampleFormats::EMPTY.with(SampleFormat::S16),
+            resolution: None,
+            channel_map: ChannelMap::STEREO,
+            rates: RateSupport::Continuous {
+                min: Rate::HZ_48000,
+                max: Rate::HZ_48000,
+            },
+            min_period_frames: min,
+            max_period_frames: max,
+            max_ring_frames: 1 << 16,
+            gain: None,
+            name: AudioName::new("period").expect("a short name"),
+        }
+    }
+
+    /// A first client buffering a whole notification — 36 480 frames, as the
+    /// 2026-10-17 Pi 4 boot's cue did — no longer programs a 16 384-frame
+    /// period every later stream on the endpoint waits behind.
+    #[test]
+    fn a_deep_first_client_does_not_make_the_period_long() {
+        assert_eq!(
+            device_period(&facts(16, 16_384), 36_480, Rate::HZ_48000),
+            960
+        );
+    }
+
+    #[test]
+    fn a_shallow_client_keeps_its_short_period_within_the_endpoints_bounds() {
+        let endpoint = facts(64, 16_384);
+        assert_eq!(device_period(&endpoint, 512, Rate::HZ_48000), 256);
+        assert_eq!(device_period(&endpoint, 2, Rate::HZ_48000), 64);
+        assert_eq!(
+            device_period(&facts(2_048, 4_096), 36_480, Rate::HZ_48000),
+            2_048
+        );
+    }
 }

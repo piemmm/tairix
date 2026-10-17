@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{NodeId, NodeSecurity};
 use tairix_abi::driver::DriverError;
-use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
+use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS};
 
 use super::{provision_home_shape, HomeShapeError, HomeTree};
 use crate::policy::{
@@ -118,9 +118,9 @@ fn a_fresh_home_gets_every_folder_owner_only_with_the_user_files_inside() {
             Some(appdata_root_security())
         );
     }
-    for child in USER_FILES_SUBDIRS {
+    for child in HOME_FILES_SUBDIRS {
         let node = tree
-            .at(&[HOME_USER_FILES_DIR, child])
+            .at(&[HOME_FILES_DIR, child])
             .expect("a user files folder");
         assert!(node.directory);
         assert_eq!(node.security, Some(private()), "{child}");
@@ -133,7 +133,7 @@ fn a_fresh_home_gets_every_folder_owner_only_with_the_user_files_inside() {
 #[test]
 fn reshaping_fills_in_the_missing_and_leaves_what_is_there() {
     let mut tree = Tree::new();
-    let files = tree.add(HOME, HOME_USER_FILES_DIR, true);
+    let files = tree.add(HOME, HOME_FILES_DIR, true);
     let custom = NodeSecurity::new(0o750, UID, GID);
     tree.stamp(files, custom).expect("stamped");
     tree.add(files, "Music", false);
@@ -142,17 +142,12 @@ fn reshaping_fills_in_the_missing_and_leaves_what_is_there() {
     provision_home_shape(&mut tree, HOME, UID, GID).expect("shaped");
 
     assert_eq!(
-        tree.at(&[HOME_USER_FILES_DIR]).and_then(|n| n.security),
+        tree.at(&[HOME_FILES_DIR]).and_then(|n| n.security),
         Some(custom)
     );
-    assert!(
-        !tree
-            .at(&[HOME_USER_FILES_DIR, "Music"])
-            .expect("kept")
-            .directory
-    );
+    assert!(!tree.at(&[HOME_FILES_DIR, "Music"]).expect("kept").directory);
     assert!(tree
-        .at(&[HOME_USER_FILES_DIR, "Pictures"])
+        .at(&[HOME_FILES_DIR, "Pictures"])
         .is_some_and(|n| n.directory));
     let desktop = tree.at(&["Desktop"]).expect("kept");
     assert!(!desktop.directory && desktop.children.is_empty());

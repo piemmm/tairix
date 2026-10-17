@@ -155,8 +155,8 @@ impl SaverOption {
                  Performance traces on every core, so each picture is finished sooner."
             }
             Self::RaytraceSave => {
-                "Whether each finished picture is kept as a PNG in UserFiles, under Pictures \
-                 and then Raytracing."
+                "Whether each finished picture is kept as a PNG in your Home folder, under \
+                 Pictures and then Raytracing."
             }
             Self::RaytraceDetail => {
                 "Simple sets each scene out plainly, in a fraction of the memory. Maximum \

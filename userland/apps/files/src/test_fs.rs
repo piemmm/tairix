@@ -10,8 +10,10 @@ use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::BlkMedium;
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::Errno;
-use tairix_browse::{Browser, DirectorySource, Entry, Listing};
+use tairix_browse::{Browser, DirectorySource, Entry, Listing, Volume, VolumeFacts};
 
 /// An in-memory directory tree: a path either lists (empty) or is refused.
 pub struct FakeFs {
@@ -28,7 +30,7 @@ impl FakeFs {
             "/",
             "/Users",
             "/Users/ann",
-            "/Users/ann/UserFiles",
+            "/Users/ann/Home",
             "/System",
             "/Storage/Backup",
         ] {
@@ -53,6 +55,21 @@ impl DirectorySource for FakeFs {
         } else {
             Err(Errno::PermissionDenied)
         }
+    }
+}
+
+/// A serving volume named `label`, mounted at `target` on `medium`, keeping
+/// no accounting.
+pub fn mounted(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
+    Volume {
+        label: label.to_string(),
+        target: target.to_string(),
+        medium,
+        facts: VolumeFacts {
+            filesystem: String::new(),
+            free: None,
+            availability: MountAvailability::Available,
+        },
     }
 }
 

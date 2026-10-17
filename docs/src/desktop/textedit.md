@@ -45,6 +45,20 @@ UTF-8 and control bytes round-trip exactly.
   from View ▸ Instruction set, else the one the container names, else this
   machine's (`boot_facts`), which is what an `rxe` installed here is written
   in; choosing the set already listed lists nothing again.
+- **Data.** A picture — a format `tairix_image::sniff` recognises from its head
+  (a bounded compare), or a RISC OS sprite area by its name, since a sprite
+  area carries no signature — opens here instead: the structure report
+  `tairix_image::inspect` reads of it (the heading naming the format, then each
+  record of its container in file order with its offset, length and what it
+  declares, and every EXIF tag by name with its value in its unit), a heading
+  over the bytes, then every byte as the hex view draws it. The report is read
+  by a worker of its own serving `tairix_sandbox::imageinspect` — the
+  document streamed to it a run at a time from the snapshot, so the editor
+  never holds a second copy — and its reply is held to the report's bounds
+  before a line is believed; the hex rows are the document's own bytes. It is
+  read-only and scrolls as Code does; a report refused for want of memory or of
+  a worker is asked again when Data is shown afresh, and a document past
+  `MAX_DOCUMENT_BYTES` is refused without asking.
 - **Format**, orthogonal to the mode: the colouring and checking the text
   view applies (`tairix-syntax`, [its page](../lib/syntax.md)). It comes from
   the file name, then from the head (asked of the sandbox), and a format the
@@ -87,7 +101,10 @@ from the file manager or the desktop at launch (`--document-writable` or
 as a `Document` target, dropped on its icon-bar slot (the file manager opens
 it for the editor, `docs/src/desktop/wm.md`), or chosen in the session's
 trusted picker. Each surface opens it read-write where the user may write
-it and says which. Save writes back through the handed-over descriptor; a
+it and says which; a file the user may not write, or one on a read-only volume
+— every picture `/System` ships — is handed over read-only
+(`tairix_browse::document::open_for`), and an open the hand-over refuses is
+stated in an alert. Save writes back through the handed-over descriptor; a
 read-only or untitled document's Save is a Save as, whose picker delegates a
 write-only descriptor to a new or confirmed-replaced file. A descriptor goes
 with the window that holds it, one inherited at launch included, so a resident
@@ -97,7 +114,7 @@ editor keeps no access to a document it has closed.
 
 TextEdit runs in the shared document host (`tairix_window::docapp`), which
 owns its windows, their saves and choosers, and the queue saves are written on.
-The loop reads nothing and waits on nothing. Two workers carry what does wait:
+The loop reads nothing and waits on nothing. Workers carry what does wait:
 
 - the host's **queue** answers each job in turn and grows by a fixed share
   (`JOBS_PER_WINDOW`) as each window opens, where a newer search or conversion
@@ -114,7 +131,10 @@ The loop reads nothing and waits on nothing. Two workers carry what does wait:
   down when it closes; all but a read run over a snapshot, handed out again
   while the document is unchanged, so editing goes on meanwhile;
 - the **syntax worker** holds the sandbox that lexes batches of visible
-  lines, detects a format from a head, and validates a store.
+  lines, detects a format from a head, and validates a store;
+- the **code worker** and the **data worker** each hold a sandbox of their
+  own, which lists an executable's code and reads a picture's structure, one
+  window's ask at a time, taking turns over the windows so none is starved.
 
 A window saves one snapshot at a time. A save asked for while one is in
 flight freezes the document as it then is and is written, in turn, once those

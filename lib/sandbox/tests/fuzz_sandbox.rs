@@ -6,7 +6,7 @@
 //! themselves, and the caller-side reply validation are all exercised
 //! together:
 //!
-//! * **Hostile input files** — mutated container/help-document/icon
+//! * **Hostile input files** — mutated container/help-document/icon/picture
 //!   templates and pure noise fed to
 //!   [`tairix_sandbox::decode::container_summary`] / [`manifest_summary`] /
 //!   [`disassemble`] / [`render_help`] / [`rasterise_icon`] over the
@@ -43,6 +43,7 @@ use tairix_sandbox::imageedit::{
     close_edit, open_edit, read_kept, read_rows, select_entry, EditDocument, EditEntry, EditKept,
     EditKind, EditPicture, EditPixels, KeptReason,
 };
+use tairix_sandbox::imageinspect::{inspect_document, InspectService};
 use tairix_sandbox::imagerender::{
     close_view, open_view, plan_wallpaper, rasterise_icon, render_page, render_thumbnail,
     select_page, send_document, ImageRenderService, ViewFormat, WallpaperRenderFailure,
@@ -638,6 +639,38 @@ fn fuzz_edit_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut P
     }
 }
 
+/// One structure-report iteration: every editable picture template mutated
+/// and cut, and noise, reported on as each format and as its signature says.
+/// Whatever comes back keeps to the report's bounds.
+fn fuzz_inspect_iteration(
+    honest: &mut ParserSandbox<LoopbackLauncher<fn() -> InspectService>, SilentSink>,
+    noise: &[u8],
+    rng: &mut Prng,
+) {
+    for template in edit_templates() {
+        let mut mutated = template;
+        for _ in 0..rng.at_most(4) {
+            if !mutated.is_empty() {
+                let pos = rng.below(mutated.len());
+                mutated[pos] ^= rng.next_u8();
+            }
+        }
+        let cut = rng.at_most(mutated.len());
+        for document in [mutated.as_slice(), &mutated[..cut], noise] {
+            if send_document(honest, document).is_err() {
+                continue;
+            }
+            if let Ok(lines) = inspect_document(honest, *rng.pick(&EDIT_FORMATS)) {
+                assert!(lines.len() <= tairix_image::inspect::MAX_REPORT_LINES);
+                for line in lines {
+                    assert!(line.text.len() <= tairix_image::inspect::MAX_LINE_BYTES);
+                    assert!(!line.text.chars().any(char::is_control));
+                }
+            }
+        }
+    }
+}
+
 /// Fetch the rows or bytes of up to four entries of `opened`, holding every
 /// row handed on to the width its description promised and every index to
 /// its palette.
@@ -900,6 +933,11 @@ impl Launcher for HostileLauncher {
     }
 }
 
+/// A sandbox over an honest `S` running in this process.
+fn honest_worker<S: Service + Default>() -> ParserSandbox<LoopbackLauncher<fn() -> S>, SilentSink> {
+    ParserSandbox::new(LoopbackLauncher::new(S::default as fn() -> S), SilentSink)
+}
+
 #[test]
 fn decode_surface_never_panics_for_any_input_or_reply() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -908,26 +946,12 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
 
-    let mut honest = ParserSandbox::new(
-        LoopbackLauncher::new(DecodeService::default as fn() -> DecodeService),
-        SilentSink,
-    );
-    let mut honest_help = ParserSandbox::new(
-        LoopbackLauncher::new(HelpService::default as fn() -> HelpService),
-        SilentSink,
-    );
-    let mut honest_icon = ParserSandbox::new(
-        LoopbackLauncher::new(ImageRenderService::default as fn() -> ImageRenderService),
-        SilentSink,
-    );
-    let mut honest_time = ParserSandbox::new(
-        LoopbackLauncher::new(TimeSyncService::default as fn() -> TimeSyncService),
-        SilentSink,
-    );
-    let mut honest_text = ParserSandbox::new(
-        LoopbackLauncher::new(TextSyntaxService::default as fn() -> TextSyntaxService),
-        SilentSink,
-    );
+    let mut honest = honest_worker::<DecodeService>();
+    let mut honest_help = honest_worker::<HelpService>();
+    let mut honest_icon = honest_worker::<ImageRenderService>();
+    let mut honest_time = honest_worker::<TimeSyncService>();
+    let mut honest_text = honest_worker::<TextSyntaxService>();
+    let mut honest_inspect = honest_worker::<InspectService>();
     let mut hostile = ParserSandbox::new(
         HostileLauncher {
             rng: Prng::new(rng.next_u64()),
@@ -984,6 +1008,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         fuzz_view_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_thumbnail_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_edit_iteration(&mut honest_icon, &noise, &mut rng);
+        fuzz_inspect_iteration(&mut honest_inspect, &noise, &mut rng);
 
         // 6b. The duplex session seam: its inbound codec over the same
         //    noise, plus an honest round trip through the in-process fake.
@@ -1017,6 +1042,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         }
         let _ = drawn(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
         hostile_document_iteration(&mut hostile);
+        let _ = inspect_document(&mut hostile, None);
         let hostile_txn = tairix_net::ntp::Transaction {
             server: 0,
             nonce: tairix_net::ntp::NtpTimestamp::from_raw(nonce),

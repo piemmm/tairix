@@ -44,6 +44,7 @@ mod program {
     extern crate alloc;
 
     use alloc::string::String;
+    use alloc::sync::Arc;
     use alloc::vec::Vec;
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
@@ -65,20 +66,23 @@ mod program {
         SwitchedOff,
     };
     use tairix_geometry::Scale;
-    use tairix_greeter::Verdict;
+    use tairix_greeter::{Courier, Ticket, Verdict};
     use tairix_greeter_service::accounts::{load_accounts, DirectoryError, SessionTransport};
     use tairix_greeter_service::chrome::identity_line;
     use tairix_greeter_service::cursor::pointer_image;
     use tairix_greeter_service::events::{
-        ACCOUNTS_UNAVAILABLE, AUTHORITY_UNREACHABLE, DISPLAY_ASLEEP, DISPLAY_KEPT_BLACK,
-        DISPLAY_WAKE_REFUSED, POINTER_UNAVAILABLE, RIBBON_UNAVAILABLE, SCREEN_READY,
-        SCREEN_READY_MESSAGE, SCREEN_UNAVAILABLE, VERDICT_RECEIVED,
+        ACCOUNTS_UNAVAILABLE, AUTHORITY_ON_LOOP, AUTHORITY_UNREACHABLE, DISPLAY_ASLEEP,
+        DISPLAY_KEPT_BLACK, DISPLAY_WAKE_REFUSED, POINTER_UNAVAILABLE, RIBBON_UNAVAILABLE,
+        SCREEN_READY, SCREEN_READY_MESSAGE, SCREEN_UNAVAILABLE, VERDICT_RECEIVED,
     };
     use tairix_greeter_service::frame::{Present, Scanout};
     use tairix_greeter_service::screen::LoginScreen;
+    use tairix_greeter_service::verify::{exchange, Check, Checked};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::shm::SharedRegion;
+    use tairix_rt::sync::WorkerWake;
+    use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::LogSink;
     use tairix_theme::{Appearance, ThemeRegistry};
     use tairix_window::app;
@@ -93,9 +97,19 @@ mod program {
     /// D12).
     const DISPLAY_OUTPUT_TOKEN: u64 = 1;
 
+    /// Wait-set token for "the authority answered a check".
+    const AUTHORITY_TOKEN: u64 = 2;
+
     /// The frame ring the screen presents through: its own frames, owned by
     /// the ring and unmapped with it.
     type Ring = RemoteDisplay<SharedRegion, RtDisplayTransport>;
+
+    /// The thread every check goes to the authority on, so the key derivation
+    /// it waits on never holds a frame.
+    type AuthorityWorker = Worker<RtSessionTransport, Check, Checked>;
+
+    /// The screen as it runs: asking through its worker.
+    type Screen = LoginScreen<ToWorker>;
 
     /// The seat's lease was refused, or taken away while the screen ran, so
     /// there is no screen to own.
@@ -160,6 +174,24 @@ mod program {
     impl SessionTransport for RtSessionTransport {
         fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::ipc_call(SESSION_ENDPOINT, request, reply).map_err(Errno::from_syscall)
+        }
+    }
+
+    /// The [`Courier`] the running screen asks through: its worker, which
+    /// carries a check on the screen's own thread only where the kernel
+    /// granted no thread.
+    struct ToWorker(Arc<AuthorityWorker>);
+
+    impl Courier for ToWorker {
+        type Answer = Checked;
+
+        fn send(&mut self, ticket: Ticket, account: &str, secret: &str) -> Result<(), Checked> {
+            self.0.submit(Check::new(ticket, account, secret)?);
+            Ok(())
+        }
+
+        fn receive(&mut self) -> Option<Checked> {
+            self.0.collect()
         }
     }
 
@@ -281,17 +313,27 @@ mod program {
     enum Drained {
         /// The channel is empty; the loop may park.
         Empty,
-        /// A secret was verified, so the screen is finished.
-        Verified,
         /// The seat gave neither a whole record nor an empty channel. The
         /// lease is gone or the channel is unreadable, and a lost lease reads
         /// ready forever, so parking again would spin.
         Lost,
     }
 
+    /// Adopt every answer the authority has given, auditing each, answering
+    /// whether one verified the secret the screen was waiting on.
+    fn adopt_answers(screen: &mut Screen) -> bool {
+        while let Some(step) = screen.collect(tairix_rt::clock_get()) {
+            audit(step.answer.verdict);
+            if step.verified {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Drain the seat's pointer channel into the screen, which owes its frame
     /// what the burst changed until the round draws it once.
-    fn drain_pointer<T: SessionTransport>(screen: &mut LoginScreen<T>) -> Drained {
+    fn drain_pointer(screen: &mut Screen) -> Drained {
         let mut wire = [0u8; PointerInput::WIRE_LEN];
         loop {
             let read = tairix_rt::pointer_read(SEAT_PRIMARY, &mut wire);
@@ -306,23 +348,17 @@ mod program {
             let Ok(input) = PointerInput::from_bytes(&wire) else {
                 continue;
             };
-            let step = screen.on_pointer(&input, tairix_rt::clock_get());
-            if let Some(answer) = step.answer {
-                audit(answer.verdict);
-            }
-            if step.verified {
-                break Drained::Verified;
-            }
+            screen.on_pointer(&input, tairix_rt::clock_get());
         }
     }
 
     /// Drain the seat's touch channel through the screen's recogniser, then act
     /// on any touch whose deadline has passed, every queued frame having been
     /// read; the screen owes its frame what they changed.
-    fn drain_touch<T: SessionTransport>(screen: &mut LoginScreen<T>) -> Drained {
+    fn drain_touch(screen: &mut Screen) -> Drained {
         let mut wire = [0u8; TouchFrame::WIRE_LEN];
         let mut gestures = Vec::new();
-        'drain: loop {
+        loop {
             let read = tairix_rt::touch_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
                 screen.expire_touch(tairix_rt::clock_get(), &mut gestures);
@@ -332,13 +368,7 @@ mod program {
                 screen.feed_touch(&frame, &mut gestures);
             }
             for gesture in gestures.drain(..) {
-                let step = screen.on_gesture(gesture, tairix_rt::clock_get());
-                if let Some(answer) = step.answer {
-                    audit(answer.verdict);
-                }
-                if step.verified {
-                    break 'drain Drained::Verified;
-                }
+                screen.on_gesture(gesture, tairix_rt::clock_get());
             }
             if read == 0 {
                 break Drained::Empty;
@@ -348,7 +378,7 @@ mod program {
 
     /// Drain the seat's keyboard channel into the screen, which owes its frame
     /// what the keystrokes changed until the round draws it once.
-    fn drain_keyboard<T: SessionTransport>(screen: &mut LoginScreen<T>) -> Drained {
+    fn drain_keyboard(screen: &mut Screen) -> Drained {
         let mut wire = [0u8; KeyInput::WIRE_LEN];
         loop {
             let read = tairix_rt::keyboard_read(SEAT_PRIMARY, &mut wire);
@@ -364,13 +394,7 @@ mod program {
                 continue;
             };
             let event = tairix_window::key_input_event(input);
-            let step = screen.on_input(&event, tairix_rt::clock_get());
-            if let Some(answer) = step.answer {
-                audit(answer.verdict);
-            }
-            if step.verified {
-                break Drained::Verified;
-            }
+            screen.on_input(&event, tairix_rt::clock_get());
         }
     }
 
@@ -424,10 +448,7 @@ mod program {
     /// output may be a new sink, or a restarted service holding none of the
     /// old ones — and the screen rebuilt in place when the mode is another,
     /// answering the whole of it to show.
-    fn follow_output<T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
-        display: &mut Option<Ring>,
-    ) -> Present {
+    fn follow_output(screen: &mut Screen, display: &mut Option<Ring>) -> Present {
         let output = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query();
         *display = None;
         // A refused query is a lost seat, which the next drain observes.
@@ -499,6 +520,33 @@ mod program {
         };
         let mut display = Some(ring);
 
+        let worker = Arc::new(Worker::new(
+            exchange::<RtSessionTransport>,
+            RtSessionTransport,
+            WorkerWake::create(),
+        ));
+        let threaded = Worker::start(&worker).is_ok();
+        let _worker_guard = WorkerGuard::new(&worker);
+        let woken = worker.wake().read_end().is_some_and(|read| {
+            tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                AUTHORITY_TOKEN,
+            ) >= 0
+        });
+        if !threaded || !woken {
+            // An answer that could never wake the loop would never be adopted,
+            // so the checks are carried on this thread instead.
+            worker.stop();
+            record(
+                AUTHORITY_ON_LOOP,
+                Level::Warn,
+                "greeter: no worker can carry checks to the authority, so the screen waits for each answer",
+            );
+        }
+
         // The ribbon is a night sky, so the column is drawn in the dark theme
         // whichever appearance the desktop defaults to: a dark ink on it
         // would be unreadable.
@@ -510,7 +558,7 @@ mod program {
             Scale::ONE,
             identity(),
             tiles(),
-            RtSessionTransport,
+            ToWorker(Arc::clone(&worker)),
         );
         if !screen.raise_ribbon(tairix_rt::clock_get()) {
             record(
@@ -545,21 +593,22 @@ mod program {
         {
             return fail(EXIT_NO_WAITSET, "the seat's input could not be waited on");
         }
-        park_loop(&mut screen, &mut display, set)
+        park_loop(&mut screen, &mut display, (set, worker.wake()))
     }
 
     /// Serve the screen until it is finished, parking between wakes.
     ///
-    /// Each round drains the seat, wakes a sleeping display for whatever
-    /// input reached it, brings the clock, any lockout and the ribbon up to
-    /// date, draws and presents what all of that changed once, puts the
-    /// display to sleep once the screen has been left alone long enough, and
-    /// then parks on `set` until either input arrives or the nearest of those
-    /// falls due. A sleeping screen arms no timer at all.
-    fn park_loop<T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
+    /// Each round drains the seat, adopts whatever the authority has answered,
+    /// wakes a sleeping display for whatever input reached it, brings the
+    /// clock, any lockout and the ribbon up to date, draws and presents what
+    /// all of that changed once, puts the display to sleep once the screen has
+    /// been left alone long enough, and then parks on `set` until input or an
+    /// answer arrives or the nearest of those falls due. A sleeping screen
+    /// arms no timer at all.
+    fn park_loop(
+        screen: &mut Screen,
         display: &mut Option<Ring>,
-        set: u64,
+        (set, answered): (u64, &WorkerWake),
     ) -> i32 {
         let mut told_unswitchable = false;
         let mut told_unwakeable = false;
@@ -570,25 +619,23 @@ mod program {
             } else {
                 Present::Nothing
             };
-            let drained = match drain_keyboard(screen) {
-                Drained::Empty => match drain_pointer(screen) {
-                    Drained::Empty => drain_touch(screen),
-                    ended => ended,
-                },
-                ended => ended,
-            };
-            match drained {
-                Drained::Verified => {
-                    let verified = round.merged(screen.draw(), screen.mode());
-                    show(display, screen.frame(), verified);
-                    fade_out(screen, display, set);
-                    return 0;
-                }
-                Drained::Lost => return fail(
+            if token == AUTHORITY_TOKEN {
+                answered.drain();
+            }
+            let lost = drain_keyboard(screen) == Drained::Lost
+                || drain_pointer(screen) == Drained::Lost
+                || drain_touch(screen) == Drained::Lost;
+            if lost {
+                return fail(
                     EXIT_NO_SEAT,
                     "the seat stopped delivering readable input, so the screen is no longer ours",
-                ),
-                Drained::Empty => {}
+                );
+            }
+            if adopt_answers(screen) {
+                let verified = round.merged(screen.draw(), screen.mode());
+                show(display, screen.frame(), verified);
+                fade_out(screen, display, set);
+                return 0;
             }
             let now = tairix_rt::clock_get();
             let wall = wall_now();
@@ -666,11 +713,7 @@ mod program {
     /// The seat's channels are still drained, though nothing acts on them:
     /// input left unread reads ready forever, and the park would return at
     /// once instead of pacing the fade.
-    fn fade_out<T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
-        display: &mut Option<Ring>,
-        set: u64,
-    ) {
+    fn fade_out(screen: &mut Screen, display: &mut Option<Ring>, set: u64) {
         let opening = screen.begin_session_fade(tairix_rt::clock_get());
         show(display, screen.frame(), opening);
         for _ in 0..screen.session_fade_budget() {

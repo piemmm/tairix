@@ -14,7 +14,8 @@ use alloc::vec::Vec;
 use tairix_abi::audio::{AudioDeviceDescriptor, AudioGain};
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, PickPurpose,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, AppMenuSymbol,
+    PickPurpose,
 };
 use tairix_audio::target::AudioTarget;
 use tairix_audio::volume::{level_at_permille, permille_of_level, DEFAULT_FLOOR_MILLIBEL};
@@ -932,22 +933,65 @@ impl Player {
     pub fn context_menu(&self) -> AppMenu {
         let mut menu = MenuBuilder::new();
         if let Some(entry) = self.menu_for {
-            let position = self.playlist.position(entry).unwrap_or(0);
-            menu.item(row::PLAY, "Play", "Enter", true, Plate::Root);
-            menu.item(row::REMOVE, "Remove", "Delete", true, Plate::Root);
-            menu.item(row::MOVE_UP, "Move up", "Alt+Up", position > 0, Plate::Root);
-            menu.item(
-                row::MOVE_DOWN,
-                "Move down",
-                "Alt+Down",
-                position + 1 < self.playlist.len(),
-                Plate::Root,
-            );
+            self.entry_rows(&mut menu, entry);
             menu.separator(Plate::Root);
         }
-        menu.item(row::OPEN_FILE, "Open file…", "Ctrl+O", true, Plate::Root);
+        self.list_rows(&mut menu);
+        menu.separator(Plate::Root);
+        self.playback_rows(&mut menu);
+        menu.finish()
+    }
+
+    /// The commands of the row the menu was opened on.
+    fn entry_rows(&self, menu: &mut MenuBuilder, entry: EntryId) {
+        let position = self.playlist.position(entry).unwrap_or(0);
+        menu.item(
+            row::PLAY,
+            AppMenuSymbol::Play,
+            "Play",
+            "Enter",
+            true,
+            Plate::Root,
+        );
+        menu.item(
+            row::REMOVE,
+            AppMenuSymbol::Remove,
+            "Remove",
+            "Delete",
+            true,
+            Plate::Root,
+        );
+        menu.item(
+            row::MOVE_UP,
+            AppMenuSymbol::MoveUp,
+            "Move up",
+            "Alt+Up",
+            position > 0,
+            Plate::Root,
+        );
+        menu.item(
+            row::MOVE_DOWN,
+            AppMenuSymbol::MoveDown,
+            "Move down",
+            "Alt+Down",
+            position + 1 < self.playlist.len(),
+            Plate::Root,
+        );
+    }
+
+    /// The commands that fill or empty the list.
+    fn list_rows(&self, menu: &mut MenuBuilder) {
+        menu.item(
+            row::OPEN_FILE,
+            AppMenuSymbol::Open,
+            "Open file…",
+            "Ctrl+O",
+            true,
+            Plate::Root,
+        );
         menu.item(
             row::OPEN_FOLDER,
+            AppMenuSymbol::OpenFolder,
             "Open folder…",
             "Ctrl+Shift+O",
             true,
@@ -955,34 +999,48 @@ impl Player {
         );
         menu.item(
             row::CLEAR,
+            AppMenuSymbol::Clear,
             "Clear the list",
             "",
             !self.playlist.is_empty(),
             Plate::Root,
         );
-        menu.separator(Plate::Root);
+    }
+
+    /// How the list plays, and where to.
+    fn playback_rows(&self, menu: &mut MenuBuilder) {
         menu.mark(
             row::SHUFFLE,
+            AppMenuSymbol::Shuffle,
             "Shuffle",
             "S",
             self.saved.shuffle,
             Plate::Root,
         );
-        if let Some(plate) = menu.submenu("Repeat", Plate::Root) {
+        if let Some(plate) = menu.submenu("Repeat", AppMenuSymbol::Repeat, Plate::Root) {
             for (id, label, mode) in REPEATS {
-                menu.radio(id, label, "", self.saved.repeat == mode, plate);
+                menu.radio(
+                    id,
+                    repeat_symbol(mode),
+                    label,
+                    "",
+                    self.saved.repeat == mode,
+                    plate,
+                );
             }
         }
         menu.mark(
             row::NORMALISE,
+            AppMenuSymbol::Loudness,
             "Level tracks by their own loudness",
             "",
             self.saved.normalise,
             Plate::Root,
         );
-        if let Some(plate) = menu.submenu("Output", Plate::Root) {
+        if let Some(plate) = menu.submenu("Output", AppMenuSymbol::AudioOutput, Plate::Root) {
             menu.radio(
                 row::DEFAULT_DEVICE,
+                AppMenuSymbol::AudioOutput,
                 "Default",
                 "",
                 self.saved.device.is_none(),
@@ -990,20 +1048,26 @@ impl Player {
             );
             for (id, device) in (row::FIRST_DEVICE..).zip(&self.devices) {
                 let chosen = self.saved.device.as_deref() == Some(device.target.as_str());
-                menu.radio(id, &device.name, "", chosen, plate);
+                menu.radio(
+                    id,
+                    AppMenuSymbol::AudioOutput,
+                    &device.name,
+                    "",
+                    chosen,
+                    plate,
+                );
             }
         }
-        menu.finish()
     }
 
     /// The rows the icon bar's menu carries above its Quit.
     #[must_use]
     pub fn bar_rows(&self) -> Vec<AppMenuRow> {
-        let row = |id: u16, label: &str, mark: AppMenuMark| {
+        let row = |id: u16, symbol: AppMenuSymbol, label: &str, mark: AppMenuMark| {
             let id = AppMenuItemId::new(id).ok()?;
             let label = AppMenuLabel::new(label).ok()?;
             Some(AppMenuRow::Item(
-                AppMenuItem::new(id, label).with_mark(mark),
+                AppMenuItem::new(id, label, symbol).with_mark(mark),
             ))
         };
         let tick = |on: bool| {
@@ -1021,22 +1085,40 @@ impl Player {
             }
         };
         [
-            row(row::OPEN_FILE, "Open file…", AppMenuMark::None),
-            row(row::OPEN_FOLDER, "Open folder…", AppMenuMark::None),
+            row(
+                row::OPEN_FILE,
+                AppMenuSymbol::Open,
+                "Open file…",
+                AppMenuMark::None,
+            ),
+            row(
+                row::OPEN_FOLDER,
+                AppMenuSymbol::OpenFolder,
+                "Open folder…",
+                AppMenuMark::None,
+            ),
             Some(AppMenuRow::Separator),
-            row(row::SHUFFLE, "Shuffle", tick(self.saved.shuffle)),
+            row(
+                row::SHUFFLE,
+                AppMenuSymbol::Shuffle,
+                "Shuffle",
+                tick(self.saved.shuffle),
+            ),
             row(
                 row::REPEAT_OFF,
+                repeat_symbol(Repeat::Off),
                 "Repeat off",
                 radio(self.saved.repeat == Repeat::Off),
             ),
             row(
                 row::REPEAT_ALL,
+                repeat_symbol(Repeat::All),
                 "Repeat the list",
                 radio(self.saved.repeat == Repeat::All),
             ),
             row(
                 row::REPEAT_ONE,
+                repeat_symbol(Repeat::One),
                 "Repeat the track",
                 radio(self.saved.repeat == Repeat::One),
             ),
@@ -1404,6 +1486,15 @@ const REPEATS: [(u16, &str, Repeat); 3] = [
     (row::REPEAT_ALL, "The whole list", Repeat::All),
     (row::REPEAT_ONE, "This track", Repeat::One),
 ];
+
+/// The function a row choosing `mode` shows.
+const fn repeat_symbol(mode: Repeat) -> AppMenuSymbol {
+    match mode {
+        Repeat::Off => AppMenuSymbol::RepeatOff,
+        Repeat::All => AppMenuSymbol::RepeatAll,
+        Repeat::One => AppMenuSymbol::RepeatOne,
+    }
+}
 
 /// The repeat control's glyph for `mode`.
 const fn repeat_icon(mode: Repeat) -> IconKind {

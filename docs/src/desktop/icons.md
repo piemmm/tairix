@@ -105,6 +105,22 @@ every other tier: a glyph is retained as an untinted coverage mask keyed
 `(kind, side)`, so the shape is resolved once and drawn in whatever colour the
 control's state calls for rather than re-rasterised per icon per frame.
 
+## Menu pictures
+
+Every menu row's picture is a command glyph (`lib/icon/src/command.rs`): the
+function an application names (`AppMenuSymbol`) maps to exactly one kind
+(`menu_symbol_icon`), several functions sharing one picture where they mean the
+same to the eye — a tool's menu row and its tool-box button draw the same kind,
+since `Paint`'s tool box takes its pictures from the same mapping. The command
+kinds are authored as stroked SVG path data on the 24-unit grid the badges use,
+in the strokes and round caps the toolbar's glyphs use, so they read at the
+14 to 40 pixels a row's slot spans and keep the same weight beside the
+navigation and file glyphs. They are chrome: one silhouette, tinted in the
+row's foreground or, on a destructive row, the danger hue — never a badge and
+never a raster master. Each is distinct from every other at a row's side, and
+every function draws something at every side a menu row asks for, which the
+crate's tests hold.
+
 ## Settings badges
 
 A settings category's or disclosed pane's built-in picture is a **badge**: its

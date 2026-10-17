@@ -3961,3 +3961,83 @@ fn a_framed_picture_wears_a_one_pixel_frame_around_its_own_bounds() {
     );
     assert_ne!(at(left + 5, top + 5), Some(edge), "one pixel thick");
 }
+
+// --- A tile laid out beside its picture --------------------------------
+
+/// A beside tile seating a `side`-pixel picture, `width` pixels wide.
+fn beside_tile(side: u32, width: u32, theme: &Theme) -> (Rect, TileLayout) {
+    let layout = TileLayout::beside();
+    let height = layout.height_for(side, Scale::ONE, theme);
+    (Rect::new(0, 0, width, height), layout)
+}
+
+#[test]
+fn a_tile_beside_its_picture_is_one_line_tall_and_draws_the_picture_it_was_sized_for() {
+    let theme = Theme::dark();
+    let gap = Scale::ONE
+        .scale_length(theme.metrics().control_inset)
+        .max(1)
+        / 2;
+    let (bounds, layout) = beside_tile(16, 160, &theme);
+    assert_eq!(
+        bounds.height,
+        16u32.max(name_font().line_height()) + gap * 2,
+        "a picture and one line of name, with the half inset round them"
+    );
+    assert_eq!(layout.icon_side(bounds, Scale::ONE, &theme), 16);
+    assert_eq!(layout.label_lines(bounds, Scale::ONE, &theme), 1);
+}
+
+#[test]
+fn a_beside_tiles_name_runs_from_its_picture_and_is_pressed_there() {
+    let theme = Theme::dark();
+    let (bounds, layout) = beside_tile(16, 160, &theme);
+    let core = layout
+        .core_rect(bounds, Scale::ONE, &theme)
+        .expect("a picture");
+    let name = layout
+        .name_target(bounds, Scale::ONE, &theme, "notes.txt", Cut::End)
+        .expect("a name");
+    let body = layout
+        .body_rect(bounds, Scale::ONE, &theme, "notes.txt", Cut::End)
+        .expect("a body");
+    assert!(core.left() < name.left(), "the picture leads");
+    assert_eq!(
+        name.left(),
+        core.right(),
+        "the name's target starts where the picture's ends"
+    );
+    assert!(
+        name.right() < bounds.right(),
+        "a short name leaves ground beside it"
+    );
+    assert_eq!(body, core.union(&body), "the body holds the picture");
+    assert!(body.right() >= name.right(), "and the name");
+    let label = layout
+        .label_rect(bounds, Scale::ONE, &theme)
+        .expect("a band");
+    assert_eq!(label.height, name_font().line_height(), "one line of name");
+    assert!(
+        label.top() > bounds.top() && label.bottom() < bounds.bottom(),
+        "centred on the picture's height"
+    );
+}
+
+#[test]
+fn a_beside_tile_cuts_a_long_name_in_its_middle_and_keeps_its_end() {
+    let theme = Theme::dark();
+    let (bounds, layout) = beside_tile(16, 120, &theme);
+    let name = "a-very-long-holiday-photograph-name.jpeg";
+    let mut s = Surface::new(bounds.width, bounds.height).expect("surface");
+    IconTile::new(name, IconKind::Image)
+        .with_layout(layout)
+        .with_name_cut(Cut::Middle { keep: 5 })
+        .render(&mut s, bounds, Scale::ONE, &theme, None);
+    let target = layout
+        .name_target(bounds, Scale::ONE, &theme, name, Cut::Middle { keep: 5 })
+        .expect("a name");
+    assert!(
+        target.right() <= bounds.right(),
+        "a name too long for its cell stops inside it"
+    );
+}

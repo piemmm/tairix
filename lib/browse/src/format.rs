@@ -8,15 +8,17 @@
 //!
 //! This is the *file-listing* convention (binary size units, an ISO calendar
 //! date), deliberately distinct from the `top`/`sysinfo` figure spellings in
-//! `lib/procinfo` — a browser engine does not depend on the System
-//! Information client crate, and a directory listing reads by calendar date,
-//! not by an uptime-relative figure. Both are pure and total: every input
-//! produces a string, and no path panics.
+//! `lib/procinfo`: a directory listing reads by calendar date, not by an
+//! uptime-relative figure. The calendar is [`CivilTime`]'s and the minute
+//! spelling `tairix_fsmeta`'s, so a listing reads a date as every other surface
+//! does. Every function is pure and total: every input produces a string, and
+//! no path panics.
 
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::time::Time64;
+use tairix_abi::time::{CivilTime, Time64};
+use tairix_fsmeta::calendar::iso_minute;
 
 /// Render a byte count for the item view's size column in binary units:
 /// `0 B`, `512 B`, `1.0 KiB`, `1.5 MiB`, `2.3 GiB`, … up to `PiB`.
@@ -47,90 +49,59 @@ pub fn format_size(bytes: u64) -> String {
     format!("{}.{} {}iB", tenths / 10, tenths % 10, LETTERS[idx])
 }
 
+/// Whether `stamp` is the epoch a backing with no stamp of that kind reports
+/// (see [`Entry::modified`](crate::Entry::modified)), which a listing leaves
+/// blank rather than showing a fabricated `1970-01-01`.
+fn unstamped(stamp: Time64) -> bool {
+    stamp.secs() == Time64::UNIX_EPOCH.secs()
+        && stamp.subsec_nanos() == Time64::UNIX_EPOCH.subsec_nanos()
+}
+
 /// Render an entry's modification instant as an ISO calendar date
 /// (`YYYY-MM-DD`), or the empty string when the instant is the epoch.
 ///
-/// A backing that keeps no per-node stamp reports [`Time64::UNIX_EPOCH`]
-/// (see [`Entry::modified`](crate::Entry::modified)); showing `1970-01-01`
-/// for every such file would be a fabricated wall time, so the column is left
-/// blank instead — honest about the absence rather than inventing a date.
-///
-/// Dates before 1970 and far after 2038 render correctly: the conversion is
-/// the standard proleptic-Gregorian days-to-civil algorithm over the signed
-/// 64-bit seconds, with floor division so a pre-epoch instant maps to the
-/// civil day that contains it.
+/// Dates before 1970 and far after 2038 render correctly: the civil date is
+/// [`CivilTime`]'s, over the signed 64-bit seconds.
 #[must_use]
 pub fn format_date(modified: Time64) -> String {
-    if modified.secs() == Time64::UNIX_EPOCH.secs()
-        && modified.subsec_nanos() == Time64::UNIX_EPOCH.subsec_nanos()
-    {
+    if unstamped(modified) {
         return String::new();
     }
-    let (year, month, day) = civil_from_secs(modified.secs());
-    format!("{year:04}-{month:02}-{day:02}")
+    let civil = CivilTime::from_time64(modified);
+    format!("{:04}-{:02}-{:02}", civil.year, civil.month, civil.day)
+}
+
+/// Render an instant as an ISO date and the time of day to the minute
+/// (`YYYY-MM-DD HH:MM`), the spelling a listing's modified column shows, or the
+/// empty string when the instant is the epoch.
+#[must_use]
+pub fn format_minute(stamp: Time64) -> String {
+    if unstamped(stamp) {
+        return String::new();
+    }
+    iso_minute(&CivilTime::from_time64(stamp))
 }
 
 /// Render an instant as an ISO calendar date *and* wall-clock time
 /// (`YYYY-MM-DD HH:MM:SS`), or the empty string when the instant is the epoch.
 ///
-/// This is the properties-view spelling of a timestamp, where the exact time
-/// of day matters (a listing column uses the shorter date-only
-/// [`format_date`]). The epoch is left blank for the same reason: a backing
-/// that keeps no stamp of a given kind reports [`Time64::UNIX_EPOCH`], and
-/// showing `1970-01-01 00:00:00` for every such node would be a fabricated
-/// wall time. The date is the same proleptic-Gregorian conversion
-/// [`format_date`] uses, so the two never disagree on a calendar day; the
-/// time of day is the floored second-of-day, correct for pre-epoch instants
-/// too.
+/// The properties-view spelling of a timestamp, where the exact second
+/// matters.
 #[must_use]
 pub fn format_datetime(stamp: Time64) -> String {
-    if stamp.secs() == Time64::UNIX_EPOCH.secs()
-        && stamp.subsec_nanos() == Time64::UNIX_EPOCH.subsec_nanos()
-    {
+    if unstamped(stamp) {
         return String::new();
     }
-    let (year, month, day) = civil_from_secs(stamp.secs());
-    let (hour, minute, second) = time_of_day(stamp.secs());
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
-}
-
-/// The floored `(hour, minute, second)` of the day an instant falls in.
-///
-/// Uses Euclidean remainder so the second-of-day is always in `0..86_400`,
-/// matching the floored-day convention of [`civil_from_secs`]: one second
-/// before the epoch is `23:59:59` of the previous civil day, not `-1`.
-fn time_of_day(secs: i64) -> (i64, i64, i64) {
-    const SECS_PER_DAY: i64 = 86_400;
-    let sod = secs.rem_euclid(SECS_PER_DAY);
-    (sod / 3600, (sod % 3600) / 60, sod % 60)
-}
-
-/// Convert signed seconds since the Unix epoch into a proleptic-Gregorian
-/// `(year, month, day)`, flooring to the civil day that contains the instant.
-///
-/// The days-to-civil arithmetic is Howard Hinnant's well-known algorithm,
-/// exact for the full range the seconds can express.
-fn civil_from_secs(secs: i64) -> (i64, i64, i64) {
-    const SECS_PER_DAY: i64 = 86_400;
-    let days = secs.div_euclid(SECS_PER_DAY);
-
-    // Shift the epoch to 0000-03-01 so leap days fall at the end of the cycle.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
-    (year, month, day)
+    let civil = CivilTime::from_time64(stamp);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        civil.year, civil.month, civil.day, civil.hour, civil.minute, civil.second
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_secs, format_date, format_datetime, format_size};
+    use super::{format_date, format_datetime, format_minute, format_size};
     use tairix_abi::time::Time64;
 
     #[test]
@@ -213,10 +184,16 @@ mod tests {
     }
 
     #[test]
-    fn civil_conversion_matches_known_days() {
-        assert_eq!(civil_from_secs(0), (1970, 1, 1));
-        assert_eq!(civil_from_secs(-86_400), (1969, 12, 31));
-        // A leap day.
-        assert_eq!(civil_from_secs(1_582_934_400), (2020, 2, 29));
+    fn a_listings_modified_column_reads_to_the_minute_and_leaves_the_epoch_blank() {
+        assert_eq!(format_minute(Time64::UNIX_EPOCH), "");
+        assert_eq!(
+            format_minute(Time64::from_secs(1_609_459_200 + 13 * 3600 + 37 * 60 + 59)),
+            "2021-01-01 13:37"
+        );
+        assert_eq!(format_minute(Time64::from_secs(-1)), "1969-12-31 23:59");
+        assert_eq!(
+            format_minute(Time64::from_secs(4_102_444_800)),
+            "2100-01-01 00:00"
+        );
     }
 }

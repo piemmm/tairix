@@ -253,14 +253,14 @@ fn a_pick_records_its_file_and_answers_its_call_once_stored() {
         number,
         choices,
         ticket,
-    }) = effects.chosen(&path("/Users/ada/UserFiles/Music/klaxon.wav"))
+    }) = effects.chosen(&path("/Users/ada/Home/Music/klaxon.wav"))
     else {
         panic!("a store");
     };
     assert_eq!(ticket, Some(3));
     assert_eq!(
         choices.file(SoundEvent::Error),
-        Some("/Users/ada/UserFiles/Music/klaxon.wav")
+        Some("/Users/ada/Home/Music/klaxon.wav")
     );
     assert!(!effects.is_picking());
     effects.stored(number, Ok(choices));

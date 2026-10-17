@@ -5,7 +5,7 @@ shared engine (`lib/browse`) gains the interaction a desktop file manager is
 judged by: marquee and modifier selection, drag-and-drop between its windows
 and onto the desktop, a New ▸ submenu, one window per folder, and icons that
 show what a folder holds and what a picture looks like. Its type and tiles are
-tightened, and the user's home gains a `UserFiles` tree. Names keep their
+tightened, and the user's home gains a `Home` folder of their own files. Names keep their
 extension over two lines, a selected name renames in place when clicked, a
 folder's icon fans out the files inside it, tiles leave real ground between
 them, icons cast soft shadows, the marquee keeps up with the pointer, and
@@ -27,8 +27,8 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI1 | Item names one point smaller: the `ItemLabel` role every icon tile's name and every listing row is set in | done |
 | FI2 | Window titles one point smaller, for every window | done |
 | FI3 | Compact icon tiles: the name half as far below its picture, the tile only as tall as what it holds | done |
-| FI4 | A bare open — the icon-bar slot, a launch naming nothing — lands in `UserFiles` | done |
-| FI5 | The home shape: `UserFiles` replaces `Documents` and holds `Documents`, `Music`, `Pictures`, `Videos`, provisioned by one shared walk | done |
+| FI4 | A bare open — the icon-bar slot, a launch naming nothing — lands in the home's `Home` folder | done |
+| FI5 | The home shape: a `Home` folder holds `Documents`, `Music`, `Pictures`, `Videos`, provisioned by one shared walk | done |
 | FI6 | One window per folder: a request for a folder already open raises that window, under a user-attested activation | done |
 | FI7 | An empty default selection, a press on empty space that clears it, Ctrl and Shift clicks, and every selected item drawn | done |
 | FI8 | Marquee selection that selects live, and scrolls the listing when it reaches an edge | done |
@@ -49,6 +49,11 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI23 | Every icon a tile draws casts a small soft shadow, cast once per picture and retained | done |
 | FI24 | ARXFS keeps a per-file content generation, reported by `fs_stat` and every directory record | done |
 | FI25 | Thumbnails persist in the file manager's own store, keyed by content generation, so a picture is decoded once per version | done |
+| FI26 | The places are the user's `Home` and `Desktop` folders and the attached storage: the Home place opens `<home>/Home`, and no place names the system tree | done |
+| FI27 | Display ▸ on the window's menu chooses its view: Large icons, Small icons or List | done |
+| FI28 | Small icons: a small picture beside a one-line name, laid in rows across the window | done |
+| FI29 | List: one row per entry under a header — name, size, modified, type; a drive states its free space, filesystem and health | done |
+| FI30 | No activate-then-close command: the context menu's Open and Close row and its hand-off rule are deleted | done |
 
 ## FI1 — item names one point smaller
 
@@ -77,15 +82,15 @@ follows it, which keeps icon and text aligned.
 The tile's picture slot and name band stop being a fixed proportion of the
 tile. An owner states how many name lines its tiles hold (`TileLayout`); the
 tile reserves exactly that band at the bottom, a half-inset gap above it, and
-gives the picture the rest, capped by the width. `grid_metrics` sizes the cell
+gives the picture the rest, capped by the width. `Tiles::metrics` sizes the cell
 from what it holds — the picture side the tiles have always drawn (seven thirds
 of the body line), a half-inset gap, one name line, insets — so the cell is
 78 px tall at the reference density instead of 90, with the picture unchanged.
 The greeter states three lines, which keeps its disc and its three-line band.
 
-## FI4 — `UserFiles` is where a bare open lands
+## FI4 — the `Home` folder is where a bare open lands
 
-The fallback ladder for a bare open is `<home>/UserFiles`, then `<home>`, then
+The fallback ladder for a bare open is `<home>/Home`, then `<home>`, then
 the root view (`tairix_browse::bare_open_places`). It applies to the icon-bar
 default action, the desktop role's bare open, and `files` with no operand; a
 named location keeps its own ladder (the folder, then the same three), and each
@@ -94,12 +99,12 @@ and climbs to the nearest listable folder above a start that is refused.
 
 ## FI5 — the home shape
 
-`AGENTS.md` §16.3's home folder `Documents/` becomes `UserFiles/`, holding
-`Documents/`, `Music/`, `Pictures/` and `Videos/`.
+`AGENTS.md` §16.3's home holds a `Home/` folder of the user's own files,
+holding `Documents/`, `Music/`, `Pictures/` and `Videos/`.
 
 - The names are defined once in `lib/abi::home` (beside the program-store
   names), and `lib/users` builds the home shape from them: the flat
-  `HOME_SUBDIRS` plus the nested `USER_FILES_SUBDIRS`. Every consumer — the
+  `HOME_SUBDIRS` plus the nested `HOME_FILES_SUBDIRS`. Every consumer — the
   places rail, the desktop's pinboard folder, the trash, the ray-trace album —
   imports them; none spells a home name itself.
 - One walk provisions the shape (`tairix_users::provision_home_shape`) over a
@@ -401,7 +406,7 @@ frame yet uses segments or filter deltas (`plans/OPEN-DEFECTS.md` D803).
 A tile names its entry exactly as the volume holds it; nothing is ever
 stripped. What lost the extension was the cut: one line, elided at its end.
 
-- `render::TILE_LAYOUT` reserves two name lines, in the manager's grid and on
+- `render::Tiles::Large` reserves two name lines, in the manager's grid and on
   the desktop, and the cell grows by one line.
 - `BitmapFont::wrap_with_cut(text, width, lines, cut)` breaks as
   `wrap_to_width` does — at whitespace, mid-word when a word outgrows the line —
@@ -659,6 +664,65 @@ account tiles and every other control draw none.
   the slots are what make that safe: two instances writing one slot leave a
   header and a payload that do not check out, which reads as empty, never as
   the wrong picture.
+
+## FI26 — the places
+
+The rail and the desktop role's icon-bar menu list one model
+(`tairix_browse::Places`): the user's own `Home` and `Desktop` folders, a rule,
+then the attached storage — the `Storage` catalog and every volume attached
+beneath it, sorted by label. The Home place opens `<home>/Home`, never the home
+root, and its label is the folder's own name.
+
+- **The storage group is an allow-list.** A mount is a place when its target is
+  the storage catalog or a volume directly beneath it; the root volume and the
+  system tree's own mounts (`/System`, its writable `Logs` and `Settings`)
+  are never offered, so no place names the OS's own tree. A user still reaches
+  it by navigating, as they reach any folder.
+- **A volume carries what a listing states about it**: its filesystem, its
+  free and total space, and its banded health, read from the same mount record
+  as its medium, so a list view states them without a read of its own.
+
+## FI27 — Display ▸
+
+The window's menu (`lib/browse::chrome::context_menu`) carries Display ▸ beside
+New ▸, in the group above Properties: Large icons, Small icons and List, one
+radio group. The display in force is the group's chosen member and is disabled
+with its reason, as the desktop's own sort and arrangement rows are. A choice
+applies to its window (`Browser::set_view_mode`) and holds while the window
+navigates; a new window opens on Large icons. The toolbar's view command steps
+through the same three in that order. The trusted picker opens on List and
+cycles the same three.
+
+## FI28 — Small icons
+
+The RISC OS Filer's small-icon display: each entry a picture the list row's
+icon side beside one line of its name, cut in its middle so its extension
+shows, the cells laid in rows across the window and wrapping down
+(`GridFlow::RowsFromLeading`). A cell is as wide as a fixed run of the name
+face's average character and as tall as a list row (`render::small_metrics`),
+so the arrangement is a function of the theme and scale alone. It is the tile
+grid with a second arrangement (`TileLayout::beside`): the same cell maths,
+hit-test, marquee, rename field and drop targets, the body being the picture
+and the name's drawn run.
+
+## FI29 — List
+
+One row per entry under a header (`TableHeader`): the entry's icon and name,
+its size, its modification time to the minute, and its type — the content-type
+registry's own name for it (`MediaType::name`), so the column says what the
+icon shows. A drive's row states instead its free space, its filesystem and its
+health, in the size, modified and type columns. In a listing of drives alone
+the header names those three; in a mixed one a drive's free space reads "*n*
+free", so no column misleads. A press on a column header orders the listing by
+that column and a second press reverses it, through the one shared sort: the
+type column orders by the type name it shows, and a drive's columns by its
+free space, filesystem and health.
+
+## FI30 — no activate-then-close
+
+The context menu's Open and Close row is deleted, and with it
+`AfterHandoff`, the only route to closing a window after a hand-off. Activating
+an entry never closes the window it was activated from.
 
 ## Sequencing
 

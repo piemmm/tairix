@@ -17,7 +17,7 @@ use crate::desk::{ArtworkDesk, ArtworkJob};
 use crate::picture::Fitted;
 use tairix_geometry::Rect;
 
-const PATH: &str = "/Users/ann/UserFiles/Pictures/cat.png";
+const PATH: &str = "/Users/ann/Home/Pictures/cat.png";
 const SIDE: u32 = 4;
 
 /// When the fixture file was last written.

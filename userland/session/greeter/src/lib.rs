@@ -29,6 +29,8 @@
 //! * The authority unreachable — the surface says so and keeps asking. It
 //!   does *not* exit, so a transient fault cannot spend the authority's
 //!   restart budget.
+//! * No worker thread — each check is carried on the screen's own thread,
+//!   which then pauses for the authority's answer: slower, never wrong.
 //! * No memory for the ribbon — the flat desktop colour.
 //! * No trusted clock or no host name — that line of chrome is empty. Never
 //!   invented.
@@ -45,7 +47,8 @@
 //! * [`events`] — the stable audit event ids (`19000` range).
 //! * [`accounts`] — the [`SessionTransport`] seam and the bounded paging walk
 //!   that turns the authority's account pages into chooser tiles.
-//! * [`verify`] — the `session-v1` client behind the surface's `Verifier`.
+//! * [`verify`] — the `session-v1` exchange a courier carries off the
+//!   screen's loop for the surface's `Verifier`, which never waits for it.
 //! * [`chrome`](mod@chrome) — the clock, date, and host name text.
 //! * [`cursor`] — the pointer position the seat's relative motion feeds,
 //!   and the arrow drawn at it.
@@ -81,10 +84,13 @@ pub mod screen;
 pub mod verify;
 pub mod wait;
 
+#[cfg(test)]
+mod test_courier;
+
 pub use accounts::{load_accounts, DirectoryError, SessionTransport, MAX_ACCOUNTS};
 pub use chrome::chrome;
 pub use cursor::{pointer_image, Cursor};
 pub use frame::{Present, Scanout};
 pub use screen::{LoginScreen, Step};
-pub use verify::{Answer, SessionVerifier};
+pub use verify::{exchange, Answer, Check, Checked};
 pub use wait::{park_timeout, Cooldown};

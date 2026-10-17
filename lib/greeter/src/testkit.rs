@@ -13,7 +13,9 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
-use crate::surface::{AuthSurface, Backdrop, Chrome, EventContext, Outcome, Verdict, Verifier};
+use crate::surface::{
+    AuthSurface, Backdrop, Chrome, EventContext, Outcome, Ticket, Tickets, Verdict, Verifier,
+};
 
 pub(crate) const PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Primary,
@@ -89,14 +91,21 @@ pub(crate) fn centre(rect: Rect) -> InputEvent {
 }
 
 /// A [`Verifier`] answering from a scripted list of verdicts, oldest first,
-/// and recording every `(account, secret)` it was offered — so a test can
-/// assert both what was asked and what came back for it. Offered past the end
+/// and recording every `(account, secret)` it was asked about — so a test can
+/// assert both what was asked and what came back for it. Asked past the end
 /// of the script, it refuses.
+///
+/// Asking only records the question, as a real authority's would: the answer
+/// is delivered by [`Scripted::answer`], or at once after the event by the
+/// helpers that feed one.
 #[derive(Default)]
 pub(crate) struct Scripted {
     answers: Vec<Verdict>,
+    tickets: Tickets,
     pub(crate) offered: Vec<String>,
     pub(crate) accounts: Vec<String>,
+    /// The questions asked and not yet answered, oldest first.
+    pub(crate) waiting: Vec<Ticket>,
 }
 
 impl Scripted {
@@ -104,46 +113,81 @@ impl Scripted {
         answers.reverse();
         Self {
             answers,
-            offered: Vec::new(),
-            accounts: Vec::new(),
+            ..Self::default()
         }
     }
 
     pub(crate) fn refusing() -> Self {
         Self::new(Vec::new())
     }
-}
 
-impl Verifier for Scripted {
-    fn verify(&mut self, account: &str, secret: &str) -> Verdict {
-        self.accounts.push(String::from(account));
-        self.offered.push(String::from(secret));
-        self.answers.pop().unwrap_or(Verdict::Refused)
+    /// Answer the oldest question still waiting with the next scripted
+    /// verdict, at `now_ns` in `theme`, or `None` when none is waiting.
+    pub(crate) fn answer(
+        &mut self,
+        surface: &mut AuthSurface,
+        now_ns: u64,
+        theme: &Theme,
+    ) -> Option<Outcome> {
+        if self.waiting.is_empty() {
+            return None;
+        }
+        let ticket = self.waiting.remove(0);
+        let verdict = self.answers.pop().unwrap_or(Verdict::Refused);
+        Some(surface.answer(ticket, verdict, now_ns, theme))
     }
 }
 
-/// Apply one event on [`SCREEN`] at the unscaled density.
+impl Verifier for Scripted {
+    fn ask(&mut self, account: &str, secret: &str) -> Ticket {
+        self.accounts.push(String::from(account));
+        self.offered.push(String::from(secret));
+        let ticket = self.tickets.issue();
+        self.waiting.push(ticket);
+        ticket
+    }
+}
+
+/// Apply one event on [`SCREEN`] at the unscaled density, answering at once
+/// any question it asked.
 pub(crate) fn feed(
     surface: &mut AuthSurface,
     event: &InputEvent,
-    verifier: &mut dyn Verifier,
+    verifier: &mut Scripted,
 ) -> Outcome {
     feed_at(surface, event, verifier, 0)
 }
 
-/// Apply one event on [`SCREEN`] at the unscaled density, timed at `now_ns`.
+/// [`feed`], timed at `now_ns`.
 pub(crate) fn feed_at(
     surface: &mut AuthSurface,
     event: &InputEvent,
-    verifier: &mut dyn Verifier,
+    verifier: &mut Scripted,
     now_ns: u64,
 ) -> Outcome {
     feed_in(surface, event, verifier, now_ns, &theme())
 }
 
-/// Apply one event on [`SCREEN`] at the unscaled density, timed at `now_ns`,
-/// in `theme` — which is what decides how long each animation runs.
+/// [`feed`], timed at `now_ns`, in `theme` — which is what decides how long
+/// each animation runs.
+///
+/// Answers the outcome of the answer when the event asked a question, which
+/// is the last thing to have happened to the surface, and otherwise that of
+/// the event.
 pub(crate) fn feed_in(
+    surface: &mut AuthSurface,
+    event: &InputEvent,
+    verifier: &mut Scripted,
+    now_ns: u64,
+    theme: &Theme,
+) -> Outcome {
+    let asked = ask_in(surface, event, verifier, now_ns, theme);
+    verifier.answer(surface, now_ns, theme).unwrap_or(asked)
+}
+
+/// Apply one event on [`SCREEN`] at the unscaled density, timed at `now_ns`
+/// in `theme`, leaving any question it asked unanswered.
+pub(crate) fn ask_in(
     surface: &mut AuthSurface,
     event: &InputEvent,
     verifier: &mut dyn Verifier,
@@ -163,12 +207,8 @@ pub(crate) fn feed_in(
 }
 
 /// Type `secret` one key at a time, then press Enter, returning the outcome
-/// of that final, submitting event.
-pub(crate) fn submit(
-    surface: &mut AuthSurface,
-    secret: &str,
-    verifier: &mut dyn Verifier,
-) -> Outcome {
+/// of the answer to it — or of the Enter, when it asked nothing.
+pub(crate) fn submit(surface: &mut AuthSurface, secret: &str, verifier: &mut Scripted) -> Outcome {
     for ch in secret.chars() {
         feed(surface, &key(Key::Char(ch)), verifier);
     }

@@ -10,7 +10,7 @@ files — navegador gráfico del sistema de archivos
 
 Abre una ventana de escritorio que lista el sistema de archivos, empezando
 por el `directorio` nombrado en la línea de órdenes o, si no se nombra
-ninguno, por la carpeta `UserFiles` del usuario que lo inicia (su directorio
+ninguno, por la carpeta `Home` del usuario que lo inicia (su directorio
 personal si esa carpeta no puede listarse). El título de la ventana nombra
 el directorio actual; la ventana lista sus entradas, cada entrada
 seleccionada resaltada con el color de acento del tema activo. Cada lectura
@@ -21,7 +21,7 @@ nunca se adivina.
 El escritorio inicia el explorador por usted y lo mantiene en la barra de
 iconos: el menú de su ranura lista sus propios lugares y todo lo montado, y
 elegir uno abre allí una ventana. Un clic en la ranura abre una en su
-carpeta `UserFiles`. Pedir una carpeta que ya tiene ventana trae esa ventana
+carpeta `Home`. Pedir una carpeta que ya tiene ventana trae esa ventana
 al frente en lugar de abrir otra. Esa copia no tiene fila *Salir*: forma
 parte del escritorio, y cerrar sus ventanas simplemente la retira.
 
@@ -73,6 +73,14 @@ El submenú *Nuevo* del menú contextual crea una carpeta, o un documento
 vacío de cada tipo que escribe un editor instalado, y abre su nombre para
 editarlo.
 
+El submenú *Mostrar* del menú contextual presenta los elementos como iconos
+grandes, la opción predeterminada; como iconos pequeños, cada nombre en una
+línea junto a su imagen; o como lista, una fila por elemento con su tamaño,
+la fecha de su último cambio y su tipo. Una unidad que aparezca entre ellos
+muestra en su lugar su espacio libre, su sistema de archivos y lo bien que
+funciona. Un clic en el título de una columna ordena la lista por ella, y un
+segundo clic invierte el orden.
+
 `Alt+Enter` abre una ventana de *Propiedades* del elemento seleccionado,
 igual que la fila *Propiedades* del menú contextual. Es una ventana propia,
 así que pueden abrirse varias a la vez y el listado sigue usable mientras
@@ -97,7 +105,7 @@ cada uno de sus componentes debe ser un nombre de directorio real —
 un lugar distinto del que se lee. Un directorio que incumpla alguna de
 esas reglas, o que el usuario que lo lanzó no pueda listar, se rechaza
 con el motivo por el flujo de error estándar y la ventana se abre en la
-carpeta `UserFiles`, de modo que un argumento incorrecto nunca deja al
+carpeta `Home`, de modo que un argumento incorrecto nunca deja al
 usuario sin ventana. Un segundo operando se rechaza de plano en lugar
 de ignorarse.
 

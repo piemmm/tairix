@@ -673,7 +673,7 @@ mod grid {
             let (w, h) = (WIN_WIDTH, WIN_HEIGHT);
             let frame_bytes = (w as usize) * 4 * (h as usize);
             let mut browser = Browser::open_root(Bundles).expect("the fixture root lists");
-            browser.set_view_mode(ViewMode::Grid);
+            browser.set_view_mode(ViewMode::LargeIcons);
             let calls = Rc::new(Calls::default());
             let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
             Self {

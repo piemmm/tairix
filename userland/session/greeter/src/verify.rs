@@ -1,19 +1,30 @@
-//! Relaying one offered secret to the session authority.
+//! Asking the session authority about one offered secret, off the screen's
+//! loop.
+//!
+//! The authority spends a deliberate key-derivation cost on every secret, and
+//! the screen owes the user a frame, so an offer never waits on the loop: it
+//! becomes a [`Check`], a [`Courier`] — a worker thread on a running system —
+//! [`exchange`]s it with the authority, and its [`Checked`] answer is
+//! collected once it has landed.
+//!
+//! [`Courier`]: tairix_greeter::Courier
+
+use alloc::string::String;
 
 use tairix_abi::session_ipc::{
     SessionRequest, SessionVerdict, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
 };
 use tairix_abi::time::Duration64;
-use tairix_greeter::{Verdict, Verifier};
-use tairix_util::secret::Wiped;
+use tairix_greeter::{Ticket, Verdict};
+use tairix_util::secret::WipedBuf;
 
 use crate::accounts::SessionTransport;
 
 /// What the authority answered about one offered secret.
 ///
 /// Kept for the embedder because the surface swallows the verdict: the screen
-/// only needs to know it is still asking, while the service still has to
-/// audit the answer and present the lockout that came with it.
+/// only needs to know whether it is still asking, while the service still has
+/// to audit the answer and present the lockout that came with it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Answer {
     /// The answer itself.
@@ -33,97 +44,103 @@ impl Answer {
     }
 }
 
-/// The `session-v1` client behind the authentication surface.
-///
-/// It decides nothing. It encodes the account and the secret, asks the
-/// authority, and reports the answer — and a reply that is not a verdict
-/// frame is [`Verdict::Unreachable`], never a pass and never a refusal,
-/// because the authority answers a request it will not honour with a
-/// well-formed frame of the *other* shape rather than an error.
-///
-/// The request buffer is a field rather than a local, sized once so encoding
-/// can never reallocate and strand a copy of the secret in a freed block. It
-/// is erased at the end of every exchange, whatever the answer, and again
-/// when the verifier is dropped.
-pub struct SessionVerifier<T: SessionTransport> {
-    transport: T,
-    answer: Option<Answer>,
-    request: Wiped<SESSION_MAX_REQUEST>,
-    reply: [u8; SESSION_MAX_REPLY],
+/// One offered secret on its way to the authority: the `session-v1` request
+/// asking about it, encoded once into a buffer sized up front so it never
+/// moves, and erased when the exchange ends and again when the check is
+/// dropped — carried, displaced by a newer offer, or never sent at all.
+pub struct Check {
+    ticket: Ticket,
+    account: String,
+    request: WipedBuf,
+    len: usize,
 }
 
-impl<T: SessionTransport> SessionVerifier<T> {
-    /// A verifier speaking over `transport`.
-    pub const fn new(transport: T) -> Self {
-        Self {
-            transport,
-            answer: None,
-            request: Wiped::new(),
-            reply: [0u8; SESSION_MAX_REPLY],
-        }
-    }
-
-    /// The authority's last answer, taken exactly once.
+impl Check {
+    /// The request asking whether `secret` authenticates `account`, for the
+    /// offer `ticket` names.
     ///
-    /// Taken rather than read so an embedder cannot apply one refusal's
-    /// lockout twice, or audit one answer on two rounds of the event loop.
-    pub fn take_answer(&mut self) -> Option<Answer> {
-        self.answer.take()
-    }
-
-    /// Ask the authority about `secret`, erasing the request before returning.
-    fn exchange(&mut self, account: &str, secret: &str) -> Answer {
-        let answer = self.ask(account, secret);
-        self.request.wipe();
-        answer
-    }
-
-    /// The exchange itself, over the buffer [`exchange`] erases.
+    /// # Errors
     ///
-    /// [`exchange`]: Self::exchange
-    fn ask(&mut self, account: &str, secret: &str) -> Answer {
-        let request = SessionRequest::Authenticate {
+    /// The unreachable answer to an offer that cannot be asked: no memory
+    /// for the request, or a name or secret the protocol cannot carry.
+    pub fn new(ticket: Ticket, account: &str, secret: &str) -> Result<Self, Checked> {
+        Self::encoded(ticket, account, secret).ok_or_else(|| Checked {
+            ticket,
+            account: String::from(account),
+            answer: Answer::unreachable(),
+        })
+    }
+
+    /// The check, or `None` when its request cannot be held or encoded.
+    fn encoded(ticket: Ticket, account: &str, secret: &str) -> Option<Self> {
+        let mut request = WipedBuf::with_capacity(SESSION_MAX_REQUEST).ok()?;
+        let len = SessionRequest::Authenticate {
             username: account,
             password: secret,
-        };
-        let Ok(len) = request.encode(&mut self.request[..]) else {
-            return Answer::unreachable();
-        };
-        let Ok(read) = self.transport.call(&self.request[..len], &mut self.reply) else {
-            return Answer::unreachable();
-        };
-        let read = read.min(self.reply.len());
-        match SessionVerdict::decode(&self.reply[..read]) {
-            Ok(SessionVerdict::Accepted) => Answer {
-                verdict: Verdict::Verified,
-                retry_after: Duration64::ZERO,
-            },
-            Ok(SessionVerdict::Refused { retry_after }) => Answer {
-                verdict: Verdict::Refused,
-                retry_after,
-            },
-            Err(_) => Answer::unreachable(),
         }
+        .encode(request.extend_zeroed(SESSION_MAX_REQUEST)?)
+        .ok()?;
+        Some(Self {
+            ticket,
+            account: String::from(account),
+            request,
+            len,
+        })
     }
 
-    /// The request buffer, for the tests that assert it was erased.
+    /// The request's bytes, for the tests that check what was sent and what
+    /// was erased.
     #[cfg(test)]
-    fn request_bytes(&self) -> &[u8] {
-        &self.request[..]
-    }
-
-    /// The authority behind this verifier, for the tests that inspect it.
-    #[cfg(test)]
-    const fn transport(&self) -> &T {
-        &self.transport
+    pub(crate) fn request_bytes(&self) -> &[u8] {
+        &self.request
     }
 }
 
-impl<T: SessionTransport> Verifier for SessionVerifier<T> {
-    fn verify(&mut self, account: &str, secret: &str) -> Verdict {
-        let answer = self.exchange(account, secret);
-        self.answer = Some(answer);
-        answer.verdict
+/// The authority's answer to one [`Check`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Checked {
+    /// The offer it answers.
+    pub ticket: Ticket,
+    /// The account it was asked about, whose lockout [`answer`](Self::answer)
+    /// carries.
+    pub account: String,
+    /// The answer.
+    pub answer: Answer,
+}
+
+/// Carry `check` to the authority over `transport`, erasing its request
+/// before returning whatever came back.
+///
+/// It decides nothing. A reply that is not a verdict frame is
+/// [`Verdict::Unreachable`], never a pass and never a refusal, because the
+/// authority answers a request it will not honour with a well-formed frame
+/// of the *other* shape rather than an error.
+pub fn exchange<T: SessionTransport>(transport: &mut T, check: &mut Check) -> Checked {
+    let mut reply = [0u8; SESSION_MAX_REPLY];
+    let answer = match transport.call(&check.request[..check.len], &mut reply) {
+        Ok(read) => decode(&reply[..read.min(reply.len())]),
+        Err(_) => Answer::unreachable(),
+    };
+    check.request.wipe();
+    Checked {
+        ticket: check.ticket,
+        account: core::mem::take(&mut check.account),
+        answer,
+    }
+}
+
+/// The answer a reply frame states.
+fn decode(reply: &[u8]) -> Answer {
+    match SessionVerdict::decode(reply) {
+        Ok(SessionVerdict::Accepted) => Answer {
+            verdict: Verdict::Verified,
+            retry_after: Duration64::ZERO,
+        },
+        Ok(SessionVerdict::Refused { retry_after }) => Answer {
+            verdict: Verdict::Refused,
+            retry_after,
+        },
+        Err(_) => Answer::unreachable(),
     }
 }
 

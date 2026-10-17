@@ -31,7 +31,7 @@ mod program {
     use core::fmt;
 
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::window_ipc::ClipboardKind;
+    use tairix_abi::window_ipc::{AppMenuSymbol, ClipboardKind};
     use tairix_abi::Errno;
     use tairix_appdata::{
         Publication, PublishJob, Published, Refusal as StoreRefusal, RtHost, Settings,
@@ -402,7 +402,8 @@ mod program {
         /// it is out — the save in flight, and the open adjustment's one job,
         /// its preview or its histogram.
         const JOBS_PER_WINDOW: usize = 5;
-        const BAR_ROWS: &'static [&'static str] = &["Settings\u{2026}"];
+        const BAR_ROWS: &'static [(AppMenuSymbol, &'static str)] =
+            &[(AppMenuSymbol::Settings, "Settings\u{2026}")];
 
         fn start(desktop: &Desktop, set: u64) -> Result<Self, i32> {
             // The decode queue's room grows with each window opened.

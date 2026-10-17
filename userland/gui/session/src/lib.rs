@@ -264,11 +264,13 @@ pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::{
     DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, OwedReport, SlotAnswer, WindowUnder,
 };
-pub use drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
+pub use drain::{
+    adopt_unlocks, drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake,
+};
 pub use elevate::{
-    ElevatePrompt, Elevator, PromptOutcome, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE,
-    NOT_STARTED_REASON, REFUSED_REASON, WIN_HEIGHT as ELEVATE_WIN_HEIGHT,
-    WIN_WIDTH as ELEVATE_WIN_WIDTH,
+    ElevateAsk, ElevatePrompt, Elevator, PromptOutcome, ELEVATE_PROMPT_SHOWN,
+    ELEVATE_PROMPT_SHOWN_MESSAGE, NOT_STARTED_REASON, REFUSED_REASON,
+    WIN_HEIGHT as ELEVATE_WIN_HEIGHT, WIN_WIDTH as ELEVATE_WIN_WIDTH,
 };
 pub use fade::{
     BackdropFade, ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
@@ -290,7 +292,7 @@ pub use layer::{
     LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE,
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
-pub use lock::{LockOutcome, LockedDrain, ScreenLock};
+pub use lock::{LockOutcome, ScreenLock, UnlockAsk};
 pub use notify::{is_settings_surface, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{

@@ -47,8 +47,8 @@ pub struct Opened {
 }
 
 /// Open the document at `path` for an application that `edits` documents or
-/// does not: read-write where the user's own authority allows it and the
-/// application edits, read-only otherwise.
+/// does not: read-write where the user may write it on a writable volume and
+/// the application edits, read-only otherwise.
 ///
 /// # Errors
 ///
@@ -70,8 +70,9 @@ fn open_with<F>(
     if edits {
         match open(OpenFlags::READ.union(OpenFlags::WRITE)) {
             Ok(file) => return Ok((file, true)),
-            // A document the user may only read is still theirs to read.
-            Err(Errno::PermissionDenied) => {}
+            // A document the user may only read, or one on a read-only volume,
+            // is still theirs to read.
+            Err(Errno::PermissionDenied | Errno::ReadOnly) => {}
             Err(err) => return Err(err),
         }
     }
@@ -108,6 +109,18 @@ mod tests {
     #[test]
     fn a_document_the_user_may_only_read_is_handed_over_read_only() {
         let (writable, asked) = opened(true, Some(Errno::PermissionDenied));
+        assert_eq!(writable, Ok(false));
+        assert_eq!(
+            asked,
+            [OpenFlags::READ.union(OpenFlags::WRITE), OpenFlags::READ]
+        );
+    }
+
+    /// Every picture `/System` ships is on a read-only volume, so a write
+    /// refused for that reason must still hand the document over to read.
+    #[test]
+    fn a_document_on_a_read_only_volume_is_handed_over_read_only() {
+        let (writable, asked) = opened(true, Some(Errno::ReadOnly));
         assert_eq!(writable, Ok(false));
         assert_eq!(
             asked,

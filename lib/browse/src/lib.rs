@@ -174,14 +174,15 @@ pub use delete::{
 pub use desk::{ListingDesk, ListingJob};
 pub use drive::{Drive, DriveChange, DrivePanels, DriveSample};
 pub use entry::{
-    is_bundle_name, resolve_target, Entry, EntryKind, LinkResolution, LinkTarget, Occupancy,
+    is_bundle_name, resolve_target, DriveMark, Entry, EntryKind, LinkResolution, LinkTarget,
+    Occupancy,
 };
 pub use error::BrowseError;
 pub use execute::{
     paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyKind, CopyWalk,
     CopyWalkError, PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
-pub use format::{format_date, format_datetime, format_size};
+pub use format::{format_date, format_datetime, format_minute, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
 pub use marquee::Marquee;
 pub use media::{
@@ -195,7 +196,7 @@ pub use open_with::{
 };
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};
 pub use places::{
-    bare_open_places, Place, PlaceKind, Places, Volume, FIXED_LABELS, MAX_PLACE_LABEL,
+    bare_open_places, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS, MAX_PLACE_LABEL,
 };
 pub use probes::Probes;
 pub use progress::{ProgressModel, ProgressOp};
@@ -383,7 +384,7 @@ const fn sizing_of(min_width_px: u32, min_height_px: u32, max_height_px: u32) ->
 /// any value answers it.
 pub const WIN_RESIZABLE: bool = sizing_of(0, 0, 0).resizable();
 
-/// The item view a **file-manager** window opens showing: icons, not rows.
+/// The display a **file-manager** window opens showing: large icons.
 ///
 /// The engine's own default is the list a read-only picker wants, so the
 /// manager states its choice — and states it here, because where an item is
@@ -391,7 +392,7 @@ pub const WIN_RESIZABLE: bool = sizing_of(0, 0, 0).resizable();
 /// host-side reconstruction of a gesture into such a window read this one
 /// value, so the tile a script aims at and the tile the renderer paints
 /// cannot disagree.
-pub const MANAGER_VIEW_MODE: ViewMode = ViewMode::Grid;
+pub const MANAGER_VIEW_MODE: ViewMode = ViewMode::LargeIcons;
 
 /// The command-toolbar band a **file-manager** window opens with: none.
 ///

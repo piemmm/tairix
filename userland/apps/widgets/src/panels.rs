@@ -238,9 +238,15 @@ fn choice() -> Vec<DemoItem> {
     let mut locked = MenuItem::new("Locked action").with_role(ControlRole::Neutral);
     locked.set_state(denied());
     let menu = Menu::new(vec![
-        MenuItem::new("Open").with_shortcut("Ctrl+O"),
-        MenuItem::new("Save").with_shortcut("Ctrl+S"),
-        MenuItem::new("Delete").with_role(ControlRole::Destructive),
+        MenuItem::new("Open")
+            .with_shortcut("Ctrl+O")
+            .with_icon(IconKind::Open),
+        MenuItem::new("Save")
+            .with_shortcut("Ctrl+S")
+            .with_icon(IconKind::Save),
+        MenuItem::new("Delete")
+            .with_role(ControlRole::Destructive)
+            .with_icon(IconKind::Delete),
         locked,
     ]);
     vec![

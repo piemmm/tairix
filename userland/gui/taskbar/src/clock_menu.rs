@@ -15,6 +15,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem};
 
 use crate::clock;
@@ -32,6 +33,14 @@ pub enum ClockRow {
 }
 
 impl ClockRow {
+    /// The function this row's picture shows.
+    const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Reading => AppMenuSymbol::Clock,
+            Self::SetDateTime => AppMenuSymbol::SetDateTime,
+        }
+    }
+
     /// What choosing this row asks the embedder for, or `None` for a row that
     /// is a statement rather than a command.
     #[must_use]
@@ -127,7 +136,12 @@ pub(crate) fn rows(permits: &ClockPermits) -> Vec<BarMenuRow> {
                     }
                 }
             };
-            (index, item, why)
+            BarMenuRow {
+                index,
+                symbol: row.symbol(),
+                item,
+                why,
+            }
         })
         .collect()
 }
@@ -165,12 +179,12 @@ mod tests {
 
     /// The rows a menu built for `permits` draws, in plate order.
     fn drawn(permits: &ClockPermits) -> alloc::vec::Vec<tairix_controls::MenuItem> {
-        rows(permits).into_iter().map(|(_, item, _)| item).collect()
+        rows(permits).into_iter().map(|row| row.item).collect()
     }
 
     /// The tip each row carries, in plate order.
     fn tips(permits: &ClockPermits) -> alloc::vec::Vec<Option<&'static str>> {
-        rows(permits).into_iter().map(|(_, _, why)| why).collect()
+        rows(permits).into_iter().map(|row| row.why).collect()
     }
 
     #[test]
@@ -222,10 +236,11 @@ mod tests {
     fn every_row_in_the_table_renders_and_carries_its_own_position() {
         let built = rows(&permits("09:41", true));
         for (index, row) in ROWS.iter().enumerate() {
-            let (position, item, _) = &built[index];
-            assert_eq!(*position, index, "a row carries its own table position");
+            let drawn = &built[index];
+            assert_eq!(drawn.index, index, "a row carries its own table position");
+            assert_eq!(drawn.symbol, row.symbol(), "and its own function");
             assert_eq!(response_at(index), row.response());
-            assert!(!item.label().is_empty());
+            assert!(!drawn.item.label().is_empty());
         }
         assert_eq!(ROWS.first().copied(), Some(ClockRow::Reading));
     }

@@ -590,7 +590,7 @@ fn a_teardown_drops_the_unreported_batch() {
 
 fn thumbnail(name: &str) -> ArtworkKey {
     ArtworkKey::Thumbnail(crate::Thumbnail {
-        path: alloc::format!("/Users/ann/UserFiles/Pictures/{name}"),
+        path: alloc::format!("/Users/ann/Home/Pictures/{name}"),
         stamp: crate::DocumentStamp {
             size: 1,
             modified: tairix_abi::time::Time64::UNIX_EPOCH,

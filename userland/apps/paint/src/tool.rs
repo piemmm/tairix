@@ -1,8 +1,9 @@
 //! The tools, what each is set to, and the tool box and view strip that
 //! choose them.
 
+use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_controls::{ControlRole, IconButton, ScrollOrientation, Toolbar};
-use tairix_icon::IconKind;
+use tairix_icon::{menu_symbol_icon, IconKind};
 
 use crate::brush::Tip;
 use crate::mask::Combine;
@@ -68,28 +69,35 @@ impl Tool {
         Self::Zoom,
     ];
 
-    /// The glyph the tool box draws.
+    /// The function the Tools menu names it by.
+    #[must_use]
+    pub const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Select => AppMenuSymbol::ToolSelect,
+            Self::Pencil => AppMenuSymbol::ToolPencil,
+            Self::Brush => AppMenuSymbol::ToolBrush,
+            Self::Airbrush => AppMenuSymbol::ToolAirbrush,
+            Self::Eraser => AppMenuSymbol::ToolEraser,
+            Self::Clone => AppMenuSymbol::ToolClone,
+            Self::Fill => AppMenuSymbol::ToolFill,
+            Self::Gradient => AppMenuSymbol::ToolGradient,
+            Self::Eyedropper => AppMenuSymbol::ToolEyedropper,
+            Self::Text => AppMenuSymbol::ToolText,
+            Self::Line => AppMenuSymbol::ToolLine,
+            Self::Rectangle => AppMenuSymbol::ToolRectangle,
+            Self::Ellipse => AppMenuSymbol::ToolEllipse,
+            Self::Polygon => AppMenuSymbol::ToolPolygon,
+            Self::Crop => AppMenuSymbol::ToolCrop,
+            Self::Hand => AppMenuSymbol::ToolHand,
+            Self::Zoom => AppMenuSymbol::ToolZoom,
+        }
+    }
+
+    /// The glyph the tool box draws: the Tools menu's own picture, so the
+    /// two can never show a tool differently.
     #[must_use]
     pub const fn icon(self) -> IconKind {
-        match self {
-            Self::Select => IconKind::ToolSelect,
-            Self::Pencil => IconKind::ToolPencil,
-            Self::Brush => IconKind::ToolBrush,
-            Self::Airbrush => IconKind::ToolSpray,
-            Self::Eraser => IconKind::ToolEraser,
-            Self::Clone => IconKind::ToolClone,
-            Self::Fill => IconKind::ToolFill,
-            Self::Gradient => IconKind::ToolGradient,
-            Self::Eyedropper => IconKind::ToolEyedropper,
-            Self::Text => IconKind::ToolText,
-            Self::Line => IconKind::ToolLine,
-            Self::Rectangle => IconKind::ToolRectangle,
-            Self::Ellipse => IconKind::ToolEllipse,
-            Self::Polygon => IconKind::ToolPolygon,
-            Self::Crop => IconKind::ToolCrop,
-            Self::Hand => IconKind::ToolHand,
-            Self::Zoom => IconKind::ToolZoom,
-        }
+        menu_symbol_icon(self.symbol())
     }
 
     /// What the tool is called, with the key that chooses it.

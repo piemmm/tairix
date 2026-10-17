@@ -12,7 +12,7 @@
 //! this opens is one plate and hangs no window of its own.
 
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuShortcut,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuShortcut, AppMenuSymbol,
 };
 use tairix_abi::Errno;
 use tairix_input::{Key, Modifiers};
@@ -97,6 +97,18 @@ impl Command {
         matches!(self, Self::Larger | Self::Clear | Self::Close)
     }
 
+    /// The function the row shows.
+    const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Settings => AppMenuSymbol::Settings,
+            Self::Larger => AppMenuSymbol::TextLarger,
+            Self::Smaller => AppMenuSymbol::TextSmaller,
+            Self::ActualSize => AppMenuSymbol::TextActual,
+            Self::Clear => AppMenuSymbol::Clear,
+            Self::Close => AppMenuSymbol::Close,
+        }
+    }
+
     /// The command `key` with `modifiers` held invokes, if any.
     ///
     /// Only combinations a shell would not otherwise receive as a control
@@ -159,8 +171,12 @@ pub fn model() -> Result<AppMenu, Errno> {
             menu.push(AppMenuRow::Separator)?;
         }
         menu.push(AppMenuRow::Item(
-            AppMenuItem::new(row_id(index)?, AppMenuLabel::new(command.label())?)
-                .with_shortcut(AppMenuShortcut::new(command.shortcut())?),
+            AppMenuItem::new(
+                row_id(index)?,
+                AppMenuLabel::new(command.label())?,
+                command.symbol(),
+            )
+            .with_shortcut(AppMenuShortcut::new(command.shortcut())?),
         ))?;
     }
     Ok(menu)

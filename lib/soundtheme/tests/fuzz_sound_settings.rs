@@ -25,7 +25,7 @@ const THEMES: &[&str] = &["TAIRiX", "High Contrast", "\"Quiet Hours\""];
 const NOT_THEMES: &[&str] = &["..", "a/b", "\"\""];
 const GAINS: &[&str] = &["0dB", "-6.5dB", "-12.25dB", "-90dB"];
 const NOT_GAINS: &[&str] = &["3dB", "-0dB", "-6", "-06dB", "+1dB"];
-const FILES: &[&str] = &["\"\"", "/Users/ada/UserFiles/Music/bell.flac", "/a"];
+const FILES: &[&str] = &["\"\"", "/Users/ada/Home/Music/bell.flac", "/a"];
 const NOT_FILES: &[&str] = &["relative.flac", "Music:/bell.flac", "/"];
 const BAD_TOKENS: &[&str] = &["", " ", "has space", "bogus"];
 

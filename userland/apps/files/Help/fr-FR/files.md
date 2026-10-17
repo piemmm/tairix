@@ -10,7 +10,7 @@ files — navigateur de fichiers graphique
 
 Ouvre une fenêtre de bureau listant le système de fichiers, en partant du
 `répertoire` nommé sur la ligne de commande ou, à défaut, du dossier
-`UserFiles` de l'utilisateur qui le lance (son répertoire personnel si ce
+`Home` de l'utilisateur qui le lance (son répertoire personnel si ce
 dossier ne peut être listé). Le titre de la fenêtre nomme le répertoire
 courant ; la fenêtre liste ses entrées, chaque entrée sélectionnée mise en
 évidence avec la couleur d'accent du thème actif. Chaque lecture de
@@ -21,7 +21,7 @@ deviné.
 Le bureau démarre le navigateur pour vous et le garde dans la barre d'icônes
 : le menu de son emplacement liste vos propres lieux et tout ce qui est
 monté, et choisir l'un d'eux y ouvre une fenêtre. Un clic sur l'emplacement
-en ouvre une sur votre dossier `UserFiles`. Demander un dossier qui a déjà
+en ouvre une sur votre dossier `Home`. Demander un dossier qui a déjà
 une fenêtre amène cette fenêtre au premier plan au lieu d'en ouvrir une
 autre. Cette instance n'a pas de ligne *Quitter* — elle fait partie du
 bureau, et fermer ses fenêtres la range simplement.
@@ -76,6 +76,14 @@ Le sous-menu *Nouveau* du menu contextuel crée un dossier, ou un document
 vide de chaque sorte qu'un éditeur installé sait écrire, et ouvre son nom
 pour le modifier.
 
+Le sous-menu *Affichage* du menu contextuel présente les entrées en grandes
+icônes, par défaut ; en petites icônes, chaque nom sur une ligne à côté de
+son image ; ou en liste, une ligne par entrée avec sa taille, sa date de
+dernière modification et son type. Un lecteur qui y figure indique à la
+place l'espace qui lui reste, son système de fichiers et l'état de son
+service. Un clic sur le titre d'une colonne trie la liste selon celle-ci, et
+un second clic inverse l'ordre.
+
 `Alt+Enter` ouvre une fenêtre *Propriétés* sur l'entrée sélectionnée, tout
 comme la ligne *Propriétés* du menu contextuel. C'est une fenêtre à part
 entière, si bien que plusieurs peuvent être ouvertes à la fois et que le
@@ -102,7 +110,7 @@ et chacun de ses composants doit être un vrai nom de répertoire — `.` et
 ailleurs que ce qu'elle donne à lire. Un répertoire qui enfreint une de
 ces règles, ou que l'utilisateur qui a lancé le programme ne peut pas
 lister, est refusé avec la raison sur le flux d'erreur standard et la
-fenêtre s'ouvre alors sur le dossier `UserFiles`, de sorte qu'un
+fenêtre s'ouvre alors sur le dossier `Home`, de sorte qu'un
 mauvais argument ne laisse jamais l'utilisateur sans fenêtre. Un second
 opérande est refusé d'emblée plutôt qu'ignoré.
 

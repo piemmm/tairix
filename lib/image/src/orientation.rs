@@ -9,27 +9,13 @@
 //! a pixel, so a decoder places each one as it produces it and never holds a
 //! second copy of the picture.
 
-use crate::{be_u16, be_u32, le_u16, le_u32};
+use crate::ifd::{self, Endian, ENTRY_LEN, LONG, MAGIC, SHORT};
 
 /// The `Orientation` tag, in both formats that carry one.
-const TAG_ORIENTATION: u16 = 274;
+pub(crate) const TAG_ORIENTATION: u16 = 274;
 
 /// The marker segment identifier that introduces an EXIF attribute block.
-const EXIF_IDENTIFIER: &[u8] = b"Exif\0\0";
-
-/// The TIFF header's arbitrary version number, which is how a reader
-/// confirms it resolved the byte order the right way round.
-const TIFF_MAGIC: u16 = 42;
-
-/// One IFD entry: tag, type, count, and the value or its offset.
-const ENTRY_BYTES: usize = 12;
-
-/// Field type 3: a 16-bit unsigned integer, which is what EXIF specifies
-/// the orientation is written as.
-const TYPE_SHORT: u16 = 3;
-
-/// Field type 4: a 32-bit unsigned integer, which some writers use instead.
-const TYPE_LONG: u16 = 4;
+pub(crate) const EXIF_IDENTIFIER: &[u8] = b"Exif\0\0";
 
 /// Which edges of the picture the stored raster's first row and first column
 /// lie along, as tag 274 numbers the eight possibilities.
@@ -102,48 +88,29 @@ impl Orientation {
 /// photograph.
 pub(crate) fn from_exif(payload: &[u8]) -> Option<Orientation> {
     let header = payload.strip_prefix(EXIF_IDENTIFIER)?;
-    let big = match header.get(..2)? {
-        b"MM" => true,
-        b"II" => false,
-        _ => return None,
-    };
-    let read_u16 = |at: usize| {
-        if big {
-            be_u16(header, at)
-        } else {
-            le_u16(header, at)
-        }
-    };
-    let read_u32 = |at: usize| {
-        if big {
-            be_u32(header, at)
-        } else {
-            le_u32(header, at)
-        }
-    };
-    if read_u16(2)? != TIFF_MAGIC {
+    let endian = Endian::of(header)?;
+    if endian.u16(header, 2)? != MAGIC {
         return None;
     }
 
     // Offsets are relative to the start of the TIFF header, which is where
     // `header` begins.
-    let directory = usize::try_from(read_u32(4)?).ok()?;
-    let count = usize::from(read_u16(directory)?);
+    let directory = usize::try_from(endian.u32(header, 4)?).ok()?;
+    let count = usize::from(endian.u16(header, directory)?);
     let entries = directory.checked_add(2)?;
     // An entry count is a declaration, not a guarantee: walk only the
     // entries the segment actually holds.
-    let available = header.len().saturating_sub(entries) / ENTRY_BYTES;
+    let available = header.len().saturating_sub(entries) / ENTRY_LEN;
 
     (0..count.min(available)).find_map(|index| {
-        let at = entries + index * ENTRY_BYTES;
-        if read_u16(at)? != TAG_ORIENTATION || read_u32(at + 4)? != 1 {
+        let entry = ifd::entry(header, endian, entries + index * ENTRY_LEN)?;
+        if entry.tag != TAG_ORIENTATION || entry.count != 1 {
             return None;
         }
-        // A single SHORT or LONG is left-justified in the value field, so it
-        // reads at the field's own start under the file's byte order.
-        let value = match read_u16(at + 2)? {
-            TYPE_SHORT => u32::from(read_u16(at + 8)?),
-            TYPE_LONG => read_u32(at + 8)?,
+        let values = entry.values?;
+        let value = match entry.kind {
+            SHORT => u32::from(endian.u16(header, values.at)?),
+            LONG => endian.u32(header, values.at)?,
             _ => return None,
         };
         Orientation::from_tag(value)

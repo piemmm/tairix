@@ -155,7 +155,7 @@ can never diverge in navigation semantics, listing policy, or look.
   `ToolbarCommand::icon`
   gives each command its `lib/icon` glyph, and `apply_command(browser, cmd)`
   is the one shared, **read-only** dispatch (Back / Forward / Up / Refresh /
-  view toggle / sort cycle over `ViewMode::toggled` and `SortMode::next`) both
+  view step / sort cycle over `ViewMode::next` and `SortMode::next`) both
   the toolbar click and its keyboard accelerator run through, so they cannot
   diverge and the read-only picker can drive the same toolbar.
   `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
@@ -434,12 +434,13 @@ can never diverge in navigation semantics, listing policy, or look.
   themselves available, so a surprise-removed device is never drawn as a row
   that would fail on the first click.
   - **One fixed order**, so the rail never reshuffles between two paints of
-    the same state: Home, Desktop, UserFiles, the application root, the system
-    root — the fixed user places, offered whether or not their directories
+    the same state: Home — the user's own files — and Desktop, the fixed user
+    places, offered whether or not their directories
     exist, since the model does no I/O and a shortcut that silently vanishes is
     less honest than one that says why it cannot open — then a drawn
-    separation at `volume_start`, then the accepted volumes sorted stably by
-    label. They are sorted *before* deduplication, so which row survives a
+    separation at `volume_start`, then the accepted storage rows — the
+    `/Storage` catalog and each volume directly beneath it, never the root or
+    the system tree's own mounts — sorted stably by label. They are sorted *before* deduplication, so which row survives a
     duplicated target depends only on the set of volumes, never on the order
     the mount table happened to page them out in. An empty `home` drops the
     three home-derived rows rather than spelling a row that navigates nowhere.
@@ -514,9 +515,10 @@ can never diverge in navigation semantics, listing policy, or look.
     to be shown, so a rail offering one-click jumps to arbitrary mounted
     volumes would widen the pick beyond what was asked for. With no rail the
     window is laid out exactly as it is with no sidebar at all.
-- **Item-view geometry** (`layout`): two views over one selection and one
-  scroll offset — `ListView` (a column of full-width rows) and `GridView`
-  (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the
+- **Item-view geometry** (`layout`): three displays over one selection and one
+  scroll offset — `ListView` (a column of full-width rows under a column
+  header) and `GridView` (a wrapped grid of large or small icon tiles,
+  `render::Tiles`) — behind the `ViewLayout` dispatch, the
   one definition of which items show for a given scroll offset, where each is
   laid out, and the point-to-index hit-test. The offset is in pixels along the
   scroll axis: the items are laid out unscrolled at their natural size and
@@ -528,8 +530,8 @@ can never diverge in navigation semantics, listing policy, or look.
   whatever part of it shows. Both clamp through the shared
   `scroll::ScrollRange` and share one `reveal` rule — the least scroll that
   shows the selection whole — so the renderer and the pointer hit-test can
-  never disagree. `ViewMode` selects the view; toggling preserves the
-  selection and re-reads nothing.
+  never disagree. `ViewMode` selects the display — `LargeIcons`, `SmallIcons`
+  or `List` — and switching preserves the selection and re-reads nothing.
   A line holds only whole tiles (`cells_per_line`), because a tile cut across
   its line could never be scrolled whole. `GridFill` (`tairix_geometry`, whose
   `GridRun` is the one line arithmetic every grid shares) is the
@@ -678,8 +680,10 @@ can never diverge in navigation semantics, listing policy, or look.
   converted through that one scale, so the chrome tracks the display density
   the text does. `render_into` paints the current directory
   into a caller-owned `lib/raster` `Surface` in the browser's `ViewMode` — list
-  entries as shared `lib/controls` `TableRow`s (name/size/modified columns),
-  grid entries as shared `IconTile`s, each carrying the icon of its
+  entries as shared `lib/controls` `TableRow`s under a `TableHeader`
+  (name/size/modified/type, or name/free/filesystem/health for a listing of
+  drives alone — `ListColumns`; a press on a title asks `header_sort_at` for the
+  order it means), grid entries as shared `IconTile`s, each carrying the icon of its
   registry-classified type above the label and no plate of its own (only a
   hovered, selected, or focused entry paints a panel behind its icon) — so the
   file manager and the trusted picker render one coherent themed surface, the
@@ -693,9 +697,9 @@ can never diverge in navigation semantics, listing policy, or look.
   rectangles such a round reports. `render_into`'s trailing
   `artwork: &mut dyn tairix_icon::IconArtwork` is the
   draw-site icon lookup: for each grid tile it is asked for the classified
-  `IconKind` at exactly the side `TILE_LAYOUT.icon_side` reserves (one name
-  line under the picture, the cell `grid_metrics` sizes as tall as both and
-  no taller, shared with the desktop's icon field), and the tile
+  `IconKind` at exactly the side its `Tiles::layout` reserves (the cell
+  `Tiles::metrics` sizes as tall as the picture and its name and no taller, the
+  large tile shared with the desktop's icon field), and the tile
   blits what it returns or draws the built-in vector glyph when it returns
   `None` — so a missing, oversize, or refused asset degrades to a meaningful
   icon and can never blank the tile. A caller with no cache passes
@@ -747,7 +751,7 @@ can never diverge in navigation semantics, listing policy, or look.
   a damage report names — and `selection_name_rect` is the narrower rectangle
   the selected item's **name** occupies, read from the drawn controls
   themselves (`TableRow::cell_text_rect` for a list row's name cell,
-  `TILE_LAYOUT.label_rect` for a tile's label band) so the in-place rename editor
+  `TileLayout::label_rect` for a tile's label band) so the in-place rename editor
   sits on the name rather than over the icon and the columns beside it.
   `draw_properties_window` is the file manager's Properties
   surface, laid out from its own window's client: the metadata fields, the

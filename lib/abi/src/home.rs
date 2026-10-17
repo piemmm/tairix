@@ -18,53 +18,53 @@ pub const HOME_LIBRARY_DIR: &str = "Library";
 /// Per-user settings, including the gated per-app configuration root.
 pub const HOME_SETTINGS_DIR: &str = "Settings";
 
-/// The user's own files: where a bare file-manager window opens, holding one
-/// folder per kind of document ([`USER_FILES_SUBDIRS`]).
-pub const HOME_USER_FILES_DIR: &str = "UserFiles";
+/// The user's own files: the file manager's Home place and where a bare
+/// file-manager window opens, holding one folder per kind of document
+/// ([`HOME_FILES_SUBDIRS`]).
+pub const HOME_FILES_DIR: &str = "Home";
 
-/// Documents in [`HOME_USER_FILES_DIR`].
-pub const USER_FILES_DOCUMENTS_DIR: &str = "Documents";
+/// Documents in [`HOME_FILES_DIR`].
+pub const HOME_FILES_DOCUMENTS_DIR: &str = "Documents";
 
-/// Music in [`HOME_USER_FILES_DIR`].
-pub const USER_FILES_MUSIC_DIR: &str = "Music";
+/// Music in [`HOME_FILES_DIR`].
+pub const HOME_FILES_MUSIC_DIR: &str = "Music";
 
-/// Pictures in [`HOME_USER_FILES_DIR`].
-pub const USER_FILES_PICTURES_DIR: &str = "Pictures";
+/// Pictures in [`HOME_FILES_DIR`].
+pub const HOME_FILES_PICTURES_DIR: &str = "Pictures";
 
-/// Videos in [`HOME_USER_FILES_DIR`].
-pub const USER_FILES_VIDEOS_DIR: &str = "Videos";
+/// Videos in [`HOME_FILES_DIR`].
+pub const HOME_FILES_VIDEOS_DIR: &str = "Videos";
 
-/// The folders a home's [`HOME_USER_FILES_DIR`] is provisioned with, sorted.
-pub const USER_FILES_SUBDIRS: [&str; 4] = [
-    USER_FILES_DOCUMENTS_DIR,
-    USER_FILES_MUSIC_DIR,
-    USER_FILES_PICTURES_DIR,
-    USER_FILES_VIDEOS_DIR,
+/// The folders a home's [`HOME_FILES_DIR`] is provisioned with, sorted.
+pub const HOME_FILES_SUBDIRS: [&str; 4] = [
+    HOME_FILES_DOCUMENTS_DIR,
+    HOME_FILES_MUSIC_DIR,
+    HOME_FILES_PICTURES_DIR,
+    HOME_FILES_VIDEOS_DIR,
 ];
 
 #[cfg(test)]
 mod tests {
     use super::{
-        HOME_DESKTOP_DIR, HOME_LIBRARY_DIR, HOME_SETTINGS_DIR, HOME_USER_FILES_DIR,
-        USER_FILES_SUBDIRS,
+        HOME_DESKTOP_DIR, HOME_FILES_DIR, HOME_FILES_SUBDIRS, HOME_LIBRARY_DIR, HOME_SETTINGS_DIR,
     };
 
     /// A provisioner creates each name as a child of its parent, so each must
     /// be one plain component; a sorted, unique table lists deterministically.
     #[test]
-    fn every_home_name_is_one_plain_component_and_the_user_files_are_sorted() {
+    fn every_home_name_is_one_plain_component_and_the_users_files_are_sorted() {
         let all = [
             HOME_DESKTOP_DIR,
             HOME_LIBRARY_DIR,
             HOME_SETTINGS_DIR,
-            HOME_USER_FILES_DIR,
+            HOME_FILES_DIR,
         ]
         .into_iter()
-        .chain(USER_FILES_SUBDIRS);
+        .chain(HOME_FILES_SUBDIRS);
         for name in all {
             assert!(!name.is_empty() && !name.contains('/'), "{name:?}");
             assert!(name != "." && name != "..", "{name:?}");
         }
-        assert!(USER_FILES_SUBDIRS.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(HOME_FILES_SUBDIRS.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }

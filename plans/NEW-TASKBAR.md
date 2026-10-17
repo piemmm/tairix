@@ -1757,7 +1757,7 @@ now stands:
   share one cell geometry, one hit-test, one set of counts (`cells_per_line`,
   `lines_total`, `visible_range`) and one scrolled view (`view`,
   `shown_rect`). The tile
-  is shared too: `grid_tile`, `entry_label`, and `grid_metrics` are public, so
+  is shared too: `Tiles::tile`, `entry_label`, and `Tiles::metrics` are public, so
   the desktop paints the *same* `lib/controls::IconTile` — the plateless
   picture-over-name item — as the file manager rather than a lookalike; there is
   no second icon-tile painter. A line holds only whole tiles across it; along

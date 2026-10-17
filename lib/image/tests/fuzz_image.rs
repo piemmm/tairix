@@ -35,6 +35,10 @@
 //!    answered [`DecodeError::OutOfMemory`] rather than an abort. A caller
 //!    accounting decodes before they run is only as sound as that bound, and
 //!    mutated files are where an odd but legal structure would break it.
+//! 8. The structure report ([`inspect`]) of every input, read as every
+//!    format, never panics and stays within its bounds: no more than
+//!    [`MAX_REPORT_LINES`] lines, none longer than [`MAX_LINE_BYTES`] and none
+//!    holding a control character, whatever text the file carries.
 //!
 //! Every generator, and its chunk/zlib, marker/Huffman, and block/LZW
 //! framing helpers, are deliberately self-contained: this harness only calls
@@ -46,6 +50,7 @@
 
 use tairix_fuzzseed::meter::{metered, refusing_above, Metered};
 use tairix_fuzzseed::Prng;
+use tairix_image::inspect::{inspect, MAX_LINE_BYTES, MAX_REPORT_LINES};
 use tairix_image::{
     decode, decode_as, decode_fitted, decode_fitted_as, decode_peak_bytes, decode_peak_bytes_as,
     encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png, encode_sprite_area, encode_tiff,
@@ -2225,6 +2230,37 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
         walk(sequence, &limits);
     }
     native_doors_agree_and_write_back(bytes);
+    reports_within_bounds(bytes);
+}
+
+/// Every format's structure report of `bytes` keeps to the report's bounds.
+fn reports_within_bounds(bytes: &[u8]) {
+    for format in [
+        ImageFormat::Png,
+        ImageFormat::Jpeg,
+        ImageFormat::Gif,
+        ImageFormat::Bmp,
+        ImageFormat::Ico,
+        ImageFormat::Sprite,
+        ImageFormat::Tiff,
+        ImageFormat::Webp,
+        ImageFormat::OpenRaster,
+    ] {
+        let report = inspect(bytes, format);
+        assert!(report.lines().len() <= MAX_REPORT_LINES, "{format:?}");
+        for line in report.lines() {
+            assert!(
+                line.text.len() <= MAX_LINE_BYTES,
+                "{format:?}: {:?}",
+                line.text
+            );
+            assert!(
+                !line.text.chars().any(char::is_control),
+                "{format:?}: {:?}",
+                line.text
+            );
+        }
+    }
 }
 
 /// `rgba` as it looks: a fully transparent pixel shows nothing, whatever

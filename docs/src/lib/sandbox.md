@@ -146,6 +146,12 @@ Stability tier: **experimental**.
   `MAX_LAYER_NAME` and a stack to `MOST_ORA_LAYERS`. `Paint.app` is the
   consumer, and reads each document through a fresh worker
   (`ParserSandbox::release`).
+- **`imageinspect`** — a picture's structure report over the same upload: the
+  records its container holds and every EXIF tag (`tairix_image::inspect`),
+  answered as lines the caller holds to `MAX_REPORT_LINES`, `MAX_LINE_BYTES`
+  and printable UTF-8. The image worker serves it beside its other ops, and
+  `InspectService` alone, in a worker held to one document. `TextEdit.app`'s
+  Data display is the consumer.
 - **`audiodecode`** — a sound file decoded through
   [`tairix-sound`](./sound.md) by a long-lived worker over a supervised
   session. The owner hands over the file's length, never the file: the

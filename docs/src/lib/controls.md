@@ -469,7 +469,10 @@ compositor, a window, an account database or IPC: an owner gives it events
 and a rectangle, takes back a painted surface and a `CredentialAction`, and
 performs the exchange itself. The password is held only in the masked field's
 bounded, pre-reserved buffer, which zeroises every byte it discards including
-on drop.
+on drop. An owner that has handed the password to its worker calls `check`:
+the sheet clears it, states `CREDENTIAL_CHECKING_REASON`, and takes no input —
+not even a cancel, which could not recall what the authority may already be
+doing — until the owner `refuse`s it or takes it down.
 
 - `FactList` is a column of key/value readouts with the values right-aligned
   on one another: the value keeps its room and the label gives way first,
@@ -1001,7 +1004,10 @@ height that leaves, capped by the width — so a cell sized with
 as tall as what it holds. `icon_side`, `label_lines` and `label_rect` read the
 one geometry the render lays out to, so an owner never re-derives it: the file
 manager and the desktop state two lines, the login chooser three, so a two-word
-display name is not elided.
+display name is not elided. `TileLayout::beside()` arranges the tile the other
+way, its picture as tall as the name line and one line of name beside it, which
+is the file manager's small icons; every query reads that arrangement as it
+reads the stacked one.
 
 The name is set in `TextRole::ItemLabel` and wraps rather than being cut.
 `paint_label` lays it out over the stated lines, each centred in the band's

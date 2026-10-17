@@ -277,11 +277,11 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::AlertWarning => EXCLAMATION,
         IconKind::AlertInformation => LETTER_I,
         IconKind::AlertQuestion => QUESTION,
-        _ => return None,
+        _ => return crate::command::marks(kind),
     })
 }
 
-const fn fill(outlines: &'static [Outline]) -> Mark {
+pub(crate) const fn fill(outlines: &'static [Outline]) -> Mark {
     Mark::Fill {
         outlines,
         rule: FillRule::NonZero,
@@ -289,14 +289,14 @@ const fn fill(outlines: &'static [Outline]) -> Mark {
 }
 
 /// A fill whose inner contours are holes.
-const fn cut(outlines: &'static [Outline]) -> Mark {
+pub(crate) const fn cut(outlines: &'static [Outline]) -> Mark {
     Mark::Fill {
         outlines,
         rule: FillRule::EvenOdd,
     }
 }
 
-const fn stroke(outlines: &'static [Outline], width: f64) -> Mark {
+pub(crate) const fn stroke(outlines: &'static [Outline], width: f64) -> Mark {
     Mark::Stroke {
         outlines,
         width,
@@ -305,7 +305,7 @@ const fn stroke(outlines: &'static [Outline], width: f64) -> Mark {
     }
 }
 
-const fn circle(x: f64, y: f64, radius: f64) -> Outline {
+pub(crate) const fn circle(x: f64, y: f64, radius: f64) -> Outline {
     Outline::Circle {
         centre: (x, y),
         radius,

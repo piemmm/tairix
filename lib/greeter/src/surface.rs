@@ -1,6 +1,6 @@
 //! The authentication surface: the account chooser, the panel, the masked
 //! field, the notice, and the state machine that turns one input event into a
-//! verdict.
+//! question for the authority, and its answer into a verdict.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -41,6 +41,9 @@ pub const UNNAMED_ACCOUNT: &str = "Locked";
 
 /// What the field says while it is waiting for a secret.
 pub(crate) const HINT: &str = "Type your password and press Enter";
+
+/// What the field says while the authority checks the secret it was offered.
+pub(crate) const CHECKING: &str = "Checking your password\u{2026}";
 
 /// What the field says after the verifier refused the secret.
 pub(crate) const REFUSED: &str = "That password was not accepted";
@@ -91,23 +94,61 @@ pub enum Verdict {
     Unreachable,
 }
 
+/// Which offered secret an answer is about.
+///
+/// Issued by the [`Verifier`] that takes the offer and carried back with its
+/// answer, so the surface adopts only the answer it is waiting for: one to an
+/// offer it has since stepped away from, or one meant for a surface the
+/// embedder has replaced, is told apart and ignored.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Ticket(u64);
+
+/// Where a [`Verifier`]'s tickets come from: each issued once.
+///
+/// Held by the verifier for its whole life, so tickets stay distinct across
+/// every surface it serves.
+#[derive(Debug, Default)]
+pub struct Tickets {
+    issued: u64,
+}
+
+impl Tickets {
+    /// A ticket no earlier call issued.
+    pub fn issue(&mut self) -> Ticket {
+        self.issued = self.issued.wrapping_add(1);
+        Ticket(self.issued)
+    }
+}
+
 /// How the surface asks whether a secret belongs to an account.
 ///
 /// The surface never answers that itself: it holds no credential store, no
 /// key, and no authority. On a running system the embedder implements this
 /// over whatever authenticates for it — the per-console elevation broker
 /// behind the desktop's screen lock, the session authority behind the login
-/// greeter — and a test injects an answer directly. Holding it behind a seam
-/// is what lets the whole surface — its editing, its wording, its erasure of
-/// the secret — be exercised on the host without a kernel.
+/// greeter — and a test answers from a script. Holding it behind a seam is
+/// what lets the whole surface — its editing, its wording, its erasure of the
+/// secret — be exercised on the host without a kernel.
+///
+/// The question is asked, never awaited. An authority spends a deliberate
+/// key-derivation cost on every secret, and the surface sits on a loop that
+/// owes the user a frame, so the answer comes back later through
+/// [`AuthSurface::answer`] — on the next round at the soonest — and the
+/// surface says it is checking until then.
 pub trait Verifier {
-    /// Whether `secret` authenticates `account`.
+    /// Ask whether `secret` authenticates `account`, answering the ticket the
+    /// answer will carry.
     ///
     /// `account` is the login name the surface is currently asking for. An
     /// embedder that authenticates its own kernel-attested caller, rather
     /// than a name it was handed, ignores it — asking on behalf of another
     /// account is exactly what such a broker must refuse.
-    fn verify(&mut self, account: &str, secret: &str) -> Verdict;
+    ///
+    /// `secret` is the surface's, and it erases it as soon as this returns.
+    /// An implementor that needs it afterwards copies it into storage that it
+    /// erases itself, on every path. One that cannot ask at all still
+    /// answers, [`Verdict::Unreachable`], so no surface is left checking.
+    fn ask(&mut self, account: &str, secret: &str) -> Ticket;
 }
 
 /// The two lines drawn along the top of the screen: what the machine is in
@@ -228,8 +269,8 @@ impl Outcome {
         self.paints
     }
 
-    /// Whether a secret was offered and the verifier accepted it, by which
-    /// time the secret has already been erased.
+    /// Whether this was the answer accepting the secret offered, which was
+    /// erased when it was offered.
     #[must_use]
     pub const fn verified(self) -> bool {
         self.verified
@@ -262,7 +303,7 @@ pub struct EventContext<'a> {
     pub scale: Scale,
     /// The theme the frame was rendered in.
     pub theme: &'a Theme,
-    /// Who decides whether a submitted secret belongs to the account.
+    /// Who is asked whether a submitted secret belongs to the account.
     pub verifier: &'a mut dyn Verifier,
     /// Monotonic nanoseconds the surface times its motion from: the chooser's
     /// selection cross-fade, one stage giving way to another, and the shake
@@ -303,12 +344,12 @@ struct Placement {
 /// under it.
 ///
 /// The surface is modal and total by construction. It offers no cancel, no
-/// timeout, and no affordance that concludes it: [`on_event`](Self::on_event)
-/// reports [`Outcome::verified`] only when a [`Verifier`] answered
-/// [`Verdict::Verified`], so no key, no click, no empty account list, and no
-/// cooldown expiring can conclude it without one. Enforcing that *nothing
-/// else* on the machine sees those events is the embedder's half of the
-/// contract; a surface cannot do it from the inside.
+/// timeout, and no affordance that concludes it: only [`answer`](Self::answer)
+/// reports [`Outcome::verified`], and only for a [`Verdict::Verified`] carrying
+/// the ticket of the offer it is waiting on, so no key, no click, no empty
+/// account list, no cooldown expiring and no stale answer can conclude it.
+/// Enforcing that *nothing else* on the machine sees those events is the
+/// embedder's half of the contract; a surface cannot do it from the inside.
 ///
 /// Nothing here rate-limits or counts attempts, deliberately. The authority
 /// behind the [`Verifier`] owns that policy and audits every attempt against
@@ -324,6 +365,9 @@ pub struct AuthSurface {
     /// not always the login name the [`Verifier`] is asked about.
     heading: String,
     field: SecretField,
+    /// The offer the authority is checking, while it is: the field takes no
+    /// input until its answer comes back.
+    checking: Option<Ticket>,
     notice: String,
     /// Bumped whenever the notice text changes, so an event can tell a
     /// keystroke's damage from a verdict's without copying the line.
@@ -409,6 +453,7 @@ impl AuthSurface {
             account: login.to_string(),
             heading: shown.to_string(),
             field: secret_field(),
+            checking: None,
             notice: HINT.to_string(),
             notice_rev: 0,
             cooldown: Duration64::ZERO,
@@ -431,6 +476,7 @@ impl AuthSurface {
             account: String::new(),
             heading: String::new(),
             field: secret_field(),
+            checking: None,
             notice: CHOOSE_HINT.to_string(),
             notice_rev: 0,
             cooldown: Duration64::ZERO,
@@ -490,7 +536,8 @@ impl AuthSurface {
         if self.is_cooling() {
             self.show(cooldown_notice(remaining), ValidationState::Invalid);
         } else {
-            self.show(self.resting_hint().to_string(), ValidationState::Valid);
+            let (hint, validation) = self.resting();
+            self.show(hint.to_string(), validation);
         }
         Outcome::changed(self.placement.get().map(|placed| placed.panel))
     }
@@ -504,12 +551,13 @@ impl AuthSurface {
     /// `Enter` offers what was typed; the pointer places the caret and
     /// selects within the login-name field — the secret's caret never leaves
     /// its end — and reaches nothing else. `Escape` steps back to the chooser
-    /// when there is one.
+    /// when there is one, leaving behind any offer still being checked.
+    /// While the authority checks an offer the field takes nothing else.
     ///
     /// The secret is erased before this returns on every path out of an
-    /// offer — accepted, refused, unanswerable, or refused for a cooldown —
-    /// and on every step back to the chooser, so no later branch can be the
-    /// one that forgot.
+    /// offer — handed to the verifier, refused as unofferable, or refused for
+    /// a cooldown — and on every step back to the chooser, so no later branch
+    /// can be the one that forgot.
     pub fn on_event(&mut self, event: &InputEvent, ctx: &mut EventContext<'_>) -> Outcome {
         // Once the screen has begun leaving, the answer is already given and
         // nothing may take it back.
@@ -522,6 +570,45 @@ impl AuthSurface {
             Mode::Name(_) => self.on_name_event(event, ctx),
             Mode::Secret => self.on_secret_event(event, ctx),
         }
+    }
+
+    /// Adopt the authority's `verdict` on the offer `ticket` names, at
+    /// monotonic `now_ns`, in `theme`.
+    ///
+    /// Only the answer the surface is waiting for is adopted: one to an offer
+    /// it has stepped away from, or that some other surface made, changes
+    /// nothing. A refusal is said and shakes the question; an authority that
+    /// could not be reached refused nothing, so nothing shakes. This is the
+    /// only way [`Outcome::verified`] is ever reported.
+    pub fn answer(
+        &mut self,
+        ticket: Ticket,
+        verdict: Verdict,
+        now_ns: u64,
+        theme: &Theme,
+    ) -> Outcome {
+        if self.session_fade_begun() || self.checking != Some(ticket) {
+            return Outcome::quiet();
+        }
+        self.checking = None;
+        match verdict {
+            Verdict::Verified => {
+                return Outcome {
+                    redraw: true,
+                    paints: true,
+                    verified: true,
+                    damage: None,
+                };
+            }
+            Verdict::Refused => {
+                self.show(REFUSED.to_string(), ValidationState::Invalid);
+                self.shake = Shake::start(now_ns, rejected_ms(theme));
+            }
+            Verdict::Unreachable => {
+                self.show(UNREACHABLE.to_string(), ValidationState::Invalid);
+            }
+        }
+        Outcome::changed(self.placement.get().map(|placed| placed.panel))
     }
 
     /// Paint the whole frame: the backdrop, the chrome, and then the chooser
@@ -963,6 +1050,9 @@ impl AuthSurface {
         if is_escape(event) && self.chooser.is_some() {
             return self.back_to_chooser(ctx.now_ns, stage_ms(ctx.theme));
         }
+        if self.checking.is_some() {
+            return Outcome::quiet();
+        }
         let said = self.notice_rev;
         let (submitted, redraw) = if let InputEvent::KeyPressed { key, modifiers } = event {
             // Typing asks the question again, so a verdict on the previous
@@ -999,17 +1089,8 @@ impl AuthSurface {
                 action.is_some() || !reported.is_empty(),
             )
         };
-        let rejected_ms = ctx
-            .theme
-            .motion()
-            .duration(MotionInteraction::AttemptRejected);
-        if submitted && self.offer(&mut *ctx.verifier, ctx.now_ns, rejected_ms) {
-            return Outcome {
-                redraw: true,
-                paints: true,
-                verified: true,
-                damage: None,
-            };
+        if submitted {
+            self.offer(&mut *ctx.verifier, ctx.now_ns, rejected_ms(ctx.theme));
         }
         if !redraw {
             return Outcome::quiet();
@@ -1089,6 +1170,7 @@ impl AuthSurface {
             name.set_text("");
         }
         self.cooldown = Duration64::ZERO;
+        self.checking = None;
     }
 
     /// Begin — or turn round — the transition carrying `slot`'s disc.
@@ -1105,40 +1187,33 @@ impl AuthSurface {
         };
     }
 
-    /// Offer the typed secret to `verifier` and record what came back.
+    /// Hand the typed secret to `verifier`, to be checked while the surface
+    /// says so.
     ///
-    /// Returns whether the account was verified. The secret is erased before
-    /// this returns, on every path — including the one where a live cooldown
-    /// means it was never offered at all.
-    ///
-    /// A rejected attempt — refused outright, or refused for a standing
-    /// lockout — shakes the question as well as saying so in the notice. An
-    /// authority that could not be reached refused nothing, so nothing
-    /// shakes.
-    fn offer(&mut self, verifier: &mut dyn Verifier, now_ns: u64, duration_ms: u16) -> bool {
+    /// The secret is erased before this returns, on every path — including
+    /// the ones where it is never offered at all. A live lockout, and a secret
+    /// longer than any account's password can be, are refused here: the
+    /// first in the lockout's words, the second in the refusal's own, since it
+    /// could never verify and so spends no attempt. Either shakes the
+    /// question.
+    fn offer(&mut self, verifier: &mut dyn Verifier, now_ns: u64, duration_ms: u16) {
         if self.is_cooling() {
             self.field.clear();
             self.show(cooldown_notice(self.cooldown), ValidationState::Invalid);
             self.shake = Shake::start(now_ns, duration_ms);
-            return false;
+            return;
         }
-        // Longer than any account's password can be: it could never verify,
-        // so it is refused in the refusal's own words and spends no attempt.
-        let verdict = self.field.secret().map_or(Verdict::Refused, |secret| {
-            verifier.verify(&self.account, secret)
-        });
+        let ticket = self
+            .field
+            .secret()
+            .map(|secret| verifier.ask(&self.account, secret));
         self.field.clear();
-        match verdict {
-            Verdict::Verified => true,
-            Verdict::Refused => {
-                self.show(REFUSED.to_string(), ValidationState::Invalid);
-                self.shake = Shake::start(now_ns, duration_ms);
-                false
-            }
-            Verdict::Unreachable => {
-                self.show(UNREACHABLE.to_string(), ValidationState::Invalid);
-                false
-            }
+        if let Some(ticket) = ticket {
+            self.checking = Some(ticket);
+            self.show(CHECKING.to_string(), ValidationState::Pending);
+        } else {
+            self.show(REFUSED.to_string(), ValidationState::Invalid);
+            self.shake = Shake::start(now_ns, duration_ms);
         }
     }
 
@@ -1147,12 +1222,14 @@ impl AuthSurface {
         self.cooldown > Duration64::ZERO
     }
 
-    /// The line this mode shows when there is nothing else to say.
-    fn resting_hint(&self) -> &'static str {
+    /// The line this mode shows when there is nothing else to say, and the
+    /// state the field takes beside it.
+    fn resting(&self) -> (&'static str, ValidationState) {
         match self.mode {
-            Mode::Chooser => CHOOSE_HINT,
-            Mode::Name(_) => NAME_HINT,
-            Mode::Secret => HINT,
+            Mode::Chooser => (CHOOSE_HINT, ValidationState::Valid),
+            Mode::Name(_) => (NAME_HINT, ValidationState::Valid),
+            Mode::Secret if self.checking.is_some() => (CHECKING, ValidationState::Pending),
+            Mode::Secret => (HINT, ValidationState::Valid),
         }
     }
 
@@ -1556,6 +1633,11 @@ fn with_shadow(rect: Rect, scale: Scale) -> Rect {
 /// How long one stage transition runs in `theme`.
 fn stage_ms(theme: &Theme) -> u16 {
     theme.motion().duration(MotionInteraction::StageTransition)
+}
+
+/// How long a rejected attempt shakes the question in `theme`.
+fn rejected_ms(theme: &Theme) -> u16 {
+    theme.motion().duration(MotionInteraction::AttemptRejected)
 }
 
 /// How long the veil runs in `theme`, whichever way it is going: the screen

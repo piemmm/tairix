@@ -182,7 +182,18 @@ nothing asks for a frame.
 ## The verdict seam
 
 The surface holds no credential store, no key, and no authority. It asks
-through `Verifier`, which answers one of three things:
+through `Verifier`, and never waits for the answer: an authority derives a key
+from every secret on purpose, and the embedder's loop owes the user a frame.
+`ask` hands the secret over — the surface erases its own copy at once, and the
+verifier keeps one only in storage it erases itself — and answers a `Ticket`.
+Until the answer comes back through `AuthSurface::answer` under that ticket the
+surface says it is checking and its field takes no input; `Escape` still steps
+back to the chooser, and an answer to an offer the surface has left, or one
+another surface made, changes nothing. `Asking` is the one `Verifier` every
+embedder uses: it issues the tickets from one `Tickets` book for its whole
+life and hands each offer to a `Courier` — a worker thread on a running system
+— which carries it off the loop and brings the answer back. The answer is one
+of three things:
 
 | Verdict | Meaning |
 |---------|---------|
@@ -198,8 +209,8 @@ at the keyboard) but conclude identically: still asking.
 login screen forwards it to the session authority; the desktop's lock ignores
 it, because its broker attests the caller's identity from the kernel and checks
 the password against *that* uid — a name on the wire could not weaken it, and
-is not consulted. A test injects an answer directly, which is what lets the
-whole surface be exercised on the host without a kernel.
+is not consulted. A test answers from a script, which is what lets the whole
+surface be exercised on the host without a kernel.
 
 ## The chooser
 

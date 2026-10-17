@@ -216,7 +216,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use tairix_abi::driver::block::Block;
-    use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
+    use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS};
     use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
     use tairix_users::{
         appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS,
@@ -464,12 +464,12 @@ mod tests {
             assert_eq!(security.gid, 100, "{name} carries the primary group");
         }
         let files = fs
-            .lookup(home, HOME_USER_FILES_DIR.as_bytes())
-            .expect("UserFiles exists");
-        for name in USER_FILES_SUBDIRS {
+            .lookup(home, HOME_FILES_DIR.as_bytes())
+            .expect("the home's Home folder exists");
+        for name in HOME_FILES_SUBDIRS {
             let node = fs
                 .lookup(files, name.as_bytes())
-                .unwrap_or_else(|_| panic!("{name} exists in a fresh UserFiles"));
+                .unwrap_or_else(|_| panic!("{name} exists in a fresh Home folder"));
             assert_eq!(fs.node_info(node).expect("info").kind, NodeKind::Directory);
             let security = fs.security(node).expect("security");
             assert_eq!(

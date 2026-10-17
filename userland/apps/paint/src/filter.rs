@@ -11,6 +11,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_colour::Rgb;
 use tairix_hash::FastHash;
 use tairix_image::Rgba8;
@@ -187,6 +188,28 @@ impl Filter {
             Self::Noise { .. } => "Add noise",
             Self::Edges => "Find edges",
             Self::Invert => "Invert colours",
+        }
+    }
+
+    /// The function the menu names it by.
+    #[must_use]
+    pub const fn symbol(&self) -> AppMenuSymbol {
+        match self {
+            Self::Brightness { .. } => AppMenuSymbol::Brightness,
+            Self::HueSaturation(_) => AppMenuSymbol::HueSaturation,
+            Self::ColourBalance(_) => AppMenuSymbol::ColourBalance,
+            Self::Levels(_) => AppMenuSymbol::Levels,
+            Self::Curves(_) => AppMenuSymbol::Curves,
+            Self::WhiteBalance(_) => AppMenuSymbol::WhiteBalance,
+            Self::Posterize { .. } => AppMenuSymbol::Posterise,
+            Self::Threshold { .. } => AppMenuSymbol::Threshold,
+            Self::Desaturate => AppMenuSymbol::Desaturate,
+            Self::Blur { .. } => AppMenuSymbol::Blur,
+            Self::Sharpen { .. } => AppMenuSymbol::Sharpen,
+            Self::Pixelate { .. } => AppMenuSymbol::Pixelate,
+            Self::Noise { .. } => AppMenuSymbol::Noise,
+            Self::Edges => AppMenuSymbol::FindEdges,
+            Self::Invert => AppMenuSymbol::InvertColours,
         }
     }
 

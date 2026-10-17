@@ -47,6 +47,9 @@ use crate::touch::PinchPhase;
 use crate::{Errno, ProcId};
 
 mod alert;
+mod symbol;
+
+pub use symbol::AppMenuSymbol;
 
 pub use alert::{
     AlertButton, AlertButtonRole, AlertDetail, AlertHeadline, AlertLabel, AlertOutcome,
@@ -830,14 +833,16 @@ impl AppMenuItemId {
 
 /// A chooseable menu row, as an application builds it.
 ///
-/// Built rather than spelled field by field, because a row states one
-/// mandatory thing — the id an outcome names and the label the user reads —
-/// and everything else is emphasis the desktop draws. Read a built row back
+/// Built rather than spelled field by field, because a row states the
+/// mandatory things — the id an outcome names, the label the user reads and
+/// the function its picture shows — and everything else is emphasis the
+/// desktop draws. Read a built row back
 /// through [`AppMenuItemView`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct AppMenuItem {
     id: AppMenuItemId,
     label: AppMenuLabel,
+    symbol: AppMenuSymbol,
     enabled: bool,
     mark: AppMenuMark,
     shortcut: AppMenuShortcut,
@@ -848,12 +853,14 @@ pub struct AppMenuItem {
 }
 
 impl AppMenuItem {
-    /// An enabled, unmarked, neutral row with no accelerator.
+    /// An enabled, unmarked, neutral row doing `symbol`'s function, with no
+    /// accelerator.
     #[must_use]
-    pub const fn new(id: AppMenuItemId, label: AppMenuLabel) -> Self {
+    pub const fn new(id: AppMenuItemId, label: AppMenuLabel, symbol: AppMenuSymbol) -> Self {
         Self {
             id,
             label,
+            symbol,
             enabled: true,
             mark: AppMenuMark::None,
             shortcut: AppMenuShortcut::EMPTY,
@@ -920,7 +927,8 @@ impl AppMenuItem {
     ///
     /// The desktop resolves the picture from that bundle's own signed
     /// manifest through the artwork cache every other slot draws through, so
-    /// an unresolvable path costs the row its picture and nothing else.
+    /// an unresolvable path costs the row that picture and it draws its
+    /// symbol instead.
     #[must_use]
     pub const fn with_icon_bundle(mut self, bundle: AppMenuBundle) -> Self {
         self.icon = AppMenuIcon::Bundle(bundle);
@@ -969,6 +977,8 @@ pub enum AppMenuRow {
         /// Whether the submenu opens. A disabled submenu draws greyed and
         /// never opens.
         enabled: bool,
+        /// What the rows it opens are for.
+        symbol: AppMenuSymbol,
     },
     /// The application-information row, whose child is the session's own
     /// info panel, drawn from the **signed manifest** of the bundle the
@@ -988,6 +998,8 @@ pub struct AppMenuItemView<'a> {
     pub id: AppMenuItemId,
     /// The row's label.
     pub label: &'a str,
+    /// The function the row's picture shows.
+    pub symbol: AppMenuSymbol,
     /// Whether the row may be chosen.
     pub enabled: bool,
     /// The mark drawn beside the label.
@@ -1044,22 +1056,24 @@ pub enum AppMenuRowView<'a> {
         label: &'a str,
         /// Whether the submenu opens.
         enabled: bool,
+        /// What the rows it opens are for.
+        symbol: AppMenuSymbol,
     },
     /// The application-information row.
     Info,
 }
 
-/// Which of the four kinds a stored row is, carrying the id the chooseable
-/// one has.
+/// Which of the four kinds a stored row is, carrying the id and the function
+/// the kinds that have them state.
 ///
-/// Held as this closed kind rather than the wire byte, so reporting a stored
-/// row back is total: there is no kind whose id has to be reconstructed, and
-/// no impossible discriminant to guess at.
+/// Held as this closed kind rather than the wire bytes, so reporting a stored
+/// row back is total: there is no kind whose id or function has to be
+/// reconstructed, and no impossible discriminant to guess at.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum RowKind {
-    Item(AppMenuItemId),
+    Item(AppMenuItemId, AppMenuSymbol),
     Separator,
-    Submenu,
+    Submenu(AppMenuSymbol),
     Info,
 }
 
@@ -1067,9 +1081,9 @@ impl RowKind {
     /// The wire discriminant of this kind.
     const fn wire(self) -> u8 {
         match self {
-            Self::Item(_) => APP_MENU_KIND_ITEM,
+            Self::Item(..) => APP_MENU_KIND_ITEM,
             Self::Separator => APP_MENU_KIND_SEPARATOR,
-            Self::Submenu => APP_MENU_KIND_SUBMENU,
+            Self::Submenu(_) => APP_MENU_KIND_SUBMENU,
             Self::Info => APP_MENU_KIND_INFO,
         }
     }
@@ -1077,8 +1091,16 @@ impl RowKind {
     /// The id this kind states, zero for the kinds that state none.
     const fn wire_id(self) -> u16 {
         match self {
-            Self::Item(id) => id.get(),
-            Self::Separator | Self::Submenu | Self::Info => 0,
+            Self::Item(id, _) => id.get(),
+            Self::Separator | Self::Submenu(_) | Self::Info => 0,
+        }
+    }
+
+    /// The function this kind states, zero for the kinds that state none.
+    const fn wire_symbol(self) -> u16 {
+        match self {
+            Self::Item(_, symbol) | Self::Submenu(symbol) => symbol.wire(),
+            Self::Separator | Self::Info => 0,
         }
     }
 }
@@ -1118,8 +1140,8 @@ impl RowRecord {
     /// cannot hold a plate too.
     const fn opens_a_plate(&self) -> bool {
         match self.kind {
-            RowKind::Submenu => true,
-            RowKind::Item(_) => self.entry_id == 0,
+            RowKind::Submenu(_) => true,
+            RowKind::Item(..) => self.entry_id == 0,
             RowKind::Separator | RowKind::Info => false,
         }
     }
@@ -1285,9 +1307,10 @@ impl AppMenu {
             (_, true) => AppMenuIconView::Asset(icon_text),
         };
         match record.kind {
-            RowKind::Item(id) => AppMenuRowView::Item(AppMenuItemView {
+            RowKind::Item(id, symbol) => AppMenuRowView::Item(AppMenuItemView {
                 id,
                 label,
+                symbol,
                 enabled: record.enabled,
                 mark: record.mark,
                 shortcut,
@@ -1302,9 +1325,10 @@ impl AppMenu {
                 icon,
             }),
             RowKind::Separator => AppMenuRowView::Separator,
-            RowKind::Submenu => AppMenuRowView::Submenu {
+            RowKind::Submenu(symbol) => AppMenuRowView::Submenu {
                 label,
                 enabled: record.enabled,
+                symbol,
             },
             RowKind::Info => AppMenuRowView::Info,
         }
@@ -1340,7 +1364,7 @@ impl AppMenu {
             AppMenuRow::Item(item) => {
                 record.enabled = item.enabled;
                 record.mark = item.mark;
-                record.kind = RowKind::Item(item.id);
+                record.kind = RowKind::Item(item.id, item.symbol);
                 record.role = item.role;
                 if let Some(entry) = item.entry {
                     record.entry_id = entry.id.get();
@@ -1354,8 +1378,12 @@ impl AppMenu {
                 AppMenuShortcut::EMPTY,
                 AppMenuReason::EMPTY,
             ),
-            AppMenuRow::Submenu { label, enabled } => {
-                record.kind = RowKind::Submenu;
+            AppMenuRow::Submenu {
+                label,
+                enabled,
+                symbol,
+            } => {
+                record.kind = RowKind::Submenu(symbol);
                 record.enabled = enabled;
                 (label, AppMenuShortcut::EMPTY, AppMenuReason::EMPTY)
             }
@@ -3423,12 +3451,13 @@ const APP_BAR_TEXT_LEN_OFFSET: usize = APP_BAR_ROW_COUNT_OFFSET + 1;
 const APP_BAR_ROWS_OFFSET: usize = APP_BAR_TEXT_LEN_OFFSET + 2;
 
 /// Encoded size, in bytes, of one menu row record: its kind, flag byte,
-/// parent, the lengths of its three text fields, and its item id.
+/// parent, the lengths of its text fields, its item id, its quick-entry
+/// field's id, and its function.
 ///
 /// The text itself is not here — it lies in the declaration's one trailing
 /// text block, in row order — so a row costs what it says rather than the
 /// widest label, caption and reason it could have said.
-const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_ENTRY_ID_OFFSET + 2;
+const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_SYMBOL_OFFSET + 2;
 /// Byte offset, within one row record, of its flag byte.
 const APP_MENU_ROW_FLAGS_OFFSET: usize = 1;
 /// Byte offset, within one row record, of the 0-based index of the row whose
@@ -3450,6 +3479,9 @@ const APP_MENU_ROW_ID_OFFSET: usize = 8;
 /// Byte offset, within one row record, of the id a commit of its quick-entry
 /// field answers with (zero when it declares no field).
 const APP_MENU_ROW_ENTRY_ID_OFFSET: usize = APP_MENU_ROW_ID_OFFSET + 2;
+/// Byte offset, within one row record, of its [`AppMenuSymbol`] (zero for a
+/// separator or the information row, which state no function).
+const APP_MENU_ROW_SYMBOL_OFFSET: usize = APP_MENU_ROW_ENTRY_ID_OFFSET + 2;
 
 /// Encoded size of the menu block a request carries: one fixed-width record
 /// per declared row, then those rows' text in row order.
@@ -4706,6 +4738,11 @@ fn write_menu_block(out: &mut [u8], at: usize, menu: &AppMenu) -> usize {
             record_at + APP_MENU_ROW_ENTRY_ID_OFFSET,
             record.entry_id,
         );
+        put_u16(
+            out,
+            record_at + APP_MENU_ROW_SYMBOL_OFFSET,
+            record.kind.wire_symbol(),
+        );
     }
     let len = usize::from(menu.text_len);
     out[text..text + len].copy_from_slice(&menu.text[..len]);
@@ -4881,6 +4918,7 @@ fn read_app_menu_row(
     };
     let id = read_u16(record, APP_MENU_ROW_ID_OFFSET);
     let entry_id = read_u16(record, APP_MENU_ROW_ENTRY_ID_OFFSET);
+    let symbol = read_u16(record, APP_MENU_ROW_SYMBOL_OFFSET);
     let label = read_app_menu_text::<0, APP_MENU_LABEL_MAX>(
         text,
         cursor,
@@ -4924,10 +4962,11 @@ fn read_app_menu_row(
         && entry_id == 0
         && mark == AppMenuMark::None
         && role == AppMenuRole::Neutral;
-    let bare = item_only && label.is_empty() && !enabled && id == 0;
+    let bare = item_only && label.is_empty() && !enabled && id == 0 && symbol == 0;
     let row = match record[0] {
         APP_MENU_KIND_ITEM => {
-            let mut item = AppMenuItem::new(AppMenuItemId::new(id)?, label)
+            let symbol = AppMenuSymbol::from_wire(symbol)?;
+            let mut item = AppMenuItem::new(AppMenuItemId::new(id)?, label, symbol)
                 .with_mark(mark)
                 .with_shortcut(shortcut)
                 .with_reason(reason)
@@ -4947,7 +4986,11 @@ fn read_app_menu_row(
         }
         // A submenu draws a chevron where an item draws its caption, and
         // opens rather than acting, so it states neither and has no id.
-        APP_MENU_KIND_SUBMENU if item_only && id == 0 => AppMenuRow::Submenu { label, enabled },
+        APP_MENU_KIND_SUBMENU if item_only && id == 0 => AppMenuRow::Submenu {
+            label,
+            enabled,
+            symbol: AppMenuSymbol::from_wire(symbol)?,
+        },
         APP_MENU_KIND_SEPARATOR if bare => AppMenuRow::Separator,
         APP_MENU_KIND_INFO if bare => AppMenuRow::Info,
         // A known kind whose guard failed and an unknown one are the same
@@ -8183,41 +8226,41 @@ mod tests {
         hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
         read_u32, AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuBundle, AppMenuEntry,
         AppMenuEntryText, AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
-        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
-        DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome,
-        MenuRefusal, OpenTarget, PickPurpose, PinchPhase, PointerAction, SaveEndings, TerrainPlate,
-        TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState,
-        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
-        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX, APP_MENU_ENTRY_MAX,
-        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
-        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
+        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, AppMenuSymbol,
+        BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
+        DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
+        MenuOutcome, MenuRefusal, OpenTarget, PickPurpose, PinchPhase, PointerAction, SaveEndings,
+        TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
+        WindowSizeState, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN,
+        APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX,
+        APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX,
+        APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
         APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET,
         APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
-        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
-        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
-        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET, DRAG_EVENT_KIND_OFFSET,
-        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
-        DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
-        HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
-        HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
-        HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
-        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
-        MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
-        MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET,
-        OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
-        OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
-        OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
-        PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET,
-        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN, PRESENT_WIRE_LEN,
-        PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
-        PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
-        RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
-        REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET,
-        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
-        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
+        APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
+        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
+        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET,
+        DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET,
+        DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET,
+        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
+        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
+        HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
+        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
+        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
+        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET,
+        NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
+        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
+        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET,
+        PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN,
+        PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN,
+        PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
+        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
+        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
+        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX,
+        SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
+        SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
+        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
         TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
@@ -8479,6 +8522,7 @@ mod tests {
         AppMenuRow::Item(AppMenuItem::new(
             AppMenuItemId::new(id).expect("a valid id"),
             label(text),
+            AppMenuSymbol::Open,
         ))
     }
 
@@ -8495,6 +8539,7 @@ mod tests {
             AppMenuItem::new(
                 AppMenuItemId::new(1).expect("a valid id"),
                 label("New window"),
+                AppMenuSymbol::Open,
             )
             .with_shortcut(AppMenuShortcut::new("Ctrl Shift N").expect("a valid caption")),
         ))
@@ -8502,6 +8547,7 @@ mod tests {
         menu.push(AppMenuRow::Submenu {
             label: label("Display"),
             enabled: true,
+            symbol: AppMenuSymbol::Open,
         })
         .expect("room for a submenu");
         menu.push_under(
@@ -8509,6 +8555,7 @@ mod tests {
                 AppMenuItem::new(
                     AppMenuItemId::new(2).expect("a valid id"),
                     label("Full screen"),
+                    AppMenuSymbol::Open,
                 )
                 .with_mark(AppMenuMark::Check),
             ),
@@ -8521,16 +8568,21 @@ mod tests {
             AppMenuRow::Submenu {
                 label: label("Colour"),
                 enabled: true,
+                symbol: AppMenuSymbol::Open,
             },
             1,
         )
         .expect("a nested submenu");
         menu.push_under(
             AppMenuRow::Item(
-                AppMenuItem::new(AppMenuItemId::new(3).expect("a valid id"), label("Green"))
-                    .with_mark(AppMenuMark::Radio)
-                    .disabled()
-                    .with_reason(AppMenuReason::new("No colour profile").expect("a valid reason")),
+                AppMenuItem::new(
+                    AppMenuItemId::new(3).expect("a valid id"),
+                    label("Green"),
+                    AppMenuSymbol::Open,
+                )
+                .with_mark(AppMenuMark::Radio)
+                .disabled()
+                .with_reason(AppMenuReason::new("No colour profile").expect("a valid reason")),
             ),
             3,
         )
@@ -8538,8 +8590,12 @@ mod tests {
         menu.push(AppMenuRow::Separator).expect("a separator");
         menu.push(AppMenuRow::Info).expect("an Info row");
         menu.push(AppMenuRow::Item(
-            AppMenuItem::new(AppMenuItemId::new(4).expect("a valid id"), label("Quit"))
-                .with_role(AppMenuRole::Destructive),
+            AppMenuItem::new(
+                AppMenuItemId::new(4).expect("a valid id"),
+                label("Quit"),
+                AppMenuSymbol::Open,
+            )
+            .with_role(AppMenuRole::Destructive),
         ))
         .expect("room for Quit");
         menu
@@ -8585,6 +8641,7 @@ mod tests {
             menu.push(AppMenuRow::Submenu {
                 label: label(&wide),
                 enabled: true,
+                symbol: AppMenuSymbol::Open,
             })
             .unwrap_or_else(|error| panic!("room for plate {plate}: {error:?}"));
         }
@@ -9389,13 +9446,18 @@ mod tests {
     fn a_row_names_a_class_picture_by_its_asset_id() {
         let mut menu = AppMenu::titled(label("Files"));
         menu.push(AppMenuRow::Item(
-            AppMenuItem::new(AppMenuItemId::new(1).expect("a valid id"), label("Home"))
-                .with_icon_asset(AppMenuAsset::new("folder").expect("a valid id")),
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label("Home"),
+                AppMenuSymbol::Open,
+            )
+            .with_icon_asset(AppMenuAsset::new("folder").expect("a valid id")),
         ))
         .expect("room for the row");
         menu.push(AppMenuRow::Item(AppMenuItem::new(
             AppMenuItemId::new(2).expect("a valid id"),
             label("Plain"),
+            AppMenuSymbol::Open,
         )))
         .expect("room for the row");
         let Ok(WindowRequest::OpenMenu { menu: back, .. }) =
@@ -9421,6 +9483,7 @@ mod tests {
         menu.push(AppMenuRow::Item(AppMenuItem::new(
             AppMenuItemId::new(1).expect("a valid id"),
             label("Plain"),
+            AppMenuSymbol::Open,
         )))
         .expect("room for the row");
         menu.push(AppMenuRow::Separator).expect("room for the rule");
@@ -9437,6 +9500,79 @@ mod tests {
         }
     }
 
+    /// An item's and a submenu's function crosses the wire as itself.
+    #[test]
+    fn a_rows_function_survives_the_wire() {
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Submenu {
+            label: label("Display"),
+            enabled: true,
+            symbol: AppMenuSymbol::Display,
+        })
+        .expect("room for the submenu");
+        menu.push_under(
+            AppMenuRow::Item(AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label("List"),
+                AppMenuSymbol::List,
+            )),
+            0,
+        )
+        .expect("room for the row");
+        let Ok(WindowRequest::OpenMenu { menu: back, .. }) =
+            WindowRequest::from_bytes(&opening(&menu).frame())
+        else {
+            panic!("the open decodes");
+        };
+        let mut symbols = back.rows().map(|(row, _)| match row {
+            AppMenuRowView::Submenu { symbol, .. } => Some(symbol),
+            AppMenuRowView::Item(item) => Some(item.symbol),
+            AppMenuRowView::Separator | AppMenuRowView::Info => None,
+        });
+        assert_eq!(symbols.next(), Some(Some(AppMenuSymbol::Display)));
+        assert_eq!(symbols.next(), Some(Some(AppMenuSymbol::List)));
+        assert_eq!(symbols.next(), None);
+    }
+
+    /// A row that states a function must name one the vocabulary holds, and a
+    /// row that states none must carry zero, so a row has one encoding.
+    #[test]
+    fn a_function_out_of_place_or_past_the_vocabulary_is_refused() {
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Submenu {
+            label: label("New"),
+            enabled: true,
+            symbol: AppMenuSymbol::NewDocument,
+        })
+        .expect("room for the submenu");
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(1).expect("a valid id"),
+            label("Plain"),
+            AppMenuSymbol::Open,
+        )))
+        .expect("room for the row");
+        menu.push(AppMenuRow::Separator).expect("room for the rule");
+        menu.push(AppMenuRow::Info).expect("room for the info row");
+        let frame = opening(&menu).frame();
+        let past = u16::try_from(AppMenuSymbol::ALL.len() + 1).expect("fits");
+        let symbol_at = |record: usize| {
+            OPEN_MENU_ROWS_OFFSET + record * APP_MENU_ROW_WIRE_LEN + APP_MENU_ROW_SYMBOL_OFFSET
+        };
+        for (record, refused) in [(0, 0), (0, past), (1, 0), (1, past), (2, 1), (3, 1)] {
+            let mut altered = frame;
+            put_u16(&mut altered, symbol_at(record), refused);
+            assert_eq!(
+                WindowRequest::from_bytes(&altered),
+                Err(Errno::OutOfRange),
+                "row {record} stating function {refused}"
+            );
+        }
+        assert!(
+            WindowRequest::from_bytes(&frame).is_ok(),
+            "the frame itself decodes"
+        );
+    }
+
     /// A row may be chooseable *and* open a plate, and a chooseable row may
     /// carry a quick-entry field and name the bundle its icon comes from —
     /// all of it surviving the wire unchanged.
@@ -9448,25 +9584,34 @@ mod tests {
     fn a_row_carries_an_entry_a_bundle_and_children_of_its_own() {
         let mut menu = AppMenu::titled(label("Files"));
         menu.push(AppMenuRow::Item(
-            AppMenuItem::new(AppMenuItemId::new(1).expect("a valid id"), label("Rename"))
-                .with_shortcut(AppMenuShortcut::new("F2").expect("a valid caption"))
-                .with_entry(AppMenuEntry {
-                    id: AppMenuItemId::new(90).expect("a valid id"),
-                    initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
-                }),
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label("Rename"),
+                AppMenuSymbol::Open,
+            )
+            .with_shortcut(AppMenuShortcut::new("F2").expect("a valid caption"))
+            .with_entry(AppMenuEntry {
+                id: AppMenuItemId::new(90).expect("a valid id"),
+                initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
+            }),
         ))
         .expect("room for the rename row");
         menu.push(AppMenuRow::Item(AppMenuItem::new(
             AppMenuItemId::new(2).expect("a valid id"),
             label("Open With\u{2026}"),
+            AppMenuSymbol::Open,
         )))
         .expect("room for the chooser row");
         menu.push_under(
             AppMenuRow::Item(
-                AppMenuItem::new(AppMenuItemId::new(50).expect("a valid id"), label("View"))
-                    .with_icon_bundle(
-                        AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
-                    ),
+                AppMenuItem::new(
+                    AppMenuItemId::new(50).expect("a valid id"),
+                    label("View"),
+                    AppMenuSymbol::Open,
+                )
+                .with_icon_bundle(
+                    AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
+                ),
             ),
             1,
         )
@@ -9517,6 +9662,7 @@ mod tests {
                 AppMenuItem::new(
                     AppMenuItemId::new(row).expect("a valid id"),
                     label("Rename"),
+                    AppMenuSymbol::Open,
                 )
                 .with_entry(entry(field, "x")),
             )
@@ -9671,6 +9817,7 @@ mod tests {
                 AppMenuItem::new(
                     AppMenuItemId::new(id).expect("a valid id"),
                     label(&"n".repeat(APP_MENU_LABEL_MAX)),
+                    AppMenuSymbol::Open,
                 )
                 .with_reason(
                     AppMenuReason::new(&"r".repeat(APP_MENU_REASON_MAX)).expect("a valid reason"),
@@ -9686,8 +9833,12 @@ mod tests {
         assert!(left > 0, "the block does not divide evenly by a wide row");
         let saying = |bytes: usize| {
             AppMenuRow::Item(
-                AppMenuItem::new(AppMenuItemId::new(id).expect("a valid id"), label("n"))
-                    .with_reason(AppMenuReason::new(&"r".repeat(bytes)).expect("a valid reason")),
+                AppMenuItem::new(
+                    AppMenuItemId::new(id).expect("a valid id"),
+                    label("n"),
+                    AppMenuSymbol::Open,
+                )
+                .with_reason(AppMenuReason::new(&"r".repeat(bytes)).expect("a valid reason")),
             )
         };
         assert_eq!(filled.push(saying(left)), Err(Errno::NoSpace));
@@ -9708,6 +9859,7 @@ mod tests {
         menu.push(AppMenuRow::Submenu {
             label: label("Root"),
             enabled: true,
+            symbol: AppMenuSymbol::Open,
         })
         .expect("the root plate's submenu");
         let mut parent = 0;
@@ -9718,6 +9870,7 @@ mod tests {
                 AppMenuRow::Submenu {
                     label: label("Deeper"),
                     enabled: true,
+                    symbol: AppMenuSymbol::Open,
                 },
                 parent,
             )
@@ -9731,6 +9884,7 @@ mod tests {
                 AppMenuRow::Submenu {
                     label: label("Too deep"),
                     enabled: true,
+                    symbol: AppMenuSymbol::Open
                 },
                 parent
             ),
@@ -9762,6 +9916,7 @@ mod tests {
             menu.push(AppMenuRow::Submenu {
                 label: label(""),
                 enabled: true,
+                symbol: AppMenuSymbol::Open
             }),
             Err(Errno::OutOfRange)
         );
@@ -9786,6 +9941,7 @@ mod tests {
         menu.push(AppMenuRow::Submenu {
             label: label("Plate"),
             enabled: true,
+            symbol: AppMenuSymbol::Open,
         })
         .expect("a submenu");
         let submenu = menu.len() - 1;
@@ -9805,6 +9961,7 @@ mod tests {
             .push(AppMenuRow::Submenu {
                 label: label("Plate"),
                 enabled: true,
+                symbol: AppMenuSymbol::Open,
             })
             .expect("a submenu to spill into");
         let mut id = 1u16;
@@ -9830,6 +9987,7 @@ mod tests {
             full.push(AppMenuRow::Submenu {
                 label: label("Plate"),
                 enabled: true,
+                symbol: AppMenuSymbol::Open,
             })
             .unwrap_or_else(|error| panic!("plate {plate}: {error:?}"));
         }
@@ -9872,9 +10030,13 @@ mod tests {
         let mut refused = false;
         while menu.len() < APP_MENU_MAX_ROWS {
             let row = AppMenuRow::Item(
-                AppMenuItem::new(AppMenuItemId::new(id).expect("a valid id"), wide)
-                    .disabled()
-                    .with_reason(reason),
+                AppMenuItem::new(
+                    AppMenuItemId::new(id).expect("a valid id"),
+                    wide,
+                    AppMenuSymbol::Open,
+                )
+                .disabled()
+                .with_reason(reason),
             );
             if menu.push(row) == Err(Errno::NoSpace) {
                 refused = true;
@@ -10089,6 +10251,7 @@ mod tests {
             AppMenuItem::new(
                 AppMenuItemId::new(1).expect("a valid id"),
                 label(&"l".repeat(APP_MENU_LABEL_MAX)),
+                AppMenuSymbol::Open,
             )
             .with_shortcut(
                 AppMenuShortcut::new(&"s".repeat(APP_MENU_SHORTCUT_MAX)).expect("the widest"),

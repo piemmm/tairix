@@ -140,8 +140,18 @@ as the device frees room and drained once queued. A shipped sound is 48 kHz at
 unity gain, so it reaches the device bit-exact; the settings' one gain is the
 stream's. A stream that is told the room moved, the device went, or its ring
 broke ends the cue; one that has not played out by its length plus a second is
-stopped (`CUE_CUT`). A cue asked to be answered once played out
-(`Answer::PlayedOut`) is answered then, or at that deadline. A machine sound
+stopped (`CUE_CUT`). What a cue's mailbox holds is always read before its
+deadline is kept, so a cue that played out while the authority was busy is
+retired as played, never cut; and a notification naming another stream — a
+closed one whose mailbox this one inherited — ends nothing. A cue asked to be
+answered once played out (`Answer::PlayedOut`) is answered then, or at that
+deadline.
+
+A repeat of a sound already sounding or decoding for the same room joins it
+rather than sounding over itself: a burst of one event — nine disks attaching
+at once — is one sound, heard once, and costs one of the four slots. A joiner
+waiting for the sound to play out is answered when the one it joined does; one
+waiting only for the start is answered at once, `Coalesced`. A machine sound
 that played out whole is recorded (`MACHINE_CUE_PLAYED`, naming the `event`);
 one that was cut or broke off is not.
 
@@ -151,6 +161,7 @@ one that was cut or broke off is not.
 |---|---|---|
 | Cues sounding or decoding at once | 4 | `TooMany`, dropped rather than queued |
 | A repeat of one event by one principal | 200 ms | `Coalesced`, and it costs nothing |
+| Callers waiting on one sound they joined | 16 | answered at once, `Coalesced` |
 | A principal's cue rate | 8 at once, 4 a second | `LimitExceeded`, recorded once a flood (`CUE_LIMITED`) |
 | Principals tracked | 64 | `LimitExceeded`; an idle record is reclaimed first |
 | Calls the rendezvous holds | 16 | refused at post by the kernel |

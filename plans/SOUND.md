@@ -2075,6 +2075,20 @@ That is stated rather than left implied by a table of peaks.
 - **A repeat of one event by one principal inside 200 ms is coalesced** and
   counted, and costs the principal nothing. Two identical notification sounds
   20 ms apart are one notification and one bug.
+- **A repeat of a sound already sounding or decoding for the same room joins
+  it**, from any principal: a burst of one event — nine disks attaching at
+  once — is one stream, heard once, and holds one slot. A joiner waiting for
+  the sound to play out is answered when it does (sixteen at most, past which
+  a joiner is answered at once, coalesced); one waiting only for the start is
+  answered at once, coalesced.
+- **A cue's mailbox is read before its deadline is kept**, so a cue that
+  played out while the authority was busy is retired as played, never cut, and
+  a notification naming a closed stream whose mailbox a cue inherited ends
+  nothing.
+- **An endpoint's period is at most 20 ms**, whatever its first stream's
+  latency target: the period is every stream's on the endpoint, so a
+  notification queueing its whole sound never makes every later stream that
+  late.
 - **Per-principal cue rate is limited and fails closed** — eight at once, four
   a second sustained, keyed on the attested uid — so a misbehaving application
   cannot hold the speakers. Sixty-four principals are tracked; an idle record

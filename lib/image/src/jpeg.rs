@@ -2903,6 +2903,9 @@ fn idct1_islow(dc: i32) -> u8 {
     clamp_u8(descale(dc, 3).wrapping_add(128))
 }
 
+#[path = "jpeg_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "jpeg_tests.rs"]
 mod tests;

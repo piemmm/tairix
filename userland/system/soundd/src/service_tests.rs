@@ -4,6 +4,7 @@
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -269,6 +270,10 @@ impl Speakers for Fake {
 
     fn mailbox(&self, stream: &usize) -> u64 {
         0x4155_0000_0000_0000 + *stream as u64
+    }
+
+    fn stream_id(&self, stream: &usize) -> u64 {
+        *stream as u64 + 1
     }
 
     fn write(&mut self, stream: &mut usize, at: Frames, samples: &[u8]) -> Result<u32, Errno> {
@@ -949,6 +954,157 @@ fn a_sound_overrunning_its_deadline_is_stopped_and_its_waiter_answered() {
     assert_eq!(taken(&mut authority), Some(Ok(CueOutcome::Played)));
     assert!(mixer.line(0, |line| line.closed));
     assert_eq!(audit.count(events::CUE_CUT), 1);
+}
+
+/// A sound that played out while the authority was busy elsewhere is retired
+/// as played when its deadline comes, not cut: what its mailbox holds is read
+/// before the deadline is kept, from the timer and from the mailbox's own
+/// wake alike.
+#[test]
+fn a_sound_that_played_out_unread_is_never_cut() {
+    let (store, mixer, audit) = (shipped(), Fake::new(BIG_RING), Audit::default());
+    let mut authority = authority(&store, &mixer, &audit);
+    let power = origin(0, 0x3000, &[CapabilityId::SYSTEM_POWER]);
+    assert_eq!(
+        ask(
+            &mut authority,
+            0,
+            &power,
+            SoundEvent::Shutdown,
+            Answer::PlayedOut
+        ),
+        None
+    );
+    let deadline = authority
+        .deadline()
+        .expect("a playing sound has a deadline");
+    mixer.report(0, StreamState::Idle);
+    authority.on_timer(deadline);
+    assert_eq!(taken(&mut authority), Some(Ok(CueOutcome::Played)));
+    assert_eq!(audit.count(events::MACHINE_CUE_PLAYED), 1);
+
+    assert_eq!(
+        ask(
+            &mut authority,
+            deadline,
+            &app(ALICE, 1),
+            SoundEvent::Info,
+            Answer::Started
+        ),
+        Some(Ok(CueOutcome::Played))
+    );
+    let late = authority
+        .deadline()
+        .expect("a playing sound has a deadline");
+    mixer.report(1, StreamState::Idle);
+    authority.on_stream(late, mixer.mailbox(&1));
+    assert!(mixer.line(1, |line| line.closed));
+    assert_eq!(audit.count(events::CUE_CUT), 0, "neither sound was cut");
+}
+
+/// A burst of one sound — the nine disks attaching at once on the 2026-10-17
+/// Pi 4 boot — is heard once: each repeat joins the sound already sounding
+/// rather than opening a stream over it, and every caller waiting on it is
+/// answered when it plays out.
+#[test]
+fn a_burst_of_one_sound_is_heard_once_and_every_waiter_answered() {
+    let (store, mixer, audit) = (shipped(), Fake::new(BIG_RING), Audit::default());
+    let mut authority = authority(&store, &mixer, &audit);
+    for uid in 0..3 {
+        assert_eq!(
+            ask(
+                &mut authority,
+                0,
+                &app(ALICE + uid, 1),
+                SoundEvent::Info,
+                Answer::PlayedOut
+            ),
+            None
+        );
+    }
+    assert_eq!(
+        ask(
+            &mut authority,
+            0,
+            &app(ALICE + 3, 1),
+            SoundEvent::Info,
+            Answer::Started
+        ),
+        Some(Ok(CueOutcome::Silent(Silence::Coalesced))),
+        "a caller waiting only for the start is answered at once"
+    );
+    assert_eq!(mixer.opened(), 1, "one stream sounds the burst");
+
+    mixer.report(0, StreamState::Idle);
+    authority.on_stream(0, mixer.mailbox(&0));
+    let answered: Vec<_> = authority
+        .take_replies()
+        .map(|(_, reply)| decode_cue_reply(&reply))
+        .collect();
+    assert_eq!(answered, vec![Ok(CueOutcome::Played); 3]);
+    assert_eq!(authority.tally().coalesced, 3);
+    assert_eq!(audit.count(events::CUE_CUT), 0);
+}
+
+/// A repeat for another room is that room's own sound, never joined to one
+/// it would not be heard in.
+#[test]
+fn a_repeat_for_another_room_sounds_on_its_own() {
+    let (store, mixer, audit) = (shipped(), Fake::new(BIG_RING), Audit::default());
+    let mut authority = authority(&store, &mixer, &audit);
+    for tag in [1, 2] {
+        assert_eq!(
+            ask(
+                &mut authority,
+                0,
+                &app(ALICE + u32::from(tag), tag),
+                SoundEvent::Info,
+                Answer::Started
+            ),
+            Some(Ok(CueOutcome::Played))
+        );
+    }
+    assert_eq!(mixer.opened(), 2);
+}
+
+/// A notification a closed stream left in a mailbox ends nothing: it names
+/// the stream it was about, and a later cue reads only its own.
+#[test]
+fn a_closed_streams_notification_ends_no_later_cue() {
+    let (store, mixer, audit) = (shipped(), Fake::new(BIG_RING), Audit::default());
+    let mut authority = authority(&store, &mixer, &audit);
+    let alice = app(ALICE, 1);
+    assert_eq!(
+        ask(&mut authority, 0, &alice, SoundEvent::Info, Answer::Started),
+        Some(Ok(CueOutcome::Played))
+    );
+    mixer.report(0, StreamState::Idle);
+    authority.on_stream(0, mixer.mailbox(&0));
+    assert!(mixer.line(0, |line| line.closed));
+    assert_eq!(
+        ask(
+            &mut authority,
+            0,
+            &alice,
+            SoundEvent::Warning,
+            Answer::Started
+        ),
+        Some(Ok(CueOutcome::Played))
+    );
+
+    mixer.line(1, |line| {
+        line.notes.push_back(AudioNotify::StateChanged {
+            stream_id: 1,
+            state: StreamState::Idle,
+            at: Frames::ZERO,
+        });
+    });
+    authority.on_stream(0, mixer.mailbox(&1));
+
+    assert!(
+        !mixer.line(1, |line| line.closed),
+        "the first stream's Idle ended nothing of the second"
+    );
 }
 
 #[test]

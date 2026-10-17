@@ -1012,6 +1012,9 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     Ok(RasterImage::from_parts(dib.width, dib.height, out))
 }
 
+#[path = "bmp_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "bmp_tests.rs"]
 mod tests;

@@ -37,6 +37,17 @@ sinon dans celui de cette machine ; « Jeu d'instructions » dans le menu
 Affichage le lit dans un autre, et le champ de vue de la ligne d'état propose
 la vue code à côté du texte et de l'hexadécimal.
 
+Une image — PNG, JPEG, GIF, BMP, TIFF, WEBP, un fichier d'icône ou de
+pointeur, une zone de sprites RISC OS ou un document OpenRaster — s'ouvre à
+la place dans la vue des données : ce dont le fichier est fait, chaque
+enregistrement à sa position avec sa longueur et ce qu'il déclare, chaque
+balise EXIF par son nom avec sa valeur, puis chaque octet du fichier en
+hexadécimal à côté de son caractère. La vue des données est en lecture seule
+; la vue hexadécimale modifie les mêmes octets. L'image est lue par un
+troisième processus de travail qui lui est propre, sans aucun accès lui non
+plus, et le menu Affichage propose la vue des données à côté du texte et de
+l'hexadécimal.
+
 Le code source est coloré : HTML, XML et SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python et scripts shell. Les fichiers de
 réglages du système — réglages d'application, bibliothèque de programmes,

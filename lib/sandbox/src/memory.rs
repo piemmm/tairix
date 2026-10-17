@@ -30,6 +30,9 @@ pub enum WorkerMemory {
     /// Documents and the pictures decoded from them, whose working set
     /// follows the file rather than any frame.
     Documents,
+    /// One document held whole and read where it lies, building nothing that
+    /// grows with it: a structure report.
+    HeldDocument,
 }
 
 impl WorkerMemory {
@@ -50,6 +53,7 @@ impl WorkerMemory {
                     DOCUMENT_WORKER_FLOOR_BYTES
                 }
             }
+            Self::HeldDocument => DOCUMENT_WORKER_FLOOR_BYTES,
         }
     }
 }
@@ -68,6 +72,11 @@ mod tests {
     #[test]
     fn a_document_worker_takes_a_quarter_of_the_machine_above_its_floor() {
         assert_eq!(WorkerMemory::Documents.ceiling(8 << 30), 2 << 30);
+        assert_eq!(
+            WorkerMemory::HeldDocument.ceiling(64 << 30),
+            DOCUMENT_WORKER_FLOOR_BYTES,
+            "a document read in place is held to one document whatever the machine"
+        );
         assert_eq!(WorkerMemory::Documents.ceiling(64 << 30), 16 << 30);
         for small in [0, 1 << 20, 256 << 20] {
             assert_eq!(

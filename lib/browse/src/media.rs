@@ -177,6 +177,67 @@ pub enum MediaType {
 }
 
 impl MediaType {
+    /// What a person calls this type: the name a listing's type column shows.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::InodeDirectory => "Folder",
+            Self::TairixApp => "Application",
+            Self::TairixService => "Service",
+            Self::TairixRxe => "Program",
+            Self::Wasm => "WebAssembly module",
+            Self::Elf => "ELF program",
+            Self::TextPlain => "Text",
+            Self::TextMarkdown => "Markdown document",
+            Self::TextCsv => "CSV table",
+            Self::Json => "JSON document",
+            Self::Yaml => "YAML document",
+            Self::Toml => "TOML document",
+            Self::Xml => "XML document",
+            Self::TextHtml => "HTML page",
+            Self::TextCss => "Style sheet",
+            Self::TextJavaScript => "JavaScript",
+            Self::TextRust => "Rust source",
+            Self::TextJava => "Java source",
+            Self::TextC => "C source",
+            Self::TextPython => "Python script",
+            Self::ShellScript => "Shell script",
+            Self::Pdf => "PDF document",
+            Self::ImagePng => "PNG image",
+            Self::ImageJpeg => "JPEG image",
+            Self::ImageGif => "GIF image",
+            Self::ImageSvg => "SVG image",
+            Self::ImageSprite => "Sprite",
+            Self::ImageBmp => "BMP image",
+            Self::ImageIcon => "Icon",
+            Self::ImageWebp => "WebP image",
+            Self::ImageTiff => "TIFF image",
+            Self::ImageOpenRaster => "OpenRaster image",
+            Self::ArchiveZip => "ZIP archive",
+            Self::ArchiveTar => "Tar archive",
+            Self::ArchiveGzip => "Gzip archive",
+            Self::ArchiveXz => "XZ archive",
+            Self::ArchiveBzip2 => "Bzip2 archive",
+            Self::ArchiveZstd => "Zstandard archive",
+            Self::Archive7z => "7z archive",
+            Self::ArchiveRar => "RAR archive",
+            Self::AudioMpeg => "MPEG audio",
+            Self::AudioFlac => "FLAC audio",
+            Self::AudioOgg => "Ogg audio",
+            Self::AudioOpus => "Opus audio",
+            Self::AudioWav => "WAVE audio",
+            Self::AudioAu => "AU audio",
+            Self::AudioAac => "AAC audio",
+            Self::AudioMp4 => "MPEG-4 audio",
+            Self::VideoMp4 => "MPEG-4 video",
+            Self::VideoWebm => "WebM video",
+            Self::VideoMatroska => "Matroska video",
+            Self::VideoQuicktime => "QuickTime video",
+            Self::VideoAvi => "AVI video",
+            Self::ApplicationOctetStream => "Data",
+        }
+    }
+
     /// The IANA (or TAIRiX vendor) media-type spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

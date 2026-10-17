@@ -32,6 +32,14 @@ set the file names, else as this machine's; the View menu's Instruction set
 reads it as another, and the view field of the status line offers the code
 view beside text and hex.
 
+A picture — PNG, JPEG, GIF, BMP, TIFF, WEBP, an icon or cursor file, a RISC
+OS sprite area or an OpenRaster document — opens in the data view instead:
+what the file is made of, each record at its offset with its length and what
+it declares, every EXIF tag by name with its value, then every byte of the
+file as hex beside its character. The data view is read-only; the hex view
+edits the same bytes. The picture is read by a third worker of its own, with
+no reach either, and the View menu offers the data view beside text and hex.
+
 Source files are coloured: HTML, XML and SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python and shell scripts. The system's settings
 files — application settings, the program library, the system and network

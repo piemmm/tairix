@@ -15,8 +15,10 @@
 
 use core::cmp::Ordering;
 
+use alloc::vec::Vec;
+
 use crate::entry::{Entry, EntryKind};
-use crate::media::Ending;
+use crate::media::media_for_named;
 
 /// Which field a listing is ordered by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
@@ -26,18 +28,24 @@ pub enum SortKey {
     #[default]
     Name,
     /// The entry's structural kind — directory, then application bundle,
-    /// then plain file — with files further clustered by extension. This is
-    /// the coarse, directory-context-free grouping [`Entry`] alone can name;
-    /// it is deliberately not the full [`crate::media::MediaType`] registry
-    /// (which needs the listed directory's own path to tell a service bundle
-    /// from an application one), so it stays a plain field comparison like
-    /// every other key here rather than a second classifier.
+    /// then plain file — with files further ordered by the name of their
+    /// content type ([`MediaType::name`](crate::MediaType::name)), the type a
+    /// listing's type column shows. A bundle's type needs the listed
+    /// directory to tell a service from an application, which one listing
+    /// shares, so bundles order among themselves by name.
     Kind,
     /// Apparent byte size. Directories and bundles have size `0`, so within
     /// their group this collapses to the name tiebreak.
     Size,
     /// Last-modification instant.
     Modified,
+    /// The space a volume root's volume has free; entries that are no
+    /// volume's root come first, as having none.
+    Free,
+    /// A volume root's filesystem name.
+    Filesystem,
+    /// How well a volume root's volume is serving, healthiest first.
+    Health,
 }
 
 /// Ascending or descending within the [`SortKey`].
@@ -74,13 +82,13 @@ impl SortMode {
 
     /// The next order in the fixed cycle the toolbar's Sort command steps
     /// through: name ↑, name ↓, kind ↑, kind ↓, size ↑, size ↓, modified ↑,
-    /// modified ↓, then back to name ↑. A single command that walks every
-    /// mode in a well-understood order (a menu of the same modes is the
-    /// later, richer surface); the wrap makes it total.
+    /// modified ↓, then back to name ↑. A volume's own orders, which only a
+    /// list's column header chooses, step back to name ↑. The wrap makes it
+    /// total.
     #[must_use]
     pub const fn next(self) -> Self {
         use SortDirection::{Ascending, Descending};
-        use SortKey::{Kind, Modified, Name, Size};
+        use SortKey::{Filesystem, Free, Health, Kind, Modified, Name, Size};
         let (key, direction) = match (self.key, self.direction) {
             (Name, Ascending) => (Name, Descending),
             (Name, Descending) => (Kind, Ascending),
@@ -89,7 +97,19 @@ impl SortMode {
             (Size, Ascending) => (Size, Descending),
             (Size, Descending) => (Modified, Ascending),
             (Modified, Ascending) => (Modified, Descending),
-            (Modified, Descending) => (Name, Ascending),
+            (Modified, Descending) | (Free | Filesystem | Health, _) => (Name, Ascending),
+        };
+        Self { key, direction }
+    }
+
+    /// The order a press on the column header ordering by `key` asks for: by
+    /// that key ascending, or reversed when it is the order already in force.
+    #[must_use]
+    pub fn pressed(self, key: SortKey) -> Self {
+        let direction = if self.key == key && self.direction == SortDirection::Ascending {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
         };
         Self { key, direction }
     }
@@ -101,7 +121,40 @@ impl SortMode {
 /// chosen key decides, then a case-insensitive name tiebreak makes the result
 /// independent of the input order.
 pub fn sort_entries(entries: &mut [Entry], mode: SortMode) {
-    entries.sort_by(|a, b| entry_cmp(a, b, mode));
+    if mode.key != SortKey::Kind {
+        entries.sort_by(|a, b| entry_cmp(a, b, mode));
+        return;
+    }
+    // Classifying a name scans the type registry's tables, so each entry is
+    // classified once rather than at every comparison.
+    let mut order: Vec<(usize, &'static str)> = entries
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| (at, type_name(entry)))
+        .collect();
+    order.sort_by(|a, b| ordered(&entries[a.0], &entries[b.0], mode, (a.1, b.1)));
+    permute(entries, order.into_iter().map(|(at, _)| at).collect());
+}
+
+/// Rearrange `entries` so the entry now at `order[i]` ends at `i`, following
+/// each cycle of the permutation so every entry moves once.
+fn permute(entries: &mut [Entry], mut order: Vec<usize>) {
+    for start in 0..order.len() {
+        let mut at = start;
+        while order[at] != start {
+            let from = order[at];
+            entries.swap(at, from);
+            order[at] = at;
+            at = from;
+        }
+        order[at] = at;
+    }
+}
+
+/// The name of `entry`'s content type, which [`SortKey::Kind`] orders files
+/// by within their structural rank.
+fn type_name(entry: &Entry) -> &'static str {
+    media_for_named(entry.name(), entry.kind(), false).name()
 }
 
 /// The group a kind sorts into: directories (`0`) ahead of everything else
@@ -114,12 +167,29 @@ fn group_rank(entry: &Entry) -> u8 {
 
 /// The total order two entries take under `mode`.
 pub(crate) fn entry_cmp(a: &Entry, b: &Entry, mode: SortMode) -> Ordering {
+    let types = if mode.key == SortKey::Kind {
+        (type_name(a), type_name(b))
+    } else {
+        ("", "")
+    };
+    ordered(a, b, mode, types)
+}
+
+/// [`entry_cmp`]'s order, given what [`type_name`] answers for each entry
+/// under [`SortKey::Kind`]: the one comparison both the one-off sort and the
+/// incremental insertions read.
+fn ordered(a: &Entry, b: &Entry, mode: SortMode, types: (&str, &str)) -> Ordering {
     group_rank(a).cmp(&group_rank(b)).then_with(|| {
         let primary = match mode.key {
             SortKey::Name => name_cmp(a.name(), b.name()),
-            SortKey::Kind => kind_cmp(a, b),
+            SortKey::Kind => kind_rank(a)
+                .cmp(&kind_rank(b))
+                .then_with(|| name_cmp(types.0, types.1)),
             SortKey::Size => a.size().cmp(&b.size()),
             SortKey::Modified => a.modified().cmp(&b.modified()),
+            SortKey::Free => free(a).cmp(&free(b)),
+            SortKey::Filesystem => name_cmp(filesystem(a), filesystem(b)),
+            SortKey::Health => health(a).cmp(&health(b)),
         };
         let primary = match mode.direction {
             SortDirection::Ascending => primary,
@@ -145,9 +215,8 @@ fn name_cmp(a: &str, b: &str) -> Ordering {
 
 /// The rank [`SortKey::Kind`] clusters an entry's structural kind into:
 /// directories first, then application bundles, then plain files. This is
-/// finer than [`group_rank`] (which only separates directories from
-/// everything else) but coarser than [`crate::media::MediaType`] (which needs
-/// directory context this comparator does not have).
+/// finer than [`group_rank`], which only separates directories from
+/// everything else.
 const fn kind_rank(entry: &Entry) -> u8 {
     // A link ranks with what it *names*, so a shortcut to a folder sorts
     // among the folders; one that names nothing ranks with the files, where
@@ -159,16 +228,24 @@ const fn kind_rank(entry: &Entry) -> u8 {
     }
 }
 
-/// Compare two entries by [`SortKey::Kind`]: [`kind_rank`], then — for two
-/// files — a case-insensitive extension fold, so files of one type cluster
-/// together within the file group.
-fn kind_cmp(a: &Entry, b: &Entry) -> Ordering {
-    kind_rank(a).cmp(&kind_rank(b)).then_with(|| {
-        let ext_a = Ending::of(a.name()).extension.unwrap_or_default();
-        let ext_b = Ending::of(b.name()).extension.unwrap_or_default();
-        ext_a
-            .bytes()
-            .map(|byte| byte.to_ascii_lowercase())
-            .cmp(ext_b.bytes().map(|byte| byte.to_ascii_lowercase()))
-    })
+/// The space `entry`'s volume has free, `None` for an entry that is no
+/// volume's root or a volume that keeps no accounting.
+fn free(entry: &Entry) -> Option<u64> {
+    entry.volume().and_then(|facts| facts.free)
 }
+
+/// The filesystem `entry`'s volume carries, empty for an entry that is no
+/// volume's root.
+fn filesystem(entry: &Entry) -> &str {
+    entry.volume().map_or("", |facts| facts.filesystem.as_str())
+}
+
+/// How well `entry`'s volume is serving, `None` for an entry that is no
+/// volume's root.
+fn health(entry: &Entry) -> Option<tairix_abi::sysinfo::VolumeHealth> {
+    entry.volume().map(|facts| facts.availability.health())
+}
+
+#[cfg(test)]
+#[path = "sort_tests.rs"]
+mod tests;

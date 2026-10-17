@@ -165,8 +165,8 @@ no-login service account.
     allocate from the user band.
   - The **shape of a home** is policy too, held here once as
     `HOME_MODE` (`0o700`) and `HOME_SUBDIRS` (`Applications`, `Commands`,
-    `Desktop`, `Library`, `Settings`, `UserFiles` — `AGENTS.md` §16.3), with
-    `UserFiles` holding `tairix_abi::home::USER_FILES_SUBDIRS` (`Documents`,
+    `Desktop`, `Home`, `Library`, `Settings` — `AGENTS.md` §16.3), with
+    `Home` holding `tairix_abi::home::HOME_FILES_SUBDIRS` (`Documents`,
     `Music`, `Pictures`, `Videos`). The names live in `lib/abi::home`. Every
     route that lays a home down takes the one walk
     (`tairix_users::provision_home_shape`): `provision_home`

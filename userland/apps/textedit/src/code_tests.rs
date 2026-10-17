@@ -12,9 +12,8 @@ use tairix_sandbox::decode::{DecodeFailure, DecodeRefusal, DecodeService, Isa, M
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::{ParserSandbox, SandboxError, WorkerEnd};
 
-use super::{
-    list_code, CodeDisplay, CodeListing, Unlisted, LISTING, LISTING_BUDGET_NS, MAX_LISTING_LINES,
-};
+use super::{list_code, CodeDisplay, CodeListing, LISTING, LISTING_BUDGET_NS, MAX_LISTING_LINES};
+use crate::answer::Unlisted;
 
 fn sandbox() -> ParserSandbox<LoopbackLauncher<fn() -> DecodeService>, DiscardSink> {
     ParserSandbox::new(

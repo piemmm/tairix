@@ -76,13 +76,14 @@ impl<S: Copy + Eq> Notices<S> {
         }
     }
 
-    /// Put the oldest waiting notice up as an alert holding `window`, its
-    /// answer sent to `event_endpoint`, unless one is up already.
+    /// Put the oldest waiting notice up as an alert holding `owner`, or none
+    /// for a refusal no window asked for, its answer sent to
+    /// `event_endpoint`, unless one is up already.
     pub fn raise<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
         event_endpoint: u64,
-        window: u64,
+        owner: Option<u64>,
     ) -> Raised {
         if self.showing.is_some() {
             return Raised::Nothing;
@@ -90,7 +91,7 @@ impl<S: Copy + Eq> Notices<S> {
         let Some((source, notice)) = self.waiting.pop_front() else {
             return Raised::Nothing;
         };
-        match client.open_alert(event_endpoint, Some(window), &notice) {
+        match client.open_alert(event_endpoint, owner, &notice) {
             Ok(alert) => {
                 self.showing = Some(alert);
                 Raised::Up

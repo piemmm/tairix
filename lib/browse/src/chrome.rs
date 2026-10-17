@@ -35,7 +35,8 @@
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    AppMenuSymbol,
 };
 use tairix_abi::Errno;
 use tairix_icon::IconKind;
@@ -65,7 +66,7 @@ pub enum ToolbarCommand {
     Up,
     /// Re-read the current directory ([`refresh`](Browser::refresh)).
     Refresh,
-    /// Toggle between the list and icon-grid item views
+    /// Step to the next display — large icons, small icons, the list
     /// ([`set_view_mode`](Browser::set_view_mode)).
     ToggleView,
     /// Change the listing sort order ([`set_sort_mode`](Browser::set_sort_mode)).
@@ -128,7 +129,7 @@ pub fn apply_command<S: DirectorySource>(
         ToolbarCommand::Up => browser.go_up(),
         ToolbarCommand::Refresh => browser.refresh().map(|()| true),
         ToolbarCommand::ToggleView => {
-            browser.set_view_mode(browser.view_mode().toggled());
+            browser.set_view_mode(browser.view_mode().next());
             Ok(true)
         }
         ToolbarCommand::Sort => {
@@ -379,11 +380,6 @@ pub enum ContextCommand {
     /// Activate the selected entry — descend, launch a bundle, or open a file
     /// ([`activate_selected`](Browser::activate_selected)).
     Open,
-    /// Activate the selected entry and close the window it was activated from:
-    /// "open this and I am done here". Offered only where activating hands the
-    /// entry to another program (a file or a bundle) — a directory becomes this
-    /// window's new content, so closing it would leave the user with nothing.
-    OpenAndClose,
     /// Choose an application to open the selected regular file with, from the
     /// installed bundles whose declared associations claim the file's type
     /// ([`applications_for`](crate::open_with::applications_for)). Offered only
@@ -424,7 +420,6 @@ pub enum ContextCommand {
 /// [`TOOLBAR_COMMANDS`]).
 pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Open,
-    ContextCommand::OpenAndClose,
     ContextCommand::OpenWith,
     ContextCommand::Rename,
     ContextCommand::Cut,
@@ -444,7 +439,6 @@ impl ContextCommand {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
-            Self::OpenAndClose => "Open and Close",
             Self::OpenWith => "Open With\u{2026}",
             Self::Rename => "Rename",
             Self::Cut => "Cut",
@@ -464,10 +458,9 @@ impl ContextCommand {
     pub const fn shortcut(self) -> &'static str {
         match self {
             Self::Open => "Enter",
-            // Neither Open and Close nor Open With… binds a keyboard
-            // accelerator, so neither advertises one; the menu's own traversal
-            // is how a keyboard reaches them.
-            Self::OpenAndClose | Self::OpenWith => "",
+            // Open With… binds no keyboard accelerator, so it advertises none;
+            // the menu's own traversal is how a keyboard reaches it.
+            Self::OpenWith => "",
             Self::Rename => "F2",
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
@@ -496,6 +489,23 @@ impl ContextCommand {
     const fn is_destructive(self) -> bool {
         matches!(self, Self::Delete)
     }
+
+    /// The function this command's row shows.
+    #[must_use]
+    pub const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Open => AppMenuSymbol::Open,
+            Self::OpenWith => AppMenuSymbol::OpenWith,
+            Self::Rename => AppMenuSymbol::Rename,
+            Self::Cut => AppMenuSymbol::Cut,
+            Self::Copy => AppMenuSymbol::Copy,
+            Self::Paste => AppMenuSymbol::Paste,
+            Self::SelectAll => AppMenuSymbol::SelectAll,
+            Self::ClearSelection => AppMenuSymbol::SelectNone,
+            Self::Properties => AppMenuSymbol::Properties,
+            Self::Delete => AppMenuSymbol::Delete,
+        }
+    }
 }
 
 /// What a chosen row of the file manager's context menu asks for.
@@ -519,6 +529,8 @@ pub enum ContextChoice {
     /// The document at this index of the list the menu was built from was
     /// chosen from New ▸.
     NewDocument(usize),
+    /// This display was chosen from Display ▸.
+    Display(ViewMode),
 }
 
 /// The id the Rename row's quick-entry field answers with: the one past the
@@ -532,8 +544,13 @@ const FIRST_CANDIDATE: usize = RENAME_COMMIT + 1;
 /// The id New ▸ Folder answers with.
 const NEW_FOLDER: usize = FIRST_CANDIDATE + OPEN_WITH_QUICK_MAX;
 
+/// The id the first of Display ▸'s displays answers with, the rest following
+/// in [`ViewMode::ALL`] order. They come before the documents, whose count is
+/// the machine's, so no display's id moves with what is installed.
+const FIRST_DISPLAY: usize = NEW_FOLDER + 1;
+
 /// The first New ▸ document's id.
-const FIRST_DOCUMENT: usize = NEW_FOLDER + 1;
+const FIRST_DOCUMENT: usize = FIRST_DISPLAY + ViewMode::ALL.len();
 
 /// The command New ▸ sits above, in a group of its own.
 const NEW_ABOVE: ContextCommand = ContextCommand::Properties;
@@ -544,6 +561,34 @@ const NEW_LABEL: &str = "New";
 /// New ▸ Folder's label.
 const NEW_FOLDER_LABEL: &str = "Folder";
 
+/// Display ▸'s label, which also titles its plate.
+const DISPLAY_LABEL: &str = "Display";
+
+/// Why the display in force cannot be chosen again.
+const REASON_CURRENT_DISPLAY: &str = "the window shows its items this way";
+
+impl ViewMode {
+    /// The label Display ▸ offers this display under.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LargeIcons => "Large icons",
+            Self::SmallIcons => "Small icons",
+            Self::List => "List",
+        }
+    }
+
+    /// The function this display's row shows.
+    #[must_use]
+    pub const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::LargeIcons => AppMenuSymbol::LargeIcons,
+            Self::SmallIcons => AppMenuSymbol::SmallIcons,
+            Self::List => AppMenuSymbol::List,
+        }
+    }
+}
+
 /// The accelerator that also makes a new folder.
 const NEW_FOLDER_SHORTCUT: &str = "Ctrl+Shift+N";
 
@@ -552,7 +597,7 @@ const NEW_FOLDER_SHORTCUT: &str = "Ctrl+Shift+N";
 ///
 /// The exact inverse of the numbering [`context_menu`] assigns: the commands
 /// in [`CONTEXT_COMMANDS`] order, the Rename row's field, the quick
-/// candidates, New ▸ Folder, then the New ▸ documents. A candidate's or a
+/// candidates, New ▸ Folder, the displays, then the New ▸ documents. A candidate's or a
 /// document's index is its position in the list the menu was *given*, not
 /// among the rows that fitted, so a row the plate could not seat shifts no
 /// other row's meaning.
@@ -566,6 +611,9 @@ pub fn context_choice_from_item(item: AppMenuItemId) -> Option<ContextChoice> {
         RENAME_COMMIT => ContextChoice::RenameCommit,
         NEW_FOLDER => ContextChoice::NewFolder,
         _ if index < NEW_FOLDER => ContextChoice::OpenWithCandidate(index - FIRST_CANDIDATE),
+        _ if index < FIRST_DOCUMENT => {
+            ContextChoice::Display(*ViewMode::ALL.get(index - FIRST_DISPLAY)?)
+        }
         _ => ContextChoice::NewDocument(index - FIRST_DOCUMENT),
     })
 }
@@ -637,20 +685,32 @@ pub fn context_menu(
     let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
     let mut open_with_row = None;
     let mut new_row = None;
+    let mut display_row = None;
     for (index, command) in CONTEXT_COMMANDS.iter().copied().enumerate() {
         if command == NEW_ABOVE {
             menu.push(AppMenuRow::Separator)?;
             menu.push(AppMenuRow::Submenu {
                 label: AppMenuLabel::new(NEW_LABEL)?,
                 enabled: true,
+                symbol: AppMenuSymbol::NewDocument,
             })?;
             new_row = Some(menu.len() - 1);
+            menu.push(AppMenuRow::Submenu {
+                label: AppMenuLabel::new(DISPLAY_LABEL)?,
+                enabled: true,
+                symbol: AppMenuSymbol::Display,
+            })?;
+            display_row = Some(menu.len() - 1);
         }
         if command.opens_group() {
             menu.push(AppMenuRow::Separator)?;
         }
-        let mut item = AppMenuItem::new(item_id(index)?, AppMenuLabel::new(command.label())?)
-            .with_shortcut(AppMenuShortcut::new(command.shortcut())?);
+        let mut item = AppMenuItem::new(
+            item_id(index)?,
+            AppMenuLabel::new(command.label())?,
+            command.symbol(),
+        )
+        .with_shortcut(AppMenuShortcut::new(command.shortcut())?);
         if command.is_destructive() {
             item = item.with_role(AppMenuRole::Destructive);
         }
@@ -673,6 +733,9 @@ pub fn context_menu(
     if let Some(parent) = new_row {
         push_new_rows(&mut menu, parent, quick.documents)?;
     }
+    if let Some(parent) = display_row {
+        push_display_rows(&mut menu, parent, model.display)?;
+    }
     if let Some(parent) = open_with_row {
         push_candidates(&mut menu, parent, quick.candidates)?;
     }
@@ -690,8 +753,12 @@ fn push_new_rows(
     parent: usize,
     documents: &[BlankDocument],
 ) -> Result<(), Errno> {
-    let folder = AppMenuItem::new(item_id(NEW_FOLDER)?, AppMenuLabel::new(NEW_FOLDER_LABEL)?)
-        .with_shortcut(AppMenuShortcut::new(NEW_FOLDER_SHORTCUT)?);
+    let folder = AppMenuItem::new(
+        item_id(NEW_FOLDER)?,
+        AppMenuLabel::new(NEW_FOLDER_LABEL)?,
+        AppMenuSymbol::NewFolder,
+    )
+    .with_shortcut(AppMenuShortcut::new(NEW_FOLDER_SHORTCUT)?);
     menu.push_under(AppMenuRow::Item(folder), parent)?;
     for (index, document) in documents.iter().enumerate() {
         let label = AppMenuLabel::new(document.noun())?;
@@ -702,7 +769,36 @@ fn push_new_rows(
             .checked_add(index)
             .ok_or(Errno::OutOfRange)
             .and_then(item_id)?;
-        menu.push_under(AppMenuRow::Item(AppMenuItem::new(id, label)), parent)?;
+        menu.push_under(
+            AppMenuRow::Item(AppMenuItem::new(id, label, AppMenuSymbol::NewDocument)),
+            parent,
+        )?;
+    }
+    Ok(())
+}
+
+/// Push Display ▸'s rows under the submenu row at `parent`: one per display,
+/// the one in force marked as the group's choice and refused with its reason,
+/// as the desktop's own sort and arrangement rows are.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared bounds refuse. The rows are fixed, so a refusal
+/// can only mean those bounds changed under this menu.
+fn push_display_rows(menu: &mut AppMenu, parent: usize, shown: ViewMode) -> Result<(), Errno> {
+    for (index, display) in ViewMode::ALL.into_iter().enumerate() {
+        let mut item = AppMenuItem::new(
+            item_id(FIRST_DISPLAY + index)?,
+            AppMenuLabel::new(display.label())?,
+            display.symbol(),
+        );
+        if display == shown {
+            item = item
+                .with_mark(AppMenuMark::Radio)
+                .disabled()
+                .with_reason(AppMenuReason::new(REASON_CURRENT_DISPLAY)?);
+        }
+        menu.push_under(AppMenuRow::Item(item), parent)?;
     }
     Ok(())
 }
@@ -733,7 +829,11 @@ fn push_candidates(
         if menu.text_remaining() < label.as_str().len() {
             break;
         }
-        let mut item = AppMenuItem::new(item_id(FIRST_CANDIDATE + index)?, label);
+        let mut item = AppMenuItem::new(
+            item_id(FIRST_CANDIDATE + index)?,
+            label,
+            AppMenuSymbol::Application,
+        );
         let path = candidate.bundle_path();
         if menu.text_remaining() >= candidate.name().len() + path.len() {
             if let Ok(bundle) = AppMenuBundle::new(path) {
@@ -767,6 +867,8 @@ pub struct ContextMenuModel {
     /// whether any is left to select.
     listed: usize,
     has_clipboard: bool,
+    /// How the window shows its entries, which Display ▸ marks.
+    display: ViewMode,
 }
 
 impl ContextMenuModel {
@@ -784,6 +886,7 @@ impl ContextMenuModel {
             selected: browser.selection().len(),
             listed: browser.entries().len(),
             has_clipboard,
+            display: browser.view_mode(),
         }
     }
 
@@ -836,17 +939,6 @@ impl ContextMenuModel {
             ContextCommand::Open | ContextCommand::Rename | ContextCommand::Properties => {
                 single().map_or_else(|reason| reason, |_| "")
             }
-            // Opening and closing means the entry has been handed to another
-            // program; a folder becomes this window's own new content, so
-            // closing the window would leave the user with nothing.
-            ContextCommand::OpenAndClose => match single() {
-                Err(reason) => reason,
-                Ok(kind) => match kind.resolved() {
-                    Some(EntryKind::File | EntryKind::Bundle) => "",
-                    Some(_) => "a folder opens in this window",
-                    None => DANGLING,
-                },
-            },
             // Open With… offers a chooser of applications, which only a regular
             // file has: a directory descends and a bundle launches itself, so
             // neither has an application to pick. A link offers the chooser

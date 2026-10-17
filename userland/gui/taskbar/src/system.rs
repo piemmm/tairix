@@ -21,6 +21,7 @@
 //! the row is left out entirely ([`SystemRow::offered_by`]).
 
 use tairix_abi::switchboard_ipc::CommandSection;
+use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_abi::PowerAction;
 use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem};
 use tairix_proglib::EntryId;
@@ -69,6 +70,8 @@ pub struct SystemRow {
     pub group_break: bool,
     /// The row's role, which decides whether it carries the danger rail.
     pub role: ControlRole,
+    /// The function the row's picture shows.
+    pub symbol: AppMenuSymbol,
 }
 
 impl SystemRow {
@@ -115,54 +118,63 @@ pub const ROWS: &[SystemRow] = &[
         label: "About This System",
         group_break: false,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::Info,
     },
     SystemRow {
         action: SystemAction::SystemMonitor,
         label: "System Monitor",
         group_break: false,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::SystemMonitor,
     },
     SystemRow {
         action: SystemAction::TaskShell,
         label: "Task Shell",
         group_break: false,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::TaskShell,
     },
     SystemRow {
         action: SystemAction::Settings,
         label: "Settings…",
         group_break: true,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::Settings,
     },
     SystemRow {
         action: SystemAction::Lock,
         label: "Lock Screen",
         group_break: true,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::LockScreen,
     },
     SystemRow {
         action: SystemAction::SwitchUser,
         label: "Switch User…",
         group_break: false,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::SwitchUser,
     },
     SystemRow {
         action: SystemAction::LogOut,
         label: "Log Out",
         group_break: false,
         role: ControlRole::Neutral,
+        symbol: AppMenuSymbol::LogOut,
     },
     SystemRow {
         action: SystemAction::Restart,
         label: "Restart",
         group_break: false,
         role: ControlRole::Destructive,
+        symbol: AppMenuSymbol::Restart,
     },
     SystemRow {
         action: SystemAction::ShutDown,
         label: "Shut Down",
         group_break: false,
         role: ControlRole::Destructive,
+        symbol: AppMenuSymbol::ShutDown,
     },
 ];
 
@@ -266,7 +278,12 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<BarMenuRow> {
                 ),
                 _ => (item, None),
             };
-            (index, item, why)
+            BarMenuRow {
+                index,
+                symbol: row.symbol,
+                item,
+                why,
+            }
         })
         .collect()
 }

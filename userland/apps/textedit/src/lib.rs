@@ -8,8 +8,11 @@
 
 extern crate alloc;
 
+pub mod answer;
 pub mod code;
+pub mod data;
 pub mod detect;
+pub mod display;
 pub mod document;
 pub mod editor;
 pub mod find;

@@ -15,14 +15,14 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow, AppMenuSymbol,
     APP_MENU_REASON_MAX,
 };
 
 use crate::damage::sink;
 use crate::menu::{
-    plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, PlatePlacement,
-    PlateSide,
+    plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
+    PlatePlacement, PlateSide,
 };
 use crate::record::{Fact, FactList};
 use crate::state::{AuthorityState, ControlRole, ControlState};
@@ -438,6 +438,210 @@ fn destructive_row_paints_a_leading_danger_rail() {
         (top, top + ROW_H),
         premul(theme.palette().danger),
     ));
+}
+
+/// The leading column a row's picture is drawn in: past the rim and the
+/// row's padding, and past the mark gutter on a plate that has one.
+fn picture_column(theme: &Theme, gutter: bool) -> (u32, u32) {
+    let pad = Scale::ONE.scale_length(theme.metrics().control_inset);
+    let side = Menu::icon_side(Scale::ONE, theme);
+    let left = BORDER + pad + if gutter { side + pad.div_ceil(2) } else { 0 };
+    (left, left + side)
+}
+
+/// Whether any pixel of `surface` in `columns` × `rows` is markedly red: the
+/// danger hue, which no neutral foreground is.
+fn reddened(surface: &Surface, columns: (u32, u32), rows: (u32, u32)) -> bool {
+    (rows.0..rows.1).any(|y| {
+        (columns.0..columns.1).any(|x| {
+            surface.get(x, y).is_some_and(|p| {
+                u16::from(p.r) > u16::from(p.g) + 60 && u16::from(p.r) > u16::from(p.b) + 60
+            })
+        })
+    })
+}
+
+/// A plate of a neutral row over a destructive one, each drawing a picture.
+fn a_delete_under_a_copy() -> Menu {
+    Menu::new(vec![
+        MenuItem::new("Copy").with_icon(tairix_icon::IconKind::Copy),
+        MenuItem::new("Delete")
+            .with_icon(tairix_icon::IconKind::Delete)
+            .with_role(ControlRole::Destructive),
+    ])
+}
+
+#[test]
+fn a_destructive_rows_glyph_is_the_danger_hue_and_a_neutral_rows_is_not() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let menu = a_delete_under_a_copy();
+        let surface = render(&menu, &theme, menu.preferred_height(Scale::ONE, &theme));
+        let column = picture_column(&theme, false);
+        let copy = (BORDER, BORDER + ROW_H);
+        let delete = (BORDER + ROW_H, BORDER + ROW_H * 2);
+        assert!(
+            reddened(&surface, column, delete),
+            "the bin is drawn in the danger hue"
+        );
+        assert!(
+            !reddened(&surface, column, copy),
+            "the copy glyph keeps the foreground"
+        );
+    }
+}
+
+#[test]
+fn a_current_destructive_rows_glyph_reads_on_its_danger_highlight() {
+    let theme = Theme::dark();
+    let menu = a_delete_under_a_copy().with_current(1);
+    let surface = render(&menu, &theme, menu.preferred_height(Scale::ONE, &theme));
+    let (left, right) = picture_column(&theme, false);
+    let on_accent = theme.palette().on_accent;
+    let lit = (BORDER + ROW_H..BORDER + ROW_H * 2).any(|y| {
+        (left..right).any(|x| {
+            surface
+                .get(x, y)
+                .is_some_and(|p| p.g > 200 && on_accent.g > 200 && p.b > 180)
+        })
+    });
+    assert!(
+        lit,
+        "the glyph takes the highlight's own foreground, as the label does"
+    );
+}
+
+#[test]
+fn a_disabled_destructive_row_mutes_its_glyph() {
+    let theme = Theme::dark();
+    let menu = Menu::new(vec![MenuItem::new("Delete")
+        .with_icon(tairix_icon::IconKind::Delete)
+        .with_role(ControlRole::Destructive)
+        .with_state(ControlState::disabled())]);
+    let surface = render(&menu, &theme, menu.preferred_height(Scale::ONE, &theme));
+    assert!(
+        !reddened(
+            &surface,
+            picture_column(&theme, false),
+            (BORDER, BORDER + ROW_H)
+        ),
+        "a row that cannot act states no danger"
+    );
+}
+
+#[test]
+fn a_plate_of_pictures_gives_its_marks_a_gutter_and_keeps_each_picture() {
+    let theme = Theme::dark();
+    let plain = Menu::new(vec![
+        MenuItem::new("Large icons").with_icon(tairix_icon::IconKind::LargeIcons),
+        MenuItem::new("List").with_icon(tairix_icon::IconKind::ListView),
+    ]);
+    let marked = Menu::new(vec![
+        MenuItem::new("Large icons")
+            .with_icon(tairix_icon::IconKind::LargeIcons)
+            .with_mark(MenuMark::Radio),
+        MenuItem::new("List").with_icon(tairix_icon::IconKind::ListView),
+    ]);
+    let pad = Scale::ONE.scale_length(theme.metrics().control_inset);
+    let side = Menu::icon_side(Scale::ONE, &theme);
+    assert_eq!(
+        marked.preferred_width(Scale::ONE, &theme),
+        plain.preferred_width(Scale::ONE, &theme) + side + pad.div_ceil(2),
+        "a mark beside a picture costs the plate one gutter"
+    );
+
+    let surface = render(&marked, &theme, marked.preferred_height(Scale::ONE, &theme));
+    let ink = |columns: (u32, u32), rows: (u32, u32)| {
+        (rows.0..rows.1)
+            .any(|y| (columns.0..columns.1).any(|x| surface.get(x, y).is_some_and(|p| p.g > 150)))
+    };
+    let gutter = (BORDER + pad, BORDER + pad + side);
+    let pictures = picture_column(&theme, true);
+    let (first, second) = (
+        (BORDER, BORDER + ROW_H),
+        (BORDER + ROW_H, BORDER + ROW_H * 2),
+    );
+    assert!(
+        ink(gutter, first),
+        "the chosen row's bullet sits in the gutter"
+    );
+    assert!(
+        ink(pictures, first),
+        "and its picture still shows beside it"
+    );
+    assert!(
+        !ink(gutter, second),
+        "an unmarked row leaves the gutter bare"
+    );
+    assert!(
+        ink(pictures, second),
+        "with its picture lined up under the first"
+    );
+}
+
+#[test]
+fn a_plate_without_pictures_keeps_a_mark_in_its_one_column() {
+    let theme = Theme::dark();
+    let plain = Menu::new(vec![MenuItem::new("Small"), MenuItem::new("Large")]);
+    let marked = Menu::new(vec![
+        MenuItem::new("Small").with_mark(MenuMark::Radio),
+        MenuItem::new("Large"),
+    ]);
+    assert_eq!(
+        marked.preferred_width(Scale::ONE, &theme),
+        plain.preferred_width(Scale::ONE, &theme),
+        "a choice list without pictures is laid out as it always was"
+    );
+}
+
+#[test]
+fn a_resolved_glyph_draws_the_pixels_a_rasterised_one_does() {
+    let theme = Theme::light();
+    let mut menu = a_delete_under_a_copy();
+    let height = menu.preferred_height(Scale::ONE, &theme);
+    let before = render(&menu, &theme, height);
+    menu.resolve_glyphs(Scale::ONE, &theme);
+    let side = Menu::icon_side(Scale::ONE, &theme);
+    assert!(
+        menu.items()
+            .iter()
+            .all(|item| item.held_glyph_side() == Some(side)),
+        "every row holds its glyph at the side it is drawn"
+    );
+    assert_eq!(render(&menu, &theme, height).pixels(), before.pixels());
+}
+
+/// A chain resolves its glyphs once, on its model: a plate built from it
+/// afterwards, as a reopened submenu is, carries every mask already.
+#[test]
+fn a_chain_resolves_its_glyphs_once_for_every_plate_built_from_it() {
+    let theme = Theme::dark();
+    let mut model = ChainModel::new("App");
+    let more = model.push(ChainRow::submenu(
+        AppMenuSymbol::View,
+        MenuItem::new("More"),
+    ));
+    model.push(ChainRow::item(wire_id(1), AppMenuSymbol::Copy, MenuItem::new("Copy")).under(more));
+    model.push(
+        ChainRow::item(wire_id(2), AppMenuSymbol::Delete, MenuItem::new("Delete")).under(more),
+    );
+    model.resolve_glyphs(Scale::ONE, &theme);
+
+    let side = Menu::icon_side(Scale::ONE, &theme);
+    let plate = Menu::new(
+        model
+            .rows()
+            .iter()
+            .filter(|row| row.parent() == Some(more))
+            .map(|row| row.drawn().clone())
+            .collect(),
+    );
+    assert!(
+        plate
+            .items()
+            .iter()
+            .all(|item| item.held_glyph_side() == Some(side)),
+        "the plate rasterises nothing of its own"
+    );
 }
 
 // --- Keyboard -----------------------------------------------------------
@@ -1579,10 +1783,11 @@ fn a_decoded_row_can_never_claim_the_system_lacks_authority() {
     wire.push(AppMenuRow::Item(AppMenuItem::new(
         wire_id(1),
         wire_label("Do it"),
+        AppMenuSymbol::Open,
     )))
     .expect("a row");
     wire.push(AppMenuRow::Item(
-        AppMenuItem::new(wire_id(2), wire_label("Denied")).disabled(),
+        AppMenuItem::new(wire_id(2), wire_label("Denied"), AppMenuSymbol::Open).disabled(),
     ))
     .expect("a row");
 
@@ -1602,24 +1807,34 @@ fn a_declared_separator_becomes_the_next_rows_group_break_on_every_plate() {
     wire.push(AppMenuRow::Item(AppMenuItem::new(
         wire_id(1),
         wire_label("One"),
+        AppMenuSymbol::Open,
     )))
     .expect("a row");
     wire.push(AppMenuRow::Separator).expect("a rule");
     wire.push(AppMenuRow::Submenu {
         label: wire_label("More"),
         enabled: true,
+        symbol: AppMenuSymbol::Open,
     })
     .expect("a submenu");
     let parent = wire.len() - 1;
     wire.push_under(
-        AppMenuRow::Item(AppMenuItem::new(wire_id(2), wire_label("Inner"))),
+        AppMenuRow::Item(AppMenuItem::new(
+            wire_id(2),
+            wire_label("Inner"),
+            AppMenuSymbol::Open,
+        )),
         parent,
     )
     .expect("a row");
     wire.push_under(AppMenuRow::Separator, parent)
         .expect("a rule");
     wire.push_under(
-        AppMenuRow::Item(AppMenuItem::new(wire_id(3), wire_label("After"))),
+        AppMenuRow::Item(AppMenuItem::new(
+            wire_id(3),
+            wire_label("After"),
+            AppMenuSymbol::Open,
+        )),
         parent,
     )
     .expect("a row");
@@ -1648,6 +1863,7 @@ fn an_information_row_without_an_attested_identity_is_left_out() {
     wire.push(AppMenuRow::Item(AppMenuItem::new(
         wire_id(1),
         wire_label("One"),
+        AppMenuSymbol::Open,
     )))
     .expect("a row");
     wire.push(AppMenuRow::Info).expect("an info row");
@@ -1681,14 +1897,16 @@ fn a_chooseable_row_that_has_children_draws_a_chevron_and_keeps_its_id() {
     wire.push(AppMenuRow::Item(AppMenuItem::new(
         wire_id(1),
         wire_label("Open With\u{2026}"),
+        AppMenuSymbol::OpenWith,
     )))
     .expect("a row");
     wire.push_under(
         AppMenuRow::Item(
-            AppMenuItem::new(wire_id(2), wire_label("View")).with_icon_bundle(
-                tairix_abi::window_ipc::AppMenuBundle::new("/System/Applications/view.app")
-                    .expect("a valid path"),
-            ),
+            AppMenuItem::new(wire_id(2), wire_label("View"), AppMenuSymbol::Application)
+                .with_icon_bundle(
+                    tairix_abi::window_ipc::AppMenuBundle::new("/System/Applications/view.app")
+                        .expect("a valid path"),
+                ),
         ),
         0,
     )
@@ -1726,9 +1944,10 @@ fn a_declared_class_picture_is_resolved_to_its_kind_and_an_unknown_one_to_the_ge
     let mut wire = wire_menu("Files");
     for (id, asset) in [(1, "folder"), (2, "disk-usb"), (3, "no-such-asset")] {
         wire.push(AppMenuRow::Item(
-            AppMenuItem::new(wire_id(id), wire_label("Place")).with_icon_asset(
-                tairix_abi::window_ipc::AppMenuAsset::new(asset).expect("a valid asset id"),
-            ),
+            AppMenuItem::new(wire_id(id), wire_label("Place"), AppMenuSymbol::Open)
+                .with_icon_asset(
+                    tairix_abi::window_ipc::AppMenuAsset::new(asset).expect("a valid asset id"),
+                ),
         ))
         .expect("a row");
     }
@@ -1751,7 +1970,7 @@ fn a_declared_class_picture_is_resolved_to_its_kind_and_an_unknown_one_to_the_ge
 fn a_declared_entry_field_becomes_the_rows_child() {
     let mut wire = wire_menu("App");
     wire.push(AppMenuRow::Item(
-        AppMenuItem::new(wire_id(1), wire_label("Rename")).with_entry(
+        AppMenuItem::new(wire_id(1), wire_label("Rename"), AppMenuSymbol::Rename).with_entry(
             tairix_abi::window_ipc::AppMenuEntry {
                 id: wire_id(90),
                 initial: tairix_abi::window_ipc::AppMenuEntryText::new("report.txt")
@@ -1822,8 +2041,13 @@ fn a_rows_artwork_draws_in_its_icon_column() {
 #[test]
 fn a_row_reports_the_plate_it_is_filed_under_and_the_id_an_answer_names() {
     let mut model = ChainModel::new("Bar");
-    let parent = model.push(ChainRow::submenu(MenuItem::new("More")));
-    let child = model.push(ChainRow::item(wire_id(7), MenuItem::new("Do it")).under(parent));
+    let parent = model.push(ChainRow::submenu(
+        AppMenuSymbol::Open,
+        MenuItem::new("More"),
+    ));
+    let child = model.push(
+        ChainRow::item(wire_id(7), AppMenuSymbol::Open, MenuItem::new("Do it")).under(parent),
+    );
 
     assert_eq!(model.rows()[parent].parent(), None, "the root plate");
     assert_eq!(
@@ -1842,7 +2066,7 @@ fn a_row_reports_the_plate_it_is_filed_under_and_the_id_an_answer_names() {
 fn refused_row(label: &str, why: &str) -> ChainModel {
     let mut wire = wire_menu("App");
     wire.push(AppMenuRow::Item(
-        AppMenuItem::new(wire_id(1), wire_label(label))
+        AppMenuItem::new(wire_id(1), wire_label(label), AppMenuSymbol::Open)
             .disabled()
             .with_reason(AppMenuReason::new(why).expect("a bounded reason")),
     ))
@@ -1911,8 +2135,10 @@ fn a_refused_row_still_states_why_it_cannot_be_chosen() {
     assert!(!row.drawn().state().is_actionable());
     assert_eq!(
         row.drawn(),
-        &MenuItem::new("Paste").with_state(ControlState::default().with_enabled(false)),
-        "the drawn row carries the label and the state, and nothing else"
+        &MenuItem::new("Paste")
+            .with_state(ControlState::default().with_enabled(false))
+            .with_icon(tairix_icon::menu_symbol_icon(AppMenuSymbol::Open)),
+        "the drawn row carries the label, the state and its function's glyph, and nothing else"
     );
 
     assert_eq!(

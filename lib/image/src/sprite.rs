@@ -1632,6 +1632,9 @@ impl<B: AsRef<[u8]>> SpriteAreaReader<B> {
     }
 }
 
+#[path = "sprite_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "sprite_tests.rs"]
 pub(crate) mod tests;

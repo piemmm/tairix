@@ -368,6 +368,9 @@ impl Service for ImageRenderService {
             Some(op) if crate::imageedit::is_edit_op(op) => {
                 crate::imageedit::dispatch(request, &mut self.document, &mut self.edit)
             }
+            Some(op) if crate::imageinspect::is_inspect_op(op) => {
+                crate::imageinspect::dispatch(request, &mut self.document)
+            }
             _ => encode_error(REFUSAL_MALFORMED_REQUEST),
         }
     }
@@ -2239,7 +2242,7 @@ pub enum DocumentRefusal {
 }
 
 impl DocumentRefusal {
-    const fn to_wire(self) -> u8 {
+    pub(crate) const fn to_wire(self) -> u8 {
         match self {
             Self::MalformedRequest => REFUSAL_DOC_MALFORMED_REQUEST,
             Self::TooLarge => REFUSAL_DOC_TOO_LARGE,
@@ -2341,23 +2344,44 @@ impl Document {
 
 impl ImageRenderService {
     /// Route a document-upload request to the op it names.
-    fn dispatch_document(&mut self, request: &[u8]) -> Result<Vec<u8>, DocumentRefusal> {
-        let mut r = Reader::new(request);
-        let op = r.u8().map_err(|_| DocumentRefusal::MalformedRequest)?;
-        match op {
-            OP_DOC_BEGIN => self.handle_doc_begin(&mut r),
-            OP_DOC_PUSH => self.handle_doc_push(&mut r),
-            _ => Err(DocumentRefusal::MalformedRequest),
-        }
-    }
-
-    /// `OP_DOC_BEGIN`: reserve a document of the declared length and drop
-    /// whatever the worker held before.
     ///
     /// A new document invalidates every session over the old one, so the
     /// prepared wallpaper and the open view go with it rather than being
     /// left to answer about a file that is no longer here.
-    fn handle_doc_begin(&mut self, r: &mut Reader<'_>) -> Result<Vec<u8>, DocumentRefusal> {
+    fn dispatch_document(&mut self, request: &[u8]) -> Result<Vec<u8>, DocumentRefusal> {
+        if request.first() == Some(&OP_DOC_BEGIN) {
+            self.wallpaper = None;
+            self.view = None;
+            self.edit = None;
+        }
+        Document::serve(request, &mut self.document)
+    }
+}
+
+/// Whether `op` hands a document over: a begin or a push.
+pub(crate) const fn is_document_op(op: u8) -> bool {
+    matches!(op, OP_DOC_BEGIN | OP_DOC_PUSH)
+}
+
+impl Document {
+    /// Serve a document-upload request over the document `held`: a begin
+    /// replaces it, a push extends it. Every service that takes a file in
+    /// takes it through this.
+    pub(crate) fn serve(
+        request: &[u8],
+        held: &mut Option<Self>,
+    ) -> Result<Vec<u8>, DocumentRefusal> {
+        let mut r = Reader::new(request);
+        match r.u8().map_err(|_| DocumentRefusal::MalformedRequest)? {
+            OP_DOC_BEGIN => Self::begin(&mut r, held),
+            OP_DOC_PUSH => Self::push(&mut r, held),
+            _ => Err(DocumentRefusal::MalformedRequest),
+        }
+    }
+
+    /// `OP_DOC_BEGIN`: reserve a document of the declared length, dropping
+    /// whatever was held before.
+    fn begin(r: &mut Reader<'_>, held: &mut Option<Self>) -> Result<Vec<u8>, DocumentRefusal> {
         let declared = r.u64().map_err(|_| DocumentRefusal::MalformedRequest)?;
         if !r.is_exhausted() || declared == 0 {
             return Err(DocumentRefusal::MalformedRequest);
@@ -2366,29 +2390,26 @@ impl ImageRenderService {
         if declared > MAX_DOCUMENT_BYTES {
             return Err(DocumentRefusal::TooLarge);
         }
-        self.wallpaper = None;
-        self.view = None;
-        self.edit = None;
-        self.document = None;
+        *held = None;
         let mut bytes = Vec::new();
         if !fallible::reserve(&mut bytes, declared) {
             return Err(DocumentRefusal::OutOfMemory);
         }
-        self.document = Some(Document { declared, bytes });
+        *held = Some(Self { declared, bytes });
         let mut w = Writer::new();
         w.u8(REPLY_DOC_BEGUN);
         Ok(w.finish())
     }
 
     /// `OP_DOC_PUSH`: append one chunk, answering how much has arrived.
-    fn handle_doc_push(&mut self, r: &mut Reader<'_>) -> Result<Vec<u8>, DocumentRefusal> {
+    fn push(r: &mut Reader<'_>, held: &mut Option<Self>) -> Result<Vec<u8>, DocumentRefusal> {
         let chunk = r
             .bytes(MAX_DOCUMENT_CHUNK)
             .map_err(|_| DocumentRefusal::MalformedRequest)?;
         if !r.is_exhausted() {
             return Err(DocumentRefusal::MalformedRequest);
         }
-        let document = self.document.as_mut().ok_or(DocumentRefusal::NotBegun)?;
+        let document = held.as_mut().ok_or(DocumentRefusal::NotBegun)?;
         let total = document
             .bytes
             .len()

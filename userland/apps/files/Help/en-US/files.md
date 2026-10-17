@@ -10,7 +10,7 @@ files — graphical filesystem browser
 
 Opens a desktop window listing the filesystem, starting at the
 `directory` named on the command line, or at the launching user's
-`UserFiles` folder when none is named (their home directory if that cannot
+`Home` folder when none is named (their home directory if that cannot
 be listed). The window's title names the current directory; the window
 lists its entries, every selected entry highlighted with the active
 theme's accent colour. Every directory read is an ordinary
@@ -19,7 +19,7 @@ unreadable directory is refused, never guessed at.
 
 The desktop starts the browser for you and keeps it on the icon bar: its
 slot's menu lists your own places and whatever is mounted, and choosing one
-opens a window there. A click on the slot opens one at your `UserFiles`
+opens a window there. A click on the slot opens one at your `Home`
 folder. Asking for a folder that already has a window brings that window to
 the front rather than opening another. That copy has no *Quit* row — it is
 part of the desktop, and closing its windows simply puts it away.
@@ -68,6 +68,13 @@ dragged onto an application's icon-bar slot opens it there.
 The right-click menu's *New* submenu makes a folder, or an empty document of
 each kind an installed editor writes, and opens its name for editing.
 
+The right-click menu's *Display* submenu shows the items as large icons, the
+default; as small icons, each name on one line beside its picture; or as a
+list, one row each with its size, when it was last changed and its type. A
+drive listed among them shows instead the space it has free, its filesystem
+and how well it is serving. A press on a column's title orders the list by
+it, and a second press reverses the order.
+
 `Alt+Enter` opens a *Properties* window on the selected item, as does the
 right-click menu's *Properties* row. It is a window of its own, so several can
 be open at once and the listing stays usable while they are: it shows what the
@@ -90,7 +97,7 @@ components must be a real directory name — `.` and `..` are not, so a
 spelling can never mean somewhere other than it reads as. A directory
 that fails any of those rules, or that the launching user cannot list,
 is refused with the reason on the standard error stream and the window
-opens at the `UserFiles` folder instead, so a bad argument never leaves the
+opens at the `Home` folder instead, so a bad argument never leaves the
 user with no window. A second operand is refused outright rather than
 ignored.
 

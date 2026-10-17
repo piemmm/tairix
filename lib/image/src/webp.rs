@@ -1043,6 +1043,9 @@ impl FrameSource for Chain {
     }
 }
 
+#[path = "webp_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "webp_tests.rs"]
 mod tests;

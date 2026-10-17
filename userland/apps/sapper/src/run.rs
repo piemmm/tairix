@@ -36,7 +36,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
-        AppMenuShortcut, WindowEvent,
+        AppMenuShortcut, AppMenuSymbol, WindowEvent,
     };
     use tairix_abi::{Errno, ProcId};
     use tairix_appdata::{PublishJob, Refusal, RtHost, Settings};
@@ -182,14 +182,19 @@ mod program {
     /// The rows between the convention's fixed ends: a new game, the three
     /// boards as a radio group, and the question-mark setting as a tick.
     fn menu_rows(game: &Game) -> Option<alloc::vec::Vec<AppMenuRow>> {
-        let item = |id: u16, label: &str, shortcut: &str| -> Option<AppMenuItem> {
-            Some(
-                AppMenuItem::new(AppMenuItemId::new(id).ok()?, AppMenuLabel::new(label).ok()?)
+        let item =
+            |id: u16, label: &str, symbol: AppMenuSymbol, shortcut: &str| -> Option<AppMenuItem> {
+                Some(
+                    AppMenuItem::new(
+                        AppMenuItemId::new(id).ok()?,
+                        AppMenuLabel::new(label).ok()?,
+                        symbol,
+                    )
                     .with_shortcut(AppMenuShortcut::new(shortcut).ok()?),
-            )
-        };
+                )
+            };
         let mut rows = alloc::vec![
-            AppMenuRow::Item(item(ROW_NEW_GAME, "New game", "N")?),
+            AppMenuRow::Item(item(ROW_NEW_GAME, "New game", AppMenuSymbol::NewGame, "N")?),
             AppMenuRow::Separator,
         ];
         for (index, preset) in Difficulty::PRESETS.into_iter().enumerate() {
@@ -201,7 +206,13 @@ mod program {
                 AppMenuMark::None
             };
             rows.push(AppMenuRow::Item(
-                item(id, preset.title(), core::str::from_utf8(&shortcut).ok()?)?.with_mark(mark),
+                item(
+                    id,
+                    preset.title(),
+                    level_symbol(preset),
+                    core::str::from_utf8(&shortcut).ok()?,
+                )?
+                .with_mark(mark),
             ));
         }
         rows.push(AppMenuRow::Separator);
@@ -214,10 +225,20 @@ mod program {
             AppMenuItem::new(
                 AppMenuItemId::new(ROW_QUESTIONS).ok()?,
                 AppMenuLabel::new("Question marks").ok()?,
+                AppMenuSymbol::QuestionMarks,
             )
             .with_mark(mark),
         ));
         Some(rows)
+    }
+
+    /// The function a board-size row shows: harder sizes climb.
+    const fn level_symbol(preset: Difficulty) -> AppMenuSymbol {
+        match preset {
+            Difficulty::Beginner => AppMenuSymbol::LevelEasy,
+            Difficulty::Intermediate | Difficulty::Custom(_) => AppMenuSymbol::LevelMedium,
+            Difficulty::Expert => AppMenuSymbol::LevelHard,
+        }
     }
 
     // ---- the window ------------------------------------------------------

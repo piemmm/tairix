@@ -16,9 +16,9 @@
 use tairix_abi::session_ipc::{SessionAccount, SESSION_ACCOUNTS_PER_PAGE};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
-use tairix_greeter::{Verdict, Verifier};
+use tairix_greeter::{Tickets, Verdict};
 use tairix_greeter_service::accounts::{load_accounts, SessionTransport};
-use tairix_greeter_service::SessionVerifier;
+use tairix_greeter_service::{exchange, Answer, Check};
 use tairix_log::{Event, Sink};
 use tairix_login::session::{AuthenticatedUser, Authenticator, Credentials, Gid, Uid};
 use tairix_login::{handle_session_request, AttemptBudget, SessionDirectory};
@@ -183,34 +183,32 @@ fn a_multi_page_list_is_paged_the_way_the_authority_pages_it() {
     assert_eq!(tiles[count - 1].login_name(), format!("user{}", count - 1));
 }
 
+/// What `authority` answers about `secret` for `account`, asked exactly as
+/// the greeter's worker carries a check.
+fn answer_from(authority: &mut Authority, account: &str, secret: &str) -> Answer {
+    let Ok(mut check) = Check::new(Tickets::default().issue(), account, secret) else {
+        panic!("a request fits");
+    };
+    exchange(authority, &mut check).answer
+}
+
 #[test]
 fn a_wrong_secret_comes_back_refused_with_a_lockout_the_greeter_can_present() {
-    let mut verifier = SessionVerifier::new(Authority::holding(1));
-    assert_eq!(verifier.verify(ACCOUNT, "not-the-secret"), Verdict::Refused);
-    let answer = verifier.take_answer().expect("an answer came back");
+    let answer = answer_from(&mut Authority::holding(1), ACCOUNT, "not-the-secret");
     assert_eq!(answer.verdict, Verdict::Refused);
 }
 
 #[test]
 fn the_right_secret_comes_back_accepted() {
-    let mut verifier = SessionVerifier::new(Authority::holding(1));
-    assert_eq!(verifier.verify(ACCOUNT, SECRET), Verdict::Verified);
-    assert_eq!(
-        verifier.take_answer().map(|answer| answer.verdict),
-        Some(Verdict::Verified)
-    );
+    let answer = answer_from(&mut Authority::holding(1), ACCOUNT, SECRET);
+    assert_eq!(answer.verdict, Verdict::Verified);
 }
 
 #[test]
 fn an_unknown_account_is_refused_exactly_like_a_wrong_secret() {
-    let mut unknown = SessionVerifier::new(Authority::holding(1));
-    assert_eq!(unknown.verify("nobody", SECRET), Verdict::Refused);
-    let unknown = unknown.take_answer().expect("an answer came back");
-
-    let mut wrong = SessionVerifier::new(Authority::holding(1));
-    assert_eq!(wrong.verify(ACCOUNT, "not-the-secret"), Verdict::Refused);
-    let wrong = wrong.take_answer().expect("an answer came back");
-
+    let unknown = answer_from(&mut Authority::holding(1), "nobody", SECRET);
+    let wrong = answer_from(&mut Authority::holding(1), ACCOUNT, "not-the-secret");
+    assert_eq!(unknown.verdict, Verdict::Refused);
     assert_eq!(
         unknown, wrong,
         "a reply must not distinguish an unknown account from a wrong secret"
@@ -224,24 +222,19 @@ fn the_whole_flow_pages_then_refuses_then_accepts() {
     assert_eq!(tiles.len(), 3);
     assert_eq!(tiles[0].login_name(), ACCOUNT);
 
-    let mut verifier = SessionVerifier::new(authority);
-    assert_eq!(verifier.verify(ACCOUNT, "first-guess"), Verdict::Refused);
-    verifier.take_answer().expect("an answer came back");
-
-    assert_eq!(verifier.verify(ACCOUNT, SECRET), Verdict::Verified);
-    assert_eq!(
-        verifier.take_answer().map(|answer| answer.verdict),
-        Some(Verdict::Verified)
-    );
+    let guessed = answer_from(&mut authority, ACCOUNT, "first-guess");
+    assert_eq!(guessed.verdict, Verdict::Refused);
+    let known = answer_from(&mut authority, ACCOUNT, SECRET);
+    assert_eq!(known.verdict, Verdict::Verified);
 }
 
 #[test]
 fn a_repeated_wrong_secret_earns_a_lockout_the_surface_can_present() {
-    let mut verifier = SessionVerifier::new(Authority::holding(1));
+    let mut authority = Authority::holding(1);
     let mut waited = Duration64::ZERO;
     for _ in 0..8 {
-        assert_eq!(verifier.verify(ACCOUNT, "guess"), Verdict::Refused);
-        let answer = verifier.take_answer().expect("an answer came back");
+        let answer = answer_from(&mut authority, ACCOUNT, "guess");
+        assert_eq!(answer.verdict, Verdict::Refused);
         if answer.retry_after > waited {
             waited = answer.retry_after;
         }
@@ -262,9 +255,8 @@ fn a_caller_that_is_not_the_greeter_learns_nothing() {
         "an unauthorised caller is answered with no accounts at all"
     );
 
-    let mut verifier = SessionVerifier::new(Authority::from_an_impostor(1));
     assert_eq!(
-        verifier.verify(ACCOUNT, SECRET),
+        answer_from(&mut Authority::from_an_impostor(1), ACCOUNT, SECRET).verdict,
         Verdict::Refused,
         "the right secret from the wrong caller is still a refusal"
     );

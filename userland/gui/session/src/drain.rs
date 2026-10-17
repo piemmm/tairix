@@ -11,12 +11,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::Errno;
-use tairix_greeter::Verifier;
+use tairix_greeter::{Asking, Courier, Ticket, Verdict, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point};
 
 use crate::drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
-use crate::lock::{LockedDrain, ScreenLock};
+use crate::lock::{LockOutcome, ScreenLock};
 use crate::menu::MenuChain;
 use crate::saver::Waking;
 use crate::shell::{DesktopShell, InputSource, ShellOutcome, Stopped};
@@ -317,10 +317,11 @@ where
 /// Drain the seat straight into the engaged lock: no motion, click or key
 /// reaches the window manager, the taskbar or an application.
 ///
-/// Both channels drain to empty even once a password is verified part-way;
-/// [`LockedDrain`] discards what follows it. The seat's modifier state is
-/// still kept, so the first click after unlocking is not stamped with a
-/// modifier released while locked.
+/// A motion sample moves the seat's pointer and the cursor with the device
+/// before the lock places its caret, so the first press after the unlock
+/// lands where the pointer is. The seat's modifier state is still kept, so
+/// the first click after unlocking is not stamped with a modifier released
+/// while locked.
 ///
 /// # Errors
 ///
@@ -338,28 +339,58 @@ where
 {
     // The shell will not see the release that ends any gesture in flight.
     seat.shell.yield_pointer(seat.compositor);
-    let mut drain = LockedDrain::new();
     while let Some(event) = pointer.poll(now_ns)? {
-        drain.feed(
-            seat.lock,
-            &event,
-            now_ns,
-            verifier,
-            seat.shell,
-            seat.compositor,
-        );
+        if let InputEvent::PointerMoved { to } = event {
+            seat.shell.track_pointer(to, seat.compositor);
+        }
+        seat.lock
+            .handle(&event, now_ns, verifier, seat.shell, seat.compositor);
     }
     while let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? {
-        drain.feed(
-            seat.lock,
-            &event,
-            now_ns,
-            verifier,
-            seat.shell,
-            seat.compositor,
-        );
+        seat.lock
+            .handle(&event, now_ns, verifier, seat.shell, seat.compositor);
     }
     Ok(())
+}
+
+/// Adopt every answer the broker has given the lock, each once the seat has
+/// been drained into the lock that is still up, answering whether one
+/// unlocked it.
+///
+/// Whatever is queued at that instant was typed or moved at the locked
+/// screen — the release of the submitting Enter, a keystroke behind it — so
+/// it is spent on the lock, which takes nothing while it checks, rather than
+/// spilt into whatever holds focus on the desktop the unlock uncovers.
+///
+/// # Errors
+///
+/// A channel's fault, before the answer it would have preceded is adopted:
+/// the lock stays up.
+pub fn adopt_unlocks<P, C, B>(
+    seat: &mut Seat<'_>,
+    (pointer, keyboard): (&mut P, &mut KeyboardInputSource<C>),
+    unlocker: &mut Asking<B>,
+    now_ns: u64,
+) -> Result<LockOutcome, Errno>
+where
+    P: InputSource + ?Sized,
+    C: KeyInputChannel,
+    B: Courier<Answer = (Ticket, Verdict)>,
+{
+    let mut outcome = LockOutcome::Pending;
+    while let Some(answer) = unlocker.landed() {
+        if seat.lock.is_locked() {
+            drain_locked(seat, pointer, keyboard, unlocker, now_ns)?;
+        }
+        if seat
+            .lock
+            .answer(answer, now_ns, seat.shell, seat.compositor)
+            == LockOutcome::Unlocked
+        {
+            outcome = LockOutcome::Unlocked;
+        }
+    }
+    Ok(outcome)
 }
 
 /// Drain the seat into nothing but the pointer's position and the seat's

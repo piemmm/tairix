@@ -46,8 +46,9 @@ use crate::ccitt;
 use crate::channel::{Channel, Sampler};
 use crate::density::{DensityUnit, Stated};
 use crate::encode::{TiffCompression, TiffOptions};
+use crate::ifd::{Endian, Field, Ifd, ENTRY_LEN, SHORT};
 use crate::lzw::{CodeSource, Lzw, Widen};
-use crate::orientation::Orientation;
+use crate::orientation::{Orientation, TAG_ORIENTATION};
 use crate::pages::{PageSource, Pages};
 use crate::picture::{IndexDepth, Picture};
 use crate::{
@@ -64,17 +65,9 @@ pub(crate) const SIGNATURES: [[u8; 4]; 4] = [
     [b'M', b'M', 0, 43],
 ];
 
-/// A directory entry's fixed length, and the smallest a whole directory can
-/// be: an entry count and the offset of the next directory.
-pub(crate) const ENTRY_LEN: usize = 12;
+/// The smallest a whole directory can be: an entry count and the offset of
+/// the next directory.
 const MIN_IFD_LEN: usize = 6;
-
-/// The field types an entry's values are held in.
-pub(crate) const BYTE: u16 = 1;
-pub(crate) const SHORT: u16 = 3;
-pub(crate) const LONG: u16 = 4;
-pub(crate) const RATIONAL: u16 = 5;
-pub(crate) const UNDEFINED: u16 = 7;
 
 /// Pages one file may declare.
 ///
@@ -104,7 +97,6 @@ pub(crate) const TAG_COMPRESSION: u16 = 259;
 pub(crate) const TAG_PHOTOMETRIC: u16 = 262;
 const TAG_FILL_ORDER: u16 = 266;
 pub(crate) const TAG_STRIP_OFFSETS: u16 = 273;
-const TAG_ORIENTATION: u16 = 274;
 pub(crate) const TAG_SAMPLES_PER_PIXEL: u16 = 277;
 pub(crate) const TAG_ROWS_PER_STRIP: u16 = 278;
 pub(crate) const TAG_STRIP_BYTE_COUNTS: u16 = 279;
@@ -211,235 +203,6 @@ const OLD_SUBFILE_REDUCED: u32 = 2;
 /// Fractional bits the colour arithmetic carries, and its unit.
 const FRAC: u32 = 16;
 const ONE: i64 = 1 << FRAC;
-
-/// A file's byte order, which every multi-byte field in it is read in.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Endian {
-    Little,
-    Big,
-}
-
-impl Endian {
-    fn u16(self, bytes: &[u8], at: usize) -> Option<u16> {
-        match self {
-            Self::Little => crate::le_u16(bytes, at),
-            Self::Big => crate::be_u16(bytes, at),
-        }
-    }
-
-    fn u32(self, bytes: &[u8], at: usize) -> Option<u32> {
-        match self {
-            Self::Little => crate::le_u32(bytes, at),
-            Self::Big => crate::be_u32(bytes, at),
-        }
-    }
-}
-
-/// Bytes one element of a directory entry's field type occupies, or `None`
-/// for a type this decoder has no reading of.
-const fn type_size(kind: u16) -> Option<u32> {
-    Some(match kind {
-        // BYTE, ASCII, SBYTE, UNDEFINED.
-        1 | 2 | 6 | 7 => 1,
-        // SHORT, SSHORT.
-        3 | 8 => 2,
-        // LONG, SLONG, FLOAT.
-        4 | 9 | 11 => 4,
-        // RATIONAL, SRATIONAL, DOUBLE.
-        5 | 10 | 12 => 8,
-        _ => return None,
-    })
-}
-
-/// One directory entry's values, wherever the entry put them.
-#[derive(Copy, Clone, Debug)]
-struct Field {
-    kind: u16,
-    count: u32,
-    at: usize,
-}
-
-/// One image file directory, and the file it indexes into.
-#[derive(Copy, Clone)]
-struct Ifd<'a> {
-    file: &'a [u8],
-    endian: Endian,
-    entries: usize,
-    count: u16,
-}
-
-impl<'a> Ifd<'a> {
-    /// Read the directory at `at`, answering it and the offset of the next.
-    fn read(file: &'a [u8], endian: Endian, at: usize) -> Result<(Self, usize), DecodeError> {
-        let count = endian.u16(file, at).ok_or(DecodeError::TiffTruncated)?;
-        let entries = at.checked_add(2).ok_or(DecodeError::TiffTruncated)?;
-        let span = usize::from(count)
-            .checked_mul(ENTRY_LEN)
-            .ok_or(DecodeError::TiffTruncated)?;
-        let after = entries
-            .checked_add(span)
-            .ok_or(DecodeError::TiffTruncated)?;
-        let next = endian.u32(file, after).ok_or(DecodeError::TiffTruncated)?;
-        let next = usize::try_from(next).map_err(|_| DecodeError::TiffTruncated)?;
-        Ok((
-            Self {
-                file,
-                endian,
-                entries,
-                count,
-            },
-            next,
-        ))
-    }
-
-    /// The entry for `tag`, or `None` where the directory carries none — or
-    /// carries one whose type this decoder has no reading of, which the
-    /// format asks a reader to pass over rather than refuse.
-    fn field(&self, tag: u16) -> Result<Option<Field>, DecodeError> {
-        Ok(self.fields([tag])?[0])
-    }
-
-    /// The entries for several tags, found in one pass.
-    ///
-    /// The chain walk reads a handful of tags from every page, so scanning
-    /// once for all of them is what keeps that walk linear in the file
-    /// rather than multiplying it by the tags wanted.
-    fn fields<const N: usize>(&self, tags: [u16; N]) -> Result<[Option<Field>; N], DecodeError> {
-        let mut found = [None; N];
-        for index in 0..usize::from(self.count) {
-            let at = self.entries + index * ENTRY_LEN;
-            let entry = self
-                .endian
-                .u16(self.file, at)
-                .ok_or(DecodeError::TiffTruncated)?;
-            let Some(slot) = tags
-                .iter()
-                .position(|tag| *tag == entry)
-                .and_then(|slot| found.get_mut(slot))
-            else {
-                continue;
-            };
-            if slot.is_some() {
-                continue;
-            }
-            *slot = self.read_field(at)?;
-        }
-        Ok(found)
-    }
-
-    /// The value span of the entry at `at`, or `None` for a field type this
-    /// decoder has no reading of.
-    fn read_field(&self, at: usize) -> Result<Option<Field>, DecodeError> {
-        let kind = self
-            .endian
-            .u16(self.file, at + 2)
-            .ok_or(DecodeError::TiffTruncated)?;
-        let count = self
-            .endian
-            .u32(self.file, at + 4)
-            .ok_or(DecodeError::TiffTruncated)?;
-        let Some(size) = type_size(kind) else {
-            return Ok(None);
-        };
-        let bytes = u64::from(count) * u64::from(size);
-        let values = at + 8;
-        let values = if bytes <= 4 {
-            values
-        } else {
-            usize::try_from(
-                self.endian
-                    .u32(self.file, values)
-                    .ok_or(DecodeError::TiffTruncated)?,
-            )
-            .map_err(|_| DecodeError::TiffTruncated)?
-        };
-        let end = u64::try_from(values)
-            .ok()
-            .and_then(|values| values.checked_add(bytes))
-            .ok_or(DecodeError::TiffTruncated)?;
-        if end > self.file.len() as u64 {
-            return Err(DecodeError::TiffTruncated);
-        }
-        Ok(Some(Field {
-            kind,
-            count,
-            at: values,
-        }))
-    }
-
-    /// Element `index` of `field`, read as an unsigned integer.
-    fn integer(&self, field: &Field, index: u32) -> Result<u32, DecodeError> {
-        if index >= field.count {
-            return Err(DecodeError::TiffInvalidTagValue);
-        }
-        let index = usize::try_from(index).map_err(|_| DecodeError::TiffInvalidTagValue)?;
-        match field.kind {
-            BYTE | UNDEFINED => self
-                .file
-                .get(field.at + index)
-                .map(|byte| u32::from(*byte))
-                .ok_or(DecodeError::TiffTruncated),
-            SHORT => self
-                .endian
-                .u16(self.file, field.at + index * 2)
-                .map(u32::from)
-                .ok_or(DecodeError::TiffTruncated),
-            LONG => self
-                .endian
-                .u32(self.file, field.at + index * 4)
-                .ok_or(DecodeError::TiffTruncated),
-            _ => Err(DecodeError::TiffInvalidTagValue),
-        }
-    }
-
-    /// Element `index` of a RATIONAL field, as its numerator and
-    /// denominator.
-    fn rational(&self, field: &Field, index: u32) -> Result<(u32, u32), DecodeError> {
-        if field.kind != RATIONAL || index >= field.count {
-            return Err(DecodeError::TiffInvalidTagValue);
-        }
-        let at = field.at + usize::try_from(index).unwrap_or(usize::MAX) * 8;
-        let numerator = self
-            .endian
-            .u32(self.file, at)
-            .ok_or(DecodeError::TiffTruncated)?;
-        let denominator = self
-            .endian
-            .u32(self.file, at + 4)
-            .ok_or(DecodeError::TiffTruncated)?;
-        if denominator == 0 {
-            return Err(DecodeError::TiffInvalidTagValue);
-        }
-        Ok((numerator, denominator))
-    }
-
-    /// A field's first value, or `fallback` where the directory carried no
-    /// such field — refusing when there is no fallback and so no page.
-    fn first(&self, field: Option<&Field>, fallback: Option<u32>) -> Result<u32, DecodeError> {
-        match field {
-            Some(field) if field.count > 0 => self.integer(field, 0),
-            _ => fallback.ok_or(DecodeError::TiffMissingTag),
-        }
-    }
-
-    /// `tag`'s first value, or `fallback` where the directory omits it.
-    fn value(&self, tag: u16, fallback: u32) -> Result<u32, DecodeError> {
-        match self.field(tag)? {
-            Some(field) if field.count > 0 => self.integer(&field, 0),
-            _ => Ok(fallback),
-        }
-    }
-
-    /// `tag`'s first value, refusing a directory that omits a tag its page
-    /// cannot be read without.
-    fn required(&self, tag: u16) -> Result<u32, DecodeError> {
-        let field = self.field(tag)?.ok_or(DecodeError::TiffMissingTag)?;
-        if field.count == 0 {
-            return Err(DecodeError::TiffMissingTag);
-        }
-        self.integer(&field, 0)
-    }
-}
 
 /// How a sample's bits are to be read as a number.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1944,13 +1707,9 @@ struct Measured {
 
 /// Read the file header: its byte order, and where the first directory is.
 fn header(file: &[u8]) -> Result<(Endian, usize), DecodeError> {
-    let endian = match file.first_chunk::<2>() {
-        Some(b"II") => Endian::Little,
-        Some(b"MM") => Endian::Big,
-        _ => return Err(DecodeError::TiffBadSignature),
-    };
+    let endian = Endian::of(file).ok_or(DecodeError::TiffBadSignature)?;
     match endian.u16(file, 2).ok_or(DecodeError::TiffTruncated)? {
-        42 => {}
+        crate::ifd::MAGIC => {}
         43 => return Err(DecodeError::TiffBigTiffUnsupported),
         _ => return Err(DecodeError::TiffBadSignature),
     }
@@ -2562,6 +2321,9 @@ impl NativePages {
         Ok(Some(picture.with_density(density)))
     }
 }
+
+#[path = "tiff_inspect.rs"]
+pub(crate) mod inspect;
 
 #[cfg(test)]
 #[path = "tiff_tests.rs"]

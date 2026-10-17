@@ -406,7 +406,7 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-image",
         test: "fuzz_image",
         description:
-            "raster-image decode (untrusted PNG + JPEG bytes: chunk framing, filters, interlace, marker segments, Huffman scans)",
+            "raster-image decode and structure report (untrusted picture bytes: chunk framing, filters, interlace, marker segments, Huffman scans, EXIF directories)",
     },
     Target {
         package: "tairix-sound",

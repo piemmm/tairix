@@ -274,9 +274,10 @@ so the rail's first row top *is* the first listing row's top and its rows share
 the `row_height` grid with the listing rows beside them. `content_area` keeps
 its meaning as the window less the rail — what the item view, scrollbar
 and overlays occupy — so the picker (no rail, `content_area` == window) is
-laid out exactly as before. The manager opens on `ViewMode::Grid` (icons)
-with the toolbar toggle switching to the list; the engine default and the
-read-only picker stay `List`, since a chooser needs names, sizes and dates.
+laid out exactly as before. The manager opens on `MANAGER_VIEW_MODE` (large
+icons), the *Display* submenu and the toolbar's view command choosing among
+large icons, small icons and the list; the engine default and the read-only
+picker stay `List`, since a chooser needs names, sizes and dates.
 The modal file-operation progress panel's Cancel press resolves through the
 same `content_area` the panel is painted in — the routing lives in the
 host-testable `userland/apps/files/src/operation.rs`, which takes the window
@@ -311,17 +312,16 @@ read-only picker is unchanged: `ManagerChrome::none()` still carries
 `ToolbarBand::Shown`, and `picker::PICKER_CHROME` names it once so the painted
 band and the hit-tests that invert it cannot disagree.
 
-**FM12 (pointer activation gestures)**: four gestures reach the one `activate`
-dispatch a keyboard `Enter` uses (so pointer and keyboard never diverge, §2.2)
-— double-click (activate), shift-double-click (list a bundle rather than run
-it), and right-click (which asks the desktop for the context menu; its **Open
-and Close** row activates and then closes
-the window once the entry is handed over). The pairing is the shared pure
+**FM12 (pointer activation gestures)**: three gestures reach the one
+`activate` dispatch a keyboard `Enter` uses (so pointer and keyboard never
+diverge, §2.2) — double-click (activate), shift-double-click (list a bundle
+rather than run it), and right-click (which asks the desktop for the context
+menu). The pairing is the shared pure
 `lib/browse::click::DoubleClickTracker` over the capability-free monotonic
 clock, keyed on the **button** as well as the item so one press of each is two
 gestures begun, never one completed. Which gesture a press is comes from the
 app's own pure, host-tested `gesture` module (`bundle_intent`,
-`primary_press`, `secondary_press`, `AfterHandoff`), mirroring how `command`
+`primary_press`, `secondary_press`), mirroring how `command`
 keeps the freestanding binary's decisions testable; `apply_primary_press` /
 `apply_secondary_press` are then thin routers, and the tracker is reset on any
 tool/chrome press so a click through the chrome and back never mis-pairs. The
@@ -454,7 +454,7 @@ manager window through that item's own context-menu *Open* row
 (`reconstruct_manager_item_menu`, which composes the session's chain from the
 rows this app declares). D98 remains the block on FM9-a's remaining halves, and
 it is a block on *keys*, not on reaching the window.
-Landed: the trusted picker opens at the user's `UserFiles` (`Browser::open_at`
+Landed: the trusted picker opens at the user's `Home` folder (`Browser::open_at`
 over the session's `HOME`, climbing from a refused start), and the CU6 one-shot delegation
 that hands the picked file to the viewer is host-tested end to end (mint, the
 D92 instance gate, one-shot redemption, the grantor-identity re-check, the
@@ -1033,8 +1033,8 @@ holds no menu shell.
 
 Host-tested in `lib/browse`: the row-id inverse over the whole command list, one
 declared row per command carrying its own label and caption, every inapplicable
-row disabled *with* the model's reason, the three distinct reasons Open With…
-and Open and Close can state, that a decoded reason reaches the chain row's tip
+row disabled *with* the model's reason, the distinct reasons Open With… can
+state, that a decoded reason reaches the chain row's tip
 and never its drawn form, the destructive emphasis on removal alone, and a
 title the bounds refuse opening nothing. Docs: `docs/src/desktop/apps.md`,
 `docs/src/desktop/menus.md`, `lib/browse/README.md` + rustdoc.
@@ -1989,7 +1989,6 @@ keyboard `Enter` uses, so pointer and keyboard can never open different things
 | double-click / `Enter` | activate: descend, run a bundle, or open a file |
 | shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
 | right-click | ask the desktop for the context menu on the item |
-| the **Open and Close** menu row | activate, then close this window |
 
 There is no right-*double*-click. The menu the first press opens is the
 desktop's chain and holds the seat's grab, so the second press is consumed there
@@ -2023,17 +2022,15 @@ discoverable, and reachable from the keyboard as the gesture never was.
   decisions testable: `bundle_intent(shift)` (one spelling, so the pointer and
   `Shift+Enter` cannot diverge), `primary_press` (which resolves a press to
   `Activate`/`Select`/`Chrome`, registering against the tracker and resetting it
-  on a press that resolves to no item), and `AfterHandoff` (whether a completed
-  hand-off closes the window). The secondary-press decision is gone with the
+  on a press that resolves to no item). Activating an entry never closes the
+  window it was activated from (`plans/FILES-INTERACTION.md` FI30). The
+  secondary-press decision is gone with the
   gesture it resolved: a right-press asks the desktop for the menu and resets
   the tracker, so a click either side of it cannot pair.
 - **The app wiring.** `apply_primary_press` is a thin router over those
   decisions and `open_context_menu` is the secondary press's whole answer; the
   shift modifier arrives on the pointer event itself
-  (`WindowEvent::Pointer`'s `modifiers`). Open and Close closes the window only
-  on a `LaunchBundle`/`OpenFile` — a `Descended` is the window's new content, so
-  closing it would leave the user with nothing, which is why the row is offered
-  only over a file or a bundle and states its reason otherwise.
+  (`WindowEvent::Pointer`'s `modifiers`).
   `open_context_menu` takes the caller's already-resolved index, so a press
   costs one hit-test. Docs: `docs/src/desktop/apps.md`,
   `docs/src/desktop/menus.md`, `lib/browse/README.md` + rustdoc.

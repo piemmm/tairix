@@ -296,6 +296,9 @@ pub(crate) fn pages(bytes: &[u8], limits: &DecodeLimits) -> Result<Pages<Directo
     Ok(Pages::new(Directory { count }, limits, width, height))
 }
 
+#[path = "ico_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "ico_tests.rs"]
 mod tests;

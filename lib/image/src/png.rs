@@ -1285,6 +1285,9 @@ pub(crate) fn decode_fitted(
     Ok(RasterImage::from_parts(width, height, pixels))
 }
 
+#[path = "png_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "png_tests.rs"]
 mod tests;

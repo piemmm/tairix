@@ -84,7 +84,7 @@ fn a_pushed_document_naming_a_file_or_a_machine_sound_is_refused_whole() {
 fn a_stored_document_keeps_only_what_a_user_may_set() {
     let (choices, refused) = stored(
         "sound.bell.enabled = off\n\
-         sound.error.file = /Users/ada/UserFiles/Music/klaxon.flac\n\
+         sound.error.file = /Users/ada/Home/Music/klaxon.flac\n\
          sound.login.enabled = false\n\
          sound.login.file = /Users/ada/hello.flac\n\
          sound.gain = 3dB\n\
@@ -101,7 +101,7 @@ fn a_stored_document_keeps_only_what_a_user_may_set() {
     );
     assert_eq!(
         choices.file(SoundEvent::Error),
-        Some("/Users/ada/UserFiles/Music/klaxon.flac")
+        Some("/Users/ada/Home/Music/klaxon.flac")
     );
     assert_eq!(choices.file(SoundEvent::Login), None);
     assert_eq!(

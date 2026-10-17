@@ -1605,7 +1605,7 @@ You are not exempt from any rule above. In addition:
     | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs and per-boot scratch | `plans/APPDATA.md` |
     | Default desktop apps going live: app windows, live app data channels, the file picker, and the alerts — the desktop-drawn error, warning and question windows every application raises, their content-sized layout, owner modality and earned focus — and the rule that every dialog, form and progress display is a window of its own | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
-    | The file manager's interaction and icons: marquee and modifier selection, drag-and-drop between windows and onto the desktop with its copy/move cursors, the New ▸ submenu, one window per folder and the activation that raises it, folder content cards, image thumbnails and the store that keeps them per content generation, the item-name and title type, two-line names and in-place rename, the compact tile and the ground between tiles, the `UserFiles` home tree | `plans/FILES-INTERACTION.md` |
+    | The file manager's interaction and icons: marquee and modifier selection, drag-and-drop between windows and onto the desktop with its copy/move cursors, the New ▸ submenu, one window per folder and the activation that raises it, folder content cards, image thumbnails and the store that keeps them per content generation, the item-name and title type, two-line names and in-place rename, the compact tile and the ground between tiles, the `Home` folder of the user's own files, the places rail's storage-only rows, the *Display* submenu's large icons, small icons and list, and the list's columns and header sort | `plans/FILES-INTERACTION.md` |
     | The picture and document viewer (`view.app`): the formats it claims, the page-source seam every document is reached through, sequence/animation decode, the sandboxed document decode, and the shared app-side window shell | `plans/VIEW.md` |
     | Sound: the one audio path (client stream ABI, the `audiod` mixer/router, the `audiochan-v1` device channel), the exported device clock and latency grant, seat-leased sinks and gated capture, the file decoders (`lib/sound`), their sandboxed decode and the one feature-gated encoder (FLAC), the audio driver class, the two players (`play`, `music.app`), and the default desktop sounds (the `SoundEvent` vocabulary, the shipped FLAC masters, the `soundd` cue authority and who may cue what) | `plans/SOUND.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
@@ -1883,7 +1883,7 @@ defect.
 ### 16.3 `/Users`, `/Storage`
 
 - `/Users/<username>/` is the only place user-owned files live. It
-  contains at least `UserFiles/` (the user's own files, holding
+  contains at least `Home/` (the user's own files, holding
   `Documents/`, `Music/`, `Pictures/` and `Videos/`), `Settings/`,
   `Library/` (per-user caches/state, **not** shared libraries),
   `Commands/` and `Applications/` (the user's own two program stores,

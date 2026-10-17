@@ -8,8 +8,8 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use super::{
-    CredentialAction, CredentialSheet, CREDENTIAL_HEIGHT, CREDENTIAL_NOT_STARTED_REASON,
-    CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
+    CredentialAction, CredentialSheet, CREDENTIAL_CHECKING_REASON, CREDENTIAL_HEIGHT,
+    CREDENTIAL_NOT_STARTED_REASON, CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 use crate::damage;
 use crate::text::Keystroke;
@@ -212,6 +212,46 @@ fn a_refusal_states_its_reason_and_clears_only_the_password() {
     // it.
     type_text(&mut sheet, "right");
     assert_eq!(sheet.secret(), Some("right"));
+}
+
+/// While the authority checks an offer the sheet takes nothing: no edit, no
+/// second offer, and no cancel that could not recall what is under way. Its
+/// refusal hands the keyboard back.
+#[test]
+fn a_sheet_being_checked_takes_no_input_until_it_is_refused() {
+    let mut sheet = asking();
+    type_text(&mut sheet, "root");
+    feed(&mut sheet, &press(NamedKey::Tab));
+    type_text(&mut sheet, "pw");
+    assert_eq!(
+        feed(&mut sheet, &press(NamedKey::Enter)),
+        Some(CredentialAction::Offered)
+    );
+    sheet.check();
+    assert!(sheet.is_checking());
+    assert_eq!(sheet.stated_reason(), Some(CREDENTIAL_CHECKING_REASON));
+    assert_eq!(
+        sheet.secret(),
+        Some(""),
+        "the password handed over is erased"
+    );
+
+    for event in [press(NamedKey::Escape), press(NamedKey::Enter)] {
+        assert_eq!(
+            feed(&mut sheet, &event),
+            None,
+            "{event:?} reached a checking sheet"
+        );
+    }
+    type_text(&mut sheet, "x");
+    assert_eq!(sheet.secret(), Some(""));
+    let cancel = CredentialSheet::field_rect(bounds(), Scale::ONE, 1);
+    assert_eq!(click(&mut sheet, cancel.origin), None);
+
+    sheet.refuse(CREDENTIAL_REFUSED_REASON);
+    assert!(!sheet.is_checking());
+    type_text(&mut sheet, "again");
+    assert_eq!(sheet.secret(), Some("again"));
 }
 
 #[test]

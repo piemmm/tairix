@@ -32,6 +32,7 @@ use core::fmt;
 
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    AppMenuSymbol,
 };
 use tairix_abi::Errno;
 
@@ -99,6 +100,7 @@ pub fn declaration(
     menu.push(AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(QUIT_ROW)?,
         AppMenuLabel::new(QUIT_LABEL)?,
+        AppMenuSymbol::Quit,
     )))?;
     Ok(AppBar {
         event_endpoint: endpoint,
@@ -184,6 +186,7 @@ mod tests {
         AppMenuRow::Item(AppMenuItem::new(
             AppMenuItemId::new(id).expect("non-zero"),
             AppMenuLabel::new(label).expect("within bounds"),
+            AppMenuSymbol::Open,
         ))
     }
 
@@ -232,6 +235,7 @@ mod tests {
         let submenu = AppMenuRow::Submenu {
             label: AppMenuLabel::new("Profile").expect("within bounds"),
             enabled: true,
+            symbol: AppMenuSymbol::Settings,
         };
         assert_eq!(
             declaration(9, AppBarClick::Raise, &[submenu]),

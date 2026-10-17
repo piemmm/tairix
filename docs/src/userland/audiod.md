@@ -28,6 +28,13 @@ services its ring from that interrupt and sends one notification carrying the
 endpoint's clock model and refills. There is no audio tick anywhere in the
 system, and nothing polls.
 
+The first stream on an endpoint programs its period: half that stream's
+latency target, so a ring two periods deep holds it, but never longer than
+20 ms (`MAX_PERIOD_MS`), clamped into what the device will do. The period is
+every stream's on the endpoint, so a client buffering deeply — a notification
+queueing its whole sound, a player saving power — never makes every later
+stream that late; its own ring still holds all it asked for.
+
 ## What it composes
 
 Every decision about *what samples come out* is `lib/audio`'s:

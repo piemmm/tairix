@@ -399,11 +399,14 @@ impl MenuChain {
     pub fn open(
         &mut self,
         owner: ChainOwner,
-        model: ChainModel,
+        mut model: ChainModel,
         placement: PlatePlacement,
         geom: &ChainGeometry<'_>,
     ) -> Result<(), ModelRefused> {
-        let root = plate_for(&model, None, geom)?;
+        // The chain ends when the scale or theme changes, so the side every
+        // plate draws its glyphs at is fixed for the chain's whole life.
+        model.resolve_glyphs(geom.scale, geom.theme);
+        let root = plate_for(&model, None)?;
         self.close_open();
         let mut chain = OpenChain {
             owner,
@@ -1433,7 +1436,7 @@ impl OpenChain {
                 }
             }
             ChainChild::Submenu => {
-                match plate_for(&self.model, Some(model_row), geom) {
+                match plate_for(&self.model, Some(model_row)) {
                     Ok(child) => self.plates.push(child),
                     // A submenu row whose plate holds nothing opens nothing,
                     // rather than a plate with no way out of it.
@@ -1677,11 +1680,7 @@ enum Hit {
 /// # Errors
 ///
 /// [`ModelRefused::NoRows`] when that plate would hold nothing.
-fn plate_for(
-    model: &ChainModel,
-    opener: Option<usize>,
-    geom: &ChainGeometry<'_>,
-) -> Result<Plate, ModelRefused> {
+fn plate_for(model: &ChainModel, opener: Option<usize>) -> Result<Plate, ModelRefused> {
     let rows: Vec<usize> = model
         .rows()
         .iter()
@@ -1708,7 +1707,6 @@ fn plate_for(
             .get(at)
             .map_or_else(String::new, |row| row.drawn().label().to_string()),
     });
-    let _ = geom;
     Ok(Plate {
         rows,
         menu: Menu::new(items),

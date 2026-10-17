@@ -17,6 +17,8 @@ use tairix_syntax::{Severity, Span};
 use tairix_theme::{Palette, SyntaxRole, Theme};
 
 use crate::code::CodeDisplay;
+use crate::data::{DataDisplay, DataRow};
+use crate::display::Display;
 use crate::document::Document;
 use crate::editor::Mode;
 use crate::hex::{self, HexCaret, HexLayout, Nibble, Pane, BYTES_PER_ROW};
@@ -53,8 +55,13 @@ pub fn render_into(
     }
     if !withheld(surface, layout.grid()) {
         fill_area(surface, layout.grid(), Color::from(palette.document));
-        match (view.code_shown(), view.editor().mode()) {
-            (Some(code), _) => code_grid(surface, code, view, layout, theme, faces.grid),
+        match (view.display_shown(), view.editor().mode()) {
+            (Some(Display::Code(code)), _) => {
+                code_grid(surface, code, view, layout, theme, faces.grid);
+            }
+            (Some(Display::Data(data)), _) => {
+                data_grid(surface, data, view, layout, theme, faces.grid);
+            }
             (None, Mode::Text) => {
                 text_grid(surface, view, layout, theme, faces.grid, focused, scale);
             }
@@ -492,67 +499,117 @@ fn hex_grid(
     font: BitmapFont,
     focused: bool,
 ) {
-    let palette = theme.palette();
     let editor = view.editor();
-    let document = editor.document();
-    let len = document.len();
-    let hex_layout = HexLayout::for_len(len);
     let (_, hex_top, left) = view.scroll();
-    let (cell_w, cell_h) = layout.cell();
-    let grid = layout.grid();
+    let rows = HexRows::new(editor.document(), layout, theme.palette(), font, left);
     let selected = editor.selection().range();
     let caret = editor.hex_caret();
-    let columns = layout.columns();
-    let x_of = |column: usize| column_x(grid.left(), left, cell_w, column);
-    let shown = |column: usize, cells: usize| column + cells > left && column < left + columns;
-    let muted = Color::from(palette.on_surface_muted);
-    let mut digits = [0u8; 16];
     for index in 0..layout.rows() {
         let row = hex_top + index;
         let base = row * BYTES_PER_ROW;
-        if base > len {
+        if base > rows.len {
             break;
         }
         let rect = layout.row_rect(index);
         if withheld(surface, rect) {
             continue;
         }
-        let top = rect.top();
+        let caret = (focused && caret.offset / BYTES_PER_ROW == row).then_some(caret);
+        rows.draw(surface, (base, rect.top()), &selected, caret);
+    }
+}
+
+/// What a hex row is drawn over: the document's bytes, its columns, and the
+/// grid they are laid across.
+struct HexRows<'a> {
+    document: &'a Document,
+    len: usize,
+    layout: HexLayout,
+    palette: &'a Palette,
+    font: BitmapFont,
+    cell: (u32, u32),
+    grid: Rect,
+    left: usize,
+    columns: usize,
+}
+
+impl<'a> HexRows<'a> {
+    fn new(
+        document: &'a Document,
+        layout: &Layout,
+        palette: &'a Palette,
+        font: BitmapFont,
+        left: usize,
+    ) -> Self {
+        let len = document.len();
+        Self {
+            document,
+            len,
+            layout: HexLayout::for_len(len),
+            palette,
+            font,
+            cell: layout.cell(),
+            grid: layout.grid(),
+            left,
+            columns: layout.columns(),
+        }
+    }
+
+    fn x_of(&self, column: usize) -> i32 {
+        column_x(self.grid.left(), self.left, self.cell.0, column)
+    }
+
+    fn shown(&self, column: usize, cells: usize) -> bool {
+        column + cells > self.left && column < self.left + self.columns
+    }
+
+    /// Draw the row of bytes from `base` with its top at `top`, the bytes in
+    /// `selected` lifted, and `caret` framed when it is on this row.
+    fn draw(
+        &self,
+        surface: &mut Surface,
+        (base, top): (usize, i32),
+        selected: &core::ops::Range<usize>,
+        caret: Option<HexCaret>,
+    ) {
+        let (cell_w, cell_h) = self.cell;
+        let font = self.font;
         let y = font.centred_top(top, cell_h);
-        let (bytes, count) = row_bytes(document, base);
-        let (x, clip_top, width, height) = row_clip(grid, top, cell_h);
+        let muted = Color::from(self.palette.on_surface_muted);
+        let (bytes, count) = row_bytes(self.document, base);
+        let (x, clip_top, width, height) = row_clip(self.grid, top, cell_h);
+        let mut digits = [0u8; 16];
         surface.with_clip(x, clip_top, width, height, |surface| {
-            let offset_text = hex_layout.offset_text(base, &mut digits);
-            if shown(0, offset_text.len()) {
-                font.draw_text(surface, x_of(0), y, offset_text, muted);
+            let offset_text = self.layout.offset_text(base, &mut digits);
+            if self.shown(0, offset_text.len()) {
+                font.draw_text(surface, self.x_of(0), y, offset_text, muted);
             }
             for (at, &byte) in bytes[..count].iter().enumerate() {
-                let offset = base + at;
                 let (hex_column, ascii_column) =
-                    (hex_layout.hex_column(at), hex_layout.ascii_column(at));
-                if selected.contains(&offset) {
+                    (self.layout.hex_column(at), self.layout.ascii_column(at));
+                if selected.contains(&(base + at)) {
                     for (column, cells, wide) in
                         [(hex_column, 2, 2 * cell_w), (ascii_column, 1, cell_w)]
                     {
-                        if shown(column, cells) {
+                        if self.shown(column, cells) {
                             blend_area(
                                 surface,
-                                Rect::new(x_of(column), top, wide, cell_h),
-                                palette.selection_fill,
+                                Rect::new(self.x_of(column), top, wide, cell_h),
+                                self.palette.selection_fill,
                             );
                         }
                     }
                 }
-                let ink = byte_ink(byte, palette);
+                let ink = byte_ink(byte, self.palette);
                 let pair = hex::hex_pair(byte);
-                if let (true, Ok(text)) = (shown(hex_column, 2), core::str::from_utf8(&pair)) {
-                    font.draw_text(surface, x_of(hex_column), y, text, ink);
+                if let (true, Ok(text)) = (self.shown(hex_column, 2), core::str::from_utf8(&pair)) {
+                    font.draw_text(surface, self.x_of(hex_column), y, text, ink);
                 }
                 let mut ch = [0u8; 4];
-                if shown(ascii_column, 1) {
+                if self.shown(ascii_column, 1) {
                     font.draw_text(
                         surface,
-                        x_of(ascii_column),
+                        self.x_of(ascii_column),
                         y,
                         tairix_util::hexdump::ascii_of(byte).encode_utf8(&mut ch),
                         ink,
@@ -560,24 +617,83 @@ fn hex_grid(
                 }
             }
             for column in [
-                hex_layout.ascii_column(0) - 1,
-                hex_layout.ascii_column(BYTES_PER_ROW),
+                self.layout.ascii_column(0) - 1,
+                self.layout.ascii_column(BYTES_PER_ROW),
             ] {
-                if shown(column, 1) {
-                    font.draw_text(surface, x_of(column), y, "|", muted);
+                if self.shown(column, 1) {
+                    font.draw_text(surface, self.x_of(column), y, "|", muted);
                 }
             }
-            if focused && caret.offset / BYTES_PER_ROW == row {
+            if let Some(caret) = caret {
                 hex_caret(
                     surface,
                     caret,
-                    hex_layout,
-                    &x_of,
+                    self.layout,
+                    &|column| self.x_of(column),
                     Rect::new(0, top, cell_w, cell_h),
-                    palette,
+                    self.palette,
                 );
             }
         });
+    }
+}
+
+/// The Data display's rows in view: the report's lines, a heading in the
+/// accent, then the document's bytes as the hex view draws them.
+fn data_grid(
+    surface: &mut Surface,
+    data: &DataDisplay,
+    view: &View,
+    layout: &Layout,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let palette = theme.palette();
+    let (_, cell_h) = layout.cell();
+    let grid = layout.grid();
+    let (_, _, left) = view.scroll();
+    let rows = HexRows::new(view.editor().document(), layout, palette, font, left);
+    let mut heading = String::new();
+    for index in 0..layout.rows() {
+        let Some(row) = data.row(data.top() + index, rows.len) else {
+            break;
+        };
+        let rect = layout.row_rect(index);
+        if withheld(surface, rect) {
+            continue;
+        }
+        let (text, ink) = match row {
+            DataRow::Hex(base) => {
+                rows.draw(surface, (base, rect.top()), &(0..0), None);
+                continue;
+            }
+            DataRow::Report(line) => (
+                line.text.as_str(),
+                if line.heading {
+                    palette.accent
+                } else {
+                    palette.on_surface
+                },
+            ),
+            DataRow::Note(note) => (note, palette.on_surface_muted),
+            DataRow::Bytes => {
+                heading.clear();
+                let _ = write!(heading, "Bytes: {}", rows.len);
+                (heading.as_str(), palette.accent)
+            }
+        };
+        let shown = text
+            .char_indices()
+            .nth(left)
+            .map_or("", |(at, _)| &text[at..]);
+        let y = font.centred_top(rect.top(), cell_h);
+        font.draw_text(
+            surface,
+            grid.left(),
+            y,
+            font.truncate_to_width(shown, grid.width),
+            Color::from(ink),
+        );
     }
 }
 
@@ -763,8 +879,8 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
         if editor.overwrite() { "OVR" } else { "INS" },
         &indent,
         editor.line_ending().label(),
-        match (view.code_shown(), editor.mode()) {
-            (Some(_), _) => "Code",
+        match (view.display_shown(), editor.mode()) {
+            (Some(display), _) => display.label(),
             (None, Mode::Text) => "Text",
             (None, Mode::Hex) => "Hex",
         },

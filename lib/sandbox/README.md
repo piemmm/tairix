@@ -174,6 +174,15 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   holds every answer to the edit bounds (`MAX_EDIT_SIDE`, `MAX_EDIT_PIXELS`,
   `MAX_EDIT_ENTRIES`), checks each index against its palette and each mode
   word against its pixels, and believes nothing it cannot check.
+- **The structure-report service** (`imageinspect`, over the same upload):
+  `inspect_document` answers what a picture file is made of, read by
+  `tairix_image::inspect` — the image worker serves it beside its other ops,
+  and `InspectService` serves it alone, in a worker held to one document
+  (`WorkerMemory::HeldDocument`), for an editor that wants nothing else of a
+  picture. The caller holds the reply to the report's own bounds: no more
+  than `MAX_REPORT_LINES` lines, none longer than `MAX_LINE_BYTES`, every one
+  printable UTF-8, or none of it is believed. `TextEdit.app`'s Data display is
+  the consumer.
 - **The NTP-evaluation service** (`timesync`): a network time server's reply
   is evaluated in the worker (`tairix-net`'s RFC 5905 rules), because the
   `timed` service that acts on the verdict holds `CAP_TIME_SET` and must

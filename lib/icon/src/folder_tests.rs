@@ -30,7 +30,7 @@ fn kinds(kinds: &[IconKind]) -> FolderSample {
 }
 
 /// The member picture the fixtures list.
-const PHOTO_PATH: &str = "/Users/ann/UserFiles/Pictures/cat.jpg";
+const PHOTO_PATH: &str = "/Users/ann/Home/Pictures/cat.jpg";
 const PHOTO_ID: FileId = FileId {
     volume: [3; 16],
     node: 9,

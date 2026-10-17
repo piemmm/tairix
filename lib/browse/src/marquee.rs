@@ -21,7 +21,7 @@ use tairix_theme::Theme;
 
 use crate::browser::Browser;
 use crate::layout::BandMarks;
-use crate::render::{entry_body, tile_core, view_layout_for, Frame};
+use crate::render::{entry_body, tile_core, view_layout_for, Frame, Tiles};
 use crate::select::Selection;
 use crate::source::DirectorySource;
 
@@ -110,7 +110,11 @@ pub fn sweep<S: DirectorySource>(
     );
     let view = layout.view(browser.scroll_offset());
     let band = band_in_layout(&view, marquee);
-    let core = layout.band_cells_within(band, tile_core(frame.scale, frame.theme));
+    let tiles = Tiles::of(browser.view_mode());
+    let part = tiles.map_or(Rect::EMPTY, |tiles| {
+        tile_core(tiles, frame.scale, frame.theme)
+    });
+    let core = layout.band_cells_within(band, part);
     let cells = layout.band_cells(band);
     let entries = browser.entries();
     let Marquee {
@@ -132,7 +136,10 @@ pub fn sweep<S: DirectorySource>(
                 {
                     marquee.laid_out += 1;
                 }
-                entry_body(entry, cell, frame.scale, frame.theme)
+                // A list row is all body, so a list's rows are never edges.
+                tiles.map_or(Some(cell), |tiles| {
+                    entry_body(tiles, entry, cell, frame.scale, frame.theme)
+                })
             }
         };
         next_bodies.push(Edge {

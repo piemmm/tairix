@@ -11,7 +11,7 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::window_ipc::{
     AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
-    AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
+    AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol, APP_MENU_MAX_ROWS,
 };
 use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_colour::Rgba;
@@ -260,7 +260,21 @@ fn menu_item(id: u16, label: &str) -> AppMenuItem {
     AppMenuItem::new(
         AppMenuItemId::new(id).expect("a non-zero id"),
         menu_label(label),
+        AppMenuSymbol::Open,
     )
+}
+
+/// What a fixture row reading `label` draws: the label beside the picture of
+/// the one function every fixture row names.
+fn drawn(label: &str) -> MenuItem {
+    MenuItem::new(label).with_icon(tairix_icon::menu_symbol_icon(AppMenuSymbol::Open))
+}
+
+/// What the fixtures' submenu row reading `label` draws.
+fn drawn_submenu(label: &str) -> MenuItem {
+    MenuItem::new(label)
+        .with_submenu(true)
+        .with_icon(tairix_icon::menu_symbol_icon(AppMenuSymbol::Settings))
 }
 
 /// The menu a well-behaved application declares: an action, a rule, *Quit*,
@@ -1938,6 +1952,7 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
     menu.push(AppMenuRow::Submenu {
         label: menu_label("Profile"),
         enabled: true,
+        symbol: AppMenuSymbol::Settings,
     })
     .expect("fits");
     menu.push_under(item(5, "Amber"), 6).expect("fits");
@@ -1962,17 +1977,17 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
     assert_eq!(
         plate_of(&request.model, None),
         alloc::vec![
-            MenuItem::new("New window"),
-            MenuItem::new("Wrap lines").with_mark(MenuMark::Check),
-            MenuItem::new("Green screen").with_mark(MenuMark::Radio),
-            MenuItem::new("Paste").with_state(ControlState::disabled()),
-            MenuItem::new("Close all")
+            drawn("New window"),
+            drawn("Wrap lines").with_mark(MenuMark::Check),
+            drawn("Green screen").with_mark(MenuMark::Radio),
+            drawn("Paste").with_state(ControlState::disabled()),
+            drawn("Close all")
                 .with_shortcut("Ctrl Shift Q")
                 .with_role(ControlRole::Destructive),
-            MenuItem::new("Profile")
+            drawn_submenu("Profile").with_group_break(true),
+            MenuItem::new(INFO_ROW_LABEL)
                 .with_submenu(true)
-                .with_group_break(true),
-            MenuItem::new(INFO_ROW_LABEL).with_submenu(true),
+                .with_icon(tairix_icon::menu_symbol_icon(AppMenuSymbol::Info)),
         ]
     );
     // The submenu's own row is on its child plate, filed under it.
@@ -1984,7 +1999,7 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
         .expect("the submenu row");
     assert_eq!(
         plate_of(&request.model, Some(parent)),
-        alloc::vec![MenuItem::new("Amber")]
+        alloc::vec![drawn("Amber")]
     );
 }
 
@@ -2053,7 +2068,7 @@ fn a_disabled_declared_row_is_stated_disabled_with_its_reason() {
     assert_eq!(row.tip(), Some("The clipboard is empty"));
     assert_eq!(
         row.drawn(),
-        &MenuItem::new("Paste").with_state(ControlState::disabled())
+        &drawn("Paste").with_state(ControlState::disabled())
     );
 }
 
@@ -2083,6 +2098,7 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
     menu.push(AppMenuRow::Submenu {
         label: menu_label("Profile"),
         enabled: true,
+        symbol: AppMenuSymbol::Settings,
     })
     .expect("fits");
     menu.push_under(item(7, "Amber"), 0).expect("fits");
@@ -2099,7 +2115,7 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
 
     assert_eq!(
         plate_of(&request.model, None),
-        alloc::vec![MenuItem::new("Profile").with_submenu(true)]
+        alloc::vec![drawn_submenu("Profile")]
     );
     assert_eq!(
         plate_of(&request.model, Some(0))
@@ -2125,6 +2141,7 @@ fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row()
     menu.push(AppMenuRow::Submenu {
         label: menu_label("Profile"),
         enabled: true,
+        symbol: AppMenuSymbol::Settings,
     })
     .expect("fits");
     menu.push_under(item(7, "Amber"), 0).expect("fits");
@@ -2142,10 +2159,7 @@ fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row()
 
     assert_eq!(
         plate_of(&request.model, Some(0)),
-        alloc::vec![
-            MenuItem::new("Amber"),
-            MenuItem::new("Green").with_group_break(true),
-        ],
+        alloc::vec![drawn("Amber"), drawn("Green").with_group_break(true)],
         "the separator is a group break, not a row"
     );
     // And the row after it still carries its own id, which a blank row

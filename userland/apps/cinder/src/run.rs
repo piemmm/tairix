@@ -38,8 +38,9 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
-        AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, LayerDepth,
-        PointerAction, TerrainPlate, WindowEvent, WindowSizing, DESKTOP_LAYER_MAX_PLATES,
+        AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
+        LayerDepth, PointerAction, TerrainPlate, WindowEvent, WindowSizing,
+        DESKTOP_LAYER_MAX_PLATES,
     };
     use tairix_abi::{Errno, ProcId};
     use tairix_appdata::{PublishJob, RtHost, Settings};
@@ -363,15 +364,15 @@ mod program {
         event_endpoint: u64,
         loose: bool,
     ) {
-        let text = if loose {
-            "Bring Cinder home"
+        let (text, symbol) = if loose {
+            ("Bring Cinder home", AppMenuSymbol::BringHome)
         } else {
-            "Let Cinder out"
+            ("Let Cinder out", AppMenuSymbol::LetOut)
         };
         let Some(row) = AppMenuItemId::new(ROW_OUT)
             .ok()
             .zip(AppMenuLabel::new(text).ok())
-            .map(|(id, label)| AppMenuRow::Item(AppMenuItem::new(id, label)))
+            .map(|(id, label)| AppMenuRow::Item(AppMenuItem::new(id, label, symbol)))
         else {
             app::report(
                 APP_NAME,

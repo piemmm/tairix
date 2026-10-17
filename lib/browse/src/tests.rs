@@ -15,6 +15,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkRotationEvidence, BlkTransport};
+use tairix_abi::fs::STORAGE_CATALOG;
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -32,7 +33,7 @@ use crate::execute::{
     PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
 use crate::media::MediaType;
-use crate::places::{PlaceKind, Places, Volume};
+use crate::places::{PlaceKind, Places, Volume, VolumeFacts};
 use crate::select::Selection;
 use crate::source::{DirectorySource, Listing, Probe};
 
@@ -113,12 +114,17 @@ fn home() -> Vec<String> {
     vec!["Users".to_string(), "ann".to_string()]
 }
 
-/// One offered volume.
+/// One offered volume, serving and keeping no accounting.
 fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
     Volume {
         label: label.to_string(),
         target: target.to_string(),
         medium,
+        facts: VolumeFacts {
+            filesystem: String::new(),
+            free: None,
+            availability: tairix_abi::sysinfo::MountAvailability::Available,
+        },
     }
 }
 
@@ -144,33 +150,120 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
     // sorted by label whatever order the mount table paged them out in.
     assert_eq!(
         place_labels(&places),
-        [
-            "Home",
-            "Desktop",
-            "UserFiles",
-            "System",
-            "Backup",
-            "Scratch"
-        ]
+        ["Home", "Desktop", "Backup", "Scratch"]
     );
-    assert_eq!(places.volume_start(), Some(4));
+    assert_eq!(places.volume_start(), Some(2));
     assert_eq!(places.rows()[0].kind(), PlaceKind::Home);
     assert_eq!(places.rows()[1].kind(), PlaceKind::UserFolder);
-    assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
-    assert_eq!(places.rows()[4].kind(), PlaceKind::Volume);
+    assert_eq!(places.rows()[2].kind(), PlaceKind::Volume);
     // The fixed places navigate where their names say, whether or not those
-    // directories exist — the model performs no I/O and never checks.
-    assert_eq!(places.rows()[0].components(), home().as_slice());
+    // directories exist — the model performs no I/O and never checks. Home is
+    // the user's own files, not the root of their home directory.
     assert_eq!(
-        places.rows()[2].components(),
-        ["Users", "ann", "UserFiles"].map(String::from)
+        places.rows()[0].components(),
+        ["Users", "ann", "Home"].map(String::from)
     );
-    assert_eq!(places.rows()[3].components(), ["System"].map(String::from));
+    assert_eq!(
+        places.rows()[1].components(),
+        ["Users", "ann", "Desktop"].map(String::from)
+    );
+    assert_eq!(places.rows()[0].icon(), IconKind::Home);
     // With no volumes there is nothing to separate.
     assert_eq!(Places::new(&home(), &[]).volume_start(), None);
-    // Without a home there is nothing for the three home rows to hang off, so
-    // only the machine-wide roots remain — never a row navigating nowhere.
-    assert_eq!(place_labels(&Places::new(&[], &[])), ["System"]);
+    // Without a home there is nothing for the home rows to hang off, and the
+    // system's own tree is no place — never a row navigating nowhere.
+    assert!(Places::new(&[], &[]).is_empty());
+}
+
+/// Only the storage catalog and the volumes directly beneath it are places:
+/// the root volume and the system tree's own mounts are reached by
+/// navigating, as any folder is.
+#[test]
+fn only_the_storage_catalog_and_its_volumes_are_offered_as_storage() {
+    let places = Places::new(
+        &home(),
+        &[
+            volume("System", "/System", None),
+            volume("Logs", "/System/Logs", None),
+            volume("Settings", "/System/Settings", None),
+            volume("Root", "/", None),
+            volume("Deep", "/Storage/Backup/Nested", None),
+            volume("Storage", "/Storage", None),
+            volume("Backup", "/Storage/Backup", Some(HARD_DISK)),
+        ],
+    );
+    assert_eq!(
+        place_labels(&places),
+        ["Home", "Desktop", "Backup", "Storage"]
+    );
+    assert_eq!(
+        places.rows()[3].components(),
+        [STORAGE_CATALOG].map(String::from)
+    );
+    assert!(
+        places.rows()[0].facts().is_none(),
+        "a folder states no facts"
+    );
+    assert!(places.rows()[2].facts().is_some(), "a volume does");
+}
+
+/// A mount record for `target`, serving as `availability` says, with
+/// `avail` 4 KiB blocks free to an ordinary write.
+fn mount(
+    target: &str,
+    availability: tairix_abi::sysinfo::MountAvailability,
+    avail: u64,
+) -> tairix_abi::sysinfo::MountRecord {
+    use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+    use tairix_abi::sysinfo::{MountRecord, MountVolumeState};
+    MountRecord::new(
+        b"usb0",
+        target.as_bytes(),
+        b"fat32",
+        MountFlags::default(),
+        MountVolumeState {
+            usage: VolumeStats {
+                block_size: 4096,
+                in_reserve: false,
+                total_blocks: 1000,
+                free_blocks: avail,
+                avail_blocks: avail,
+                files: 0,
+                files_free: 0,
+            },
+            availability,
+            medium: Some(STICK),
+        },
+        [0; tairix_abi::sysinfo::MOUNT_VOLUME_ID_LEN],
+    )
+    .expect("a well-formed record")
+}
+
+/// A volume is offered while its data can be read, labelled by its mount
+/// point's leaf and stating what its record says of it; one whose device has
+/// gone is not offered at all.
+#[test]
+fn a_mount_is_offered_as_a_volume_while_it_serves() {
+    use tairix_abi::sysinfo::MountAvailability;
+    let degraded = Volume::from_mount(&mount("/Storage/Stick", MountAvailability::Degraded, 250))
+        .expect("a degraded volume still serves");
+    assert_eq!(degraded.label, "Stick");
+    assert_eq!(degraded.target, "/Storage/Stick");
+    assert_eq!(degraded.medium, Some(STICK));
+    assert_eq!(degraded.facts.filesystem, "fat32");
+    assert_eq!(degraded.facts.free, Some(250 * 4096));
+    assert_eq!(degraded.facts.availability, MountAvailability::Degraded);
+    for gone in [
+        MountAvailability::UnavailableDirty,
+        MountAvailability::UnavailableLost,
+    ] {
+        assert_eq!(Volume::from_mount(&mount("/Storage/Stick", gone, 1)), None);
+    }
+    assert_eq!(
+        Volume::from_mount(&mount("/", MountAvailability::Available, 1)),
+        None,
+        "a mount point naming no leaf is no volume to label"
+    );
 }
 
 /// A bare open lands among the user's own files first and their home next;
@@ -178,7 +271,7 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
 #[test]
 fn a_bare_open_tries_the_user_files_then_the_home() {
     let [first, second] = crate::bare_open_places(&home());
-    assert_eq!(first, ["Users", "ann", "UserFiles"].map(String::from));
+    assert_eq!(first, ["Users", "ann", "Home"].map(String::from));
     assert_eq!(second, home());
 }
 
@@ -233,15 +326,12 @@ fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
             // A second row for a target an accepted row already covers.
             volume("Twin", "/Storage/Good", None),
             // A volume landing on a fixed place's own target.
-            volume("Shadow", "/System", None),
+            volume("Shadow", "/Users/ann/Home", None),
         ],
     );
-    assert_eq!(
-        place_labels(&places),
-        ["Home", "Desktop", "UserFiles", "System", "Good"]
-    );
-    // The duplicate never displaced the fixed row it collided with.
-    assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
+    assert_eq!(place_labels(&places), ["Home", "Desktop", "Good"]);
+    // The colliding volume never displaced the fixed row.
+    assert_eq!(places.rows()[0].kind(), PlaceKind::Home);
 }
 
 #[test]
@@ -605,7 +695,8 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
 #[test]
 fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     use crate::render::{
-        chrome_height, content_area, entry_rect, row_height, sidebar_view, toolbar_height,
+        chrome_height, content_area, entry_rect, list_header_rect, row_height, sidebar_view,
+        toolbar_height,
     };
 
     let theme = Theme::dark();
@@ -621,7 +712,7 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     assert_eq!(rail.height, window.height - band);
 
     // The toolbar is the whole chrome, so the first rail row shares its top
-    // with the first drawn listing row and the two columns read on one grid.
+    // with the list's column header, the first thing beside it.
     let first = view.row_rect(0).expect("first row");
     assert_eq!(first.origin.y, i32::try_from(band).expect("band"));
     assert_eq!(first.height, row);
@@ -629,12 +720,13 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(0).expect("select the first entry");
     let area = content_area(window, Scale::ONE, &theme, Some(&places), BAND);
+    let header = list_header_rect(&browser, Scale::ONE, &theme, area, BAND).expect("a list");
+    assert_eq!(header.origin.y, first.origin.y);
     let listing = entry_rect(&browser, Scale::ONE, &theme, area, BAND, 0).expect("first row drawn");
     assert_eq!(
         listing.origin.y,
-        i32::try_from(chrome_height(Scale::ONE, &theme, BAND)).expect("chrome")
+        i32::try_from(chrome_height(Scale::ONE, &theme, BAND) + header.height).expect("chrome")
     );
-    assert_eq!(first.origin.y, listing.origin.y);
 
     // Every drawn row is on that grid, displaced only by the volumes' band.
     let separator = view.separator_rect().expect("separator").height;
@@ -839,15 +931,15 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
 #[test]
 fn the_rail_selects_the_row_matching_the_browsers_location() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
-    let places = Places::new(&home(), &[]);
+    let places = Places::new(&home(), &[volume("Storage", "/Storage", None)]);
     // At the root, no place matches, so nothing is selected.
     assert_eq!(places.index_of(browser.components()), None);
     // Standing on a place selects exactly it.
-    assert_eq!(places.index_of(&["System".to_string()]), Some(3));
+    assert_eq!(places.index_of(&["Storage".to_string()]), Some(2));
     // A directory *inside* a place is not that place: an exact match only,
     // never a claim that the user is somewhere they are not.
     assert_eq!(
-        places.index_of(&["System".to_string(), "Fonts".to_string()]),
+        places.index_of(&["Storage".to_string(), "Backup".to_string()]),
         None
     );
 
@@ -869,10 +961,12 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
         &chrome,
         &mut NoArtwork,
     );
-    let mut at_place = Browser::open_root(MockFs::fixture()).expect("root");
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert("/Storage".to_string(), Vec::new());
+    let mut at_place = Browser::open_root(fs).expect("root");
     at_place
-        .navigate_to(vec!["System".to_string()])
-        .expect("navigate to System");
+        .navigate_to(vec!["Storage".to_string()])
+        .expect("navigate to Storage");
     let selected = paint(
         &at_place,
         Scale::ONE,
@@ -883,8 +977,8 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
     );
     let rail = crate::render::sidebar_view(viewport, Scale::ONE, &theme, Some(&places), BAND)
         .expect("rail")
-        .row_rect(3)
-        .expect("the System row");
+        .row_rect(2)
+        .expect("the Storage row");
     let row_y = usize::try_from(rail.origin.y).expect("row top");
     let width = usize::try_from(viewport.width).expect("width");
     let at = row_y * width;
@@ -1381,7 +1475,7 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     // answers a question about a face nothing draws with.
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     let row_height = font.glyph_height() + 4;
-    let header = crate::render::chrome_height(Scale::ONE, &theme, BAND);
+    let header = list_top(&theme);
     let surface = paint(
         &browser,
         Scale::ONE,
@@ -1406,8 +1500,8 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     // selection look every collection view shares. We sample inside the
     // content column (x = 100), clear of the leading rail gutter and of the
     // reserved right-edge scrollbar gutter.
-    // Entry rows begin below the chrome (toolbar + path bar): entry 0 is the
-    // first content row and the selected entry 1 the second.
+    // Entry rows begin below the toolbar and the column header: entry 0 is
+    // the first content row and the selected entry 1 the second.
     let unselected_y = header + 1;
     let selected_y = header + row_height + 1;
     // The unselected row's body is the base surface.
@@ -1430,7 +1524,7 @@ fn render_draws_every_selected_entry_and_none_while_nothing_is_selected() {
     let theme = Theme::dark();
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     let row_height = font.glyph_height() + 4;
-    let header = crate::render::chrome_height(Scale::ONE, &theme, BAND);
+    let header = list_top(&theme);
     let raised = Color::from(theme.palette().surface_raised).premultiply();
     let rows_lifted = |browser: &Browser<MockFs>| -> Vec<bool> {
         let surface = paint(
@@ -1476,16 +1570,17 @@ fn render_into_a_tiny_viewport_does_not_panic() {
 /// beneath it, and nothing is left over below.
 #[test]
 fn a_grid_tile_is_as_tall_as_its_picture_and_two_name_lines() {
-    use crate::render::{grid_metrics, TILE_LAYOUT};
+    use crate::render::Tiles;
 
     let theme = Theme::dark();
     for (percent, picture, height) in [(100, 37, 86), (200, 74, 174)] {
         let scale = Scale::from_percent(percent).expect("a valid scale");
-        let tiles = grid_metrics(scale, &theme);
+        let tiles = Tiles::Large.metrics(scale, &theme);
         assert_eq!(tiles.cell_height, height, "at {percent}%");
         let cell = Rect::new(0, 0, tiles.cell_width, tiles.cell_height);
-        assert_eq!(TILE_LAYOUT.icon_side(cell, scale, &theme), picture);
-        assert_eq!(TILE_LAYOUT.label_lines(cell, scale, &theme), 2);
+        let layout = Tiles::Large.layout();
+        assert_eq!(layout.icon_side(cell, scale, &theme), picture);
+        assert_eq!(layout.label_lines(cell, scale, &theme), 2);
     }
 }
 
@@ -1539,8 +1634,8 @@ fn a_rename_selects_the_stem_and_keeps_the_ending() {
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     use crate::render::{
-        chrome_height, grid_metrics, open_with_chooser_extent, row_height, scrollbar_bounds,
-        sidebar_view, toolbar_height,
+        chrome_height, open_with_chooser_extent, row_height, scrollbar_bounds, sidebar_view,
+        toolbar_height, Tiles,
     };
 
     let theme = Theme::dark();
@@ -1564,11 +1659,13 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     let rail = sidebar_view(vp, Scale::ONE, &theme, Some(&places), BAND).expect("a rail at 100%");
     let rail_hidpi = sidebar_view(vp, hidpi, &theme, Some(&places), BAND).expect("a rail at 200%");
     assert!(rail_hidpi.width() > rail.width());
-    let tiles = grid_metrics(Scale::ONE, &theme);
-    let tiles_hidpi = grid_metrics(hidpi, &theme);
-    assert!(tiles_hidpi.cell_width > tiles.cell_width);
-    assert!(tiles_hidpi.cell_height > tiles.cell_height);
-    assert!(tiles_hidpi.gap > tiles.gap);
+    for tiles in [Tiles::Large, Tiles::Small] {
+        let at_one = tiles.metrics(Scale::ONE, &theme);
+        let at_two = tiles.metrics(hidpi, &theme);
+        assert!(at_two.cell_width > at_one.cell_width, "{tiles:?}");
+        assert!(at_two.cell_height > at_one.cell_height, "{tiles:?}");
+        assert!(at_two.gap > at_one.gap, "{tiles:?}");
+    }
 
     // The overlay this surface still owns: the "Open With…" chooser. The
     // right-click menu and every question are not among them — their windows
@@ -1843,14 +1940,14 @@ fn a_browser_navigates_the_vfs_source_end_to_end() {
 
 #[test]
 fn entry_index_at_mirrors_the_rendered_rows() {
-    use crate::render::{chrome_height, entry_index_at, row_height};
+    use crate::render::{entry_index_at, row_height};
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(Scale::ONE, &theme);
-    // The chrome (toolbar + path bar) reserved above the first entry row.
-    let header = chrome_height(Scale::ONE, &theme, BAND);
+    // The toolbar and the column header reserved above the first entry row.
+    let header = list_top(&theme);
     // A window wide enough for content beside the scrollbar gutter, the chrome
     // plus several entry rows tall. Clicks land in the content column (x=4).
     let vp = |h: u32| Rect::new(0, 0, 200, h);
@@ -1866,7 +1963,8 @@ fn entry_index_at_mirrors_the_rendered_rows() {
     };
     let viewport_height = header + row * 4;
 
-    // The chrome resolves to no entry; the first list row is entry 0.
+    // The chrome and the header resolve to no entry; the first list row is
+    // entry 0.
     assert_eq!(at(&browser, viewport_height, 0), None);
     assert_eq!(at(&browser, viewport_height, header - 1), None);
     assert_eq!(at(&browser, viewport_height, header), Some(0));
@@ -1900,13 +1998,13 @@ fn entry_index_at_mirrors_the_rendered_rows() {
 
 #[test]
 fn entry_index_at_accounts_for_the_scroll_anchor() {
-    use crate::render::{chrome_height, entry_index_at, reveal_selection, row_height};
+    use crate::render::{entry_index_at, reveal_selection, row_height};
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(Scale::ONE, &theme);
-    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let header = list_top(&theme);
     // Two visible entry rows below the chrome; select the last entry and reveal
     // it so the list scrolls to keep it on the bottom row — as the app does.
     let viewport_height = header + row * 2;
@@ -2274,8 +2372,8 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
         .map(|e| e.name().to_string())
         .collect();
 
-    browser.set_view_mode(ViewMode::Grid);
-    assert_eq!(browser.view_mode(), ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
+    assert_eq!(browser.view_mode(), ViewMode::LargeIcons);
     // The selection stays on the same entry and the listing is untouched.
     assert_eq!(browser.focus_index(), Some(7));
     let names_after: Vec<String> = browser
@@ -2309,15 +2407,15 @@ fn turn(
     (moved, damage)
 }
 
+/// How far below the window's top a list's first row begins.
+fn list_top(theme: &Theme) -> u32 {
+    crate::render::listing_top(ViewMode::List, Scale::ONE, theme, BAND)
+}
+
 /// A window the chrome plus `rows` list rows tall.
 fn rows_tall(theme: &Theme, rows: u32) -> Rect {
     let row = crate::render::row_height(Scale::ONE, theme);
-    Rect::new(
-        0,
-        0,
-        200,
-        crate::render::chrome_height(Scale::ONE, theme, BAND) + row * rows,
-    )
+    Rect::new(0, 0, 200, list_top(theme) + row * rows)
 }
 
 #[test]
@@ -2455,12 +2553,12 @@ fn item_rows(
 /// further down, so no row was squeezed into what shows and none was skipped.
 #[test]
 fn a_list_scrolled_part_way_draws_the_rows_its_edges_cut_whole() {
-    use crate::render::{chrome_height, entry_index_at, item_area, row_height};
+    use crate::render::{entry_index_at, item_area, row_height};
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
     let row = row_height(Scale::ONE, &theme);
-    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let header = list_top(&theme);
     let mut browser = many_files(20);
     browser.select(0).expect("the first entry");
     let vp = rows_tall(&theme, 4);
@@ -2479,10 +2577,18 @@ fn a_list_scrolled_part_way_draws_the_rows_its_edges_cut_whole() {
         item_rows(&reference, width, header + half..vp.height + half),
         "every item row is the unscrolled one shifted up by the scroll"
     );
+    // The bar beside the column header moves with the scroll; nothing else
+    // above the rows may.
+    let band = crate::render::chrome_height(Scale::ONE, &theme, BAND);
     assert_eq!(
-        item_rows(&scrolled, vp.width, 0..header),
-        item_rows(&reference, vp.width, 0..header),
-        "and nothing was drawn over the chrome"
+        item_rows(&scrolled, vp.width, 0..band),
+        item_rows(&reference, vp.width, 0..band),
+        "nothing was drawn over the toolbar"
+    );
+    assert_eq!(
+        item_rows(&scrolled, width, band..header),
+        item_rows(&reference, width, band..header),
+        "nor over the column header"
     );
     let at = |y: u32| {
         entry_index_at(
@@ -2512,15 +2618,15 @@ fn a_list_scrolled_part_way_draws_the_rows_its_edges_cut_whole() {
 /// of a tile that shows finds it.
 #[test]
 fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
-    use crate::render::{chrome_height, entry_index_at, entry_rect, grid_metrics, item_area};
+    use crate::render::{chrome_height, entry_index_at, entry_rect, item_area, Tiles};
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
     let header = chrome_height(Scale::ONE, &theme, BAND);
-    let metrics = grid_metrics(Scale::ONE, &theme);
+    let metrics = Tiles::Large.metrics(Scale::ONE, &theme);
     let pitch = metrics.cell_height + metrics.gap;
     let mut browser = many_files(40);
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     browser.select(0).expect("the first entry");
     // Two lines and a quarter of a tile: resting half a tile down, the foot
     // cuts the third line through its tiles, not through the gap after them.
@@ -2544,7 +2650,8 @@ fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
     // The cut tile is hit on its name, which shows; the ground beside it is
     // not the tile.
     let across = i32::try_from(metrics.cell_width / 2).unwrap();
-    let name = crate::render::TILE_LAYOUT
+    let name = Tiles::Large
+        .layout()
         .label_rect(
             Rect::new(0, 0, metrics.cell_width, metrics.cell_height),
             Scale::ONE,
@@ -2594,12 +2701,12 @@ fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
 /// foot, and hit where it shows.
 #[test]
 fn a_row_past_the_whole_rows_that_fit_is_hit_where_it_shows() {
-    use crate::render::{chrome_height, entry_index_at, entry_rect, row_height};
+    use crate::render::{entry_index_at, entry_rect, row_height};
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
     let row = row_height(Scale::ONE, &theme);
-    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let header = list_top(&theme);
     let browser = many_files(20);
     let vp = Rect::new(0, 0, 200, header + row * 3 + row / 3);
     let partial = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 3).expect("shown");
@@ -2623,11 +2730,11 @@ fn a_row_past_the_whole_rows_that_fit_is_hit_where_it_shows() {
 /// its head on the list's, and one already whole leaves the view alone.
 #[test]
 fn revealing_the_selection_scrolls_the_least_pixels_that_show_it_whole() {
-    use crate::render::{chrome_height, entry_rect, reveal_selection, row_height};
+    use crate::render::{entry_rect, reveal_selection, row_height};
 
     let theme = Theme::dark();
     let row = row_height(Scale::ONE, &theme);
-    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let header = list_top(&theme);
     let mut browser = many_files(20);
     let seen = row * 2 + row / 2;
     let vp = Rect::new(0, 0, 200, header + seen);
@@ -2838,7 +2945,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
 
     let theme = Theme::dark();
     let mut browser = many_files(20);
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     browser.select(0).expect("the first entry");
     // A window wide and tall enough for several tiles.
     let vp = Rect::new(0, 0, 400, 400);
@@ -2862,7 +2969,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
     );
     // A click on that tile's picture resolves to entry 0, and one on the
     // ground in its cell's corner to none.
-    let core = crate::render::tile_core(Scale::ONE, &theme).center();
+    let core = crate::render::tile_core(crate::render::Tiles::Large, Scale::ONE, &theme).center();
     assert_eq!(
         entry_index_at(
             &browser,
@@ -2947,7 +3054,7 @@ fn a_part_inside_the_listing_draws_none_of_the_chrome() {
     let window = Rect::new(0, 0, 400, 300);
     let places = Places::new(&home(), &[]);
     let mut browser = many_files(20);
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     let chrome = crate::ManagerChrome {
         tools: MANAGER_TOOLS,
         tool_model: ManagerToolModel::new(true),
@@ -2986,7 +3093,7 @@ fn a_part_inside_the_listing_draws_none_of_the_chrome() {
 fn the_grid_resolves_each_tile_through_the_artwork_lookup_and_draws_what_it_returns() {
     let theme = Theme::dark();
     let mut browser = many_files(20);
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     let vp = Rect::new(0, 0, 400, 400);
 
     // The fixture's names carry no extension, so every tile classifies as the
@@ -3226,7 +3333,7 @@ fn content_reads(read: &[String]) -> Vec<String> {
 /// type, so all tiles resolve to the same icon kind.
 fn generic_grid(n: usize) -> Browser<MockFs> {
     let mut browser = many_files(n);
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     browser
 }
 
@@ -3252,7 +3359,7 @@ fn bundle_grid() -> Browser<MockFs> {
         root_after_refresh: None,
     })
     .expect("root");
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     browser
 }
 
@@ -3277,7 +3384,7 @@ fn two_kind_grid(png: usize, txt: usize) -> Browser<MockFs> {
         root_after_refresh: None,
     })
     .expect("root");
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     browser
 }
 
@@ -3925,7 +4032,7 @@ mod rename_model {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(1).expect("select the second entry");
 
-        for view in [ViewMode::List, ViewMode::Grid] {
+        for view in [ViewMode::List, ViewMode::LargeIcons] {
             browser.set_view_mode(view);
             let item = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
                 .expect("the selected item is drawn");
@@ -3963,7 +4070,7 @@ mod rename_model {
 
         // In the icon view the name is the label band, so the field is below
         // the picture.
-        browser.set_view_mode(ViewMode::Grid);
+        browser.set_view_mode(ViewMode::LargeIcons);
         let tile = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
             .expect("the tile");
         let label =
@@ -3994,7 +4101,7 @@ mod rename_model {
         let theme = Theme::dark();
         let viewport = Rect::new(0, 0, 400, 300);
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        for view in [ViewMode::List, ViewMode::Grid] {
+        for view in [ViewMode::List, ViewMode::LargeIcons] {
             browser.set_view_mode(view);
             let target =
                 crate::render::entry_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
@@ -4021,7 +4128,7 @@ mod rename_model {
                 "{view:?}: a press on the name is a press on its entry"
             );
         }
-        browser.set_view_mode(ViewMode::Grid);
+        browser.set_view_mode(ViewMode::LargeIcons);
         let tile = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
             .expect("the tile");
         let name =
@@ -6173,14 +6280,14 @@ fn the_toolbar_reports_the_active_view_and_sort() {
     assert_eq!(toolbar.view_mode(), ViewMode::List);
     assert_eq!(toolbar.sort_mode(), SortMode::default_order());
 
-    browser.set_view_mode(ViewMode::Grid);
+    browser.set_view_mode(ViewMode::LargeIcons);
     let by_size_desc = SortMode {
         key: SortKey::Size,
         direction: SortDirection::Descending,
     };
     browser.set_sort_mode(by_size_desc);
     let toolbar = ToolbarModel::for_browser(&browser);
-    assert_eq!(toolbar.view_mode(), ViewMode::Grid);
+    assert_eq!(toolbar.view_mode(), ViewMode::LargeIcons);
     assert_eq!(toolbar.sort_mode(), by_size_desc);
 }
 
@@ -6218,7 +6325,6 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     for command in [
         ContextCommand::Open,
-        ContextCommand::OpenAndClose,
         ContextCommand::OpenWith,
         ContextCommand::Rename,
         ContextCommand::Cut,
@@ -6320,9 +6426,6 @@ fn the_context_menu_enables_the_item_commands_on_a_directory() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
-    // A folder becomes this window's own new content, so there is no hand-off
-    // for Open and Close to close the window after.
-    assert!(!menu.is_enabled(ContextCommand::OpenAndClose));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -6343,9 +6446,6 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
-    // Launching a bundle hands the entry to another program, so the window may
-    // close behind it.
-    assert!(menu.is_enabled(ContextCommand::OpenAndClose));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Properties));
     assert!(menu.is_enabled(ContextCommand::Delete));
@@ -6360,10 +6460,8 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
     assert_eq!(focused(&browser).map(Entry::name), Some("notes.txt"));
     let menu = ContextMenuModel::for_browser(&browser, false);
     assert!(menu.is_enabled(ContextCommand::Open));
-    // Open With… is offered only for a regular file, so it is enabled here, and
-    // opening a file hands it over, so Open and Close is too.
+    // Open With… is offered only for a regular file, so it is enabled here.
     assert!(menu.is_enabled(ContextCommand::OpenWith));
-    assert!(menu.is_enabled(ContextCommand::OpenAndClose));
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
@@ -6388,16 +6486,11 @@ fn context_commands_list_covers_every_variant_once() {
 
     // The declared menu iterates CONTEXT_COMMANDS and a row's id is a command's
     // position in it, so it must hold each command exactly once in a stable
-    // order. Open and Close carries the "open this and I am done here" verb the
-    // desktop's menu grab took the right-double-click gesture's second press
-    // away from (`plans/NEW-MENUS.md` D20). New Folder stays absent — the menu
-    // has no verb to invoke for it (it is a toolbar write tool), so it would be
-    // speculative surface here.
+    // order. New Folder is New ▸'s row, not a command of its own.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
             ContextCommand::Open,
-            ContextCommand::OpenAndClose,
             ContextCommand::OpenWith,
             ContextCommand::Rename,
             ContextCommand::Cut,
@@ -6419,9 +6512,9 @@ fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
 
     // The numbering runs: the commands in CONTEXT_COMMANDS order, the Rename
     // row's quick-entry field, a block as long as a plate offers candidates,
-    // New ▸ Folder, then the New ▸ documents. Reading a chosen row back is the
-    // exact inverse of numbering it, so no kind of answer can be mistaken for
-    // another.
+    // New ▸ Folder, Display ▸'s displays, then the New ▸ documents. Reading a
+    // chosen row back is the exact inverse of numbering it, so no kind of
+    // answer can be mistaken for another.
     let id = |index: usize| {
         AppMenuItemId::new(u16::try_from(index + 1).expect("a small index")).expect("non-zero")
     };
@@ -6446,9 +6539,16 @@ fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
         context_choice_from_item(id(new_folder)),
         Some(ContextChoice::NewFolder)
     );
+    for (offset, &mode) in ViewMode::ALL.iter().enumerate() {
+        assert_eq!(
+            context_choice_from_item(id(new_folder + 1 + offset)),
+            Some(ContextChoice::Display(mode))
+        );
+    }
+    let first_document = new_folder + 1 + ViewMode::ALL.len();
     for document in 0..4 {
         assert_eq!(
-            context_choice_from_item(id(new_folder + 1 + document)),
+            context_choice_from_item(id(first_document + document)),
             Some(ContextChoice::NewDocument(document))
         );
     }
@@ -6484,14 +6584,14 @@ fn new_sits_above_properties_and_offers_folder_then_the_documents() {
                 row,
                 AppMenuRowView::Submenu {
                     label: "New",
-                    enabled: true
+                    enabled: true,
+                    ..
                 }
             )
         })
         .expect("New is declared, and opens");
     assert_eq!(rows[new_at].1, None, "New is on the root plate");
     assert!(matches!(rows[new_at - 1].0, AppMenuRowView::Separator));
-    assert!(matches!(rows[new_at + 1].0, AppMenuRowView::Separator));
     let label_at = |at: usize| match rows[at].0 {
         AppMenuRowView::Item(item) => item.label,
         _ => "",
@@ -6500,7 +6600,15 @@ fn new_sits_above_properties_and_offers_folder_then_the_documents() {
     assert_eq!(label_at(new_at - 3), "Select All");
     assert!(matches!(rows[new_at - 4].0, AppMenuRowView::Separator));
     assert_eq!(label_at(new_at - 5), "Paste");
-    assert_eq!(label_at(new_at + 2), "Properties");
+    assert!(matches!(
+        rows[new_at + 1].0,
+        AppMenuRowView::Submenu {
+            label: "Display",
+            ..
+        }
+    ));
+    assert!(matches!(rows[new_at + 2].0, AppMenuRowView::Separator));
+    assert_eq!(label_at(new_at + 3), "Properties");
 
     let children: alloc::vec::Vec<_> = rows
         .iter()
@@ -6525,6 +6633,61 @@ fn new_sits_above_properties_and_offers_folder_then_the_documents() {
             Some(ContextChoice::NewDocument(1)),
         ]
     );
+}
+
+/// Display ▸ offers every view, the one the window shows marked as the
+/// group's choice and refused with its reason, and each row reads back as
+/// its view.
+#[test]
+fn display_offers_every_view_and_marks_the_one_in_force() {
+    use crate::chrome::{
+        context_choice_from_item, context_menu, ContextChoice, ContextMenuModel, ContextQuick,
+    };
+    use crate::layout::ViewMode;
+    use tairix_abi::window_ipc::{AppMenuMark, AppMenuRowView};
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.set_view_mode(ViewMode::SmallIcons);
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, false),
+        "Files",
+        ContextQuick::default(),
+    )
+    .expect("the rows fit the bounds");
+    let rows: alloc::vec::Vec<_> = menu.rows().collect();
+    let display_at = rows
+        .iter()
+        .position(|(row, _)| {
+            matches!(
+                row,
+                AppMenuRowView::Submenu {
+                    label: "Display",
+                    ..
+                }
+            )
+        })
+        .expect("Display is declared");
+    let children: alloc::vec::Vec<_> = rows
+        .iter()
+        .filter(|(_, parent)| *parent == Some(display_at))
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(*item),
+            _ => None,
+        })
+        .collect();
+    let labels: alloc::vec::Vec<_> = children.iter().map(|item| item.label).collect();
+    assert_eq!(labels, ["Large icons", "Small icons", "List"]);
+    for (item, mode) in children.iter().zip(ViewMode::ALL) {
+        assert_eq!(
+            context_choice_from_item(item.id),
+            Some(ContextChoice::Display(mode))
+        );
+        assert_eq!(item.symbol, mode.symbol());
+        let shown = mode == ViewMode::SmallIcons;
+        assert_eq!(item.mark == AppMenuMark::Radio, shown, "{mode:?}");
+        assert_eq!(item.enabled, !shown, "{mode:?}");
+        assert_eq!(item.reason.is_empty(), !shown, "{mode:?}");
+    }
 }
 
 #[test]
@@ -6666,8 +6829,7 @@ fn the_context_menu_reason_distinguishes_why_a_row_cannot_act() {
 
     // Enablement alone cannot say *why*, and a row that greys out with no
     // reason is the thing the wire model's reason field exists to fix. A
-    // directory, a bundle, and a file each turn Open With… and Open and Close
-    // down for a different reason, and each states it.
+    // directory and a bundle each turn Open With… down, and each states why.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(0).expect("select Docs");
     assert_eq!(focused(&browser).map(Entry::name), Some("Docs"));
@@ -6675,11 +6837,6 @@ fn the_context_menu_reason_distinguishes_why_a_row_cannot_act() {
     assert_eq!(
         on_directory.reason(ContextCommand::OpenWith),
         "only a file opens with an application"
-    );
-    assert_eq!(
-        on_directory.reason(ContextCommand::OpenAndClose),
-        "a folder opens in this window",
-        "a descent is this window's new content, so closing it would leave nothing"
     );
     assert_eq!(on_directory.reason(ContextCommand::Open), "");
 
@@ -6690,16 +6847,10 @@ fn the_context_menu_reason_distinguishes_why_a_row_cannot_act() {
         "only a file opens with an application",
         "a bundle launches itself"
     );
-    assert_eq!(
-        on_bundle.reason(ContextCommand::OpenAndClose),
-        "",
-        "launching a bundle hands the entry over, so the window may close"
-    );
 
     browser.select(2).expect("select notes.txt");
     let on_file = ContextMenuModel::for_browser(&browser, false);
     assert_eq!(on_file.reason(ContextCommand::OpenWith), "");
-    assert_eq!(on_file.reason(ContextCommand::OpenAndClose), "");
     // Enablement is derived from the reason, so the two cannot disagree.
     for command in crate::chrome::CONTEXT_COMMANDS {
         assert_eq!(
@@ -6751,8 +6902,11 @@ fn a_declared_context_reason_reaches_a_tip_and_never_the_drawn_row() {
     assert_eq!(
         row.drawn(),
         &tairix_controls::MenuItem::new(ContextCommand::OpenWith.label())
+            .with_icon(tairix_icon::menu_symbol_icon(
+                ContextCommand::OpenWith.symbol()
+            ))
             .with_state(tairix_controls::ControlState::default().with_enabled(false)),
-        "the drawn row is the label and the refusal, with no reason on it"
+        "the drawn row is its picture, the label and the refusal, with no reason on it"
     );
 
     // And the plate is the width of its labels: no reason is measured into it.
@@ -7405,10 +7559,19 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn view_mode_toggled_swaps_list_and_grid() {
+fn the_view_command_steps_through_every_display_and_wraps() {
     use crate::layout::ViewMode;
-    assert_eq!(ViewMode::List.toggled(), ViewMode::Grid);
-    assert_eq!(ViewMode::Grid.toggled(), ViewMode::List);
+    let mut mode = ViewMode::ALL[0];
+    for expected in ViewMode::ALL
+        .iter()
+        .cycle()
+        .skip(1)
+        .take(ViewMode::ALL.len())
+    {
+        mode = mode.next();
+        assert_eq!(mode, *expected);
+    }
+    assert_eq!(mode, ViewMode::ALL[0], "back where it began");
 }
 
 #[test]
@@ -7466,13 +7629,13 @@ fn apply_command_drives_navigation_view_and_sort() {
     // Back at the root has no history: a no-op, not an error, and no change.
     assert_eq!(apply_command(&mut browser, ToolbarCommand::Back), Ok(false));
 
-    // Toggle view flips list ↔ grid and reports a change.
+    // The view command steps to the next display and reports a change.
     assert_eq!(browser.view_mode(), ViewMode::List);
     assert_eq!(
         apply_command(&mut browser, ToolbarCommand::ToggleView),
         Ok(true)
     );
-    assert_eq!(browser.view_mode(), ViewMode::Grid);
+    assert_eq!(browser.view_mode(), ViewMode::LargeIcons);
 
     // Sort advances to the next mode in the cycle.
     let before = browser.sort_mode();
@@ -10985,7 +11148,7 @@ mod occupancy {
     #[test]
     fn the_grid_draws_the_filled_folder_only_for_a_directory_that_holds_something() {
         let mut browser = Browser::open_root(empty_and_full()).expect("root");
-        browser.set_view_mode(ViewMode::Grid);
+        browser.set_view_mode(ViewMode::LargeIcons);
 
         assert_eq!(
             tile_kinds(&browser),
@@ -11660,7 +11823,7 @@ mod listing_cue {
     fn nothing_undrawn_answers_while_another_folder_is_read() {
         let theme = Theme::dark();
         let mut browser = Browser::open_root(RootThenPending(200)).expect("open");
-        browser.set_view_mode(crate::ViewMode::Grid);
+        browser.set_view_mode(crate::ViewMode::LargeIcons);
         let shown = crate::render::entry_rect(&browser, Scale::ONE, &theme, WINDOW, BAND, 0)
             .expect("the premise: the root's entries show");
         browser
@@ -11806,7 +11969,7 @@ mod window_fit {
     fn the_floor_is_one_whole_row_of_the_listing_beneath_the_bands() {
         for theme in [Theme::dark(), text_ladder(30)] {
             for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
-                for view in [ViewMode::Grid, ViewMode::List] {
+                for view in [ViewMode::LargeIcons, ViewMode::List] {
                     for toolbar in [ToolbarBand::Hidden, ToolbarBand::Shown] {
                         let width = scale.scale_length(WIN_WIDTH);
                         let floor = browser_floor(

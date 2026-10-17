@@ -5,11 +5,12 @@
 //! One crate owns what such a surface *is* — the account tiles or the chosen
 //! account's disc, name, and masked field centred on the screen, under one row
 //! of chrome naming the machine and the time — together with the wording, the
-//! geometry, and the state machine that turns a keystroke into a verdict. It
-//! knows nothing of a compositor, a window manager, a seat, or IPC: an
-//! embedder gives it events and a [`Verifier`], takes back a painted
+//! geometry, and the state machine that turns a keystroke into a question for
+//! an authority and its answer into a verdict. It knows nothing of a
+//! compositor, a window manager, a seat, or IPC: an embedder gives it events,
+//! a [`Verifier`] and the answers that verifier collects, takes back a painted
 //! [`Surface`] and an [`Outcome`], and owns everything about *where* those
-//! pixels and events come from.
+//! pixels, events and answers come from.
 //!
 //! It lives in `lib/*` because it has two consumers that may not depend on
 //! one another: the login greeter service, and the desktop session's screen
@@ -19,19 +20,28 @@
 //!
 //! # What it guarantees
 //!
-//! * **Only a verified secret concludes it.** [`AuthSurface::on_event`]
-//!   reports [`Outcome::verified`] only for a [`Verdict::Verified`] answer.
-//!   There is no cancel, no timeout, no error state that falls through: a
-//!   refusal, an unreachable authority, an unparseable reply, an empty
+//! * **Only a verified secret concludes it.** [`AuthSurface::answer`]
+//!   reports [`Outcome::verified`] only for a [`Verdict::Verified`] answer to
+//!   the offer the surface is waiting on, named by its [`Ticket`]. There is no
+//!   cancel, no timeout, no error state that falls through: a refusal, an
+//!   unreachable authority, an unparseable reply, a stale answer, an empty
 //!   account list, and a cooldown running out are all the same answer, and it
 //!   is "still asking".
+//! * **It never waits for the authority.** An authority spends a deliberate
+//!   key-derivation cost on every secret, and the embedder's loop owes the
+//!   user a frame, so a secret is *asked* about and its answer adopted on a
+//!   later round. Meanwhile the surface says it is checking and its field
+//!   takes no input; `Escape` still steps back to the chooser, leaving the
+//!   answer to an offer nobody waits on to be ignored. [`Asking`] is the one
+//!   [`Verifier`] that does this, over whatever [`Courier`] carries an offer
+//!   off the embedder's loop.
 //! * **The secret lives in one place and is erased on every path out.** It
 //!   is held only in the masked field's bounded, pre-reserved buffer — which
 //!   reserves once so typing can never reallocate and strand a copy in a
 //!   freed block, shows the console's `[input active...]` marker rather than
-//!   anything typed, and redacts itself in `Debug` — and it is wiped as soon
-//!   as a verdict comes back, whichever verdict that is, as well as on every
-//!   step between accounts.
+//!   anything typed, and redacts itself in `Debug` — and it is wiped the
+//!   moment it is handed to the [`Verifier`], which copies what it needs into
+//!   storage it erases itself, as well as on every step between accounts.
 //! * **The paint and the hit test cannot disagree.** The prompt block, the
 //!   field, and the tile rectangles have one definition ([`panel_rect`],
 //!   [`AuthSurface::field_rect`], the chooser's own grid), read by both.
@@ -57,15 +67,24 @@
 //! # Using it
 //!
 //! ```
-//! use tairix_greeter::{AccountTile, AuthSurface, Backdrop, EventContext, Verdict, Verifier};
+//! use tairix_greeter::{
+//!     AccountTile, AuthSurface, Backdrop, EventContext, Ticket, Tickets, Verdict, Verifier,
+//! };
 //! use tairix_geometry::{Rect, Scale};
 //! use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 //! use tairix_theme::Theme;
 //!
-//! struct Never;
-//! impl Verifier for Never {
-//!     fn verify(&mut self, _account: &str, _secret: &str) -> Verdict {
-//!         Verdict::Refused
+//! /// An authority that has been asked and not yet answered.
+//! #[derive(Default)]
+//! struct Pending {
+//!     tickets: Tickets,
+//!     asked: Option<Ticket>,
+//! }
+//! impl Verifier for Pending {
+//!     fn ask(&mut self, _account: &str, _secret: &str) -> Ticket {
+//!         let ticket = self.tickets.issue();
+//!         self.asked = Some(ticket);
+//!         ticket
 //!     }
 //! }
 //!
@@ -77,18 +96,23 @@
 //!     modifiers: Modifiers::default(),
 //! };
 //!
+//! let mut authority = Pending::default();
+//!
 //! // The first Return picks the focused tile; the second offers a secret
-//! // for the account it named.
+//! // for the account it named, which the authority is then asked about.
 //! surface.on_event(
 //!     &enter,
-//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut Never, now_ns: 0 },
+//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut authority, now_ns: 0 },
 //! );
 //! assert_eq!(surface.selected_account(), Some("ann"));
-//!
-//! let outcome = surface.on_event(
+//! surface.on_event(
 //!     &enter,
-//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut Never, now_ns: 0 },
+//!     &mut EventContext { screen, scale: Scale::ONE, theme: &theme, verifier: &mut authority, now_ns: 0 },
 //! );
+//!
+//! // Its answer arrives on a later round.
+//! let asked = authority.asked.take().expect("the secret was offered");
+//! let outcome = surface.answer(asked, Verdict::Refused, 0, &theme);
 //! assert!(!outcome.verified());
 //! if outcome.redraw() {
 //!     let _frame = surface.render(screen, Scale::ONE, &theme, Backdrop::Desktop);
@@ -103,19 +127,23 @@
 
 extern crate alloc;
 
+mod asking;
 mod chooser;
 mod layout;
 mod motion;
 mod surface;
 
+pub use asking::{Asking, Courier};
 pub use chooser::AccountTile;
 pub use surface::{
-    panel_rect, AuthSurface, Backdrop, Chrome, EventContext, Outcome, Verdict, Verifier,
-    MAX_CHROME, UNNAMED_ACCOUNT,
+    panel_rect, AuthSurface, Backdrop, Chrome, EventContext, Outcome, Ticket, Tickets, Verdict,
+    Verifier, MAX_CHROME, UNNAMED_ACCOUNT,
 };
 
 #[cfg(test)]
 mod backdrop_tests;
+#[cfg(test)]
+mod checking_tests;
 #[cfg(test)]
 mod chooser_tests;
 #[cfg(test)]

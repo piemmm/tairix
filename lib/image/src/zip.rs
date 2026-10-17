@@ -375,6 +375,9 @@ fn find_end(bytes: &[u8]) -> Result<usize, ZipError> {
         .ok_or(ZipError::Malformed)
 }
 
+#[path = "zip_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "zip_tests.rs"]
 mod tests;

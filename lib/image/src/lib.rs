@@ -151,11 +151,14 @@ mod density;
 mod encode;
 #[cfg(test)]
 mod encode_fixture;
+mod exif;
 mod frames;
 mod gif;
 mod gif_encode;
 mod huffman;
 mod ico;
+mod ifd;
+pub mod inspect;
 mod jpeg;
 mod jpeg_encode;
 mod lzw;

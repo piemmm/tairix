@@ -15,7 +15,7 @@ use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_appconf::Registry;
 use tairix_controls::testkit::keystroke;
-use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, WHEEL_STEP};
+use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, MenuItem, WHEEL_STEP};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -1008,6 +1008,14 @@ fn the_leading_crumb_opens_the_category_list_only_once_the_strip_is_shed() {
         &theme,
     );
     assert!(shell.category_list_open(), "the shed strip's way back");
+    let shown: Vec<_> = shell
+        .category_items_for_test()
+        .expect("open")
+        .iter()
+        .map(MenuItem::icon)
+        .collect();
+    let declared: Vec<_> = CATEGORIES.iter().map(|row| Some(row.icon)).collect();
+    assert_eq!(shown, declared, "each row shows its category's own picture");
 
     let mut sink = damage();
     shell.on_key(
@@ -4055,16 +4063,19 @@ fn every_screensaver_option_posts_its_own_key() {
     }
 }
 
-/// The kept-pictures sentence names the folders a home keeps them in.
+/// The kept-pictures sentence names the folders a home keeps them in, outermost
+/// first.
 #[test]
 fn the_kept_pictures_option_names_where_pictures_go() {
-    use tairix_abi::home::{
-        HOME_USER_FILES_DIR, USER_FILES_DOCUMENTS_DIR, USER_FILES_PICTURES_DIR,
-    };
+    use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_DOCUMENTS_DIR, HOME_FILES_PICTURES_DIR};
     let text = SaverOption::RaytraceSave.description();
-    assert!(text.contains(HOME_USER_FILES_DIR), "{text}");
-    assert!(text.contains(USER_FILES_PICTURES_DIR), "{text}");
-    assert!(!text.contains(USER_FILES_DOCUMENTS_DIR), "{text}");
+    let at = |name: &str| {
+        text.find(name)
+            .unwrap_or_else(|| panic!("{name} in {text}"))
+    };
+    assert!(at(HOME_FILES_DIR) < at(HOME_FILES_PICTURES_DIR), "{text}");
+    assert!(at(HOME_FILES_PICTURES_DIR) < at("Raytracing"), "{text}");
+    assert!(!text.contains(HOME_FILES_DOCUMENTS_DIR), "{text}");
 }
 
 /// The slideshow is narrowed to a category the catalog files a picture under,

@@ -343,6 +343,238 @@ pub enum IconKind {
     AlertInformation,
     /// A question mark on a blue disc: something only the user can decide.
     AlertQuestion,
+    /// An open folder, for opening an item or choosing a document to open.
+    Open,
+    /// A box with an arrow leaving its corner, for opening an item in another application.
+    OpenWith,
+    /// A window bearing a plus, for opening another window.
+    NewWindow,
+    /// A page bearing a plus, for starting a new document.
+    NewDocument,
+    /// A floppy disk, for saving a document.
+    Save,
+    /// A floppy disk under a pencil, for saving a document somewhere new.
+    SaveAs,
+    /// A window bearing a cross, for closing a window or a document.
+    Close,
+    /// A cross in a ring, for ending an application.
+    Quit,
+    /// A card of labelled lines, for an item's facts and settings.
+    Properties,
+    /// A page with a folded corner, for the document menu.
+    Page,
+    /// A pencil over a line, for the editing menu.
+    Edit,
+    /// An open eye, for showing something.
+    Visible,
+    /// An eye struck through, for hiding something.
+    Hidden,
+    /// Scissors, for cutting the selection to the clipboard.
+    Cut,
+    /// Two overlapping pages, for copying the selection.
+    Copy,
+    /// A clipboard, for pasting.
+    Paste,
+    /// A dashed frame around a filled square, for selecting everything.
+    SelectAll,
+    /// A dashed frame around a cross, for selecting nothing.
+    SelectNone,
+    /// A text field with its caret, for renaming.
+    Rename,
+    /// Two overlapping pages, the front bearing a plus, for duplicating.
+    Duplicate,
+    /// A waste bin, for destroying an item.
+    Delete,
+    /// A minus in a ring, for taking an item out of a list.
+    Remove,
+    /// An eraser, for emptying a screen or a list.
+    Clear,
+    /// An arrow curving back, for undoing.
+    Undo,
+    /// An arrow curving on, for redoing.
+    Redo,
+    /// Lines moved in past a chevron, for indenting.
+    Indent,
+    /// Lines with a chevron pointing out, for outdenting.
+    Outdent,
+    /// A pair of slashes, for commenting lines out.
+    Comment,
+    /// A letter beside a block caret, for typing over text.
+    Overwrite,
+    /// A magnifier, for finding text.
+    Search,
+    /// Two boxes changing places, for finding and replacing.
+    Replace,
+    /// A magnifier beside a down arrow, for the next match.
+    FindNext,
+    /// A magnifier beside an up arrow, for the previous match.
+    FindPrevious,
+    /// A number sign, for going to a numbered place.
+    GoTo,
+    /// A warning triangle, for the next problem.
+    Problem,
+    /// Lines of text, for showing a document as text.
+    ViewText,
+    /// Binary digits, for showing a document's bytes.
+    ViewHex,
+    /// Braces around a run of values, for showing a document's structure.
+    ViewData,
+    /// Angle brackets around a slash, for showing machine code.
+    ViewCode,
+    /// A page bearing angle brackets, for the syntax a document is coloured as.
+    Syntax,
+    /// An arrow meeting a stop, for tab stops.
+    TabWidth,
+    /// A pilcrow, for how lines end.
+    LineEndings,
+    /// A double arrow between two bars, for fitting the width.
+    FitWidth,
+    /// A letter beside a plus, for larger text.
+    TextLarger,
+    /// A letter beside a minus, for smaller text.
+    TextSmaller,
+    /// A letter beside an equals sign, for text at its own size.
+    TextActual,
+    /// A half-turn arrow, for turning half a turn.
+    RotateHalf,
+    /// Two arrowheads facing away from a level axis, for mirroring top to bottom.
+    FlipVertical,
+    /// A ruled frame, for a grid.
+    Grid,
+    /// A window with a side pane, for the panes.
+    Panes,
+    /// An arrow turning back round, for putting the panes back.
+    ResetPanes,
+    /// A window divided into panels, for how a window shows its items.
+    Layout,
+    /// Four large tiles, for large icons.
+    LargeIcons,
+    /// Small tiles beside their names in two columns, for small icons.
+    SmallIcons,
+    /// Rows of points and lines, for a list.
+    ListView,
+    /// Letters beside a down arrow, for ordering by name.
+    SortByName,
+    /// A triangle, a circle and a square, for ordering by kind.
+    SortByKind,
+    /// Shortening bars beside a down arrow, for ordering by size.
+    SortBySize,
+    /// A calendar page, for a date.
+    Calendar,
+    /// Blocks against a left edge, for arranging from the left.
+    ArrangeLeft,
+    /// Blocks against a right edge, for arranging from the right.
+    ArrangeRight,
+    /// A curved arrow in a box, for a desktop shortcut.
+    Shortcut,
+    /// A house, for the user's home folder.
+    Home,
+    /// An arrow up, for moving up.
+    MoveUp,
+    /// An arrow down, for moving down.
+    MoveDown,
+    /// Stacked sheets seen edge on, for layers.
+    Layers,
+    /// Stacked sheets bearing a plus, for a new layer.
+    LayerNew,
+    /// An arrow above a sheet, for the layer above.
+    LayerAbove,
+    /// An arrow below a sheet, for the layer below.
+    LayerBelow,
+    /// A solid square in front of an open one, for raising a layer.
+    LayerRaise,
+    /// An open square in front of a solid one, for lowering a layer.
+    LayerLower,
+    /// Two arrows joining into one, for merging down.
+    MergeDown,
+    /// Two arrows pressing onto a line, for flattening.
+    Flatten,
+    /// Arrows pointing out of opposite corners, for resizing.
+    Resize,
+    /// A picture inside a larger frame, for the canvas size.
+    CanvasSize,
+    /// A square half filled across its diagonal, for inverting colours.
+    Invert,
+    /// Three overlapping circles, for how colours are held.
+    ColourModel,
+    /// A frame around a disc, bearing a plus, for adding a mask.
+    MaskAdd,
+    /// A frame around a disc, bearing a minus, for removing a mask.
+    MaskRemove,
+    /// An anchor, for putting down what is carried.
+    PutDown,
+    /// A filled circle in front of an open one, for the primary colour.
+    ColourPrimary,
+    /// An open circle in front of a filled one, for the secondary colour.
+    ColourSecondary,
+    /// Two arrows passing each other, for swapping the colours.
+    ColourSwap,
+    /// A filled and an open square, for the default colours.
+    ColourReset,
+    /// Three sliders, for adjustments.
+    Sliders,
+    /// A sun, for brightness and contrast.
+    Brightness,
+    /// A drop, for hue and saturation.
+    Droplet,
+    /// A disc cut into thirds, for the balance of colours.
+    ColourBalance,
+    /// The bars of a histogram, for levels.
+    Levels,
+    /// A curve rising across a frame, for curves.
+    Curves,
+    /// A thermometer, for white balance.
+    WhiteBalance,
+    /// A staircase, for posterising.
+    Posterise,
+    /// A frame filled on one side, for a threshold.
+    Threshold,
+    /// A drop struck through, for taking the colour out.
+    Desaturate,
+    /// A ring of dots, for blurring.
+    Blur,
+    /// A peak, for sharpening.
+    Sharpen,
+    /// A chequered frame, for pixelating.
+    Pixelate,
+    /// Scattered dots, for noise.
+    Noise,
+    /// A diamond between corner marks, for finding edges.
+    FindEdges,
+    /// Two pages, one behind the other, for sprites and pages.
+    Pages,
+    /// A toolbox, for the tools.
+    Toolbox,
+    /// The trace of a pulse, for watching what the machine is doing.
+    Activity,
+    /// A prompt in a window, for a shell.
+    Terminal,
+    /// An arrow leaving a door frame, for ending a session.
+    LogOut,
+    /// A turning arrow around a bar, for restarting.
+    Restart,
+    /// A window in front of another, for bringing a window forward.
+    SwitchTo,
+    /// A dial with its needle low, for lowering priority.
+    Gauge,
+    /// A page of lines, for logs.
+    Logs,
+    /// A cross in an octagon, for ending a task at once.
+    ForceQuit,
+    /// A loop of arrows struck through, for playing once.
+    RepeatOff,
+    /// A waveform, for evening out loudness.
+    Loudness,
+    /// A flag on its pole, for a new game.
+    Flag,
+    /// Three rising bars, the first filled, for the easiest level.
+    LevelEasy,
+    /// Three rising bars, two filled, for the middle level.
+    LevelMedium,
+    /// Three rising bars, all filled, for the hardest level.
+    LevelHard,
+    /// An open door, for letting the companion out.
+    DoorOpen,
 }
 
 impl IconKind {
@@ -488,6 +720,122 @@ impl IconKind {
             "alert-warning" => Self::AlertWarning,
             "alert-information" => Self::AlertInformation,
             "alert-question" => Self::AlertQuestion,
+            "open" => Self::Open,
+            "open-with" => Self::OpenWith,
+            "new-window" => Self::NewWindow,
+            "new-document" => Self::NewDocument,
+            "save" => Self::Save,
+            "save-as" => Self::SaveAs,
+            "close" => Self::Close,
+            "quit" => Self::Quit,
+            "properties" => Self::Properties,
+            "page" => Self::Page,
+            "edit" => Self::Edit,
+            "visible" => Self::Visible,
+            "hidden" => Self::Hidden,
+            "cut" => Self::Cut,
+            "copy" => Self::Copy,
+            "paste" => Self::Paste,
+            "select-all" => Self::SelectAll,
+            "select-none" => Self::SelectNone,
+            "rename" => Self::Rename,
+            "duplicate" => Self::Duplicate,
+            "delete" => Self::Delete,
+            "remove" => Self::Remove,
+            "clear" => Self::Clear,
+            "undo" => Self::Undo,
+            "redo" => Self::Redo,
+            "indent" => Self::Indent,
+            "outdent" => Self::Outdent,
+            "comment" => Self::Comment,
+            "overwrite" => Self::Overwrite,
+            "search" => Self::Search,
+            "replace" => Self::Replace,
+            "find-next" => Self::FindNext,
+            "find-previous" => Self::FindPrevious,
+            "go-to" => Self::GoTo,
+            "problem" => Self::Problem,
+            "view-text" => Self::ViewText,
+            "view-hex" => Self::ViewHex,
+            "view-data" => Self::ViewData,
+            "view-code" => Self::ViewCode,
+            "syntax" => Self::Syntax,
+            "tab-width" => Self::TabWidth,
+            "line-endings" => Self::LineEndings,
+            "fit-width" => Self::FitWidth,
+            "text-larger" => Self::TextLarger,
+            "text-smaller" => Self::TextSmaller,
+            "text-actual" => Self::TextActual,
+            "rotate-half" => Self::RotateHalf,
+            "flip-vertical" => Self::FlipVertical,
+            "grid" => Self::Grid,
+            "panes" => Self::Panes,
+            "reset-panes" => Self::ResetPanes,
+            "layout" => Self::Layout,
+            "large-icons" => Self::LargeIcons,
+            "small-icons" => Self::SmallIcons,
+            "list-view" => Self::ListView,
+            "sort-by-name" => Self::SortByName,
+            "sort-by-kind" => Self::SortByKind,
+            "sort-by-size" => Self::SortBySize,
+            "calendar" => Self::Calendar,
+            "arrange-left" => Self::ArrangeLeft,
+            "arrange-right" => Self::ArrangeRight,
+            "shortcut" => Self::Shortcut,
+            "home" => Self::Home,
+            "move-up" => Self::MoveUp,
+            "move-down" => Self::MoveDown,
+            "layers" => Self::Layers,
+            "layer-new" => Self::LayerNew,
+            "layer-above" => Self::LayerAbove,
+            "layer-below" => Self::LayerBelow,
+            "layer-raise" => Self::LayerRaise,
+            "layer-lower" => Self::LayerLower,
+            "merge-down" => Self::MergeDown,
+            "flatten" => Self::Flatten,
+            "resize" => Self::Resize,
+            "canvas-size" => Self::CanvasSize,
+            "invert" => Self::Invert,
+            "colour-model" => Self::ColourModel,
+            "mask-add" => Self::MaskAdd,
+            "mask-remove" => Self::MaskRemove,
+            "put-down" => Self::PutDown,
+            "colour-primary" => Self::ColourPrimary,
+            "colour-secondary" => Self::ColourSecondary,
+            "colour-swap" => Self::ColourSwap,
+            "colour-reset" => Self::ColourReset,
+            "sliders" => Self::Sliders,
+            "brightness" => Self::Brightness,
+            "droplet" => Self::Droplet,
+            "colour-balance" => Self::ColourBalance,
+            "levels" => Self::Levels,
+            "curves" => Self::Curves,
+            "white-balance" => Self::WhiteBalance,
+            "posterise" => Self::Posterise,
+            "threshold" => Self::Threshold,
+            "desaturate" => Self::Desaturate,
+            "blur" => Self::Blur,
+            "sharpen" => Self::Sharpen,
+            "pixelate" => Self::Pixelate,
+            "noise" => Self::Noise,
+            "find-edges" => Self::FindEdges,
+            "pages" => Self::Pages,
+            "toolbox" => Self::Toolbox,
+            "activity" => Self::Activity,
+            "terminal" => Self::Terminal,
+            "log-out" => Self::LogOut,
+            "restart" => Self::Restart,
+            "switch-to" => Self::SwitchTo,
+            "gauge" => Self::Gauge,
+            "logs" => Self::Logs,
+            "force-quit" => Self::ForceQuit,
+            "repeat-off" => Self::RepeatOff,
+            "loudness" => Self::Loudness,
+            "flag" => Self::Flag,
+            "level-easy" => Self::LevelEasy,
+            "level-medium" => Self::LevelMedium,
+            "level-hard" => Self::LevelHard,
+            "door-open" => Self::DoorOpen,
             _ => Self::Generic,
         }
     }
@@ -639,6 +987,122 @@ impl IconKind {
             Self::AlertWarning => 130,
             Self::AlertInformation => 131,
             Self::AlertQuestion => 132,
+            Self::Open => 133,
+            Self::OpenWith => 134,
+            Self::NewWindow => 135,
+            Self::NewDocument => 136,
+            Self::Save => 137,
+            Self::SaveAs => 138,
+            Self::Close => 139,
+            Self::Quit => 140,
+            Self::Properties => 141,
+            Self::Page => 142,
+            Self::Edit => 143,
+            Self::Visible => 144,
+            Self::Hidden => 145,
+            Self::Cut => 146,
+            Self::Copy => 147,
+            Self::Paste => 148,
+            Self::SelectAll => 149,
+            Self::SelectNone => 150,
+            Self::Rename => 151,
+            Self::Duplicate => 152,
+            Self::Delete => 153,
+            Self::Remove => 154,
+            Self::Clear => 155,
+            Self::Undo => 156,
+            Self::Redo => 157,
+            Self::Indent => 158,
+            Self::Outdent => 159,
+            Self::Comment => 160,
+            Self::Overwrite => 161,
+            Self::Search => 162,
+            Self::Replace => 163,
+            Self::FindNext => 164,
+            Self::FindPrevious => 165,
+            Self::GoTo => 166,
+            Self::Problem => 167,
+            Self::ViewText => 168,
+            Self::ViewHex => 169,
+            Self::ViewData => 170,
+            Self::ViewCode => 171,
+            Self::Syntax => 172,
+            Self::TabWidth => 173,
+            Self::LineEndings => 174,
+            Self::FitWidth => 175,
+            Self::TextLarger => 176,
+            Self::TextSmaller => 177,
+            Self::TextActual => 178,
+            Self::RotateHalf => 179,
+            Self::FlipVertical => 180,
+            Self::Grid => 181,
+            Self::Panes => 182,
+            Self::ResetPanes => 183,
+            Self::Layout => 184,
+            Self::LargeIcons => 185,
+            Self::SmallIcons => 186,
+            Self::ListView => 187,
+            Self::SortByName => 188,
+            Self::SortByKind => 189,
+            Self::SortBySize => 190,
+            Self::Calendar => 191,
+            Self::ArrangeLeft => 192,
+            Self::ArrangeRight => 193,
+            Self::Shortcut => 194,
+            Self::Home => 195,
+            Self::MoveUp => 196,
+            Self::MoveDown => 197,
+            Self::Layers => 198,
+            Self::LayerNew => 199,
+            Self::LayerAbove => 200,
+            Self::LayerBelow => 201,
+            Self::LayerRaise => 202,
+            Self::LayerLower => 203,
+            Self::MergeDown => 204,
+            Self::Flatten => 205,
+            Self::Resize => 206,
+            Self::CanvasSize => 207,
+            Self::Invert => 208,
+            Self::ColourModel => 209,
+            Self::MaskAdd => 210,
+            Self::MaskRemove => 211,
+            Self::PutDown => 212,
+            Self::ColourPrimary => 213,
+            Self::ColourSecondary => 214,
+            Self::ColourSwap => 215,
+            Self::ColourReset => 216,
+            Self::Sliders => 217,
+            Self::Brightness => 218,
+            Self::Droplet => 219,
+            Self::ColourBalance => 220,
+            Self::Levels => 221,
+            Self::Curves => 222,
+            Self::WhiteBalance => 223,
+            Self::Posterise => 224,
+            Self::Threshold => 225,
+            Self::Desaturate => 226,
+            Self::Blur => 227,
+            Self::Sharpen => 228,
+            Self::Pixelate => 229,
+            Self::Noise => 230,
+            Self::FindEdges => 231,
+            Self::Pages => 232,
+            Self::Toolbox => 233,
+            Self::Activity => 234,
+            Self::Terminal => 235,
+            Self::LogOut => 236,
+            Self::Restart => 237,
+            Self::SwitchTo => 238,
+            Self::Gauge => 239,
+            Self::Logs => 240,
+            Self::ForceQuit => 241,
+            Self::RepeatOff => 242,
+            Self::Loudness => 243,
+            Self::Flag => 244,
+            Self::LevelEasy => 245,
+            Self::LevelMedium => 246,
+            Self::LevelHard => 247,
+            Self::DoorOpen => 248,
         }
     }
 
@@ -789,6 +1253,122 @@ impl IconKind {
             Self::Microphone => "microphone",
             Self::VolumeMuted => "volume-muted",
             Self::NetworkOffline => "network-offline",
+            Self::Open => "open",
+            Self::OpenWith => "open-with",
+            Self::NewWindow => "new-window",
+            Self::NewDocument => "new-document",
+            Self::Save => "save",
+            Self::SaveAs => "save-as",
+            Self::Close => "close",
+            Self::Quit => "quit",
+            Self::Properties => "properties",
+            Self::Page => "page",
+            Self::Edit => "edit",
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+            Self::SelectAll => "select-all",
+            Self::SelectNone => "select-none",
+            Self::Rename => "rename",
+            Self::Duplicate => "duplicate",
+            Self::Delete => "delete",
+            Self::Remove => "remove",
+            Self::Clear => "clear",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
+            Self::Indent => "indent",
+            Self::Outdent => "outdent",
+            Self::Comment => "comment",
+            Self::Overwrite => "overwrite",
+            Self::Search => "search",
+            Self::Replace => "replace",
+            Self::FindNext => "find-next",
+            Self::FindPrevious => "find-previous",
+            Self::GoTo => "go-to",
+            Self::Problem => "problem",
+            Self::ViewText => "view-text",
+            Self::ViewHex => "view-hex",
+            Self::ViewData => "view-data",
+            Self::ViewCode => "view-code",
+            Self::Syntax => "syntax",
+            Self::TabWidth => "tab-width",
+            Self::LineEndings => "line-endings",
+            Self::FitWidth => "fit-width",
+            Self::TextLarger => "text-larger",
+            Self::TextSmaller => "text-smaller",
+            Self::TextActual => "text-actual",
+            Self::RotateHalf => "rotate-half",
+            Self::FlipVertical => "flip-vertical",
+            Self::Grid => "grid",
+            Self::Panes => "panes",
+            Self::ResetPanes => "reset-panes",
+            Self::Layout => "layout",
+            Self::LargeIcons => "large-icons",
+            Self::SmallIcons => "small-icons",
+            Self::ListView => "list-view",
+            Self::SortByName => "sort-by-name",
+            Self::SortByKind => "sort-by-kind",
+            Self::SortBySize => "sort-by-size",
+            Self::Calendar => "calendar",
+            Self::ArrangeLeft => "arrange-left",
+            Self::ArrangeRight => "arrange-right",
+            Self::Shortcut => "shortcut",
+            Self::Home => "home",
+            Self::MoveUp => "move-up",
+            Self::MoveDown => "move-down",
+            Self::Layers => "layers",
+            Self::LayerNew => "layer-new",
+            Self::LayerAbove => "layer-above",
+            Self::LayerBelow => "layer-below",
+            Self::LayerRaise => "layer-raise",
+            Self::LayerLower => "layer-lower",
+            Self::MergeDown => "merge-down",
+            Self::Flatten => "flatten",
+            Self::Resize => "resize",
+            Self::CanvasSize => "canvas-size",
+            Self::Invert => "invert",
+            Self::ColourModel => "colour-model",
+            Self::MaskAdd => "mask-add",
+            Self::MaskRemove => "mask-remove",
+            Self::PutDown => "put-down",
+            Self::ColourPrimary => "colour-primary",
+            Self::ColourSecondary => "colour-secondary",
+            Self::ColourSwap => "colour-swap",
+            Self::ColourReset => "colour-reset",
+            Self::Sliders => "sliders",
+            Self::Brightness => "brightness",
+            Self::Droplet => "droplet",
+            Self::ColourBalance => "colour-balance",
+            Self::Levels => "levels",
+            Self::Curves => "curves",
+            Self::WhiteBalance => "white-balance",
+            Self::Posterise => "posterise",
+            Self::Threshold => "threshold",
+            Self::Desaturate => "desaturate",
+            Self::Blur => "blur",
+            Self::Sharpen => "sharpen",
+            Self::Pixelate => "pixelate",
+            Self::Noise => "noise",
+            Self::FindEdges => "find-edges",
+            Self::Pages => "pages",
+            Self::Toolbox => "toolbox",
+            Self::Activity => "activity",
+            Self::Terminal => "terminal",
+            Self::LogOut => "log-out",
+            Self::Restart => "restart",
+            Self::SwitchTo => "switch-to",
+            Self::Gauge => "gauge",
+            Self::Logs => "logs",
+            Self::ForceQuit => "force-quit",
+            Self::RepeatOff => "repeat-off",
+            Self::Loudness => "loudness",
+            Self::Flag => "flag",
+            Self::LevelEasy => "level-easy",
+            Self::LevelMedium => "level-medium",
+            Self::LevelHard => "level-hard",
+            Self::DoorOpen => "door-open",
         }
     }
 }
@@ -868,7 +1448,6 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::NavBack => nav_back(color),
         IconKind::NavForward => nav_forward(color),
         IconKind::NavUp => nav_up(color),
-        IconKind::Refresh => refresh(color),
         IconKind::ViewToggle => view_toggle(color),
         IconKind::Sort => sort(color),
         IconKind::NewFolder => new_folder(color),
@@ -889,11 +1468,9 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::ZoomIn => magnifier(color, Lens::Plus),
         IconKind::ZoomOut => magnifier(color, Lens::Minus),
         IconKind::ZoomFit => zoom_fit(color),
-        IconKind::ZoomActual => zoom_actual(color),
         IconKind::RotateRight => rotate(color, true),
         IconKind::RotateLeft => rotate(color, false),
         IconKind::Mirror => mirror(color),
-        IconKind::Info => info(color),
         IconKind::ToolSelect => tool_select(color),
         IconKind::ToolPencil => tool_pencil(color),
         IconKind::ToolBrush => tool_brush(color),
@@ -964,7 +1541,126 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::OsLinux
         | IconKind::OsWindows
         | IconKind::OsApple
-        | IconKind::OsAndroid => {
+        | IconKind::OsAndroid
+        | IconKind::Refresh
+        | IconKind::ZoomActual
+        | IconKind::Info
+        | IconKind::Open
+        | IconKind::OpenWith
+        | IconKind::NewWindow
+        | IconKind::NewDocument
+        | IconKind::Save
+        | IconKind::SaveAs
+        | IconKind::Close
+        | IconKind::Quit
+        | IconKind::Properties
+        | IconKind::Page
+        | IconKind::Edit
+        | IconKind::Visible
+        | IconKind::Hidden
+        | IconKind::Cut
+        | IconKind::Copy
+        | IconKind::Paste
+        | IconKind::SelectAll
+        | IconKind::SelectNone
+        | IconKind::Rename
+        | IconKind::Duplicate
+        | IconKind::Delete
+        | IconKind::Remove
+        | IconKind::Clear
+        | IconKind::Undo
+        | IconKind::Redo
+        | IconKind::Indent
+        | IconKind::Outdent
+        | IconKind::Comment
+        | IconKind::Overwrite
+        | IconKind::Search
+        | IconKind::Replace
+        | IconKind::FindNext
+        | IconKind::FindPrevious
+        | IconKind::GoTo
+        | IconKind::Problem
+        | IconKind::ViewText
+        | IconKind::ViewHex
+        | IconKind::ViewData
+        | IconKind::ViewCode
+        | IconKind::Syntax
+        | IconKind::TabWidth
+        | IconKind::LineEndings
+        | IconKind::FitWidth
+        | IconKind::TextLarger
+        | IconKind::TextSmaller
+        | IconKind::TextActual
+        | IconKind::RotateHalf
+        | IconKind::FlipVertical
+        | IconKind::Grid
+        | IconKind::Panes
+        | IconKind::ResetPanes
+        | IconKind::Layout
+        | IconKind::LargeIcons
+        | IconKind::SmallIcons
+        | IconKind::ListView
+        | IconKind::SortByName
+        | IconKind::SortByKind
+        | IconKind::SortBySize
+        | IconKind::Calendar
+        | IconKind::ArrangeLeft
+        | IconKind::ArrangeRight
+        | IconKind::Shortcut
+        | IconKind::Home
+        | IconKind::MoveUp
+        | IconKind::MoveDown
+        | IconKind::Layers
+        | IconKind::LayerNew
+        | IconKind::LayerAbove
+        | IconKind::LayerBelow
+        | IconKind::LayerRaise
+        | IconKind::LayerLower
+        | IconKind::MergeDown
+        | IconKind::Flatten
+        | IconKind::Resize
+        | IconKind::CanvasSize
+        | IconKind::Invert
+        | IconKind::ColourModel
+        | IconKind::MaskAdd
+        | IconKind::MaskRemove
+        | IconKind::PutDown
+        | IconKind::ColourPrimary
+        | IconKind::ColourSecondary
+        | IconKind::ColourSwap
+        | IconKind::ColourReset
+        | IconKind::Sliders
+        | IconKind::Brightness
+        | IconKind::Droplet
+        | IconKind::ColourBalance
+        | IconKind::Levels
+        | IconKind::Curves
+        | IconKind::WhiteBalance
+        | IconKind::Posterise
+        | IconKind::Threshold
+        | IconKind::Desaturate
+        | IconKind::Blur
+        | IconKind::Sharpen
+        | IconKind::Pixelate
+        | IconKind::Noise
+        | IconKind::FindEdges
+        | IconKind::Pages
+        | IconKind::Toolbox
+        | IconKind::Activity
+        | IconKind::Terminal
+        | IconKind::LogOut
+        | IconKind::Restart
+        | IconKind::SwitchTo
+        | IconKind::Gauge
+        | IconKind::Logs
+        | IconKind::ForceQuit
+        | IconKind::RepeatOff
+        | IconKind::Loudness
+        | IconKind::Flag
+        | IconKind::LevelEasy
+        | IconKind::LevelMedium
+        | IconKind::LevelHard
+        | IconKind::DoorOpen => {
             return symbol::glyph(kind, color)
                 .unwrap_or_else(|| VectorIcon::new(DESIGN, generic(color)));
         }
@@ -1304,32 +2000,6 @@ fn nav_up(color: Color) -> alloc::vec::Vec<IconLayer> {
     vec![IconLayer::from_points(color, ARROW)]
 }
 
-/// A circular arrow, for Refresh: an annular sector (a ring with a gap at the
-/// top) plus an arrowhead at the gap so it reads as a rotation.
-fn refresh(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const RING: &[(i32, i32)] = &[
-        (18, 6),
-        (21, 12),
-        (18, 18),
-        (12, 21),
-        (6, 18),
-        (3, 12),
-        (6, 6),
-        (8, 8),
-        (7, 12),
-        (8, 16),
-        (12, 17),
-        (16, 16),
-        (17, 12),
-        (16, 8),
-    ];
-    const HEAD: &[(i32, i32)] = &[(18, 2), (22, 8), (14, 8)];
-    vec![
-        IconLayer::from_points(color, RING),
-        IconLayer::from_points(color, HEAD),
-    ]
-}
-
 /// A two-by-two grid of tiles, for the list/grid view toggle.
 fn view_toggle(color: Color) -> alloc::vec::Vec<IconLayer> {
     const TL: &[(i32, i32)] = &[(4, 4), (10, 4), (10, 10), (4, 10)];
@@ -1572,43 +2242,12 @@ fn zoom_fit(color: Color) -> alloc::vec::Vec<IconLayer> {
     ]
 }
 
-/// Callipers closed on a fixed box, for showing a picture at its true pixel
-/// size: what is measured is the picture, not the window, so the jaws do not
-/// move.
-fn zoom_actual(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const LEFT_JAW: &[(i32, i32)] = &[
-        (3, 4),
-        (8, 4),
-        (8, 7),
-        (6, 7),
-        (6, 17),
-        (8, 17),
-        (8, 20),
-        (3, 20),
-    ];
-    const RIGHT_JAW: &[(i32, i32)] = &[
-        (21, 4),
-        (21, 20),
-        (16, 20),
-        (16, 17),
-        (18, 17),
-        (18, 7),
-        (16, 7),
-        (21, 7),
-    ];
-    const BOX: &[(i32, i32)] = &[(10, 9), (14, 9), (14, 15), (10, 15)];
-    vec![
-        IconLayer::from_points(color, LEFT_JAW),
-        IconLayer::from_points(color, RIGHT_JAW),
-        IconLayer::from_points(color, BOX),
-    ]
-}
-
 /// A half-turn arrow, for turning what a window displays a quarter turn.
 ///
 /// The arc is shared and only the head moves, so the two directions cannot
-/// drift apart. Deliberately a half-turn arc rather than [`refresh`]'s
-/// near-complete ring: a toolbar carrying both must not draw them alike.
+/// drift apart. Deliberately a half-turn arc rather than
+/// [`IconKind::Refresh`]'s near-complete ring: a toolbar carrying both must
+/// not draw them alike.
 fn rotate(color: Color, clockwise: bool) -> alloc::vec::Vec<IconLayer> {
     // Outer half-annulus left over the top to right, then back inside.
     const ARC: &[(i32, i32)] = &[
@@ -1643,35 +2282,6 @@ fn mirror(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, AXIS),
         IconLayer::from_points(color, LEFT),
         IconLayer::from_points(color, RIGHT),
-    ]
-}
-
-/// An `i` in a ring, for what is known about the thing on display.
-fn info(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const RING: &[(i32, i32)] = &[
-        (12, 2),
-        (19, 5),
-        (22, 12),
-        (19, 19),
-        (12, 22),
-        (5, 19),
-        (2, 12),
-        (5, 5),
-        (12, 5),
-        (17, 7),
-        (19, 12),
-        (17, 17),
-        (12, 19),
-        (7, 17),
-        (5, 12),
-        (7, 7),
-    ];
-    const DOT: &[(i32, i32)] = &[(10, 7), (14, 7), (14, 10), (10, 10)];
-    const STEM: &[(i32, i32)] = &[(10, 12), (14, 12), (14, 18), (10, 18)];
-    vec![
-        IconLayer::from_points(color, RING),
-        IconLayer::from_points(color, DOT),
-        IconLayer::from_points(color, STEM),
     ]
 }
 

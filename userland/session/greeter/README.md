@@ -184,9 +184,11 @@ reported for; picking another account is never held behind it.
 * `events` — the stable audit event ids (`19000` range).
 * `accounts` — the `SessionTransport` seam and the bounded paging walk that
   turns the authority's account pages into chooser tiles.
-* `verify` — the `session-v1` client behind the surface's `Verifier`. The
-  buffer that carries the secret is a `Wiped` field, sized once so encoding
-  cannot reallocate and strand a copy, and erased on every path out.
+* `verify` — the `session-v1` exchange behind the surface's `Verifier`: a
+  `Check` encodes the offer once into a buffer sized up front, so it never
+  moves and strands a copy, and erased when the exchange ends and when the
+  check is dropped; a worker thread carries it off the screen's loop, which
+  never waits for the authority's key derivation.
 * `chrome` — the two corner lines: `TAIRiX <version> (<host name>)` from the
   System Information identity at the top left, and the UTC date and time
   (`Wednesday 30 September 2026 14:05`) at the top right, told again only when

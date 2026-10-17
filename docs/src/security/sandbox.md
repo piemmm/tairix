@@ -393,6 +393,13 @@ sandboxes a parse imports it:
   through a fresh worker, so a hostile file can reach no other document's
   decode.
 
+- **Structure reports** (`imageinspect`, over the same upload): a picture's
+  container walked record by record and its EXIF directories named tag by tag
+  in the worker, which answers text only. The parent (`inspect_document`)
+  believes a reply only within the report's bounds — its line count, every
+  line's length, printable UTF-8 throughout — and `InspectService` serves the
+  op alone, in a worker held to the one document it reads, so an editor that
+  reports on pictures links none of the decoders' rendering paths.
 - **NTP response evaluation** (`timesync`): a network time server's reply
   is evaluated inside the worker (`tairix_net::ntp::evaluate`) because the
   `timed` service that acts on the verdict holds `CAP_TIME_SET`, and

@@ -172,8 +172,9 @@ rather than carrying private copies.
 
 A home is not just its top directory. `HOME_SUBDIRS` is the fixed set the
 installed-system contract requires inside `/Users/<name>` —
-`Applications`, `Commands`, `Desktop`, `Library`, `Settings`, `UserFiles`
-(`AGENTS.md` §16.3) — and `UserFiles` holds its own fixed folders,
+`Applications`, `Commands`, `Desktop`, `Home`, `Library`, `Settings`
+(`AGENTS.md` §16.3) — and `Home`, the user's own files, holds its own fixed
+folders,
 `Documents`, `Music`, `Pictures` and `Videos`. The names are defined once in
 `tairix_abi::home`. `HOME_MODE` (`0o700`) is the owner-only mode the home
 and each of those directories is stamped with, so an account's storage is

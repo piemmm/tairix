@@ -2,25 +2,29 @@
 //! what is left queued for the next holder.
 
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{
-    AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, BundleRunPath, DocumentName,
-    DragItems, DropTarget,
+    AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
+    BundleRunPath, DocumentName, DragItems, DropTarget,
 };
 use tairix_abi::Errno;
+use tairix_greeter::{Asking, Courier, Ticket, Verdict};
 use tairix_icon::IconKind;
 use tairix_taskbar::TaskbarResponse;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 
 use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport, SlotAnswer};
-use crate::drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
+use crate::drain::{
+    adopt_unlocks, drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake,
+};
 use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
-use crate::lock::ScreenLock;
+use crate::lock::{LockOutcome, ScreenLock};
 use crate::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
 use crate::saver::Waking;
 use crate::shell::{DesktopShell, ShellOutcome};
@@ -264,6 +268,51 @@ impl Desk {
     }
 }
 
+/// A broker that holds every password it is asked about, and answers the
+/// oldest with the next scripted verdict once the loop collects.
+#[derive(Default)]
+struct Broker {
+    verdicts: VecDeque<Verdict>,
+    offered: Vec<String>,
+    held: VecDeque<Ticket>,
+}
+
+impl Courier for Broker {
+    type Answer = (Ticket, Verdict);
+
+    fn send(&mut self, ticket: Ticket, _account: &str, password: &str) -> Result<(), Self::Answer> {
+        self.offered.push(String::from(password));
+        self.held.push_back(ticket);
+        Ok(())
+    }
+
+    fn receive(&mut self) -> Option<Self::Answer> {
+        let ticket = self.held.pop_front()?;
+        Some((
+            ticket,
+            self.verdicts.pop_front().unwrap_or(Verdict::Refused),
+        ))
+    }
+}
+
+/// A broker answering `verdicts` in turn.
+fn broker(verdicts: &[Verdict]) -> Asking<Broker> {
+    Asking::new(Broker {
+        verdicts: verdicts.iter().copied().collect(),
+        ..Broker::default()
+    })
+}
+
+/// `password` typed at the lock and submitted. The fixture sends presses
+/// alone, so a password must not repeat a key back to back.
+fn typed_password(password: &str) -> Vec<KeyInput> {
+    password
+        .chars()
+        .map(char_key)
+        .chain(core::iter::once(named_key(NamedKeyCode::Enter)))
+        .collect()
+}
+
 /// The *New window* row every slot of [`bar_desktop`] declares.
 fn new_window() -> AppMenuItemId {
     AppMenuItemId::new(tairix_window::QUIT_ROW + 1).expect("non-zero")
@@ -278,6 +327,7 @@ fn bar_desktop() -> (DesktopShell, Compositor) {
         &[AppMenuRow::Item(AppMenuItem::new(
             new_window(),
             AppMenuLabel::new("New window").expect("short"),
+            AppMenuSymbol::NewWindow,
         ))],
     )
     .expect("the convention fits");
@@ -916,4 +966,71 @@ fn a_refused_switch_keeps_serving() {
     assert_eq!(woke, Ok(SeatWake::Served));
     assert_eq!(program.routed.len(), 2);
     assert_eq!(queued_keys(&keys), 0);
+}
+
+/// The security property of the lock coming down: whatever is queued when
+/// the broker's answer lands was typed or moved at the locked screen, so it
+/// is spent on the lock — which takes nothing while it checks — and none of
+/// it reaches the desktop the unlock uncovers.
+#[test]
+fn everything_queued_when_the_unlock_lands_is_spent_on_the_lock() {
+    let mut desk = Desk::new((shell(), compositor()));
+    assert!(desk
+        .lock
+        .engage(("ann", "ann"), &desk.shell, &mut desk.comp));
+    let mut unlocker = broker(&[Verdict::Verified]);
+    drain_locked(
+        &mut desk.seat(),
+        &mut MemoryInput::new(&[]),
+        &mut keyboard(&typed_password("hunter2")),
+        &mut unlocker,
+        0,
+    )
+    .expect("in-memory sources do not fault");
+    assert!(desk.lock.is_locked(), "asked, not yet answered");
+
+    // Were this tail routed on, its Enter would offer "s" as a password.
+    let mut keys = keyboard(&[char_key('s'), named_key(NamedKeyCode::Enter)]);
+    let outcome = adopt_unlocks(
+        &mut desk.seat(),
+        (&mut MemoryInput::new(&[PRIMARY_PRESS]), &mut keys),
+        &mut unlocker,
+        0,
+    )
+    .expect("in-memory sources do not fault");
+
+    assert_eq!(outcome, LockOutcome::Unlocked);
+    assert!(!desk.lock.is_locked());
+    assert_eq!(queued_keys(&keys), 0, "the tail was drained into the lock");
+    assert_eq!(unlocker.courier().offered, vec![String::from("hunter2")]);
+    assert_eq!(desk.comp.window_count(), 0, "the tail reached nothing");
+}
+
+/// A refusal leaves the lock up, still asking.
+#[test]
+fn a_refused_unlock_keeps_the_screen_locked() {
+    let mut desk = Desk::new((shell(), compositor()));
+    assert!(desk
+        .lock
+        .engage(("ann", "ann"), &desk.shell, &mut desk.comp));
+    let mut unlocker = broker(&[Verdict::Refused]);
+    drain_locked(
+        &mut desk.seat(),
+        &mut MemoryInput::new(&[]),
+        &mut keyboard(&typed_password("wrong")),
+        &mut unlocker,
+        0,
+    )
+    .expect("in-memory sources do not fault");
+
+    let outcome = adopt_unlocks(
+        &mut desk.seat(),
+        (&mut MemoryInput::new(&[]), &mut keyboard(&[])),
+        &mut unlocker,
+        0,
+    )
+    .expect("in-memory sources do not fault");
+
+    assert_eq!(outcome, LockOutcome::Pending);
+    assert!(desk.lock.is_locked());
 }

@@ -12,6 +12,7 @@
 
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow,
+    AppMenuSymbol,
 };
 use tairix_abi::Errno;
 use tairix_window::QUIT_ROW;
@@ -57,6 +58,7 @@ pub fn declaration(endpoint: u64, settings_open: bool) -> Result<AppBar, Errno> 
     let item = AppMenuItem::new(
         AppMenuItemId::new(ROW_SETTINGS)?,
         AppMenuLabel::new("Settings\u{2026}")?,
+        AppMenuSymbol::Settings,
     );
     let item = if settings_open {
         item.disabled()

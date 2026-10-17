@@ -34,8 +34,8 @@ use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
 use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
     AlertOutcome, AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    CursorShape, DialogModality, DocumentName, MenuOutcome, PickPurpose, ToolOver, WindowEvent,
-    WindowRegion, WindowSizing,
+    AppMenuSymbol, CursorShape, DialogModality, DocumentName, MenuOutcome, PickPurpose, ToolOver,
+    WindowEvent, WindowRegion, WindowSizing,
 };
 use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, DOCUMENT_WRITABLE_ROLE_ARG, STDIN};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -234,8 +234,9 @@ pub trait DocumentApp: Sized {
     /// bound derived from what one window can ask for, not a capacity: the
     /// queue grows by it as windows open.
     const JOBS_PER_WINDOW: usize;
-    /// The application's own icon-bar rows, after *New window*, in order.
-    const BAR_ROWS: &'static [&'static str] = &[];
+    /// The application's own icon-bar rows, after *New window*, in order:
+    /// each one's function and label.
+    const BAR_ROWS: &'static [(AppMenuSymbol, &'static str)] = &[];
 
     /// Bring the application's own state up for `desktop`: its own workers
     /// started ([`start_worker`]) and their answer wakes watched on `set`
@@ -2892,22 +2893,27 @@ fn launched_document() -> Option<(Handle, String, bool)> {
 /// A document application's icon-bar presence: a click opens a window when
 /// none is open, and its menu offers another, then the application's own rows.
 fn app_bar<A: DocumentApp>(endpoint: u64) -> Result<AppBar, Errno> {
-    let item = |id: u16, label: &str| -> Result<AppMenuRow, Errno> {
+    let item = |id: u16, symbol: AppMenuSymbol, label: &str| -> Result<AppMenuRow, Errno> {
         Ok(AppMenuRow::Item(AppMenuItem::new(
             AppMenuItemId::new(id)?,
             AppMenuLabel::new(label)?,
+            symbol,
         )))
     };
     let mut rows = Vec::new();
     rows.try_reserve_exact(1 + A::BAR_ROWS.len())
         .map_err(|_| Errno::OutOfMemory)?;
-    rows.push(item(NEW_WINDOW_ROW, "New window")?);
-    for (index, label) in A::BAR_ROWS.iter().enumerate() {
+    rows.push(item(
+        NEW_WINDOW_ROW,
+        AppMenuSymbol::NewWindow,
+        "New window",
+    )?);
+    for (index, &(symbol, label)) in A::BAR_ROWS.iter().enumerate() {
         let id = u16::try_from(index)
             .ok()
             .and_then(|index| FIRST_APP_ROW.checked_add(index))
             .ok_or(Errno::OutOfRange)?;
-        rows.push(item(id, label)?);
+        rows.push(item(id, symbol, label)?);
     }
     declaration(endpoint, AppBarClick::RaiseOrOpen, &rows)
 }

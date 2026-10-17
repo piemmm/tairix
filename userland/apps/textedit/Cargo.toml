@@ -22,6 +22,10 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
 # The container magics alone, so an executable is offered as code; the
 # container itself is parsed only in the decode worker.
 tairix-binfmt = { path = "../../../lib/binfmt", version = "=0.0.0" }
+# The picture signatures alone, so a picture is offered as data, and the line
+# a structure report is made of; the picture itself is read only in the data
+# worker.
+tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
 # The sink a sandbox logs a worker's replacement through.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The shared Reactive Alloy controls the window composes: the find bar's

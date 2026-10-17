@@ -19,7 +19,7 @@
 //! resulting action out. Nothing here reads a directory, writes a store, or
 //! launches anything.
 
-use tairix_abi::window_ipc::AppMenuItemId;
+use tairix_abi::window_ipc::{AppMenuItemId, AppMenuSymbol};
 use tairix_controls::{ChainModel, ChainRow, ControlState, MenuItem, MenuMark};
 use tairix_wallpaper::{DesktopSettings, IconFlow, IconSort};
 
@@ -112,6 +112,23 @@ impl PinboardCommand {
         }
     }
 
+    /// The function this command's row shows.
+    const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Open => AppMenuSymbol::Open,
+            Self::NewFolder => AppMenuSymbol::NewFolder,
+            Self::SortBy(IconSort::Name) => AppMenuSymbol::SortByName,
+            Self::SortBy(IconSort::Kind) => AppMenuSymbol::SortByKind,
+            Self::SortBy(IconSort::Size) => AppMenuSymbol::SortBySize,
+            Self::SortBy(IconSort::Date) => AppMenuSymbol::SortByDate,
+            Self::ArrangeFrom(IconFlow::Leading) => AppMenuSymbol::ArrangeLeft,
+            Self::ArrangeFrom(IconFlow::Trailing) => AppMenuSymbol::ArrangeRight,
+            Self::Refresh => AppMenuSymbol::Refresh,
+            Self::OpenDesktopFolder => AppMenuSymbol::OpenFolder,
+            Self::ChangeBackground => AppMenuSymbol::Wallpaper,
+        }
+    }
+
     /// Whether this command begins a new group, drawing a divider above it.
     const fn opens_group(self) -> bool {
         matches!(
@@ -181,7 +198,7 @@ pub fn model(on_icon: bool, settings: &DesktopSettings) -> ChainModel {
                 .with_state(ControlState::disabled());
             why = command.already_reason();
         }
-        let mut row = ChainRow::item(id, item);
+        let mut row = ChainRow::item(id, command.symbol(), item);
         if let Some(why) = why {
             row = row.explained(why);
         }

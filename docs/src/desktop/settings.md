@@ -624,7 +624,7 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   the minimal clock's date; the starfield's stars and warp; the Game of
   Life's cell size and speed; the ray tracer's processor use — *Idle time*,
   one core, or *Performance*, every core — whether it saves each finished
-  picture into *UserFiles/Pictures/Raytracing* (*Save pictures*, off until
+  picture into *Home/Pictures/Raytracing* (*Save pictures*, off until
   asked), and how much its scenes set out (*Detail*: *Simple*, until asked,
   or *Maximum realism*, which the session lowers to Simple while the memory
   band leaves no room for it); the retro games' speed; whether the system monitor names the busiest
@@ -833,7 +833,10 @@ cannot change a pane the reader is about to authenticate for; that hold is the
 desktop's, and the shell filters none of its window's input for it. A dialog
 the desktop will not open turns the question down with the reason stated in
 the action band. The password is held only in the masked field's bounded
-buffer, which zeroises what it discards. Both masked
+buffer, which zeroises what it discards; once offered it is copied into the
+request handed to the elevation worker and cleared from the sheet, which says
+it is checking and asks for no second run until the answer comes back. Both
+masked
 fields step their marker's dots on the window's own clock: the event loop
 stamps each key as it takes it, parks no later than
 `Shell::secret_deadline_ns`, and on that wake presents only the field

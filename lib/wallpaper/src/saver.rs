@@ -450,7 +450,7 @@ pub struct RaytraceOptions {
     /// How many of the machine's cores it traces on.
     pub cpu: CpuUse,
     /// Whether each finished picture is kept, as a PNG in the user's
-    /// `Documents/Pictures/Raytracing/`.
+    /// `Home/Pictures/Raytracing/`.
     pub save: bool,
     /// How much each scene sets out.
     pub detail: SceneDetail,

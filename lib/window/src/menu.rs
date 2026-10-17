@@ -7,7 +7,7 @@
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-    AppMenuRow, AppMenuShortcut,
+    AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol,
 };
 use tairix_abi::Errno;
 
@@ -34,11 +34,42 @@ impl Default for MenuBuilder {
     }
 }
 
-/// How a chooseable row is marked and whether it may be chosen.
+/// How a chooseable row is marked, whether it may be chosen, and the
+/// emphasis it draws with.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Look {
     enabled: bool,
     mark: AppMenuMark,
+    role: AppMenuRole,
+}
+
+impl Look {
+    /// An unmarked, neutral row that may be chosen when `enabled`.
+    const fn plain(enabled: bool) -> Self {
+        Self {
+            enabled,
+            mark: AppMenuMark::None,
+            role: AppMenuRole::Neutral,
+        }
+    }
+
+    /// This look drawing `mark` while `on`.
+    const fn marked(self, mark: AppMenuMark, on: bool) -> Self {
+        Self {
+            mark: if on { mark } else { AppMenuMark::None },
+            ..self
+        }
+    }
+}
+
+/// What a chooseable row says: the id an answer names, the function its
+/// picture shows, its label and its accelerator caption.
+#[derive(Copy, Clone, Debug)]
+struct Says<'a> {
+    id: u16,
+    symbol: AppMenuSymbol,
+    label: &'a str,
+    shortcut: &'a str,
 }
 
 impl MenuBuilder {
@@ -67,60 +98,95 @@ impl MenuBuilder {
         }
     }
 
-    /// The chooseable row `id`, or `None` where its label cannot be carried.
-    fn row(id: u16, label: &str, shortcut: &str, look: Look) -> Option<AppMenuItem> {
-        let (Ok(id), Ok(label)) = (AppMenuItemId::new(id), AppMenuLabel::new(label)) else {
+    /// The chooseable row `says` describes, or `None` where its label cannot
+    /// be carried.
+    fn row(says: Says<'_>, look: Look) -> Option<AppMenuItem> {
+        let (Ok(id), Ok(label)) = (AppMenuItemId::new(says.id), AppMenuLabel::new(says.label))
+        else {
             return None;
         };
-        let mut item = AppMenuItem::new(id, label).with_mark(look.mark);
-        if !shortcut.is_empty() {
-            if let Ok(caption) = AppMenuShortcut::new(shortcut) {
+        let mut item = AppMenuItem::new(id, label, says.symbol)
+            .with_mark(look.mark)
+            .with_role(look.role);
+        if !says.shortcut.is_empty() {
+            if let Ok(caption) = AppMenuShortcut::new(says.shortcut) {
                 item = item.with_shortcut(caption);
             }
         }
         Some(if look.enabled { item } else { item.disabled() })
     }
 
-    fn build(&mut self, id: u16, label: &str, shortcut: &str, look: Look, plate: Plate) {
-        if let Some(item) = Self::row(id, label, shortcut, look) {
+    fn build(&mut self, says: Says<'_>, look: Look, plate: Plate) {
+        if let Some(item) = Self::row(says, look) {
             let _ = self.push(&AppMenuRow::Item(item), plate);
         }
     }
 
-    /// A row choosing `id`, which may be chosen when `enabled`.
+    /// A row choosing `id`, doing `symbol`'s function, which may be chosen
+    /// when `enabled`.
     pub fn item(
         &mut self,
         id: impl Into<u16>,
+        symbol: AppMenuSymbol,
         label: &str,
         shortcut: &str,
         enabled: bool,
         plate: Plate,
     ) {
-        let look = Look {
-            enabled,
-            mark: AppMenuMark::None,
+        let says = Says {
+            id: id.into(),
+            symbol,
+            label,
+            shortcut,
         };
-        self.build(id.into(), label, shortcut, look, plate);
+        self.build(says, Look::plain(enabled), plate);
+    }
+
+    /// A row choosing `id` that destroys something or is otherwise hard to
+    /// undo, drawn with the destructive emphasis.
+    pub fn destructive(
+        &mut self,
+        id: impl Into<u16>,
+        symbol: AppMenuSymbol,
+        label: &str,
+        shortcut: &str,
+        enabled: bool,
+        plate: Plate,
+    ) {
+        let says = Says {
+            id: id.into(),
+            symbol,
+            label,
+            shortcut,
+        };
+        let look = Look {
+            role: AppMenuRole::Destructive,
+            ..Look::plain(enabled)
+        };
+        self.build(says, look, plate);
     }
 
     /// A row turning a setting on or off, ticked while `on`.
     pub fn mark(
         &mut self,
         id: impl Into<u16>,
+        symbol: AppMenuSymbol,
         label: &str,
         shortcut: &str,
         on: bool,
         plate: Plate,
     ) {
-        let look = Look {
-            enabled: true,
-            mark: if on {
-                AppMenuMark::Check
-            } else {
-                AppMenuMark::None
-            },
+        let says = Says {
+            id: id.into(),
+            symbol,
+            label,
+            shortcut,
         };
-        self.build(id.into(), label, shortcut, look, plate);
+        self.build(
+            says,
+            Look::plain(true).marked(AppMenuMark::Check, on),
+            plate,
+        );
     }
 
     /// A row choosing one of a group of alternatives, the chosen one while
@@ -128,20 +194,23 @@ impl MenuBuilder {
     pub fn radio(
         &mut self,
         id: impl Into<u16>,
+        symbol: AppMenuSymbol,
         label: &str,
         shortcut: &str,
         on: bool,
         plate: Plate,
     ) {
-        let look = Look {
-            enabled: true,
-            mark: if on {
-                AppMenuMark::Radio
-            } else {
-                AppMenuMark::None
-            },
+        let says = Says {
+            id: id.into(),
+            symbol,
+            label,
+            shortcut,
         };
-        self.build(id.into(), label, shortcut, look, plate);
+        self.build(
+            says,
+            Look::plain(true).marked(AppMenuMark::Radio, on),
+            plate,
+        );
     }
 
     /// A row choosing `id` that carries a quick-entry field starting at
@@ -150,16 +219,19 @@ impl MenuBuilder {
         &mut self,
         id: impl Into<u16>,
         entry: impl Into<u16>,
+        symbol: AppMenuSymbol,
         label: &str,
         initial: &str,
         plate: Plate,
     ) {
-        let look = Look {
-            enabled: true,
-            mark: AppMenuMark::None,
+        let says = Says {
+            id: id.into(),
+            symbol,
+            label,
+            shortcut: "",
         };
         let (Some(item), Ok(entry), Ok(initial)) = (
-            Self::row(id.into(), label, "", look),
+            Self::row(says, Look::plain(true)),
             AppMenuItemId::new(entry.into()),
             AppMenuEntryText::new(initial),
         ) else {
@@ -174,15 +246,17 @@ impl MenuBuilder {
         let _ = self.push(&AppMenuRow::Separator, plate);
     }
 
-    /// Open a submenu labelled `label` on `plate`, answering the plate its
-    /// rows go on, or `None` when it could not be added.
-    pub fn submenu(&mut self, label: &str, plate: Plate) -> Option<Plate> {
+    /// Open a submenu labelled `label` on `plate`, for rows doing `symbol`'s
+    /// function, answering the plate its rows go on, or `None` when it could
+    /// not be added.
+    pub fn submenu(&mut self, label: &str, symbol: AppMenuSymbol, plate: Plate) -> Option<Plate> {
         let index = self.menu.len();
         let label = AppMenuLabel::new(label).ok()?;
         self.push(
             &AppMenuRow::Submenu {
                 label,
                 enabled: true,
+                symbol,
             },
             plate,
         )

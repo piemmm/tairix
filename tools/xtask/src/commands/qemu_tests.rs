@@ -16007,7 +16007,7 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
 /// plants, for reconstructing the row geometry of any surface that browses
 /// it.
 ///
-/// It answers for the account's `UserFiles` and refuses everywhere else: both
+/// It answers for the account's `Home` folder and refuses everywhere else: both
 /// the picker and a bare file-manager window open there and these
 /// reconstructions need that one listing, so a request for anything else is a
 /// mistake rather than a directory to invent.
@@ -16028,7 +16028,7 @@ impl tairix_browse::DirectorySource for PlantedHome {
         // Derived from the same definitions the fixture plants from — the
         // fixed user-files folders and the planted documents' names — so
         // neither side carries a copy of the listing.
-        let mut entries: Vec<Entry> = tairix_abi::home::USER_FILES_SUBDIRS
+        let mut entries: Vec<Entry> = tairix_abi::home::HOME_FILES_SUBDIRS
             .iter()
             .map(|name| Entry::directory(*name))
             .collect();

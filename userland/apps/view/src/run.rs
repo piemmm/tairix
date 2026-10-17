@@ -59,7 +59,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
-        AppMenuShortcut, MenuOutcome, PickPurpose, WindowEvent, WindowRegion,
+        AppMenuShortcut, AppMenuSymbol, MenuOutcome, PickPurpose, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_controls::damage;
@@ -428,19 +428,40 @@ mod program {
 
     /// The commands the app's own menu offers, in the order they are shown.
     ///
-    /// One ordered list, so a row's label, its accelerator caption and the
-    /// command it runs are the same position — a menu whose rows and actions
-    /// could be listed separately is one that can be wired up wrong.
-    const MENU: [(&str, &str, Command); 9] = [
-        ("Open…", "O", Command::OpenDocument),
-        ("Zoom in", "+", Command::ZoomIn),
-        ("Zoom out", "-", Command::ZoomOut),
-        ("Fit in window", "0", Command::FitWindow),
-        ("Fit width", "2", Command::FitWidth),
-        ("Actual size", "1", Command::ActualSize),
-        ("Rotate right", "]", Command::RotateRight),
-        ("Mirror", "M", Command::Mirror),
-        ("Information", "I", Command::ToggleInfo),
+    /// One ordered list, so a row's label, its accelerator caption, its
+    /// function and the command it runs are the same position — a menu whose
+    /// rows and actions could be listed separately is one that can be wired up
+    /// wrong.
+    const MENU: [(&str, &str, AppMenuSymbol, Command); 9] = [
+        ("Open…", "O", AppMenuSymbol::Open, Command::OpenDocument),
+        ("Zoom in", "+", AppMenuSymbol::ZoomIn, Command::ZoomIn),
+        ("Zoom out", "-", AppMenuSymbol::ZoomOut, Command::ZoomOut),
+        (
+            "Fit in window",
+            "0",
+            AppMenuSymbol::ZoomFit,
+            Command::FitWindow,
+        ),
+        ("Fit width", "2", AppMenuSymbol::FitWidth, Command::FitWidth),
+        (
+            "Actual size",
+            "1",
+            AppMenuSymbol::ZoomActual,
+            Command::ActualSize,
+        ),
+        (
+            "Rotate right",
+            "]",
+            AppMenuSymbol::RotateRight,
+            Command::RotateRight,
+        ),
+        (
+            "Mirror",
+            "M",
+            AppMenuSymbol::FlipHorizontal,
+            Command::Mirror,
+        ),
+        ("Information", "I", AppMenuSymbol::Info, Command::ToggleInfo),
     ];
 
     /// Build the app's menu, marking the rows whose state is a toggle.
@@ -451,13 +472,13 @@ mod program {
     fn build_menu(view: &View) -> (AppMenu, usize) {
         let mut menu = AppMenu::EMPTY;
         let mut skipped = 0;
-        for (index, (label, shortcut, command)) in MENU.iter().enumerate() {
+        for (index, &(label, shortcut, symbol, command)) in MENU.iter().enumerate() {
             let (Some(id), Ok(label)) = (AppMenuItemId::for_index(index), AppMenuLabel::new(label))
             else {
                 skipped += 1;
                 continue;
             };
-            let mut item = AppMenuItem::new(id, label);
+            let mut item = AppMenuItem::new(id, label, symbol);
             if let Ok(caption) = AppMenuShortcut::new(shortcut) {
                 item = item.with_shortcut(caption);
             }
@@ -473,7 +494,7 @@ mod program {
 
     /// The command a chosen menu row names.
     fn menu_command(id: AppMenuItemId) -> Option<Command> {
-        MENU.get(id.index()).map(|(_, _, command)| *command)
+        MENU.get(id.index()).map(|&(_, _, _, command)| command)
     }
 
     // ---- one window per document ---------------------------------------

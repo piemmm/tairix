@@ -36,6 +36,16 @@ macchina; «Set di istruzioni» nel menu Vista lo legge in un altro, e il campo
 della vista nella riga di stato offre la vista codice accanto a testo ed
 esadecimale.
 
+Un'immagine — PNG, JPEG, GIF, BMP, TIFF, WEBP, un file di icona o di
+puntatore, un'area di sprite di RISC OS o un documento OpenRaster — si apre
+invece nella vista dei dati: di che cosa è fatto il file, ogni record alla
+sua posizione con la sua lunghezza e ciò che dichiara, ogni tag EXIF per
+nome con il suo valore, poi ogni byte del file in esadecimale accanto al suo
+carattere. La vista dei dati è di sola lettura; la vista esadecimale
+modifica gli stessi byte. L'immagine viene letta da un terzo processo di
+lavoro tutto suo, anch'esso senza alcun accesso, e il menu Visualizza offre
+la vista dei dati accanto a testo ed esadecimale.
+
 Il codice sorgente viene colorato: HTML, XML e SVG, CSS, JavaScript, JSON,
 YAML, TOML, Markdown, Rust, C, Java, Python e script di shell. Anche i file di
 impostazioni del sistema — impostazioni delle applicazioni, la libreria dei

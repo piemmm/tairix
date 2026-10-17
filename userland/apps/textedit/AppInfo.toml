@@ -8,8 +8,9 @@
 # CAP_CONSOLE_WRITE carries its stderr diagnostics; CAP_SHM the window frame
 # region and the clipboard's payload region; CAP_SANDBOX_SPAWN re-enters this
 # binary as capability-empty workers, one that colours, detects and checks a
-# document and one that lists an executable's code, each holding nothing
-# beyond its two pipes, since a document is untrusted input; CAP_LOG_EMIT
+# document, one that lists an executable's code and one that reports a
+# picture's structure, each holding nothing beyond its two pipes, since a
+# document is untrusted input; CAP_LOG_EMIT
 # records a worker being replaced after a crash, which would otherwise be
 # refused and lost.
 id = "os.tairix.textedit"

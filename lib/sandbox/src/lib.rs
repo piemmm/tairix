@@ -94,6 +94,7 @@ pub mod decode;
 pub mod helpdoc;
 pub mod host;
 pub mod imageedit;
+pub mod imageinspect;
 pub mod imagerender;
 pub mod listing;
 pub mod loopback;

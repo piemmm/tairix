@@ -137,7 +137,12 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   heavier than the rest of a floating plate. A destructive or recovery row
   keeps its own emphasis colour, equally solid; only a *non-actionable*
   current row stays a quiet background, so it can never masquerade as an
-  available action. The `Menu`
+  available action. Every `ChainRow` is built with the function it performs
+  (`AppMenuSymbol`), whose picture it draws; a destructive row's picture is
+  the danger hue, and a plate with marks keeps a gutter for them before the
+  picture column. `ChainModel::resolve_glyphs` rasterises every row's glyph
+  once for the chain and `Menu::resolve_glyphs` once for a plate built
+  directly, so a paint tints a retained mask. The `Menu`
   owns Up/Down/Home/End/Right/Enter/Space/Escape and pointer hover/click, sizes
   itself (`preferred_width`/`preferred_height`), and emits a typed `MenuAction`.
   It also carries `plate_rect` — the one rule that places a plate against a
@@ -342,7 +347,9 @@ the band under the picture holds, the band sits half an inset below the picture
 and above the tile's foot, and the picture takes the height that leaves, capped
 by the width. `TileLayout::height_for(side, …)` is the cell height that seats a
 `side`-pixel picture, and `icon_side`, `label_lines` and `label_rect` read the
-same geometry the render lays out to, so an owner never re-derives it. The
+same geometry the render lays out to, so an owner never re-derives it.
+`TileLayout::beside()` sets one line of name beside the picture instead, left
+of nothing but the ground — the file manager's small icons. The
 name, set in `TextRole::ItemLabel`, wraps rather than being cut: each line
 centred, the last elided with the shared ellipsis when the name runs past the
 stated lines; a band too short for one whole line draws nothing rather than

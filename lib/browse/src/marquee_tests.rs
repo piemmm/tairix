@@ -15,7 +15,7 @@ use crate::browser::Browser;
 use crate::chrome::ToolbarBand;
 use crate::entry::Entry;
 use crate::layout::ViewMode;
-use crate::render::{entry_body, entry_rect, listing_area};
+use crate::render::{entry_body, entry_rect, listing_area, Tiles};
 use crate::source::{DirectorySource, Listing};
 
 /// A root holding `0` files and nothing else.
@@ -67,6 +67,7 @@ fn rect_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> Rect {
 fn body_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> Rect {
     let cell = rect_of(browser, frame, index);
     let body = entry_body(
+        Tiles::Large,
         &browser.entries()[index],
         Rect::new(0, 0, cell.width, cell.height),
         frame.scale,
@@ -148,7 +149,7 @@ fn a_band_adds_to_what_it_began_with_and_escape_takes_its_part_back() {
 fn a_band_in_a_grid_takes_the_block_of_tiles_it_crosses_and_no_gap() {
     let theme = Theme::dark();
     let frame = frame(&theme);
-    let mut browser = browser(40, ViewMode::Grid);
+    let mut browser = browser(40, ViewMode::LargeIcons);
     let a = body_of(&browser, frame, 0);
     let b = body_of(&browser, frame, 1);
     let first_line = rect_of(&browser, frame, 0).top();
@@ -191,10 +192,10 @@ fn a_band_in_a_grid_takes_the_block_of_tiles_it_crosses_and_no_gap() {
 fn a_band_touching_only_a_tiles_name_selects_it() {
     let theme = Theme::dark();
     let frame = frame(&theme);
-    let mut browser = browser(40, ViewMode::Grid);
+    let mut browser = browser(40, ViewMode::LargeIcons);
     let cell = rect_of(&browser, frame, 0);
     let body = body_of(&browser, frame, 0);
-    let core = crate::render::tile_core(frame.scale, frame.theme);
+    let core = crate::render::tile_core(Tiles::Large, frame.scale, frame.theme);
     let name_row = cell.top() + core.bottom() + 4;
     assert!(
         name_row < body.bottom(),
@@ -226,10 +227,10 @@ fn a_band_touching_only_a_tiles_name_selects_it() {
 fn a_band_lays_out_an_edge_tiles_name_once_while_it_stays_on_the_edge() {
     let theme = Theme::dark();
     let frame = frame(&theme);
-    let mut browser = browser(40, ViewMode::Grid);
+    let mut browser = browser(40, ViewMode::LargeIcons);
     let cell = rect_of(&browser, frame, 0);
     let body = body_of(&browser, frame, 0);
-    let core = crate::render::tile_core(frame.scale, frame.theme);
+    let core = crate::render::tile_core(Tiles::Large, frame.scale, frame.theme);
     let name_row = cell.top() + core.bottom() + 4;
     let mut marquee =
         begin(&browser, frame, Point::new(cell.left() + 1, name_row)).expect("in the item area");

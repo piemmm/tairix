@@ -43,13 +43,61 @@
 //! identity it will ever check is this process's own. A refusal, a transport
 //! failure, a broker that is not there, and a reply it cannot parse are all
 //! the same answer: still locked.
+//!
+//! The broker is asked and never awaited: it derives a key from every
+//! password on purpose, and the serve loop it would stall composites every
+//! window on the screen. Its answer arrives later through
+//! [`answer`](ScreenLock::answer), and until then the lock says it is
+//! checking and takes no keystroke.
 
 use tairix_controls::damage::{self, Repaint};
-use tairix_greeter::{AuthSurface, Backdrop, EventContext, Outcome, Verifier};
+use tairix_greeter::{AuthSurface, Backdrop, EventContext, Outcome, Ticket, Verdict, Verifier};
+use tairix_util::secret::WipedBuf;
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Scale, Surface, WindowId};
 
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
+
+/// One password the lock asks the broker about, on its way off the serve
+/// loop: held in a buffer sized to it so it never moves, and erased once the
+/// broker has answered and again when it is dropped — carried, displaced by a
+/// newer offer, or never sent at all.
+pub struct UnlockAsk {
+    ticket: Ticket,
+    password: WipedBuf,
+}
+
+impl UnlockAsk {
+    /// The question `ticket` names, about `password`, or `None` when no
+    /// memory holds it.
+    #[must_use]
+    pub fn new(ticket: Ticket, password: &str) -> Option<Self> {
+        let mut held = WipedBuf::with_capacity(password.len()).ok()?;
+        held.extend_zeroed(password.len())?
+            .copy_from_slice(password.as_bytes());
+        Some(Self {
+            ticket,
+            password: held,
+        })
+    }
+
+    /// The offer this question answers for.
+    #[must_use]
+    pub const fn ticket(&self) -> Ticket {
+        self.ticket
+    }
+
+    /// The password, as the text it was offered as.
+    #[must_use]
+    pub fn password(&self) -> Option<&str> {
+        core::str::from_utf8(&self.password).ok()
+    }
+
+    /// Erase the password now, rather than when the question is dropped.
+    pub fn erase(&mut self) {
+        self.password.wipe();
+    }
+}
 
 /// What one input event did to the lock.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -186,14 +234,11 @@ impl ScreenLock {
     /// Apply one input event — pointer or key — to the lock, at monotonic
     /// `now_ns`.
     ///
-    /// Keys edit the password; `Enter` offers it to `verifier`. The pointer
-    /// places the caret and selects within the field, and reaches nothing
-    /// else on screen; following the device with the cursor is the drain's
-    /// ([`LockedDrain::feed`]). There is no key and no click that dismisses
-    /// the lock without a verified password.
-    ///
-    /// Returns [`LockOutcome::Unlocked`] once the user has been verified, by
-    /// which time the lock is already down.
+    /// Keys edit the password; `Enter` asks `verifier` about it, and the
+    /// broker's answer comes back through [`answer`](Self::answer). The
+    /// pointer places the caret and selects within the field, and reaches
+    /// nothing else on screen; following the device with the cursor is the
+    /// drain's. There is no key and no click that dismisses the lock.
     ///
     /// What the event changed is only owed to the frame: the next
     /// [`advance`](Self::advance) draws it, once however many events owed it.
@@ -204,12 +249,12 @@ impl ScreenLock {
         verifier: &mut dyn Verifier,
         shell: &DesktopShell,
         compositor: &mut Compositor,
-    ) -> LockOutcome {
+    ) {
         let screen = compositor.screen_rect();
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
         let Some(engaged) = self.engaged.as_mut() else {
-            return LockOutcome::Pending;
+            return;
         };
         let outcome = engaged.surface.on_event(
             &to_window_space(event, screen),
@@ -221,6 +266,28 @@ impl ScreenLock {
                 now_ns,
             },
         );
+        engaged.owe(outcome);
+    }
+
+    /// Adopt the broker's `verdict` on the offer `ticket` names, at monotonic
+    /// `now_ns`.
+    ///
+    /// Returns [`LockOutcome::Unlocked`] only for a verified answer to the
+    /// offer the lock is waiting on, by which time the lock is already down.
+    /// An answer to an offer a lock since abandoned asked, or to none at all,
+    /// changes nothing.
+    pub fn answer(
+        &mut self,
+        (ticket, verdict): (Ticket, Verdict),
+        now_ns: u64,
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+    ) -> LockOutcome {
+        let theme = shell.session().active_theme();
+        let Some(engaged) = self.engaged.as_mut() else {
+            return LockOutcome::Pending;
+        };
+        let outcome = engaged.surface.answer(ticket, verdict, now_ns, theme);
         if outcome.verified() {
             self.release(compositor);
             return LockOutcome::Unlocked;
@@ -361,67 +428,6 @@ impl ScreenLock {
     fn release(&mut self, compositor: &mut Compositor) {
         if let Some(engaged) = self.engaged.take() {
             let _ = compositor.remove(engaged.wm);
-        }
-    }
-}
-
-/// One pass of the embedder draining the seat into a locked screen.
-///
-/// The embedder empties the pointer and keyboard channels on every wake, and
-/// keeps emptying them even once a password has been verified part-way
-/// through the batch. What is still queued at that instant is the tail of the
-/// gesture that typed the password — the release of the `Enter` that
-/// submitted it, a stray keystroke landing behind it — and routing that into
-/// the session the moment it becomes visible would spill part of a password
-/// entry into whatever holds focus.
-///
-/// So the first unlock latches here and every event after it in the same
-/// drain is **dropped**: the channels still reach empty, so the seat cannot
-/// wake the loop over events nobody will read, and nothing typed at a locked
-/// screen is ever delivered onward. The next wake starts a fresh drain, by
-/// which time the desktop is genuinely visible and the user is typing at what
-/// they can see.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct LockedDrain {
-    unlocked: bool,
-}
-
-impl LockedDrain {
-    /// A drain that has not yet seen the lock come down.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { unlocked: false }
-    }
-
-    /// Whether the lock came down part-way through this drain.
-    #[must_use]
-    pub const fn unlocked(&self) -> bool {
-        self.unlocked
-    }
-
-    /// Apply one drained event to `lock`, or discard it because the lock has
-    /// already come down earlier in this same drain.
-    ///
-    /// A motion sample moves the seat's pointer and the cursor with the
-    /// device before the lock places its caret, so the first press after the
-    /// unlock lands where the pointer is; a discarded one moves neither.
-    pub fn feed(
-        &mut self,
-        lock: &mut ScreenLock,
-        event: &InputEvent,
-        now_ns: u64,
-        verifier: &mut dyn Verifier,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-    ) {
-        if self.unlocked {
-            return;
-        }
-        if let InputEvent::PointerMoved { to } = event {
-            shell.track_pointer(*to, compositor);
-        }
-        if lock.handle(event, now_ns, verifier, shell, compositor) == LockOutcome::Unlocked {
-            self.unlocked = true;
         }
     }
 }

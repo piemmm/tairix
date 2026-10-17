@@ -322,6 +322,35 @@ fn the_window_keeps_its_own_input_while_the_question_is_up() {
     assert!(shell.asking(), "and left the question to be answered");
 }
 
+/// While the broker checks an offer the question takes nothing more: a second
+/// Enter asks for no second run, and the refusal hands the keyboard back.
+#[test]
+fn a_question_being_checked_asks_for_no_second_run() {
+    let mut shell = showing_with("login-startup", SystemConfig::default());
+    choose_next(&mut shell, 0, 0);
+    press_action(&mut shell);
+    type_into(&mut shell, "root");
+    press(&mut shell, NamedKey::Tab);
+    type_into(&mut shell, "hunter2");
+    assert!(matches!(
+        press(&mut shell, NamedKey::Enter),
+        ShellOutcome::Elevate(_)
+    ));
+
+    type_into(&mut shell, "x");
+    assert!(
+        !matches!(press(&mut shell, NamedKey::Enter), ShellOutcome::Elevate(_)),
+        "a question being checked offers nothing"
+    );
+
+    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::Credentials));
+    type_into(&mut shell, "again");
+    let ShellOutcome::Elevate(asked) = press(&mut shell, NamedKey::Enter) else {
+        panic!("a refused question asks again");
+    };
+    assert_eq!(asked.password, b"again");
+}
+
 #[test]
 fn an_offered_secret_is_never_rendered() {
     // A derived `Debug` would print the password into whatever rendered

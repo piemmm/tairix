@@ -933,6 +933,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-17 — §16.3: `Home` replaces `UserFiles` in the home.** At the
+  user's direction the folder of the user's own files is called `Home`, the
+  file manager's Home place.
+
 - **2026-10-16 — §3, §19.3: the signing key set is a secret build input.** The
   driver, app-signing and publisher seeds were committed constants, so anybody
   could sign a bundle the kernel attests as first-party (`plans/OPEN-DEFECTS.md`

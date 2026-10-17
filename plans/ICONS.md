@@ -35,6 +35,7 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I12 | Raster masters exceed every slot the desktop can draw them in | blocked: the master side against decode cost and the byte bound is undecided |
 | I13 | A settings category's or disclosed pane's built-in picture is a colour badge | done |
 | I14 | Every drive medium has its own picture | done |
+| I15 | Every menu row's function has a picture: the `AppMenuSymbol` → `IconKind` map, and the command glyphs drawn as symbols | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -446,15 +447,16 @@ across every one of those call sites. It is therefore a parameter of `render`,
 `render_band` and `render_overlay` — the pattern `lib/browse/src/render.rs` and
 `lib/controls/src/toolbar.rs` already use.
 
-Three controls also draw their glyph outside the shared icon slot, so they
+Two controls also draw their glyph outside the shared icon slot, so they
 resolve coverage per frame even when their owner *does* hold a cache: a
-`Button`'s leading icon (`ButtonContent::Icon`/`IconLabel`), a `MenuItem`'s
-row icon, and the greeter's continue mark. All three now draw through the one
-`glyph_mask` + `Surface::blit_tinted` arithmetic every other icon uses — so no
-two surfaces disagree about a glyph's pixels — but none of them takes a
-picture, so none is cached. Giving them one means an artwork parameter on
-`Button::render`, `Menu::render` and the greeter's row painter, which their
-callers would have to thread.
+`Button`'s leading icon (`ButtonContent::Icon`/`IconLabel`) and the greeter's
+continue mark. Both draw through the one `glyph_mask` + `Surface::blit_tinted`
+arithmetic every other icon uses — so no two surfaces disagree about a glyph's
+pixels — but neither takes a picture, so neither is cached. Giving them one
+means an artwork parameter on `Button::render` and the greeter's row painter,
+which their callers would have to thread. A `MenuItem` keeps the coverage mask
+its owner resolved (`Menu::resolve_glyphs`, I15), so a menu row rasterises its
+symbol once per chain rather than per paint.
 
 None of this is a correctness defect — the pixels are identical either way,
 which is the point of routing every path through the same arithmetic — and
@@ -585,7 +587,29 @@ unreported ATA medium the generic `disk`. Each
 is a raster master in the existing drive style over the drive family's built-in
 glyph, so the rule stays total.
 
-## 16. What this plan deliberately does not cover
+## 16. I15 — every menu row's function has a picture
+
+A menu row names its function (`AppMenuSymbol`, `plans/NEW-MENUS.md` M10) and
+`tairix_icon::menu_symbol_icon` is the one map from a function to the
+`IconKind` that pictures it. Several functions may share a picture — every
+"copy" row of the network map is the copy glyph — but a function has exactly
+one, so no two applications draw the same command differently.
+
+- **Command pictures are symbols.** A command kind is authored as `symbol.rs`
+  marks — SVG path data on the 24-unit grid, stroked about 2 units wide with
+  round caps and joins, the settings categories' own drawing — never as an
+  integer polygon table, so it reads cleanly from a 16 px menu row to a 48 px
+  toolbar. The polygon command glyphs that predate the menu set (Refresh,
+  Sort, New Folder, Trash, Info, the zoom, rotation and mirror commands, the
+  transport controls) are redrawn as symbols, so a toolbar and a menu row
+  draw one picture.
+- **Monochrome by construction.** A command kind has no raster or vector
+  asset and no badge: it is chrome, tinted by whatever draws it.
+- **Proven at the size it is drawn.** `menu_symbol_icon` is total over the
+  vocabulary, every kind it answers rasterises non-blank at a menu row's side,
+  and no two distinct pictures rasterise to the same mask there.
+
+## 17. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

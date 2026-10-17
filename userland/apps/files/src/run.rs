@@ -194,9 +194,8 @@ mod program {
         DriveJob, DriveReading, DriveReads, FilesClient, FilesClients, PropertyJob, PropertyReads,
     };
     use crate::gesture::{
-        self, bundle_intent, press_step, AfterHandoff, DragArm, Keyboard, NamePress, PressHit,
-        PressHold, PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit, SelectHow,
-        SelectKeys,
+        self, bundle_intent, press_step, DragArm, Keyboard, NamePress, PressHit, PressHold,
+        PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit, SelectHow, SelectKeys,
     };
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
@@ -2193,7 +2192,9 @@ mod program {
         // An alert answers the application; the window that asked is found by
         // the alert it holds.
         if let WindowEvent::AlertClosed { alert_id, outcome } = *event {
-            answer_alert(windows, alert_id, outcome);
+            if !launcher.borrow_mut().notices.answered(alert_id) {
+                answer_alert(windows, alert_id, outcome);
+            }
             return None;
         }
         // Where a drag is, and where it ended, may name a window other than the
@@ -2981,6 +2982,10 @@ mod program {
         reads: alloc::sync::Arc<Reads>,
         /// The program-store scan every open resolves its application from.
         installed: alloc::rc::Rc<Installed>,
+        /// The opens and launches it could not carry out, each stated in an
+        /// alert holding no window: by the time one is known, the window that
+        /// asked may have moved on or closed.
+        notices: Notices,
     }
 
     impl Launcher {
@@ -2992,7 +2997,15 @@ mod program {
                 awaiting: Vec::new(),
                 reads,
                 installed,
+                notices: Notices::default(),
             }
+        }
+
+        /// State that the item `name` could not be opened, because of
+        /// `reason`.
+        fn not_opened(&mut self, name: &str, reason: &str) {
+            let headline = alloc::format!("\u{201c}{name}\u{201d} could not be opened");
+            self.notices.refuse(NoticeSource::Open, &headline, reason);
         }
 
         /// Launch the application bundle whose directory is `bundle_path` (the
@@ -3024,7 +3037,9 @@ mod program {
             }
             let ret = tairix_rt::spawn(run_path.as_bytes());
             if ret < 0 {
-                report_error(&alloc::format!("could not launch {label}"));
+                let reason =
+                    alloc::format!("it could not be started: {}", Errno::from_syscall(ret));
+                self.not_opened(&label, &reason);
                 return;
             }
             #[allow(clippy::cast_sign_loss)] // `ret >= 0` in this branch; it is a PID.
@@ -3085,7 +3100,10 @@ mod program {
                 return;
             }
             if self.awaiting.len() >= DOCUMENT_OPENS_MAX {
-                report_error("too many documents are already waiting to open");
+                self.not_opened(
+                    path_leaf(file_path),
+                    "too many documents are already waiting to open",
+                );
                 return;
             }
             self.awaiting.push(String::from(file_path));
@@ -3113,7 +3131,7 @@ mod program {
                 Some((bundle_path, edits)) => {
                     self.launch_viewer(client, &bundle_path, edits, file_path, name);
                 }
-                None => report_error(&alloc::format!("no application to open {name}")),
+                None => self.not_opened(name, "no installed application opens it"),
             }
         }
 
@@ -3167,9 +3185,13 @@ mod program {
         ) {
             let DocumentOpened { job, result } = answer;
             let display_name = job.name.as_str();
-            let Ok(document::Opened { file, writable }) = result else {
-                report_error(&alloc::format!("could not open {display_name}"));
-                return;
+            let document::Opened { file, writable } = match result {
+                Ok(opened) => opened,
+                Err(err) => {
+                    let reason = alloc::format!("it could not be read: {err}");
+                    self.not_opened(display_name, &reason);
+                    return;
+                }
             };
             let run_path = tairix_appstore::entry_path(&job.bundle_path);
             let label = bundle_leaf(&job.bundle_path);
@@ -3201,7 +3223,9 @@ mod program {
             // so the manager's copy goes either way.
             drop(file);
             if pid < 0 {
-                report_error(&alloc::format!("could not launch {label}"));
+                let reason =
+                    alloc::format!("{label} could not be started: {}", Errno::from_syscall(pid));
+                self.not_opened(display_name, &reason);
                 return;
             }
             #[allow(clippy::cast_sign_loss)] // `pid >= 0` in this branch; it is a PID.
@@ -5761,7 +5785,7 @@ mod program {
         if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
             whole(ask_properties(browser, acts.properties))
         } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-            whole(activate(
+            let changed = activate(
                 browser,
                 acts.launcher,
                 acts.menu.client,
@@ -5770,8 +5794,8 @@ mod program {
                 viewport,
                 toolbar,
                 bundle_intent(modifiers.shift),
-                AfterHandoff::Keep,
-            ))
+            );
+            (whole_if(changed), false)
         } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
             whole(begin_delete(browser, overlays))
         } else if let Some(verb) = clipboard_verb(key, modifiers) {
@@ -5942,36 +5966,15 @@ mod program {
     }
 
     /// The mounted volumes offered to the places rail, read from the live
-    /// mount table through the shared System Information client.
-    ///
-    /// Only volumes this session can actually navigate to are offered: a mount
-    /// whose device vanished, or whose target is not valid text, is left out
-    /// rather than shown as a row that would fail on the first click. A
-    /// degraded, recovering or read-only conflicted volume still serves its
-    /// data, so it stays. A refused or failed query yields no volumes at all,
-    /// so the rail falls back to the user's own places rather than guessing
-    /// what is mounted. The rail itself then re-validates every row.
+    /// mount table through the shared System Information client, each as
+    /// [`Volume::from_mount`] reads its record. A refused or failed query
+    /// yields no volumes at all, so the rail falls back to the user's own
+    /// places rather than guessing what is mounted. The rail itself then
+    /// re-validates every row.
     fn mounted_volumes() -> alloc::vec::Vec<Volume> {
-        use tairix_abi::sysinfo::MountAvailability;
         let mut volumes = alloc::vec::Vec::new();
         let _ = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
-            if matches!(
-                record.availability(),
-                MountAvailability::UnavailableDirty | MountAvailability::UnavailableLost
-            ) {
-                return Ok(WalkStep::Continue);
-            }
-            let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
-                return Ok(WalkStep::Continue);
-            };
-            let Some(label) = target.rsplit('/').find(|part| !part.is_empty()) else {
-                return Ok(WalkStep::Continue);
-            };
-            volumes.push(Volume {
-                label: String::from(label),
-                target: String::from(target),
-                medium: record.medium(),
-            });
+            volumes.extend(Volume::from_mount(record));
             Ok(WalkStep::Continue)
         });
         volumes
@@ -6333,7 +6336,7 @@ mod program {
     /// A refused activation (an unreadable directory the engine could not
     /// descend into) leaves the browser where it was and repaints nothing
     /// (fail closed).
-    #[allow(clippy::too_many_arguments)] // The selection's context, the intent, and what follows a handoff.
+    #[allow(clippy::too_many_arguments)] // The selection's context and the intent.
     fn activate<S: DirectorySource>(
         browser: &mut Browser<S>,
         launcher: &RefCell<Launcher>,
@@ -6343,22 +6346,21 @@ mod program {
         viewport: Rect,
         toolbar: ToolbarBand,
         intent: BundleIntent,
-        handoff: AfterHandoff,
-    ) -> (bool, bool) {
+    ) -> bool {
         match browser.activate_selected(intent) {
             Ok(Activation::Descended) => {
                 tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
-                (true, false)
+                true
             }
             Ok(Activation::LaunchBundle { path }) => {
                 launcher.borrow_mut().launch(client, &path);
-                (false, handoff == AfterHandoff::CloseWindow)
+                false
             }
             Ok(Activation::OpenFile { path }) => {
                 launcher.borrow_mut().open_file(client, &path);
-                (false, handoff == AfterHandoff::CloseWindow)
+                false
             }
-            Err(_) => (false, false),
+            Err(_) => false,
         }
     }
 
@@ -6545,14 +6547,18 @@ mod program {
                             }
                         }
                         NextAlert::Notice => {
-                            *full =
-                                raise_notice(&mut overlays.notices, client, endpoint, window_id);
+                            *full = raise_notice(
+                                &mut overlays.notices,
+                                client,
+                                endpoint,
+                                Some(window_id),
+                            );
                         }
                         NextAlert::Nothing => {}
                     }
                 }
                 WindowKind::Properties(props) => {
-                    *full = raise_notice(&mut props.notices, client, endpoint, window_id);
+                    *full = raise_notice(&mut props.notices, client, endpoint, Some(window_id));
                 }
                 // A refusal that stops an operation is its folder's to state.
                 WindowKind::Progress(_) => {}
@@ -6560,15 +6566,15 @@ mod program {
         }
     }
 
-    /// Put up `notices`' next notice for window `window_id` when none is up.
+    /// Put up `notices`' next notice, holding `owner`, when none is up.
     fn raise_notice(
         notices: &mut Notices,
         client: &mut WindowClient<app::RtWindowTransport>,
         endpoint: u64,
-        window_id: u64,
+        owner: Option<u64>,
     ) -> bool {
         loop {
-            match notices.raise(client, endpoint, window_id) {
+            match notices.raise(client, endpoint, owner) {
                 Raised::Nothing | Raised::Up => return false,
                 Raised::Full => return true,
                 Raised::Refused(err, notice) => report_error(&alloc::format!(
@@ -7621,6 +7627,14 @@ mod program {
             overlays.double_click.reset();
             return whole(apply_manager_tool(browser, overlays, tool));
         }
+        if let Some(order) =
+            tairix_browse::render::header_sort_at(browser, scale, theme, viewport, toolbar, point)
+        {
+            overlays.double_click.reset();
+            browser.set_sort_mode(order);
+            tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
+            return whole((true, false));
+        }
         let frame = Frame {
             scale,
             theme,
@@ -7658,7 +7672,7 @@ mod program {
         ) {
             PrimaryPress::Activate { index } => {
                 let _ = browser.select(index);
-                whole(activate(
+                let changed = activate(
                     browser,
                     acts.launcher,
                     acts.menu.client,
@@ -7667,8 +7681,8 @@ mod program {
                     viewport,
                     toolbar,
                     bundle_intent(modifiers.shift),
-                    AfterHandoff::Keep,
-                ))
+                );
+                (whole_if(changed), false)
             }
             PrimaryPress::Select { index, how } => select_pressed(
                 browser,
@@ -7961,6 +7975,13 @@ mod program {
                 Some(ContextChoice::NewFolder) => {
                     begin_new_entry(browser, overlays, NewEntry::Folder)
                 }
+                Some(ContextChoice::Display(mode)) => {
+                    browser.set_view_mode(mode);
+                    tairix_browse::render::reveal_selection(
+                        browser, scale, theme, viewport, toolbar,
+                    );
+                    (true, false)
+                }
                 // A document the menu never offered makes nothing.
                 Some(ContextChoice::NewDocument(index)) => match gesture.documents.get(index) {
                     Some(document) => {
@@ -8107,29 +8128,18 @@ mod program {
             toolbar,
         };
         let (changed, close) = match command {
-            ContextCommand::Open => activate(
-                browser,
-                launcher,
-                acts.menu.client,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                BundleIntent::Launch,
-                AfterHandoff::Keep,
-            ),
-            // Opening and closing is the same activation, with the window
-            // closed behind it once the entry has been handed over.
-            ContextCommand::OpenAndClose => activate(
-                browser,
-                launcher,
-                acts.menu.client,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                BundleIntent::Launch,
-                AfterHandoff::CloseWindow,
+            ContextCommand::Open => (
+                activate(
+                    browser,
+                    launcher,
+                    acts.menu.client,
+                    scale,
+                    theme,
+                    viewport,
+                    toolbar,
+                    BundleIntent::Launch,
+                ),
+                false,
             ),
             ContextCommand::OpenWith => begin_open_with(browser, overlays, acts, canvas),
             ContextCommand::Rename => begin_rename(
@@ -10627,6 +10637,10 @@ mod program {
             }
 
             raise_alerts(&mut windows, &mut client, event_endpoint, &mut alerts_full);
+            if !alerts_full {
+                let notices = &mut launcher.borrow_mut().notices;
+                alerts_full = raise_notice(notices, &mut client, event_endpoint, None);
+            }
             let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
             if present_owed_windows(&mut windows, &mut client, grounds, &icons, desktop.scale())
                 .is_err()

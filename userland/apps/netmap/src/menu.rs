@@ -12,7 +12,8 @@ use core::net::IpAddr;
 
 use tairix_abi::net_ipc::address_parts;
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, APP_MENU_LABEL_MAX,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol,
+    APP_MENU_LABEL_MAX,
 };
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
@@ -34,6 +35,19 @@ pub enum Command {
     Copy(String),
     /// Open the probe-settings window.
     OpenSettings,
+}
+
+impl Command {
+    /// The function a row asking for this shows.
+    const fn symbol(&self) -> AppMenuSymbol {
+        match self {
+            Self::Steer(Steer::ShowServices(_)) => AppMenuSymbol::Visible,
+            Self::Steer(Steer::HideServices(_)) => AppMenuSymbol::Hidden,
+            Self::Steer(Steer::Fit) => AppMenuSymbol::ZoomFit,
+            Self::Copy(_) => AppMenuSymbol::Copy,
+            Self::OpenSettings => AppMenuSymbol::Settings,
+        }
+    }
 }
 
 /// What a menu row asks of the view.
@@ -143,6 +157,7 @@ impl Builder {
             self.model.push(AppMenuRow::Item(AppMenuItem::new(
                 id,
                 AppMenuLabel::new(label)?,
+                command.symbol(),
             )))?;
             self.commands.push(command);
         }

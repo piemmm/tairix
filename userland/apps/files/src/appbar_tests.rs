@@ -15,25 +15,21 @@ use tairix_abi::window_ipc::{
 use tairix_browse::{Places, Volume};
 
 use super::{component_declaration, place_of, DESKTOP_SLOT_CLICK, WINDOW_SLOT_CLICK};
+use crate::test_fs::mounted;
 
 /// A USB unit that reported a non-rotating medium: served as removable.
 const STICK: BlkMedium = BlkMedium::of_transport(BlkTransport::Usb).with_rotation(
     BlkRotation::NonRotating(BlkRotationEvidence::RotationRateVpd),
 );
 
-/// A home whose three derived places (Home, Desktop, `UserFiles`) join the two
-/// machine roots, so the fixed rail is five rows long.
+/// A home whose two derived places (Home, Desktop) open the rail.
 fn home() -> Vec<String> {
     alloc::vec!["Users".to_string(), "ada".to_string()]
 }
 
-/// A mounted volume at `/Volumes/<label>` with no reported medium.
+/// A volume attached at `/Storage/<label>` with no reported medium.
 fn volume(label: &str) -> Volume {
-    Volume {
-        label: label.to_string(),
-        target: alloc::format!("/Volumes/{label}"),
-        medium: None,
-    }
+    mounted(label, &alloc::format!("/Storage/{label}"), None)
 }
 
 /// The kinds a declaration's rows carried, in order.
@@ -122,12 +118,7 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
     // Every row is the rail's, in the rail's own order.
     assert_eq!(
         labels(&places),
-        alloc::vec![
-            "Home".to_string(),
-            "Desktop".to_string(),
-            "UserFiles".to_string(),
-            "System".to_string(),
-        ]
+        alloc::vec!["Home".to_string(), "Desktop".to_string()]
     );
     assert!(
         bar.menu.rows().all(|(_, parent)| parent.is_none()),
@@ -198,7 +189,7 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
     );
     // Sorted by label, after the fixed places.
     assert_eq!(
-        labels(&mounted)[4..],
+        labels(&mounted)[2..],
         ["Backup".to_string(), "Stick".to_string()]
     );
 }
@@ -273,9 +264,8 @@ fn the_row_cap_drops_the_tail_and_reports_how_many() {
 
 #[test]
 fn an_empty_rail_declares_an_empty_menu_rather_than_failing() {
-    // `Places` always offers the machine roots, so this is the degenerate
-    // shape rather than a reachable one — but a menu with no rows is a menu
-    // the bar opens nothing for, which is honest, not an error.
+    // A session with no home and nothing attached: a menu with no rows is a
+    // menu the bar opens nothing for, which is honest, not an error.
     let places = Places::default();
     let (bar, skipped) = component_declaration(7, &places).expect("an empty menu is admissible");
     assert_eq!(bar.menu.len(), 0);

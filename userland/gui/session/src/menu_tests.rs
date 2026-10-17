@@ -8,7 +8,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, MenuRefusal, APP_MENU_MAX_DEPTH,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol, MenuRefusal,
+    APP_MENU_MAX_DEPTH,
 };
 use tairix_controls::{ChainChild, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -93,9 +94,21 @@ fn key(named: NamedKey) -> InputEvent {
 /// A root plate of three chooseable rows.
 fn flat_model() -> ChainModel {
     let mut model = ChainModel::new("Plain");
-    model.push(ChainRow::item(id(1), MenuItem::new("One")));
-    model.push(ChainRow::item(id(2), MenuItem::new("Two")));
-    model.push(ChainRow::item(id(3), MenuItem::new("Three")));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("One"),
+    ));
+    model.push(ChainRow::item(
+        id(2),
+        AppMenuSymbol::Open,
+        MenuItem::new("Two"),
+    ));
+    model.push(ChainRow::item(
+        id(3),
+        AppMenuSymbol::Open,
+        MenuItem::new("Three"),
+    ));
     model
 }
 
@@ -103,11 +116,19 @@ fn flat_model() -> ChainModel {
 /// which opens a submenu of its own — the chain the bar could never render.
 fn nested_model() -> ChainModel {
     let mut model = ChainModel::new("Nested");
-    model.push(ChainRow::item(id(1), MenuItem::new("Top")));
-    let parent = model.push(ChainRow::submenu(MenuItem::new("More")));
-    let inner = model.push(ChainRow::submenu(MenuItem::new("Deeper")).under(parent));
-    model.push(ChainRow::item(id(2), MenuItem::new("Inner")).under(parent));
-    model.push(ChainRow::item(id(3), MenuItem::new("Deepest")).under(inner));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("Top"),
+    ));
+    let parent = model.push(ChainRow::submenu(
+        AppMenuSymbol::Settings,
+        MenuItem::new("More"),
+    ));
+    let inner = model
+        .push(ChainRow::submenu(AppMenuSymbol::Settings, MenuItem::new("Deeper")).under(parent));
+    model.push(ChainRow::item(id(2), AppMenuSymbol::Open, MenuItem::new("Inner")).under(parent));
+    model.push(ChainRow::item(id(3), AppMenuSymbol::Open, MenuItem::new("Deepest")).under(inner));
     model
 }
 
@@ -498,11 +519,16 @@ fn a_disabled_submenu_row_opens_nothing() {
     let theme = theme();
     let g = geom(&theme);
     let mut model = ChainModel::new("Guarded");
-    model.push(ChainRow::item(id(1), MenuItem::new("One")));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("One"),
+    ));
     let shut = model.push(ChainRow::submenu(
+        AppMenuSymbol::Settings,
         MenuItem::new("Shut").with_state(tairix_controls::ControlState::disabled()),
     ));
-    model.push(ChainRow::item(id(2), MenuItem::new("Hidden")).under(shut));
+    model.push(ChainRow::item(id(2), AppMenuSymbol::Open, MenuItem::new("Hidden")).under(shut));
 
     let mut chain = MenuChain::new();
     open(&mut chain, APP, model, Point::new(40, 40), &g);
@@ -517,15 +543,27 @@ fn a_disabled_submenu_row_opens_nothing() {
 /// so a path aimed at the child crosses both the break and a row.
 fn aim_model() -> ChainModel {
     let mut model = ChainModel::new("Aim");
-    model.push(ChainRow::item(id(1), MenuItem::new("First")));
-    let more = model.push(ChainRow::submenu(MenuItem::new("More")));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("First"),
+    ));
+    let more = model.push(ChainRow::submenu(
+        AppMenuSymbol::Settings,
+        MenuItem::new("More"),
+    ));
     model.push(ChainRow::item(
         id(2),
+        AppMenuSymbol::Open,
         MenuItem::new("Below").with_group_break(true),
     ));
-    model.push(ChainRow::item(id(3), MenuItem::new("Last")));
+    model.push(ChainRow::item(
+        id(3),
+        AppMenuSymbol::Open,
+        MenuItem::new("Last"),
+    ));
     for (raw, label) in [(4, "One"), (5, "Two"), (6, "Three")] {
-        model.push(ChainRow::item(id(raw), MenuItem::new(label)).under(more));
+        model.push(ChainRow::item(id(raw), AppMenuSymbol::Open, MenuItem::new(label)).under(more));
     }
     model
 }
@@ -801,12 +839,16 @@ fn a_disabled_sibling_borrows_the_highlight_and_gives_it_back() {
     let theme = theme();
     let g = geom(&theme);
     let mut model = ChainModel::new("Lend");
-    let more = model.push(ChainRow::submenu(MenuItem::new("More")));
+    let more = model.push(ChainRow::submenu(
+        AppMenuSymbol::Settings,
+        MenuItem::new("More"),
+    ));
     model.push(ChainRow::item(
         id(1),
+        AppMenuSymbol::Open,
         MenuItem::new("Shut").with_state(refused_state()),
     ));
-    model.push(ChainRow::item(id(2), MenuItem::new("One")).under(more));
+    model.push(ChainRow::item(id(2), AppMenuSymbol::Open, MenuItem::new("One")).under(more));
     let mut chain = MenuChain::new();
     open(&mut chain, APP, model, Point::new(40, 40), &g);
     settle_on(&mut chain, 0, 0, &g);
@@ -834,8 +876,17 @@ fn settling_on_a_plain_row_closes_the_entry_field_and_asks_for_a_redraw() {
     let theme = theme();
     let g = geom(&theme);
     let mut model = ChainModel::new("Entry");
-    model.push(ChainRow::item(id(1), MenuItem::new("Plain")));
-    model.push(ChainRow::entry(id(2), id(3), "name", MenuItem::new("Name")));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("Plain"),
+    ));
+    model.push(ChainRow::entry(
+        (id(2), id(3)),
+        "name",
+        AppMenuSymbol::Rename,
+        MenuItem::new("Name"),
+    ));
     let mut chain = MenuChain::new();
     open(&mut chain, APP, model, Point::new(40, 40), &g);
     settle_on(&mut chain, 0, 1, &g);
@@ -936,7 +987,11 @@ fn about_app() -> tairix_controls::AboutSheet {
 /// A model whose second row opens the desktop's own information sheet.
 fn info_model() -> ChainModel {
     let mut model = ChainModel::new("Attested");
-    model.push(ChainRow::item(id(1), MenuItem::new("One")));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("One"),
+    ));
     model.push(ChainRow::info(MenuItem::new("Info"), about_app()));
     model
 }
@@ -1198,10 +1253,14 @@ fn a_closed_chain_lists_no_surfaces_at_any_depth() {
 #[test]
 fn a_decoded_row_can_never_claim_the_system_lacks_authority() {
     let mut wire = titled("App");
-    wire.push(AppMenuRow::Item(AppMenuItem::new(id(1), label("Do it"))))
-        .expect("a row");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        id(1),
+        label("Do it"),
+        AppMenuSymbol::Open,
+    )))
+    .expect("a row");
     wire.push(AppMenuRow::Item(
-        AppMenuItem::new(id(2), label("Denied")).disabled(),
+        AppMenuItem::new(id(2), label("Denied"), AppMenuSymbol::Open).disabled(),
     ))
     .expect("a row");
 
@@ -1218,24 +1277,29 @@ fn a_decoded_row_can_never_claim_the_system_lacks_authority() {
 #[test]
 fn a_declared_separator_becomes_the_next_rows_group_break_on_every_plate() {
     let mut wire = titled("App");
-    wire.push(AppMenuRow::Item(AppMenuItem::new(id(1), label("One"))))
-        .expect("a row");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        id(1),
+        label("One"),
+        AppMenuSymbol::Open,
+    )))
+    .expect("a row");
     wire.push(AppMenuRow::Separator).expect("a rule");
     wire.push(AppMenuRow::Submenu {
         label: label("More"),
         enabled: true,
+        symbol: AppMenuSymbol::Settings,
     })
     .expect("a submenu");
     let parent = wire.len() - 1;
     wire.push_under(
-        AppMenuRow::Item(AppMenuItem::new(id(2), label("Inner"))),
+        AppMenuRow::Item(AppMenuItem::new(id(2), label("Inner"), AppMenuSymbol::Open)),
         parent,
     )
     .expect("a row");
     wire.push_under(AppMenuRow::Separator, parent)
         .expect("a rule");
     wire.push_under(
-        AppMenuRow::Item(AppMenuItem::new(id(3), label("After"))),
+        AppMenuRow::Item(AppMenuItem::new(id(3), label("After"), AppMenuSymbol::Open)),
         parent,
     )
     .expect("a row");
@@ -1261,8 +1325,12 @@ fn a_declared_separator_becomes_the_next_rows_group_break_on_every_plate() {
 #[test]
 fn an_information_row_without_an_attested_identity_is_left_out() {
     let mut wire = titled("App");
-    wire.push(AppMenuRow::Item(AppMenuItem::new(id(1), label("One"))))
-        .expect("a row");
+    wire.push(AppMenuRow::Item(AppMenuItem::new(
+        id(1),
+        label("One"),
+        AppMenuSymbol::Open,
+    )))
+    .expect("a row");
     wire.push(AppMenuRow::Info).expect("an info row");
 
     let bare = ChainModel::from_app_menu("App", &wire, None);
@@ -1284,6 +1352,7 @@ fn a_submenu_on_the_deepest_plate_is_refused_by_the_wire_model() {
     wire.push(AppMenuRow::Submenu {
         label: label("L1"),
         enabled: true,
+        symbol: AppMenuSymbol::Settings,
     })
     .expect("a submenu");
     let mut parent = wire.len() - 1;
@@ -1292,6 +1361,7 @@ fn a_submenu_on_the_deepest_plate_is_refused_by_the_wire_model() {
             AppMenuRow::Submenu {
                 label: label(&alloc::format!("L{level}")),
                 enabled: true,
+                symbol: AppMenuSymbol::Settings,
             },
             parent,
         )
@@ -1303,6 +1373,7 @@ fn a_submenu_on_the_deepest_plate_is_refused_by_the_wire_model() {
             AppMenuRow::Submenu {
                 label: label("too deep"),
                 enabled: true,
+                symbol: AppMenuSymbol::Settings,
             },
             parent,
         )
@@ -1691,7 +1762,11 @@ fn a_plate_is_wide_enough_for_its_own_title_not_only_its_rows() {
     let mut model = ChainModel::new(TITLE);
     for (index, label) in ["Cut", "Copy"].iter().enumerate() {
         let id = AppMenuItemId::for_index(index).expect("row id");
-        model.push(ChainRow::item(id, MenuItem::new(*label)));
+        model.push(ChainRow::item(
+            id,
+            AppMenuSymbol::Open,
+            MenuItem::new(*label),
+        ));
     }
     chain
         .open(
@@ -1737,10 +1812,18 @@ fn a_plate_is_wide_enough_for_its_own_title_not_only_its_rows() {
 fn explained_model() -> ChainModel {
     let refused = || MenuItem::new("Open With\u{2026}").with_state(refused_state());
     let mut model = ChainModel::new("Files");
-    model.push(ChainRow::item(id(1), MenuItem::new("Open")));
-    model.push(ChainRow::item(id(2), refused()).explained("only a file opens with an application"));
+    model.push(ChainRow::item(
+        id(1),
+        AppMenuSymbol::Open,
+        MenuItem::new("Open"),
+    ));
+    model.push(
+        ChainRow::item(id(2), AppMenuSymbol::Open, refused())
+            .explained("only a file opens with an application"),
+    );
     model.push(ChainRow::item(
         id(3),
+        AppMenuSymbol::Open,
         MenuItem::new("Paste").with_state(refused_state()),
     ));
     model
@@ -1808,11 +1891,18 @@ fn the_deepest_plate_is_the_one_that_explains_the_pointer() {
     let mut chain = MenuChain::new();
 
     let mut model = ChainModel::new("Nested");
-    let parent = model.push(ChainRow::submenu(MenuItem::new("Open With\u{2026}")));
+    let parent = model.push(ChainRow::submenu(
+        AppMenuSymbol::Settings,
+        MenuItem::new("Open With\u{2026}"),
+    ));
     model.push(
-        ChainRow::item(id(2), MenuItem::new("View").with_state(refused_state()))
-            .under(parent)
-            .explained("that application cannot open this file"),
+        ChainRow::item(
+            id(2),
+            AppMenuSymbol::Open,
+            MenuItem::new("View").with_state(refused_state()),
+        )
+        .under(parent)
+        .explained("that application cannot open this file"),
     );
     open(&mut chain, APP, model, Point::new(40, 40), &g);
 

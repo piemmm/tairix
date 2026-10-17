@@ -14,11 +14,14 @@
 //! stream reports it as a link and nothing more, so what it resolves to costs
 //! one stat, paid only for the link entries.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
 use tairix_icon::{DocumentStamp, FolderSample, IconKind};
+
+use crate::places::VolumeFacts;
 
 /// What a listed symbolic link's target resolves to.
 ///
@@ -279,9 +282,20 @@ pub struct Entry {
     /// The occupancy shown is from before a change to this folder: it stays
     /// drawn, so the icon does not blink, until a fresh probe replaces it.
     stale: bool,
-    /// The drive this entry is drawn as when it is the root of a mounted
-    /// volume ([`Browser::mark_volume_roots`](crate::Browser::mark_volume_roots)).
-    drive: Option<IconKind>,
+    /// The drive this entry is drawn as, and what it states about its
+    /// volume, when it is the root of a mounted volume
+    /// ([`Browser::mark_volume_roots`](crate::Browser::mark_volume_roots)).
+    /// Boxed, because only a volume root has one.
+    drive: Option<Box<DriveMark>>,
+}
+
+/// What a listed volume root is drawn as and states about its volume.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriveMark {
+    /// The picture of the drive the volume is on.
+    pub icon: IconKind,
+    /// What the volume is and how it is doing.
+    pub facts: VolumeFacts,
 }
 
 impl Entry {
@@ -451,16 +465,25 @@ impl Entry {
     /// The drive this entry is drawn as, when it is the root of a mounted
     /// volume.
     #[must_use]
-    pub const fn drive(&self) -> Option<IconKind> {
-        self.drive
+    pub fn drive(&self) -> Option<IconKind> {
+        self.drive.as_ref().map(|mark| mark.icon)
+    }
+
+    /// What the volume this entry is the root of is and how it is doing, when
+    /// it is one.
+    #[must_use]
+    pub fn volume(&self) -> Option<&VolumeFacts> {
+        self.drive.as_ref().map(|mark| &mark.facts)
     }
 
     /// Draw this entry as `drive`, or as what it is when `None`, answering
-    /// whether its picture changed.
-    pub(crate) fn set_drive(&mut self, drive: Option<IconKind>) -> bool {
-        let changed = self.drive != drive;
-        self.drive = drive;
-        changed
+    /// whether its picture or what it states changed.
+    pub(crate) fn set_drive(&mut self, drive: Option<&DriveMark>) -> bool {
+        if self.drive.as_deref() == drive {
+            return false;
+        }
+        self.drive = drive.map(|mark| Box::new(mark.clone()));
+        true
     }
 
     /// Whether this and `other` would be listed identically: everything but
@@ -483,7 +506,7 @@ impl Entry {
         if self.is_directory() && previous.is_directory() {
             self.occupancy = previous.occupancy.clone();
             self.stale = true;
-            self.drive = previous.drive;
+            self.drive.clone_from(&previous.drive);
         }
     }
 

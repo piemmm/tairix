@@ -9,15 +9,19 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, DialogModality};
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuItemId, AppMenuSymbol as S, CursorShape, DialogModality,
+};
 use tairix_browse::vfs::write_document_title;
 use tairix_controls::{
     Button, ButtonContent, ControlRole, Dialog, DialogAction, ScrollAction, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollRange, SearchField, SelectionState, TextAction, TextField,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_image::inspect::ReportLine;
 use tairix_input::{ClickRun, InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_sandbox::decode::Isa;
+use tairix_sandbox::imagerender::ViewFormat;
 use tairix_sandbox::textsyntax::LexedBatch;
 use tairix_syntax::{Diagnostic, Format};
 use tairix_theme::Theme;
@@ -25,8 +29,11 @@ use tairix_window::docapp::{DialogWindow, DocumentView};
 use tairix_window::document::{Access, SavedDocument};
 use tairix_window::menu::{MenuBuilder, Plate};
 
-use crate::code::{CodeDisplay, CodeListing, Unlisted};
+use crate::answer::Unlisted;
+use crate::code::{CodeDisplay, CodeListing};
+use crate::data::DataDisplay;
 use crate::detect::{Indent, LineEnding};
+use crate::display::{Display, HEAD_LEN};
 use crate::document::Snapshot;
 use crate::editor::{Command, Editor, Effect, Mode, Motion};
 use crate::find::{Options, Pattern, PatternError, Search, Step};
@@ -153,6 +160,8 @@ pub enum Action {
     Mode(Mode),
     /// Show an executable's instructions.
     ShowCode,
+    /// Show a picture's structure, then its bytes.
+    ShowData,
     /// Read the code as this instruction set.
     Isa(Isa),
     /// Colour and check the document as a format.
@@ -167,7 +176,7 @@ pub enum Action {
 
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 22] = [
+const PLAIN_ACTIONS: [Action; 23] = [
     Action::NewWindow,
     Action::Open,
     Action::Save,
@@ -190,6 +199,7 @@ const PLAIN_ACTIONS: [Action; 22] = [
     Action::GoToLine,
     Action::NextProblem,
     Action::ShowCode,
+    Action::ShowData,
 ];
 
 const MODES: [Mode; 2] = [Mode::Text, Mode::Hex];
@@ -322,9 +332,9 @@ pub struct View {
     /// The vertical bar's pixels past `(top, hex_top)`.
     down: Carry<(Row, usize)>,
     /// The vertical bar's pixels past the Code display's first line.
-    code_down: Carry<usize>,
-    /// The document as code, for an executable.
-    code: Option<CodeDisplay>,
+    display_down: Carry<usize>,
+    /// The document as code, for an executable, or as data, for a picture.
+    display: Option<Display>,
     /// The horizontal bar's pixels past `left`.
     across: Carry<usize>,
     find_open: bool,
@@ -523,14 +533,14 @@ impl View {
     #[must_use]
     pub fn new(editor: Editor, name: String, access: Access, double_click: Duration64) -> Self {
         let flat = || ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1);
-        let code = {
+        let display = {
             let document = editor.document();
             let mut head = Vec::new();
-            // A head the allocator refuses offers no Code display.
+            // A head the allocator refuses offers no display.
             document
-                .copy_range(0..document.len().min(CODE_HEAD_LEN), &mut head)
+                .copy_range(0..document.len().min(HEAD_LEN), &mut head)
                 .ok()
-                .and_then(|()| CodeDisplay::of(&head))
+                .and_then(|()| Display::of(&head, &name))
         };
         Self {
             editor,
@@ -540,8 +550,8 @@ impl View {
             hex_top: 0,
             left: 0,
             down: Carry::default(),
-            code_down: Carry::default(),
-            code,
+            display_down: Carry::default(),
+            display,
             across: Carry::default(),
             find_open: false,
             find: SearchField::new()
@@ -578,31 +588,69 @@ impl View {
         &self.editor
     }
 
+    /// The read-only display, while the window shows its document that way.
+    #[must_use]
+    pub fn display_shown(&self) -> Option<&Display> {
+        self.display.as_ref().filter(|display| display.showing())
+    }
+
+    /// The read-only display, while the window shows its document that way,
+    /// for a change to where it is scrolled.
+    fn display_scrolled(&mut self) -> Option<&mut Display> {
+        self.display.as_mut().filter(|display| display.showing())
+    }
+
     /// The Code display, while the window shows its document as code.
     #[must_use]
     pub fn code_shown(&self) -> Option<&CodeDisplay> {
-        self.code.as_ref().filter(|code| code.showing())
+        match self.display_shown() {
+            Some(Display::Code(code)) => Some(code),
+            Some(Display::Data(_)) | None => None,
+        }
+    }
+
+    /// The Data display, while the window shows its document as data.
+    #[must_use]
+    pub fn data_shown(&self) -> Option<&DataDisplay> {
+        match self.display_shown() {
+            Some(Display::Data(data)) => Some(data),
+            Some(Display::Code(_)) | None => None,
+        }
     }
 
     /// The listing the window wants of its document now: its id and the
     /// instruction set chosen for it.
     pub fn code_want(&mut self) -> Option<(u64, Option<Isa>)> {
         let generation = self.editor.generation();
-        self.code.as_mut()?.want(generation)
+        match self.display.as_mut()? {
+            Display::Code(code) => code.want(generation),
+            Display::Data(_) => None,
+        }
     }
 
-    /// State why there is no listing in place of the one just wanted, asked
-    /// of no worker.
-    pub fn code_refused(&mut self, unlisted: Unlisted, layout: &Layout, damage: &mut Region) {
+    /// The report the window wants of its document now: its id and the
+    /// format its name gives it, if its content gives none.
+    pub fn data_want(&mut self) -> Option<(u64, Option<ViewFormat>)> {
         let generation = self.editor.generation();
-        let Some(code) = &mut self.code else {
+        match self.display.as_mut()? {
+            Display::Data(data) => data.want(generation).map(|id| (id, data.named())),
+            Display::Code(_) => None,
+        }
+    }
+
+    /// State why there is no listing or report in place of the one just
+    /// wanted, asked of no worker.
+    pub fn display_refused(&mut self, unlisted: Unlisted, layout: &Layout, damage: &mut Region) {
+        let generation = self.editor.generation();
+        let Some(display) = &mut self.display else {
             return;
         };
-        code.refuse(unlisted, generation);
-        if code.showing() {
-            damage.add(layout.grid());
-            damage.add(layout.status());
-            self.sync_bars(layout, damage);
+        match display {
+            Display::Code(code) => code.refuse(unlisted, generation),
+            Display::Data(data) => data.refuse(unlisted, generation),
+        }
+        if display.showing() {
+            self.display_changed(layout, damage);
         }
     }
 
@@ -614,14 +662,36 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) {
-        let Some(code) = &mut self.code else {
+        let Some(Display::Code(code)) = &mut self.display else {
             return;
         };
         if code.listed(id, listing) && code.showing() {
-            damage.add(layout.grid());
-            damage.add(layout.status());
-            self.sync_bars(layout, damage);
+            self.display_changed(layout, damage);
         }
+    }
+
+    /// Take in the report asked as `id`, repainting what it fills.
+    pub fn data_reported(
+        &mut self,
+        id: u64,
+        report: Result<Vec<ReportLine>, Unlisted>,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let len = self.editor.document().len();
+        let Some(Display::Data(data)) = &mut self.display else {
+            return;
+        };
+        if data.reported(id, report, len) && data.showing() {
+            self.display_changed(layout, damage);
+        }
+    }
+
+    /// Repaint what a display that changed under the window fills.
+    fn display_changed(&mut self, layout: &Layout, damage: &mut Region) {
+        damage.add(layout.grid());
+        damage.add(layout.status());
+        self.sync_bars(layout, damage);
     }
 
     /// The editor, for `Run` to feed answers to.
@@ -710,7 +780,7 @@ impl View {
     }
 
     fn gutter_digits(&self) -> u32 {
-        if self.code_shown().is_some() {
+        if self.display_shown().is_some() {
             return 0;
         }
         match self.editor.mode() {
@@ -737,7 +807,7 @@ impl View {
 
     /// The next batch worth lexing to colour what the window shows.
     pub fn lex_job(&mut self, layout: &Layout) -> Option<LexJob> {
-        if self.editor.mode() == Mode::Hex || self.code_shown().is_some() {
+        if self.editor.mode() == Mode::Hex || self.display_shown().is_some() {
             return None;
         }
         let lines = self.visible_lines(layout);
@@ -943,12 +1013,12 @@ impl View {
         let rows = layout.rows() as u64;
         let columns = layout.columns();
         let document = self.editor.document();
-        let (content, first, wide, carried) = match (self.code_shown(), self.editor.mode()) {
-            (Some(code), _) => (
-                code.line_count(),
-                code.top(),
-                code.widest(),
-                self.code_down.at(&code.top()),
+        let (content, first, wide, carried) = match (self.display_shown(), self.editor.mode()) {
+            (Some(display), _) => (
+                display.row_count(document.len()),
+                display.top(),
+                display.widest(document.len()),
+                self.display_down.at(&display.top()),
             ),
             (None, Mode::Text) => (
                 document.row_count(),
@@ -1088,16 +1158,16 @@ impl View {
 
     /// Carry out `action`.
     pub fn act(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
-        if self.code_shown().is_some() && needs_editor_display(action) {
-            self.message = Some(String::from(CODE_READ_ONLY));
-            damage.add(layout.status());
-            return Outcome::none();
+        if self.display_shown().is_some() && needs_editor_display(action) {
+            return self.read_only(layout, damage);
         }
         let command = match action {
-            Action::ShowCode => return self.show_code(true),
+            Action::ShowCode if self.code_offered() => return self.show_display(true),
+            Action::ShowData if self.data_offered() => return self.show_display(true),
+            Action::ShowCode | Action::ShowData => return Outcome::none(),
             Action::Isa(isa) => return self.choose_isa(isa, layout, damage),
-            Action::Mode(mode) if self.code_shown().is_some() => {
-                self.show_code(false);
+            Action::Mode(mode) if self.display_shown().is_some() => {
+                self.show_display(false);
                 self.command(&Command::SetMode(mode), layout, damage);
                 return Outcome::relaid();
             }
@@ -1661,8 +1731,8 @@ impl View {
         scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
-        // The Code display has no caret: only the wheel moves it.
-        if self.code_shown().is_some() && !matches!(event, InputEvent::PointerScrolled { .. }) {
+        // A read-only display has no caret: only the wheel moves it.
+        if self.display_shown().is_some() && !matches!(event, InputEvent::PointerScrolled { .. }) {
             return Outcome::none();
         }
         match event {
@@ -1863,8 +1933,9 @@ impl View {
     }
 
     fn nudge(&mut self, down: bool) {
-        if let Some(code) = self.code.as_mut().filter(|code| code.showing()) {
-            code.scroll(if down { 1 } else { -1 });
+        let len = self.editor.document().len();
+        if let Some(display) = self.display_scrolled() {
+            display.scroll(if down { 1 } else { -1 }, len);
             return;
         }
         let document = self.editor.document();
@@ -1897,14 +1968,15 @@ impl View {
     ) -> Outcome {
         let (cell_w, cell_h) = layout.cell();
         let (cell_w, cell_h) = (u64::from(cell_w.max(1)), u64::from(cell_h.max(1)));
-        let code_before = self.code_shown().map(CodeDisplay::top);
+        let display_before = self.display_shown().map(Display::top);
         let before = (self.top, self.hex_top, self.left);
         let cells = |pixels: u64, cell: u64| usize::try_from(pixels / cell).unwrap_or(usize::MAX);
-        if let (Some(pixels), Some(code)) = (down, self.code.as_mut().filter(|code| code.showing()))
-        {
-            code.set_top(cells(pixels, cell_h));
-            self.code_down = Carry {
-                at: code.top(),
+        let len = self.editor.document().len();
+        if let (Some(pixels), Some(display)) = (down, self.display_scrolled()) {
+            display.set_top(cells(pixels, cell_h), len);
+            let at = display.top();
+            self.display_down = Carry {
+                at,
                 pixels: pixels % cell_h,
             };
         } else if let Some(pixels) = down {
@@ -1929,7 +2001,7 @@ impl View {
             };
         }
         if before != (self.top, self.hex_top, self.left)
-            || code_before != self.code_shown().map(CodeDisplay::top)
+            || display_before != self.display_shown().map(Display::top)
         {
             damage.add(layout.gutter());
             damage.add(layout.grid());
@@ -1938,21 +2010,22 @@ impl View {
         Outcome::none()
     }
 
-    /// Feed a key to the Code display: it scrolls, and says it is read-only
-    /// to anything that would edit.
-    fn code_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> Outcome {
+    /// Feed a key to the read-only display: it scrolls, and says it is
+    /// read-only to anything that would edit.
+    fn display_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> Outcome {
         let page = isize::try_from(layout.rows().saturating_sub(1).max(1)).unwrap_or(isize::MAX);
-        let Some(code) = self.code.as_mut() else {
+        let len = self.editor.document().len();
+        let Some(display) = self.display_scrolled() else {
             return Outcome::none();
         };
-        let widest = code.widest();
+        let widest = display.widest(len);
         let moved = match key {
-            Key::Named(NamedKey::Up) => code.scroll(-1),
-            Key::Named(NamedKey::Down) => code.scroll(1),
-            Key::Named(NamedKey::PageUp) => code.scroll(-page),
-            Key::Named(NamedKey::PageDown) => code.scroll(page),
-            Key::Named(NamedKey::Home) => code.set_top(0),
-            Key::Named(NamedKey::End) => code.set_top(usize::MAX),
+            Key::Named(NamedKey::Up) => display.scroll(-1, len),
+            Key::Named(NamedKey::Down) => display.scroll(1, len),
+            Key::Named(NamedKey::PageUp) => display.scroll(-page, len),
+            Key::Named(NamedKey::PageDown) => display.scroll(page, len),
+            Key::Named(NamedKey::Home) => display.set_top(0, len),
+            Key::Named(NamedKey::End) => display.set_top(usize::MAX, len),
             Key::Named(NamedKey::Left) => {
                 let was = self.left;
                 self.left = self.left.saturating_sub(1);
@@ -1967,9 +2040,7 @@ impl View {
             | Key::Named(
                 NamedKey::Enter | NamedKey::Backspace | NamedKey::Delete | NamedKey::Tab,
             ) => {
-                self.message = Some(String::from(CODE_READ_ONLY));
-                damage.add(layout.status());
-                return Outcome::none();
+                return self.read_only(layout, damage);
             }
             Key::Named(_) => false,
         };
@@ -1980,10 +2051,36 @@ impl View {
         Outcome::none()
     }
 
-    /// Show the document as code, or as the editor shows it. The find bar
-    /// goes with the editor's display: nothing it does reaches code.
-    fn show_code(&mut self, showing: bool) -> Outcome {
-        if !self.code.as_mut().is_some_and(|code| code.show(showing)) {
+    /// Say the read-only display is read-only, to something that would edit
+    /// or search it.
+    fn read_only(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+        let label = self.display_shown().map_or("Code", Display::label);
+        self.message = Some(alloc::format!(
+            "{label} is read-only: show the document as Text or Hex to edit or search it"
+        ));
+        damage.add(layout.status());
+        Outcome::none()
+    }
+
+    /// Whether the document offers a Code display.
+    fn code_offered(&self) -> bool {
+        matches!(self.display, Some(Display::Code(_)))
+    }
+
+    /// Whether the document offers a Data display.
+    fn data_offered(&self) -> bool {
+        matches!(self.display, Some(Display::Data(_)))
+    }
+
+    /// Show the document as its read-only display, or as the editor shows
+    /// it. The find bar goes with the editor's display: nothing it does
+    /// reaches a read-only one.
+    fn show_display(&mut self, showing: bool) -> Outcome {
+        if !self
+            .display
+            .as_mut()
+            .is_some_and(|display| display.show(showing))
+        {
             return Outcome::none();
         }
         if showing && self.find_open {
@@ -1995,7 +2092,11 @@ impl View {
 
     /// Read the code as `isa`, which lists it again.
     fn choose_isa(&mut self, isa: Isa, layout: &Layout, damage: &mut Region) -> Outcome {
-        if self.code.as_mut().is_some_and(|code| code.choose(isa)) {
+        let chose = match &mut self.display {
+            Some(Display::Code(code)) => code.choose(isa),
+            Some(Display::Data(_)) | None => false,
+        };
+        if chose {
             damage.add(layout.grid());
             damage.add(layout.status());
             self.sync_bars(layout, damage);
@@ -2012,12 +2113,12 @@ impl View {
         damage: &mut Region,
     ) -> Outcome {
         self.modifiers = modifiers;
-        let hex_shown = self.code_shown().is_none() && self.editor.mode() == Mode::Hex;
+        let hex_shown = self.display_shown().is_none() && self.editor.mode() == Mode::Hex;
         if let Some(action) = shortcut(key, modifiers, hex_shown) {
             return self.run(action, layout, damage);
         }
-        if self.code_shown().is_some() && self.focus == Focus::Grid {
-            return self.code_key(key, layout, damage);
+        if self.display_shown().is_some() && self.focus == Focus::Grid {
+            return self.display_key(key, layout, damage);
         }
         match self.focus {
             Focus::Grid => self.grid_key(key, modifiers, layout, damage),
@@ -2220,16 +2321,16 @@ impl View {
     fn window_rows(&self, menu: &mut MenuBuilder) {
         self.clipboard_rows(menu, Plate::Root);
         menu.separator(Plate::Root);
-        if let Some(file) = menu.submenu("File", Plate::Root) {
+        if let Some(file) = menu.submenu("File", S::File, Plate::Root) {
             file_rows(menu, file);
         }
-        if let Some(edit) = menu.submenu("Edit", Plate::Root) {
+        if let Some(edit) = menu.submenu("Edit", S::Edit, Plate::Root) {
             self.edit_rows(menu, edit);
         }
-        if let Some(find) = menu.submenu("Find", Plate::Root) {
+        if let Some(find) = menu.submenu("Find", S::Find, Plate::Root) {
             self.find_rows(menu, find);
         }
-        if let Some(view) = menu.submenu("View", Plate::Root) {
+        if let Some(view) = menu.submenu("View", S::View, Plate::Root) {
             self.view_rows(menu, view);
         }
     }
@@ -2245,24 +2346,53 @@ impl View {
             Focus::Grid => !self.editor.selection().is_empty(),
             Focus::Find | Focus::Replace => self.field_selection().is_some(),
         };
-        menu.item(Action::Cut, "Cut", "Ctrl+X", selected, plate);
-        menu.item(Action::Copy, "Copy", "Ctrl+C", selected, plate);
-        menu.item(Action::Paste, "Paste", "Ctrl+V", true, plate);
-        menu.item(Action::SelectAll, "Select all", "Ctrl+A", true, plate);
+        menu.item(Action::Cut, S::Cut, "Cut", "Ctrl+X", selected, plate);
+        menu.item(Action::Copy, S::Copy, "Copy", "Ctrl+C", selected, plate);
+        menu.item(Action::Paste, S::Paste, "Paste", "Ctrl+V", true, plate);
+        menu.item(
+            Action::SelectAll,
+            S::SelectAll,
+            "Select all",
+            "Ctrl+A",
+            true,
+            plate,
+        );
     }
 
     fn edit_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
         let history = self.focus == Focus::Grid;
         let (undo, redo) = self.editor.can_undo_redo();
-        menu.item(Action::Undo, "Undo", "Ctrl+Z", history && undo, plate);
-        menu.item(Action::Redo, "Redo", "Ctrl+Shift+Z", history && redo, plate);
+        menu.item(
+            Action::Undo,
+            S::Undo,
+            "Undo",
+            "Ctrl+Z",
+            history && undo,
+            plate,
+        );
+        menu.item(
+            Action::Redo,
+            S::Redo,
+            "Redo",
+            "Ctrl+Shift+Z",
+            history && redo,
+            plate,
+        );
         menu.separator(plate);
-        menu.item(Action::Indent, "Indent", "Ctrl+]", text, plate);
-        menu.item(Action::Outdent, "Outdent", "Ctrl+[", text, plate);
+        menu.item(Action::Indent, S::Indent, "Indent", "Ctrl+]", text, plate);
+        menu.item(
+            Action::Outdent,
+            S::Outdent,
+            "Outdent",
+            "Ctrl+[",
+            text,
+            plate,
+        );
         let comment = self.can_comment();
         menu.item(
             Action::ToggleComment,
+            S::Comment,
             "Toggle comment",
             "Ctrl+/",
             comment,
@@ -2272,6 +2402,7 @@ impl View {
         let overwrite = self.editor.overwrite();
         menu.mark(
             Action::ToggleOverwrite,
+            S::Overwrite,
             "Overwrite",
             "Insert",
             overwrite,
@@ -2282,11 +2413,26 @@ impl View {
     fn find_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
         let problems = !self.editor.diagnostics().0.is_empty();
-        menu.item(Action::Find, "Find\u{2026}", "Ctrl+F", true, plate);
-        menu.item(Action::Replace, "Replace\u{2026}", "Ctrl+H", true, plate);
-        menu.item(Action::FindNext, "Find next", "F3", true, plate);
+        menu.item(Action::Find, S::Find, "Find\u{2026}", "Ctrl+F", true, plate);
+        menu.item(
+            Action::Replace,
+            S::Replace,
+            "Replace\u{2026}",
+            "Ctrl+H",
+            true,
+            plate,
+        );
+        menu.item(
+            Action::FindNext,
+            S::FindNext,
+            "Find next",
+            "F3",
+            true,
+            plate,
+        );
         menu.item(
             Action::FindPrevious,
+            S::FindPrevious,
             "Find previous",
             "Shift+F3",
             true,
@@ -2295,55 +2441,77 @@ impl View {
         menu.separator(plate);
         menu.item(
             Action::GoToLine,
+            S::GoTo,
             "Go to line\u{2026}",
             "Ctrl+L",
             text,
             plate,
         );
-        menu.item(Action::NextProblem, "Next problem", "F8", problems, plate);
+        menu.item(
+            Action::NextProblem,
+            S::NextProblem,
+            "Next problem",
+            "F8",
+            problems,
+            plate,
+        );
     }
 
     fn view_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         self.modes(menu, plate);
         menu.separator(plate);
-        if let Some(formats) = menu.submenu("Format", plate) {
+        if let Some(formats) = menu.submenu("Format", S::Syntax, plate) {
             self.formats(menu, formats);
         }
-        if let Some(tabs) = menu.submenu("Tab width", plate) {
+        if let Some(tabs) = menu.submenu("Tab width", S::TabWidth, plate) {
             self.tab_widths(menu, tabs);
         }
-        if let Some(indents) = menu.submenu("Indentation", plate) {
+        if let Some(indents) = menu.submenu("Indentation", S::Indent, plate) {
             self.indents(menu, indents);
         }
-        if let Some(endings) = menu.submenu("Line endings", plate) {
+        if let Some(endings) = menu.submenu("Line endings", S::LineEndings, plate) {
             self.endings(menu, endings);
         }
     }
 
     fn modes(&self, menu: &mut MenuBuilder, plate: Plate) {
-        let code = self.code_shown().is_some();
+        let shown = self.display_shown().is_some();
         menu.radio(
             Action::Mode(Mode::Text),
+            S::ViewText,
             "Text",
             "",
-            !code && self.editor.mode() == Mode::Text,
+            !shown && self.editor.mode() == Mode::Text,
             plate,
         );
         menu.radio(
             Action::Mode(Mode::Hex),
+            S::ViewHex,
             "Hex",
             "Ctrl+Shift+H",
-            !code && self.editor.mode() == Mode::Hex,
+            !shown && self.editor.mode() == Mode::Hex,
             plate,
         );
-        let Some(display) = &self.code else {
-            return;
+        let display = match &self.display {
+            Some(Display::Code(display)) => display,
+            Some(Display::Data(_)) => {
+                menu.radio(Action::ShowData, S::ViewData, "Data", "", shown, plate);
+                return;
+            }
+            None => return,
         };
-        menu.radio(Action::ShowCode, "Code", "", code, plate);
-        if let Some(sets) = menu.submenu("Instruction set", plate) {
+        menu.radio(Action::ShowCode, S::ViewCode, "Code", "", shown, plate);
+        if let Some(sets) = menu.submenu("Instruction set", S::InstructionSet, plate) {
             let read_as = display.choice().or(display.isa());
             for isa in Isa::ALL {
-                menu.radio(Action::Isa(isa), isa.name(), "", read_as == Some(isa), sets);
+                menu.radio(
+                    Action::Isa(isa),
+                    S::InstructionSet,
+                    isa.name(),
+                    "",
+                    read_as == Some(isa),
+                    sets,
+                );
             }
         }
     }
@@ -2352,6 +2520,7 @@ impl View {
         for format in Format::ALL {
             menu.radio(
                 Action::Format(format),
+                S::Syntax,
                 format.label(),
                 "",
                 self.editor.format() == format,
@@ -2364,6 +2533,7 @@ impl View {
         for (width, label) in TAB_WIDTHS.into_iter().zip(TAB_LABELS) {
             menu.radio(
                 Action::TabWidth(width),
+                S::TabWidth,
                 label,
                 "",
                 self.editor.tab_width() == usize::from(width),
@@ -2376,6 +2546,7 @@ impl View {
         for (indent, label) in INDENTS.into_iter().zip(INDENT_LABELS) {
             menu.radio(
                 Action::Indentation(indent),
+                S::Indent,
                 label,
                 "",
                 self.editor.indent() == indent,
@@ -2388,6 +2559,7 @@ impl View {
         for ending in ENDINGS {
             menu.radio(
                 Action::LineEnding(ending),
+                S::LineEndings,
                 ending.label(),
                 "",
                 self.editor.line_ending() == ending,
@@ -2411,19 +2583,27 @@ const INDENT_LABELS: [&str; 4] = [
 
 /// The File menu's rows, the same whatever the document.
 fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
-    menu.item(Action::NewWindow, "New window", "Ctrl+N", true, plate);
-    menu.item(Action::Open, "Open\u{2026}", "Ctrl+O", true, plate);
+    menu.item(
+        Action::NewWindow,
+        S::NewWindow,
+        "New window",
+        "Ctrl+N",
+        true,
+        plate,
+    );
+    menu.item(Action::Open, S::Open, "Open\u{2026}", "Ctrl+O", true, plate);
     menu.separator(plate);
-    menu.item(Action::Save, "Save", "Ctrl+S", true, plate);
+    menu.item(Action::Save, S::Save, "Save", "Ctrl+S", true, plate);
     menu.item(
         Action::SaveAs,
+        S::SaveAs,
         "Save as\u{2026}",
         "Ctrl+Shift+S",
         true,
         plate,
     );
     menu.separator(plate);
-    menu.item(Action::Close, "Close", "Ctrl+W", true, plate);
+    menu.item(Action::Close, S::Close, "Close", "Ctrl+W", true, plate);
 }
 
 impl From<Action> for u16 {
@@ -2466,16 +2646,8 @@ fn shortcut(key: Key, modifiers: Modifiers, hex_shown: bool) -> Option<Action> {
     }
 }
 
-/// What the Code display says to anything that would edit or search it.
-const CODE_READ_ONLY: &str =
-    "Code is read-only: show the document as Text or Hex to edit or search it";
-
-/// Bytes of a document's head read to tell whether it is an executable: the
-/// longest container magic, with room to spare.
-const CODE_HEAD_LEN: usize = 16;
-
 /// Whether `action` works on the document as the editor shows it — editing,
-/// searching or retyping it — and so not on its Code display.
+/// searching or retyping it — and so not on a read-only display.
 const fn needs_editor_display(action: Action) -> bool {
     !matches!(
         action,
@@ -2486,6 +2658,7 @@ const fn needs_editor_display(action: Action) -> bool {
             | Action::Close
             | Action::Mode(_)
             | Action::ShowCode
+            | Action::ShowData
             | Action::Isa(_)
     )
 }

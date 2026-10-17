@@ -10,7 +10,7 @@ files — navegador gráfico do sistema de ficheiros
 
 Abre uma janela do ambiente de trabalho que lista o sistema de ficheiros, a
 começar pelo `directory` indicado na linha de comandos ou, se nenhum for
-indicado, pela pasta `UserFiles` do utilizador que o inicia (o seu diretório
+indicado, pela pasta `Home` do utilizador que o inicia (o seu diretório
 pessoal, se essa pasta não puder ser listada). O título da janela indica o
 diretório atual; a janela lista as suas entradas, cada entrada selecionada
 realçada com a cor de destaque do tema ativo. Cada leitura de um diretório é
@@ -20,7 +20,7 @@ que o inicia: um diretório ilegível é recusado, nunca adivinhado.
 O ambiente de trabalho inicia o explorador por si e mantém-no na barra de
 ícones: o menu do seu lugar lista os seus próprios locais e tudo o que
 estiver montado, e escolher um abre lá uma janela. Um clique no lugar abre
-uma na sua pasta `UserFiles`. Pedir uma pasta que já tem uma janela traz
+uma na sua pasta `Home`. Pedir uma pasta que já tem uma janela traz
 essa janela para a frente, em vez de abrir outra. Esta instância não tem a
 linha *Sair* — faz parte do ambiente de trabalho, e fechar as suas janelas
 apenas a arruma.
@@ -69,6 +69,14 @@ de uma aplicação na barra de ícones é aberto lá.
 O submenu *Novo* do menu de contexto cria uma pasta, ou um documento vazio
 de cada tipo que um editor instalado escreve, e abre o seu nome para edição.
 
+O submenu *Visualização* do menu de contexto mostra os itens como ícones
+grandes, a predefinição; como ícones pequenos, cada nome numa linha ao lado
+da sua imagem; ou como lista, uma linha por item com o tamanho, a data da
+última alteração e o tipo. Uma unidade listada entre eles mostra, em vez
+disso, o espaço livre, o sistema de ficheiros e o estado do seu
+funcionamento. Um clique no título de uma coluna ordena a lista por ela, e
+um segundo clique inverte a ordem.
+
 `Alt+Enter` abre uma janela de *Propriedades* do item selecionado, tal como
 a linha *Propriedades* do menu de contexto. É uma janela própria, pelo que
 podem estar várias abertas ao mesmo tempo e a listagem continua utilizável
@@ -94,7 +102,7 @@ verdadeiro — `.` e `..` não o são, pelo que uma escrita nunca pode
 significar outro lugar que não aquele que se lê. Um diretório que
 infrinja alguma dessas regras, ou que o utilizador que a lançou não
 possa listar, é recusado com a razão no fluxo de erro padrão e a janela
-abre-se antes na pasta `UserFiles`, para que um argumento errado nunca
+abre-se antes na pasta `Home`, para que um argumento errado nunca
 deixe o utilizador sem janela. Um segundo operando é recusado de todo
 em vez de ignorado.
 

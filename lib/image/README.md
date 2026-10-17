@@ -23,8 +23,9 @@ authored no larger than the wallpaper renderer's own maximum destination
 that, which is what `decode_fitted` and the progressive-store bound below
 exist for.
 
-The picture viewer (`plans/VIEW.md`) and the image editor (`plans/PAINT.md`)
-are the other consumers, through the same sandbox. Every format they claim
+The picture viewer (`plans/VIEW.md`), the image editor (`plans/PAINT.md`)
+and the text editor's Data display (`plans/TEXTEDIT.md` TE16, the structure
+report below) are the other consumers, through the same sandbox. Every format they claim
 lands here rather than beside them, so a format's decoder exists once.
 *Admitting* a format is still each consumer's own decision: the icon pipeline
 deliberately takes only PNG and SVG (`plans/ICONS.md`), and the wallpaper
@@ -139,6 +140,24 @@ as RGBA. For a PNG or JPEG, `Unkept` says what the file held that the picture
 does not: samples narrowed from 16 bits (`precision`), or data beside the
 picture no encoder here writes (`extras`), such as a colour profile, text,
 EXIF metadata or an animation's further frames.
+
+## Structure reports
+
+`inspect::inspect(bytes, format)` reports what a picture file is made of: each
+record of its container in file order, at its offset and length, with what it
+declares — a PNG's chunks (a run of image data as one line), a JPEG's marker
+segments and the entropy-coded data between them, a GIF's blocks and frames, a
+BMP's headers, an icon file's directory and pictures, a TIFF's directory chain,
+a WEBP's RIFF chunks and animation frames, a sprite area's control blocks, an
+OpenRaster archive's members — and every EXIF tag by name with its value in
+its unit (`exif`, which reads a TIFF file's own pages too). Advisory reading,
+walked tolerantly: a record that will not read ends the walk with where and
+why, an EXIF entry list cut short is read as far as it goes, and no directory
+is visited twice. The report is bounded — `MAX_REPORT_LINES` lines of at most
+`MAX_LINE_BYTES` bytes, saying where it stopped — and the text a file carries
+is shown with its control bytes escaped. The TIFF directory layout every
+reader here shares — the decoder's strict reading and the advisory walks — is
+`ifd`.
 
 ## Writing
 

@@ -34,6 +34,15 @@ gyfarwyddiadau y mae'r ffeil yn ei henwi, neu fel set y peiriant hwn fel arall;
 mae "Set gyfarwyddiadau" yn y ddewislen Gwedd yn ei ddarllen fel un arall, ac
 mae maes gwedd y llinell statws yn cynnig y wedd cod wrth ochr testun a hecs.
 
+Mae llun — PNG, JPEG, GIF, BMP, TIFF, WEBP, ffeil eicon neu bwyntydd, ardal
+corluniau RISC OS neu ddogfen OpenRaster — yn agor yn hytrach yn y wedd
+ddata: o beth mae'r ffeil wedi'i gwneud, pob cofnod yn ei safle gyda'i hyd
+a'r hyn y mae'n ei ddatgan, pob tag EXIF wrth ei enw gyda'i werth, ac yna
+pob beit o'r ffeil mewn hecs wrth ymyl ei nod. Mae'r wedd ddata yn ddarllen
+yn unig; mae'r wedd hecs yn golygu'r un beitiau. Caiff y llun ei ddarllen
+gan drydedd broses waith ei hun, heb gyrraedd dim chwaith, ac mae'r
+ddewislen Gwedd yn cynnig y wedd ddata wrth ymyl testun a hecs.
+
 Mae cod ffynhonnell yn cael ei liwio: HTML, XML ac SVG, CSS, JavaScript, JSON,
 YAML, TOML, Markdown, Rust, C, Java, Python a sgriptiau cragen. Mae ffeiliau
 gosodiadau'r system — gosodiadau rhaglenni, llyfrgell y rhaglenni,

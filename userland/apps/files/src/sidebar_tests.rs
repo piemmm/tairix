@@ -23,7 +23,7 @@ use super::{
     apply_event, follow_pointer, is_refresh_request, press_point, refresh_places, track_hover,
 };
 use crate::chrome::Chrome;
-use crate::test_fs::{browser, FakeFs};
+use crate::test_fs::{browser, mounted, FakeFs};
 
 /// A disk on an ATA bus that reported its rotation.
 const HARD_DISK: BlkMedium = BlkMedium::of_transport(BlkTransport::Ata).with_rotation(
@@ -60,11 +60,7 @@ fn home() -> Vec<String> {
 fn places() -> Places {
     Places::new(
         &home(),
-        &[Volume {
-            label: "Backup".to_string(),
-            target: "/Storage/Backup".to_string(),
-            medium: Some(HARD_DISK),
-        }],
+        &[mounted("Backup", "/Storage/Backup", Some(HARD_DISK))],
     )
 }
 
@@ -202,17 +198,20 @@ fn hovered(places: &mut Places, event: &WindowEvent) -> (bool, Region) {
     (moved, damage)
 }
 
+/// The components of the one volume the test rail offers.
+fn backup() -> [String; 2] {
+    ["Storage".to_string(), "Backup".to_string()]
+}
+
 #[test]
 fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
     let mut browser = browser();
     let mut places = places();
-    let system = places
-        .index_of(&["System".to_string()])
-        .expect("the system root is a fixed row");
+    let volume = places.index_of(&backup()).expect("the volume is a row");
 
-    let on_system = press(row_centre(&places, system));
+    let on_volume = press(row_centre(&places, volume));
     let outcome =
-        route(&mut browser, &mut places, &on_system).expect("the rail owns its own press");
+        route(&mut browser, &mut places, &on_volume).expect("the rail owns its own press");
 
     assert_eq!(
         outcome.repaint,
@@ -220,11 +219,11 @@ fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
         "the listing, the toolbar's enable states, and the rail's own mark all moved"
     );
     assert_eq!(outcome.refused, None);
-    assert_eq!(browser.components(), ["System".to_string()]);
+    assert_eq!(browser.components(), backup());
     assert!(places.is_focused());
-    assert_eq!(places.cursor(), system);
+    assert_eq!(places.cursor(), volume);
     // The rail shows where the browser now is.
-    assert_eq!(places.index_of(browser.components()), Some(system));
+    assert_eq!(places.index_of(browser.components()), Some(volume));
 }
 
 #[test]
@@ -272,16 +271,17 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     let mut places = places();
     places.set_focused(true);
 
-    // Down to UserFiles (Home, Desktop, UserFiles).
+    // Down to Desktop, then back up to Home, the user's own files.
     assert_eq!(
         route(&mut browser, &mut places, &named(NamedKeyCode::Down)),
         Some(super::SidebarOutcome::reported(true))
     );
+    assert_eq!(places.cursor(), 1);
     assert_eq!(
-        route(&mut browser, &mut places, &named(NamedKeyCode::Down)),
+        route(&mut browser, &mut places, &named(NamedKeyCode::Up)),
         Some(super::SidebarOutcome::reported(true))
     );
-    assert_eq!(places.cursor(), 2);
+    assert_eq!(places.cursor(), 0);
 
     let outcome = route(&mut browser, &mut places, &named(NamedKeyCode::Enter));
     assert_eq!(
@@ -291,17 +291,10 @@ fn the_arrows_walk_the_rail_and_enter_navigates_to_the_cursor() {
     );
     assert_eq!(
         browser.components(),
-        [
-            "Users".to_string(),
-            "ann".to_string(),
-            "UserFiles".to_string()
-        ]
+        ["Users".to_string(), "ann".to_string(), "Home".to_string()]
     );
 
-    // Up walks back and clamps at the first row rather than wrapping.
-    route(&mut browser, &mut places, &named(NamedKeyCode::Up));
-    route(&mut browser, &mut places, &named(NamedKeyCode::Up));
-    assert_eq!(places.cursor(), 0);
+    // Up clamps at the first row rather than wrapping.
     assert_eq!(
         route(&mut browser, &mut places, &named(NamedKeyCode::Up)),
         Some(super::SidebarOutcome::QUIET)
@@ -400,39 +393,35 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
 fn pressing_the_row_already_marked_changes_and_reports_nothing() {
     let mut browser = browser();
     let mut places = places();
-    let system = places
-        .index_of(&["System".to_string()])
-        .expect("the system root is a fixed row");
-    let on_system = press(row_centre(&places, system));
-    route(&mut browser, &mut places, &on_system);
+    let volume = places.index_of(&backup()).expect("the volume is a row");
+    let on_volume = press(row_centre(&places, volume));
+    route(&mut browser, &mut places, &on_volume);
 
     // The focus, the cursor, and the browser are all already there, so the
     // second press moves no pixel and owes no present.
-    let (outcome, damage) = routed(&mut browser, &mut places, &on_system);
+    let (outcome, damage) = routed(&mut browser, &mut places, &on_volume);
     assert_eq!(outcome, Some(super::SidebarOutcome::QUIET));
     assert!(damage.is_empty());
-    assert_eq!(browser.components(), ["System".to_string()]);
+    assert_eq!(browser.components(), backup());
 }
 
 #[test]
 fn a_press_that_only_moves_the_mark_reports_the_rows_it_moved_between() {
     let mut browser = browser();
     let mut places = places();
-    let system = places
-        .index_of(&["System".to_string()])
-        .expect("the system root is a fixed row");
-    let on_system = press(row_centre(&places, system));
-    route(&mut browser, &mut places, &on_system);
+    let volume = places.index_of(&backup()).expect("the volume is a row");
+    let on_volume = press(row_centre(&places, volume));
+    route(&mut browser, &mut places, &on_volume);
     // Put the cursor elsewhere without navigating, so the next press on the
     // shown row moves the mark and nothing else.
     places.set_cursor(0);
     let view = rail(&places);
     let (first, marked) = (
         view.row_rect(0).expect("row 0"),
-        view.row_rect(system).expect("the System row"),
+        view.row_rect(volume).expect("the volume's row"),
     );
 
-    let (outcome, damage) = routed(&mut browser, &mut places, &on_system);
+    let (outcome, damage) = routed(&mut browser, &mut places, &on_volume);
 
     assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Reported));
     let mut want = damage::sink();
@@ -640,30 +629,22 @@ fn a_refresh_re_reads_the_volumes_and_keeps_the_users_place_in_the_rail() {
         &mut places,
         &home(),
         &[
-            Volume {
-                label: "Backup".to_string(),
-                target: "/Storage/Backup".to_string(),
-                medium: Some(HARD_DISK),
-            },
+            mounted("Backup", "/Storage/Backup", Some(HARD_DISK)),
             // A stick the user just plugged in: it appears without a poll.
-            Volume {
-                label: "Stick".to_string(),
-                target: "/Storage/Stick".to_string(),
-                medium: Some(STICK),
-            },
+            mounted("Stick", "/Storage/Stick", Some(STICK)),
         ],
     );
 
     assert!(places.is_focused());
     assert_eq!(places.cursor(), 2);
-    assert_eq!(places.len(), 6);
-    assert_eq!(places.rows()[5].label(), "Stick");
+    assert_eq!(places.len(), 4);
+    assert_eq!(places.rows()[3].label(), "Stick");
 
     // A cursor the shorter rail no longer has is left at the first row rather
     // than pointing past the end.
-    places.set_cursor(5);
+    places.set_cursor(3);
     refresh_places(&mut places, &home(), &[]);
-    assert_eq!(places.len(), 4);
+    assert_eq!(places.len(), 2);
     assert_eq!(places.cursor(), 0);
 }
 
@@ -699,10 +680,12 @@ fn only_a_primary_press_resolves_to_a_point() {
 /// Thirty mounted volumes: far more rows than the test window holds.
 fn crowded_volumes() -> Vec<Volume> {
     (0..30)
-        .map(|at| Volume {
-            label: alloc::format!("Disk {at:02}"),
-            target: alloc::format!("/Storage/d{at:02}"),
-            medium: None,
+        .map(|at| {
+            mounted(
+                &alloc::format!("Disk {at:02}"),
+                &alloc::format!("/Storage/d{at:02}"),
+                None,
+            )
         })
         .collect()
 }
@@ -929,11 +912,9 @@ fn a_focused_rail_lets_the_windows_accelerators_through() {
 fn alt_enter_on_the_focused_rail_navigates_nowhere() {
     let mut browser = browser();
     let mut places = places();
-    let system = places
-        .index_of(&["System".to_string()])
-        .expect("the system root is a fixed row");
+    let volume = places.index_of(&backup()).expect("the volume is a row");
     places.set_focused(true);
-    places.set_cursor(system);
+    places.set_cursor(volume);
 
     let outcome = route(
         &mut browser,
@@ -961,16 +942,8 @@ fn a_rebuilt_rail_lights_the_row_now_under_a_still_pointer() {
         &mut places,
         &home(),
         &[
-            Volume {
-                label: "Archive".to_string(),
-                target: "/Storage/Archive".to_string(),
-                medium: None,
-            },
-            Volume {
-                label: "Backup".to_string(),
-                target: "/Storage/Backup".to_string(),
-                medium: Some(HARD_DISK),
-            },
+            mounted("Archive", "/Storage/Archive", None),
+            mounted("Backup", "/Storage/Backup", Some(HARD_DISK)),
         ],
     );
     follow_pointer(

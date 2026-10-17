@@ -14,6 +14,8 @@ pub enum NoticeSource {
     Write,
     /// A rename.
     Rename,
+    /// Opening an item in an application, or starting one.
+    Open,
 }
 
 /// A window's refusal notices, by where each came from.

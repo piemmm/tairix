@@ -175,6 +175,10 @@ mod program {
             stream.notify_port()
         }
 
+        fn stream_id(&self, stream: &LiveStream) -> u64 {
+            stream.client().grant().stream_id
+        }
+
         fn write(
             &mut self,
             stream: &mut LiveStream,

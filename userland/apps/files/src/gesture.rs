@@ -28,10 +28,7 @@
 //!
 //! There is no right-*double*-click: the menu the first press opens is the
 //! desktop's chain and holds the seat's grab, so the second press is consumed
-//! there and never reaches this window. Its "open this and I am done here" verb
-//! is a row of the menu instead ([`AfterHandoff::CloseWindow`], reached from
-//! `ContextCommand::OpenAndClose`) — discoverable, and reachable from the
-//! keyboard, which the gesture never was (`plans/NEW-MENUS.md` D20).
+//! there and never reaches this window (`plans/NEW-MENUS.md` D20).
 //!
 //! The pairing rule itself is the shared engine's
 //! ([`DoubleClickTracker`]) — keyed on the button as well as the item, so a
@@ -82,22 +79,6 @@ pub const fn bundle_intent(shift: bool) -> BundleIntent {
     } else {
         BundleIntent::Launch
     }
-}
-
-/// Whether a completed activation that handed the entry to another program
-/// leaves this window with nothing left to do.
-///
-/// The gesture decides: a plain activation leaves the manager open on the
-/// folder it was showing, while a right-double-click means "open this and I am
-/// done here". A *descent* never closes the window whichever is asked for — it
-/// is the window's new content, so closing it would leave the user with
-/// nothing.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AfterHandoff {
-    /// Keep the window on the folder it is showing.
-    Keep,
-    /// Close the window: the entry has been handed to another program.
-    CloseWindow,
 }
 
 /// Where a primary press landed.

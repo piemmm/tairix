@@ -9,6 +9,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::CommandSection;
+use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_controls::{ControlState, MenuItem};
 
 use crate::input::TaskbarResponse;
@@ -45,6 +46,14 @@ impl NetworkRow {
             Self::Activity => "Network Activity…",
         }
     }
+
+    /// The function this row's picture shows.
+    const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Settings => AppMenuSymbol::Network,
+            Self::Activity => AppMenuSymbol::NetworkActivity,
+        }
+    }
 }
 
 /// The network menu, in order: the single definition of its shape.
@@ -59,13 +68,18 @@ pub(crate) fn rows(settings_installed: bool) -> Vec<BarMenuRow> {
         .enumerate()
         .map(|(index, row)| {
             let item = MenuItem::new(row.label());
-            match row {
+            let (item, why) = match row {
                 NetworkRow::Settings if !settings_installed => (
-                    index,
                     item.with_state(ControlState::disabled()),
                     Some(REASON_NOT_INSTALLED),
                 ),
-                _ => (index, item, None),
+                _ => (item, None),
+            };
+            BarMenuRow {
+                index,
+                symbol: row.symbol(),
+                item,
+                why,
             }
         })
         .collect()
@@ -89,11 +103,12 @@ mod tests {
     fn each_row_draws_its_label_and_answers_its_own_command() {
         let drawn = rows(true);
         assert_eq!(drawn.len(), ROWS.len());
-        for ((index, item, why), row) in drawn.into_iter().zip(ROWS) {
-            assert_eq!(item.label(), row.label());
-            assert!(why.is_none());
-            assert!(item.state().is_actionable());
-            assert_eq!(response_at(index), Some(row.response()));
+        for (drawn, row) in drawn.into_iter().zip(ROWS) {
+            assert_eq!(drawn.item.label(), row.label());
+            assert_eq!(drawn.symbol, row.symbol());
+            assert!(drawn.why.is_none());
+            assert!(drawn.item.state().is_actionable());
+            assert_eq!(response_at(drawn.index), Some(row.response()));
         }
         assert_eq!(response_at(0), Some(TaskbarResponse::OpenNetworkSettings));
         assert_eq!(
@@ -111,10 +126,10 @@ mod tests {
 
     #[test]
     fn with_no_settings_bundle_the_settings_row_says_so_and_cannot_act() {
-        for (index, item, why) in rows(false) {
-            let settings = ROWS[index] == NetworkRow::Settings;
-            assert_eq!(item.state().is_actionable(), !settings);
-            assert_eq!(why, settings.then_some(REASON_NOT_INSTALLED));
+        for drawn in rows(false) {
+            let settings = ROWS[drawn.index] == NetworkRow::Settings;
+            assert_eq!(drawn.item.state().is_actionable(), !settings);
+            assert_eq!(drawn.why, settings.then_some(REASON_NOT_INSTALLED));
         }
     }
 }

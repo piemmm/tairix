@@ -41,11 +41,11 @@ use tairix_controls::state::{
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    fill_area, ground_fill, paint_icon_slot, stack, withheld, Chart, Checkbox, ChromeLayer,
-    CompositionBar, CompositionRing, CompositionSegment, Fact, FactList, FieldAction, FieldControl,
-    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow,
-    Panel, PressureKind, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout, Toolbar,
-    FULL_COLOUR, FULL_PERMILLE,
+    fill_area, ground_fill, paint_icon_slot, stack, withheld, CellAlign, Chart, Checkbox,
+    ChromeLayer, CompositionBar, CompositionRing, CompositionSegment, Fact, FactList, FieldAction,
+    FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet, HeaderColumn,
+    IconButton, IconTile, ListRow, Panel, PressureKind, ScrollBar, SortOrder, Tab, TableCell,
+    TableHeader, TableRow, Tabs, TileLayout, Toolbar, FULL_COLOUR, FULL_PERMILLE,
 };
 use tairix_font::{BitmapFont, Cut, ELLIPSIS};
 use tairix_geometry::{to_i32, GridFill, Point, Rect, Region, Scale};
@@ -62,15 +62,18 @@ use crate::chrome::{
 };
 use crate::column::ScrollColumn;
 use crate::delete::DeletePlan;
-use crate::drive::{Drive, DriveChange, DRIVE_FACTS_MAX};
+use crate::drive::{health_word, Drive, DriveChange, DRIVE_FACTS_MAX};
 use crate::entry::{Entry, EntryKind};
-use crate::format::{format_date, format_size};
+use crate::format::{format_minute, format_size};
 use crate::layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
-use crate::media::{entry_icon, icon_for_entry, media_for_name, Ending, MediaType};
+use crate::media::{
+    entry_icon, icon_for_entry, media_for_entry, media_for_name, Ending, MediaType,
+};
 use crate::open_with::OpenWithChooser;
-use crate::places::{self, Place, Places};
+use crate::places::{self, Place, Places, VolumeFacts};
 use crate::progress::ProgressModel;
 use crate::properties::{Attributes, Properties};
+use crate::sort::{SortDirection, SortKey, SortMode};
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 use tairix_abi::fs::FileKind;
@@ -82,13 +85,145 @@ const LABEL_PADDING: u32 = 4;
 /// Vertical padding above and below a row's glyphs, in logical pixels.
 const ROW_PADDING: u32 = 2;
 
-/// Relative widths of the list view's name, size, and modified columns.
+/// Relative widths of the list's four columns: the name, then the size, the
+/// modification time and the type — or, for a drive, its free space,
+/// filesystem and health in their places.
 ///
 /// [`TableRow::render`] scales these proportionally into the actual content
 /// width, so they act as weights independent of the window size: the name
-/// column dominates, with narrower size and date columns beside it. Defining
-/// them once here keeps the column layout a single definition.
-const COLUMNS: [u32; 3] = [240, 96, 128];
+/// column dominates. The header lays its titles out across the same weights,
+/// so a title can never drift from the cells beneath it.
+const COLUMNS: [u32; 4] = [240, 96, 148, 136];
+
+/// What the list's columns state.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ListColumns {
+    /// Name, size, modified, type: any listing holding more than drives. A
+    /// drive's row in one states its free space, filesystem and health in
+    /// those columns, the space said to be free.
+    Files,
+    /// Name, free space, filesystem, health: a listing of drives alone.
+    Drives,
+}
+
+impl ListColumns {
+    /// The columns a listing of `entries` shows.
+    ///
+    /// Asked per paint and per press, which costs one entry for a listing that
+    /// holds anything but drives, since the scan stops at the first.
+    #[must_use]
+    pub fn of(entries: &[Entry]) -> Self {
+        if !entries.is_empty() && entries.iter().all(|entry| entry.volume().is_some()) {
+            Self::Drives
+        } else {
+            Self::Files
+        }
+    }
+
+    /// Each column's title and the order a press on it asks for.
+    const fn columns(self) -> [(&'static str, SortKey); 4] {
+        match self {
+            Self::Files => [
+                ("Name", SortKey::Name),
+                ("Size", SortKey::Size),
+                ("Modified", SortKey::Modified),
+                ("Type", SortKey::Kind),
+            ],
+            Self::Drives => [
+                ("Name", SortKey::Name),
+                ("Free", SortKey::Free),
+                ("Filesystem", SortKey::Filesystem),
+                ("Health", SortKey::Health),
+            ],
+        }
+    }
+
+    /// The header over these columns, its caret on the column `sort` orders
+    /// by when it is one of them.
+    fn header(self, sort: SortMode) -> TableHeader {
+        let columns = self.columns();
+        let mut header = TableHeader::new(
+            columns
+                .iter()
+                .enumerate()
+                .map(|(at, (title, _))| {
+                    let column = HeaderColumn::new(*title);
+                    if at == 1 {
+                        column.with_align(CellAlign::Trailing)
+                    } else {
+                        column
+                    }
+                })
+                .collect(),
+        );
+        let order = match sort.direction {
+            SortDirection::Ascending => SortOrder::Ascending,
+            SortDirection::Descending => SortOrder::Descending,
+        };
+        header.adopt_sort(
+            columns
+                .iter()
+                .position(|(_, key)| *key == sort.key)
+                .map(|at| (at, order)),
+        );
+        header
+    }
+}
+
+/// Where the list's column header lies within the content viewport: across
+/// it, below the toolbar band.
+fn header_rect(scale: Scale, theme: &Theme, content: Rect, toolbar: ToolbarBand) -> Rect {
+    Rect::new(
+        content.left(),
+        content
+            .top()
+            .saturating_add_unsigned(chrome_height(scale, theme, toolbar)),
+        content.width,
+        TableHeader::measured_height(scale, theme),
+    )
+}
+
+/// The order a primary press at window `point` on the list's column header
+/// asks for, or `None` for a point off the header or a display that has none.
+#[must_use]
+pub fn header_sort_at<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    point: Point,
+) -> Option<SortMode> {
+    if Tiles::of(browser.view_mode()).is_some() || awaiting_listing(browser) {
+        return None;
+    }
+    let content = content_viewport(viewport, scale, theme);
+    let bounds = header_rect(scale, theme, content, toolbar);
+    let columns = ListColumns::of(browser.entries());
+    let column = columns
+        .header(browser.sort_mode())
+        .column_at(bounds, scale, theme, &COLUMNS, point)?;
+    let (_, key) = columns.columns().get(column).copied()?;
+    Some(browser.sort_mode().pressed(key))
+}
+
+/// The window-local rectangle the list's column header occupies, or `None`
+/// in a display that draws none: what a change of the listing's order
+/// repaints besides its rows.
+#[must_use]
+pub fn list_header_rect<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+) -> Option<Rect> {
+    if Tiles::of(browser.view_mode()).is_some() {
+        return None;
+    }
+    let content = content_viewport(viewport, scale, theme);
+    Some(header_rect(scale, theme, content, toolbar))
+}
 
 /// Paint `browser`'s current directory into `surface` at `viewport`'s size,
 /// using `theme`'s palette and the shared collection controls.
@@ -170,8 +305,8 @@ pub fn render_into<S: DirectorySource>(
     if awaiting_listing(browser) {
         draw_listing_cue(surface, scale, theme, content);
     } else {
-        match browser.view_mode() {
-            ViewMode::List => draw_list(
+        match Tiles::of(browser.view_mode()) {
+            None => draw_list(
                 surface,
                 scale,
                 theme,
@@ -180,11 +315,11 @@ pub fn render_into<S: DirectorySource>(
                 chrome.toolbar,
                 artwork,
             ),
-            ViewMode::Grid => draw_grid(
+            Some(tiles) => draw_grid(
                 surface,
                 scale,
                 theme,
-                browser,
+                (browser, tiles),
                 content,
                 chrome.toolbar,
                 artwork,
@@ -612,6 +747,13 @@ fn draw_list<S: DirectorySource>(
     let offset = browser.scroll_offset();
     let parent = browser.components();
     let entries = browser.entries();
+    let columns = ListColumns::of(entries);
+    let header = header_rect(scale, theme, content, toolbar);
+    if !withheld(surface, header) {
+        columns
+            .header(browser.sort_mode())
+            .render(surface, header, scale, theme, &COLUMNS);
+    }
     view.view(offset).paint(surface, |surface| {
         for index in view.visible_range(offset) {
             let (Some(entry), Some(bounds)) = (entries.get(index), view.row_rect(index)) else {
@@ -623,7 +765,7 @@ fn draw_list<S: DirectorySource>(
                 continue;
             }
             let kind = icon_for_entry(entry, parent);
-            let mut row = entry_row(entry, browser.is_selected(index), kind);
+            let mut row = entry_row((entry, parent), columns, browser.is_selected(index), kind);
             if browser.drop_mark() == Some(index) {
                 row.set_state(row.state().with_pointer(PointerState::DragTarget));
             }
@@ -634,12 +776,12 @@ fn draw_list<S: DirectorySource>(
     });
 }
 
-/// Draw the visible icon-grid tiles below the toolbar as shared [`IconTile`]s,
+/// Draw the visible `tiles` below the toolbar as shared [`IconTile`]s,
 /// giving the selected entry the tile's selection state.
 ///
 /// Each tile's icon is the shared classification ([`entry_icon`]): the entry's
 /// content type and folder occupancy decide an [`IconKind`], and `artwork` is
-/// asked for a pre-rasterised surface at the side [`TILE_LAYOUT`] reserves.
+/// asked for a pre-rasterised surface at the side the tile's layout reserves.
 /// When it supplies one the tile draws that artwork; otherwise the tile falls
 /// back to the built-in glyph for the kind. The classification is resolved
 /// once here so the manager and picker draw the same icon for the same entry.
@@ -660,12 +802,12 @@ fn draw_grid<S: DirectorySource>(
     surface: &mut Surface,
     scale: Scale,
     theme: &Theme,
-    browser: &Browser<S>,
+    (browser, tiles): (&Browser<S>, Tiles),
     content: Rect,
     toolbar: ToolbarBand,
     artwork: &mut dyn IconArtwork,
 ) {
-    let view = grid_view(browser, scale, theme, content, toolbar);
+    let view = grid_view(browser, tiles, scale, theme, content, toolbar);
     let offset = browser.scroll_offset();
     let parent = browser.components();
     let entries = browser.entries();
@@ -690,9 +832,12 @@ fn draw_grid<S: DirectorySource>(
             if browser.drop_mark() == Some(index) {
                 state.pointer = PointerState::DragTarget;
             }
-            let tile = grid_tile(entry, state, kind);
-            let side = TILE_LAYOUT.icon_side(bounds, scale, theme);
-            let art = artwork.shadowed(request, side, shadow);
+            let tile = tiles.tile(entry, state, kind);
+            let side = tiles.layout().icon_side(bounds, scale, theme);
+            let art = match tiles {
+                Tiles::Large => artwork.shadowed(request, side, shadow),
+                Tiles::Small => artwork.artwork(request, side),
+            };
             tile.render(surface, bounds, scale, theme, art);
         }
     });
@@ -808,53 +953,168 @@ pub fn scroll_pointer<S: DirectorySource>(
         .route(model, (bounds, shown), scale, theme, (point, event), damage)
 }
 
-/// Build the [`TableRow`] for one list entry: a leading name cell carrying the
-/// entry's `icon`, a trailing numeric size cell (blank for a directory, a
-/// bundle, or a link, none of which carries a meaningful byte size — a link's
-/// own size is the length of the path it stores), and a modified-date cell.
+/// Build the [`TableRow`] for one list entry listed in `parent`, under
+/// `columns`: a leading name cell carrying the entry's `icon`, then what the
+/// entry states — its size (blank for a directory, a bundle, or a link, none
+/// of which carries a meaningful byte size; a link's own size is the length of
+/// the path it stores), its modification to the minute, and its type — or, for
+/// a drive, its free space, its filesystem and its health.
 ///
 /// `icon` is the shared classification ([`icon_for_entry`]) the grid tile
 /// draws too, so a row and a tile can never picture the same entry
-/// differently. The name cell paints the built-in glyph for that kind — the
-/// row control takes an [`IconKind`], not cached artwork — which is what makes
-/// the kind readable in a view whose rows are otherwise text.
-fn entry_row(entry: &Entry, selected: bool, icon: IconKind) -> TableRow {
-    let size = if matches!(entry.kind(), EntryKind::File) {
-        format_size(entry.size())
-    } else {
-        String::new()
+/// differently.
+fn entry_row(
+    (entry, parent): (&Entry, &[String]),
+    columns: ListColumns,
+    selected: bool,
+    icon: IconKind,
+) -> TableRow {
+    let [size, second, third] = match entry.volume() {
+        Some(facts) => drive_cells(facts, columns),
+        None => [
+            if matches!(entry.kind(), EntryKind::File) {
+                format_size(entry.size())
+            } else {
+                String::new()
+            },
+            format_minute(entry.modified()),
+            String::from(type_name(entry, parent)),
+        ],
     };
     let cells = vec![
         TableCell::new(entry_label(entry)).with_icon(icon),
         TableCell::numeric(size),
-        TableCell::new(format_date(entry.modified())),
+        TableCell::new(second),
+        TableCell::new(third),
     ];
     let mut row = TableRow::new(cells).with_text_role(TextRole::ItemLabel);
     row.set_selected(selected);
     row
 }
 
-/// The layout every entry tile is divided by: two name lines under its picture.
-///
-/// Shared with the desktop's icon field, so a tile there and in a listing
-/// seat their names alike.
-pub const TILE_LAYOUT: TileLayout = TileLayout::new(2);
+/// What a drive's row states in the three columns after its name: its free
+/// space — said to be free where the column is a size — its filesystem and
+/// its health, in the words its Properties window uses.
+fn drive_cells(facts: &VolumeFacts, columns: ListColumns) -> [String; 3] {
+    let free = match (facts.free, columns) {
+        (None, _) => String::new(),
+        (Some(bytes), ListColumns::Drives) => format_size(bytes),
+        (Some(bytes), ListColumns::Files) => alloc::format!("{} free", format_size(bytes)),
+    };
+    [
+        free,
+        facts.filesystem.clone(),
+        health_word(facts.availability),
+    ]
+}
 
-/// Build the [`IconTile`] for one grid entry: the entry's file-type `icon`
-/// above its label, carrying the shared selection state when selected. The
-/// `icon` is the shared classification ([`icon_for_entry`]) resolved by the
-/// caller — a display hint only, decided once so a tile and a list row draw
-/// the same icon for the same entry.
+/// What a list's type column calls `entry`, listed in `parent`: its content
+/// type's name, or what a link names as its Properties window words it.
+fn type_name(entry: &Entry, parent: &[String]) -> &'static str {
+    match entry.kind() {
+        EntryKind::Link(_) => Properties::kind_label_for(entry.kind()),
+        _ => media_for_entry(entry, parent).name(),
+    }
+}
+
+/// How wide a small tile's name runs, in body glyphs: room for a dozen or so
+/// characters, as the RISC OS Filer's small icons give, before a longer name
+/// is cut.
+const SMALL_NAME_GLYPHS: u32 = 7;
+
+/// One of the two displays that lay entries out as tiles in a grid: how big a
+/// tile is and where its name sits against its picture.
 ///
-/// A name too long for its lines is cut in its middle ([`name_cut`]), so its
-/// extension is never what is dropped.
-#[must_use]
-pub fn grid_tile(entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
-    IconTile::new(entry_label(entry), icon)
-        .with_layout(TILE_LAYOUT)
-        .with_state(state)
-        .with_name_cut(name_cut(entry.name()))
-        .with_picture_shadow()
+/// The one place the two differ, so every geometry query — the paint, the
+/// hit-test, the marquee, the rename field, a drop — reads the same tile.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Tiles {
+    /// Large icons: a picture above two lines of name. Shared with the
+    /// desktop's icon field, so a tile there and in a listing seat their names
+    /// alike.
+    Large,
+    /// Small icons: a picture the size of a list row's beside one line of
+    /// name.
+    Small,
+}
+
+impl Tiles {
+    /// The tiles `mode` lays its entries out as, or `None` for the list.
+    #[must_use]
+    pub const fn of(mode: ViewMode) -> Option<Self> {
+        match mode {
+            ViewMode::LargeIcons => Some(Self::Large),
+            ViewMode::SmallIcons => Some(Self::Small),
+            ViewMode::List => None,
+        }
+    }
+
+    /// How a tile divides its cell.
+    #[must_use]
+    pub const fn layout(self) -> TileLayout {
+        match self {
+            Self::Large => TileLayout::new(2),
+            Self::Small => TileLayout::beside(),
+        }
+    }
+
+    /// The dimensions of one tile and the gap between tiles, measured on the
+    /// theme's own body face at `scale`, so a tile grows with the desktop's
+    /// density instead of staying a fixed pixel count.
+    ///
+    /// A tile is exactly as tall as what it holds ([`layout`](Self::layout)):
+    /// a large one its picture, seven thirds of the body line, and two name
+    /// lines beneath it; a small one a body-line picture and one line beside
+    /// it, wide enough for a dozen or so characters of its name.
+    #[must_use]
+    pub fn metrics(self, scale: Scale, theme: &Theme) -> GridMetrics {
+        let glyph = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
+            .glyph_height()
+            .max(1);
+        match self {
+            Self::Large => {
+                let picture = glyph.saturating_mul(7) / 3;
+                GridMetrics {
+                    cell_width: glyph.saturating_mul(6).max(scale.scale_length(48)),
+                    cell_height: self
+                        .layout()
+                        .height_for(picture, scale, theme)
+                        .max(scale.scale_length(48)),
+                    gap: (glyph / 2).max(scale.scale_length(2)),
+                }
+            }
+            Self::Small => {
+                let inset = scale.scale_length(theme.metrics().control_inset).max(1) / 2;
+                GridMetrics {
+                    cell_width: glyph
+                        .saturating_mul(SMALL_NAME_GLYPHS + 1)
+                        .saturating_add(inset.saturating_mul(3)),
+                    cell_height: self.layout().height_for(glyph, scale, theme),
+                    gap: (glyph / 4).max(scale.scale_length(1)),
+                }
+            }
+        }
+    }
+
+    /// The [`IconTile`] for `entry`: its file-type `icon` and its name,
+    /// carrying the shared selection state when selected. The `icon` is the
+    /// shared classification ([`icon_for_entry`]) resolved by the caller, so a
+    /// tile and a list row draw the same icon for the same entry.
+    ///
+    /// A name too long for its room is cut in its middle ([`name_cut`]), so
+    /// its extension is never what is dropped. A large tile's picture casts its
+    /// soft shadow; a small one, like a list row's, casts none.
+    #[must_use]
+    pub fn tile(self, entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
+        let tile = IconTile::new(entry_label(entry), icon)
+            .with_layout(self.layout())
+            .with_state(state)
+            .with_name_cut(name_cut(entry.name()));
+        match self {
+            Self::Large => tile.with_picture_shadow(),
+            Self::Small => tile,
+        }
+    }
 }
 
 /// How a name too long for its tile is cut: in its middle, keeping whatever
@@ -930,31 +1190,6 @@ fn content_viewport(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
         viewport.width.saturating_sub(gutter),
         viewport.height,
     )
-}
-
-/// The dimensions of one grid tile and the gap between tiles, measured on the
-/// theme's own body face at `scale`, so a tile grows with the desktop's
-/// density instead of staying a fixed pixel count.
-///
-/// A tile is exactly as tall as what it holds ([`TILE_LAYOUT`]): its picture,
-/// seven thirds of the body line, and two name lines beneath it.
-///
-/// Shared with the desktop's icon column, which lays the same tiles out under
-/// a different [`GridFlow`], so the two views can never disagree about how big
-/// an icon tile is.
-#[must_use]
-pub fn grid_metrics(scale: Scale, theme: &Theme) -> GridMetrics {
-    let glyph = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
-        .glyph_height()
-        .max(1);
-    let picture = glyph.saturating_mul(7) / 3;
-    GridMetrics {
-        cell_width: glyph.saturating_mul(6).max(scale.scale_length(48)),
-        cell_height: TILE_LAYOUT
-            .height_for(picture, scale, theme)
-            .max(scale.scale_length(48)),
-        gap: (glyph / 2).max(scale.scale_length(2)),
-    }
 }
 
 /// The height in pixels of the command toolbar strip at the top of the window:
@@ -1182,9 +1417,20 @@ fn list_view<S: DirectorySource>(
     ListView::new(
         content,
         row_height(scale, theme),
-        chrome_height(scale, theme, toolbar),
+        listing_top(browser.view_mode(), scale, theme, toolbar),
         laid_out(browser),
     )
+}
+
+/// How far below the content's top `view`'s first item begins: past the
+/// toolbar band and, in the list, its column header.
+#[must_use]
+pub fn listing_top(view: ViewMode, scale: Scale, theme: &Theme, toolbar: ToolbarBand) -> u32 {
+    let header = match Tiles::of(view) {
+        Some(_) => 0,
+        None => TableHeader::measured_height(scale, theme),
+    };
+    chrome_height(scale, theme, toolbar).saturating_add(header)
 }
 
 /// The [`GridView`] for `browser` at the given content viewport.
@@ -1195,6 +1441,7 @@ fn list_view<S: DirectorySource>(
 /// tile re-flows the listing into the extra column.
 fn grid_view<S: DirectorySource>(
     browser: &Browser<S>,
+    tiles: Tiles,
     scale: Scale,
     theme: &Theme,
     content: Rect,
@@ -1202,7 +1449,7 @@ fn grid_view<S: DirectorySource>(
 ) -> GridView {
     GridView::new(
         content,
-        grid_metrics(scale, theme),
+        tiles.metrics(scale, theme),
         chrome_height(scale, theme, toolbar),
         laid_out(browser),
         GridFlow::RowsFromLeading,
@@ -1252,7 +1499,10 @@ pub fn fitted_height<S: DirectorySource>(
         .content_extent();
     let rail = sidebar_view(window, scale, theme, sidebar, toolbar)
         .map_or(0, |rail| rail.content_height());
-    let content = u32::try_from(items.max(rail)).unwrap_or(u32::MAX);
+    let header = listing_top(browser.view_mode(), scale, theme, toolbar)
+        .saturating_sub(chrome_height(scale, theme, toolbar));
+    let content =
+        u32::try_from(items.saturating_add(u64::from(header)).max(rail)).unwrap_or(u32::MAX);
     Some(chrome_height(scale, theme, toolbar).saturating_add(content))
 }
 
@@ -1267,11 +1517,11 @@ pub fn listing_floor_height(
     scale: Scale,
     theme: &Theme,
 ) -> u32 {
-    let row = match view {
-        ViewMode::Grid => grid_metrics(scale, theme).cell_height,
-        ViewMode::List => row_height(scale, theme),
-    };
-    chrome_height(scale, theme, toolbar).saturating_add(row)
+    let row = Tiles::of(view).map_or_else(
+        || row_height(scale, theme),
+        |tiles| tiles.metrics(scale, theme).cell_height,
+    );
+    listing_top(view, scale, theme, toolbar).saturating_add(row)
 }
 
 /// Scroll by the wheel's `(dx, dy)`, in the seat's scroll units, through the
@@ -1426,33 +1676,42 @@ fn entry_at<S: DirectorySource>(
 ) -> Option<usize> {
     let offset = browser.scroll_offset();
     let index = view.index_at(offset, point)?;
-    let ViewLayout::Grid(grid) = view else {
+    let (ViewLayout::Grid(grid), Some(tiles)) = (view, Tiles::of(browser.view_mode())) else {
         return Some(index);
     };
     let at = view.view(offset).to_content(point)?;
     let entry = browser.entries().get(index)?;
-    entry_body(entry, grid.cell_rect(index)?, scale, theme)?
+    entry_body(tiles, entry, grid.cell_rect(index)?, scale, theme)?
         .contains(at)
         .then_some(index)
 }
 
-/// The part of every grid tile's body it holds whatever its name — its
+/// The part of every `tiles` tile's body it holds whatever its name — its
 /// picture with the body's margin — relative to the tile's own top-left.
 #[must_use]
-pub(crate) fn tile_core(scale: Scale, theme: &Theme) -> Rect {
-    let metrics = grid_metrics(scale, theme);
+pub(crate) fn tile_core(tiles: Tiles, scale: Scale, theme: &Theme) -> Rect {
+    let metrics = tiles.metrics(scale, theme);
     let cell = Rect::new(0, 0, metrics.cell_width, metrics.cell_height);
-    TILE_LAYOUT
+    tiles
+        .layout()
         .core_rect(cell, scale, theme)
         .unwrap_or(Rect::EMPTY)
 }
 
-/// Where the grid tile for `entry`, laid out in `cell`, truly lies: its
+/// Where the `tiles` tile for `entry`, laid out in `cell`, truly lies: its
 /// picture and its name's drawn lines ([`TileLayout::body_rect`]). The rest of
 /// the cell is ground.
 #[must_use]
-pub fn entry_body(entry: &Entry, cell: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-    TILE_LAYOUT.body_rect(cell, scale, theme, entry.name(), name_cut(entry.name()))
+pub fn entry_body(
+    tiles: Tiles,
+    entry: &Entry,
+    cell: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<Rect> {
+    tiles
+        .layout()
+        .body_rect(cell, scale, theme, entry.name(), name_cut(entry.name()))
 }
 
 /// The folder a drop at window-local `point` lands in, and the listed folder
@@ -1531,11 +1790,12 @@ pub fn entry_target<S: DirectorySource>(
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let offset = browser.scroll_offset();
     let shown = view.item_rect(offset, index)?;
-    let ViewLayout::Grid(grid) = view else {
+    let (ViewLayout::Grid(grid), Some(tiles)) = (view, Tiles::of(browser.view_mode())) else {
         return Some(shown);
     };
     let scrolled = view.view(offset);
     let body = entry_body(
+        tiles,
         browser.entries().get(index)?,
         grid.cell_rect(index)?,
         scale,
@@ -1610,10 +1870,12 @@ pub fn entry_name_target<S: DirectorySource>(
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let item = view.layout_rect(index)?;
     let entry = browser.entries().get(index)?;
-    let name = match view {
-        ViewLayout::List(_) => list_name_rect(browser, entry, item, scale, theme)?,
-        ViewLayout::Grid(_) => {
-            TILE_LAYOUT.name_target(item, scale, theme, entry.name(), name_cut(entry.name()))?
+    let name = match Tiles::of(browser.view_mode()) {
+        None => list_name_rect(browser, entry, item, scale, theme)?,
+        Some(tiles) => {
+            tiles
+                .layout()
+                .name_target(item, scale, theme, entry.name(), name_cut(entry.name()))?
         }
     };
     let offset = browser.scroll_offset();
@@ -1633,8 +1895,10 @@ fn list_name_rect<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
 ) -> Option<Rect> {
-    let kind = icon_for_entry(entry, browser.components());
-    entry_row(entry, false, kind).cell_text_rect(item, scale, theme, &COLUMNS, 0)
+    let parent = browser.components();
+    let kind = icon_for_entry(entry, parent);
+    let columns = ListColumns::of(browser.entries());
+    entry_row((entry, parent), columns, false, kind).cell_text_rect(item, scale, theme, &COLUMNS, 0)
 }
 
 /// Draw the in-place rename `field` over the chosen item's name, laid out
@@ -1673,11 +1937,9 @@ fn name_field<S: DirectorySource>(
 ) -> Option<(Rect, ScrollView)> {
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let item = view.layout_rect(index)?;
-    let name = match view {
-        ViewLayout::List(_) => {
-            list_name_rect(browser, browser.entries().get(index)?, item, scale, theme)?
-        }
-        ViewLayout::Grid(_) => TILE_LAYOUT.label_rect(item, scale, theme)?,
+    let name = match Tiles::of(browser.view_mode()) {
+        None => list_name_rect(browser, browser.entries().get(index)?, item, scale, theme)?,
+        Some(tiles) => tiles.layout().label_rect(item, scale, theme)?,
     };
     let height = name.height.max(TextField::height(scale, theme));
     let field = Rect::new(name.left(), name.top(), name.width, height).intersection(&item);
@@ -1757,9 +2019,9 @@ pub(crate) fn view_layout_for<S: DirectorySource>(
     toolbar: ToolbarBand,
 ) -> ViewLayout {
     let content = content_viewport(viewport, scale, theme);
-    match browser.view_mode() {
-        ViewMode::List => ViewLayout::List(list_view(browser, scale, theme, content, toolbar)),
-        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, scale, theme, content, toolbar)),
+    match Tiles::of(browser.view_mode()) {
+        None => ViewLayout::List(list_view(browser, scale, theme, content, toolbar)),
+        Some(tiles) => ViewLayout::Grid(grid_view(browser, tiles, scale, theme, content, toolbar)),
     }
 }
 
@@ -4739,3 +5001,7 @@ pub fn open_with_reveal(
     chooser.scroll_mut().set_offset(revealed);
     revealed != at
 }
+
+#[cfg(test)]
+#[path = "render_tests.rs"]
+mod tests;

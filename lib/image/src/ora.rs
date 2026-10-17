@@ -768,6 +768,9 @@ fn landing(start: i32, length: usize, canvas: usize) -> Option<(Range<usize>, us
     ))
 }
 
+#[path = "ora_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "ora_tests.rs"]
 mod tests;

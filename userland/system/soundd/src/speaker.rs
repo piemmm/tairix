@@ -22,6 +22,10 @@ pub trait Speakers {
     /// The mailbox `stream`'s notifications arrive in, for the wait-set.
     fn mailbox(&self, stream: &Self::Stream) -> u64;
 
+    /// The id the service granted `stream`, which every notification about
+    /// it carries.
+    fn stream_id(&self, stream: &Self::Stream) -> u64;
+
     /// Publish `samples` from frame `at`, answering how many frames the ring
     /// took.
     ///

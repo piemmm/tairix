@@ -1295,6 +1295,9 @@ fn place_frame(
     Ok((indices, mask))
 }
 
+#[path = "gif_inspect.rs"]
+pub(crate) mod inspect;
+
 #[cfg(test)]
 #[path = "gif_tests.rs"]
 mod tests;

@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{Display, DisplayMode};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
-use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::time::Time64;
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::window_ipc::PointerAction;
 use tairix_abi::{DriverError, WAITSET_TIMEOUT_NONE};
@@ -20,7 +20,7 @@ use tairix_controls::damage;
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::{DisplaySleep, SwitchedOff};
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_greeter::{AccountTile, AuthSurface, Backdrop, EventContext, Outcome};
+use tairix_greeter::{AccountTile, Asking, AuthSurface, Backdrop, Courier, EventContext, Outcome};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
 use tairix_ribbon::SKY;
@@ -28,50 +28,40 @@ use tairix_theme::{MotionInteraction, Theme};
 use tairix_touch::{Gesture, Recogniser, SurfacePoint, TouchPress, TouchSettings};
 use tairix_window::pointer_input_events;
 
-use crate::accounts::SessionTransport;
 use crate::chrome::Teller;
 use crate::cursor::Cursor;
 use crate::frame::{Present, Scanout};
 use crate::scene::Scene;
-use crate::verify::{Answer, SessionVerifier};
+use crate::verify::{Answer, Checked};
 use crate::wait::{frame_budget, park_timeout, Cooldown, Idle};
 
-/// What one input did, beyond what it owes the frame
-/// ([`draw`](LoginScreen::draw)).
+/// What adopting one of the authority's answers did, beyond what it owes the
+/// frame ([`draw`](LoginScreen::draw)).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Step {
-    /// Whether a secret was verified. The screen is finished: the authority
-    /// is watching for the exit and starts the session itself.
+    /// Whether it verified the secret the screen was waiting on. The screen
+    /// is finished: the authority is watching for the exit and starts the
+    /// session itself.
     pub verified: bool,
-    /// The authority's answer, when one came back this round.
-    pub answer: Option<Answer>,
-}
-
-impl Step {
-    /// Nothing happened.
-    const fn quiet() -> Self {
-        Self {
-            verified: false,
-            answer: None,
-        }
-    }
+    /// The answer itself, for the embedder to audit.
+    pub answer: Answer,
 }
 
 /// The graphical login screen.
 ///
-/// It draws and types; it never decides. Every question about a secret goes
-/// out over `session-v1` and comes back as one of three answers, and only a
-/// verified one finishes the screen. A refusal, an unreachable authority, an
-/// empty account list, and a lockout running out are all "still asking" —
-/// none of them exits, so a transient fault cannot spend the authority's
-/// restart budget.
-pub struct LoginScreen<T: SessionTransport> {
+/// It draws and types; it never decides, and it never waits. Every question
+/// about a secret goes out over `session-v1` through its [`Courier`] and comes
+/// back, on a later round, as one of three answers, and only a verified one
+/// finishes the screen. A refusal, an unreachable authority, an empty account
+/// list, and a lockout running out are all "still asking" — none of them
+/// exits, so a transient fault cannot spend the authority's restart budget.
+pub struct LoginScreen<C: Courier<Answer = Checked>> {
     surface: AuthSurface,
     /// The accounts the screen offers, which it comes back to rest on.
     accounts: Vec<AccountTile>,
     scanout: Scanout,
     cooldown: Cooldown,
-    verifier: SessionVerifier<T>,
+    verifier: Asking<C>,
     theme: Theme,
     scale: Scale,
     teller: Teller,
@@ -185,9 +175,9 @@ fn wider(one: Option<Rect>, other: Option<Rect>) -> Option<Rect> {
     }
 }
 
-impl<T: SessionTransport> LoginScreen<T> {
+impl<C: Courier<Answer = Checked>> LoginScreen<C> {
     /// A screen offering `accounts`, painted into `scanout`, naming the
-    /// machine by `identity`.
+    /// machine by `identity`, asking its authority through `courier`.
     ///
     /// An empty list is not an error: the chooser always carries its
     /// typed-name tile, so a machine whose account directory could not be
@@ -198,7 +188,7 @@ impl<T: SessionTransport> LoginScreen<T> {
         scale: Scale,
         identity: String,
         accounts: Vec<AccountTile>,
-        transport: T,
+        courier: C,
     ) -> Self {
         let cursor = Cursor::centred(scanout.mode());
         let mut touch = Recogniser::new(TouchSettings::DEFAULT);
@@ -209,7 +199,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             accounts,
             scanout,
             cooldown: Cooldown::default(),
-            verifier: SessionVerifier::new(transport),
+            verifier: Asking::new(courier),
             theme,
             scale,
             teller: Teller::new(identity),
@@ -392,24 +382,48 @@ impl<T: SessionTransport> LoginScreen<T> {
 
     /// Apply one input event, owing the frame what it changed.
     ///
-    /// The verdict a submitted secret produced is applied before this
-    /// returns: a refusal's lockout starts counting from `now_ns` and is
-    /// already on screen in the frame this round draws.
+    /// A submitted secret is asked about and not awaited: its answer is
+    /// adopted by [`collect`](Self::collect) once it has landed.
     ///
     /// While the display sleeps the event reaches nothing: it only owes the
     /// display its wake.
-    pub fn on_input(&mut self, event: &InputEvent, now_ns: u64) -> Step {
+    pub fn on_input(&mut self, event: &InputEvent, now_ns: u64) {
         self.idle.input(now_ns);
         if !self.sleep.is_awake() {
             self.wake_owed = true;
-            return Step::quiet();
+            return;
         }
-        let round = self.apply(event, now_ns);
-        self.owe(round.repaint);
-        Step {
-            verified: round.verified,
-            answer: round.answer,
-        }
+        let repaint = self.apply(event, now_ns);
+        self.owe(repaint);
+    }
+
+    /// Adopt the oldest answer the authority has given that the screen has
+    /// not yet adopted, owing the frame what it changed; `None` when none has
+    /// landed.
+    ///
+    /// A refusal's lockout counts from `now_ns` against the account it was
+    /// asked about, whichever account the screen has moved on to since, and is
+    /// on screen in the frame this round draws while that is the account it
+    /// asks about.
+    pub fn collect(&mut self, now_ns: u64) -> Option<Step> {
+        let Checked {
+            ticket,
+            account,
+            answer,
+        } = self.verifier.landed()?;
+        self.cooldown.start(now_ns, answer.retry_after, &account);
+        let outcome = self
+            .surface
+            .answer(ticket, answer.verdict, now_ns, &self.theme);
+        let remaining = self
+            .cooldown
+            .remaining(now_ns, self.surface.selected_account());
+        let lockout = Repaint::of(self.surface.set_cooldown(remaining));
+        self.owe(Repaint::of(outcome).merged(lockout));
+        Some(Step {
+            verified: outcome.verified(),
+            answer,
+        })
     }
 
     /// Apply one pointer report from the seat, owing the frame what it
@@ -427,7 +441,7 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// While the display sleeps a report reaches nothing and owes the display
     /// its wake, though motion still carries the pointer: it comes back where
     /// the hand put it.
-    pub fn on_pointer(&mut self, input: &PointerInput, now_ns: u64) -> Step {
+    pub fn on_pointer(&mut self, input: &PointerInput, now_ns: u64) {
         let action = match *input {
             PointerInput::MovedBy { dx, dy } => Pointing::By(dx, dy),
             PointerInput::Pressed(button) => Pointing::Pressed(button),
@@ -435,7 +449,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             // The authentication surface has nothing scrollable.
             PointerInput::Scrolled { .. } => Pointing::Nothing,
         };
-        self.point(action, now_ns)
+        self.point(action, now_ns);
     }
 
     /// Read one touch frame, adding what it meant to `gestures` for
@@ -454,7 +468,7 @@ impl<T: SessionTransport> LoginScreen<T> {
 
     /// Answer one touch gesture, as [`on_pointer`](Self::on_pointer) answers
     /// a pointer report: a click the fingers made is the button it names.
-    pub fn on_gesture(&mut self, gesture: Gesture, now_ns: u64) -> Step {
+    pub fn on_gesture(&mut self, gesture: Gesture, now_ns: u64) {
         let button = |press: TouchPress| match press {
             TouchPress::Device(code) => code,
             TouchPress::Fingers(PointerButton::Primary) => PointerButtonCode::Primary,
@@ -469,13 +483,13 @@ impl<T: SessionTransport> LoginScreen<T> {
             // Nothing on the authentication surface scrolls or zooms.
             Gesture::Scrolled { .. } | Gesture::Pinch(_) => Pointing::Nothing,
         };
-        self.point(action, now_ns)
+        self.point(action, now_ns);
     }
 
     /// One pointing action through the surface. While the display sleeps it
     /// reaches nothing and owes the display its wake, though motion still
     /// carries the pointer.
-    fn point(&mut self, action: Pointing, now_ns: u64) -> Step {
+    fn point(&mut self, action: Pointing, now_ns: u64) {
         self.idle.input(now_ns);
         let moved = match action {
             Pointing::By(dx, dy) => self.move_pointer(dx, dy),
@@ -484,28 +498,19 @@ impl<T: SessionTransport> LoginScreen<T> {
         };
         if !self.sleep.is_awake() {
             self.wake_owed = true;
-            return Step::quiet();
+            return;
         }
         let action = match action {
             Pointing::By(..) | Pointing::To(_) => PointerAction::Moved,
             Pointing::Pressed(button) => PointerAction::Pressed(button),
             Pointing::Released(button) => PointerAction::Released(button),
-            Pointing::Nothing => return Step::quiet(),
+            Pointing::Nothing => return,
         };
         let mut repaint = moved.map_or(Repaint::Nothing, |damage| Repaint::Scanout(Some(damage)));
-        let mut verified = false;
-        let mut answer = None;
         for event in pointer_input_events(action, self.cursor.at()) {
-            let round = self.apply(&event, now_ns);
-            repaint = repaint.merged(round.repaint);
-            answer = round.answer.or(answer);
-            if round.verified {
-                verified = true;
-                break;
-            }
+            repaint = repaint.merged(self.apply(&event, now_ns));
         }
         self.owe(repaint);
-        Step { verified, answer }
     }
 
     /// Bring the clock, the lockout, the surface's animations and the ribbon
@@ -735,36 +740,16 @@ impl<T: SessionTransport> LoginScreen<T> {
         !self.surface.session_fade_begun()
     }
 
-    /// One event through the surface, with any verdict it produced applied.
-    fn apply(&mut self, event: &InputEvent, now_ns: u64) -> Round {
-        let outcome = {
-            let mut ctx = EventContext {
-                screen: self.scanout.screen(),
-                scale: self.scale,
-                theme: &self.theme,
-                verifier: &mut self.verifier,
-                now_ns,
-            };
-            self.surface.on_event(event, &mut ctx)
+    /// One event through the surface, answering what it repaints.
+    fn apply(&mut self, event: &InputEvent, now_ns: u64) -> Repaint {
+        let mut ctx = EventContext {
+            screen: self.scanout.screen(),
+            scale: self.scale,
+            theme: &self.theme,
+            verifier: &mut self.verifier,
+            now_ns,
         };
-        let answer = self.verifier.take_answer();
-        let mut repaint = Repaint::of(outcome);
-        if let Some(answer) = answer {
-            // The surface still asks about the account it offered the secret
-            // for, so that is whose lockout this answer reports.
-            if let Some(account) = self.surface.selected_account() {
-                self.cooldown.start(now_ns, answer.retry_after, account);
-            }
-            if answer.retry_after > Duration64::ZERO {
-                repaint =
-                    repaint.merged(Repaint::of(self.surface.set_cooldown(answer.retry_after)));
-            }
-        }
-        Round {
-            repaint,
-            verified: outcome.verified(),
-            answer,
-        }
+        Repaint::of(self.surface.on_event(event, &mut ctx))
     }
 
     /// Owe the frame what `repaint` changed: the pixels to compose, and the
@@ -822,13 +807,6 @@ impl<T: SessionTransport> LoginScreen<T> {
         let painted = surface.paint_into(into, screen, *scale, theme, backdrop);
         self.paint_owed = !painted;
     }
-}
-
-/// What one event through the surface did.
-struct Round {
-    repaint: Repaint,
-    verified: bool,
-    answer: Option<Answer>,
 }
 
 #[cfg(test)]

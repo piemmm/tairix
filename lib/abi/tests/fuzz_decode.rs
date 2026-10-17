@@ -118,10 +118,10 @@ use tairix_abi::window_ipc::{
     AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu,
     AppMenuAsset, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
     AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
-    DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewOutcome,
-    PreviewSubject, SaveEndings, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    WindowSizing, WindowTitle,
+    AppMenuSymbol, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
+    DropOperation, DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose,
+    PreviewOutcome, PreviewSubject, SaveEndings, ToolOver, TooltipText, WindowEvent, WindowRegion,
+    WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -2274,6 +2274,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
     menu.push(AppMenuRow::Submenu {
         label: AppMenuLabel::new("Display").expect("a valid label"),
         enabled: true,
+        symbol: AppMenuSymbol::Display,
     })
     .expect("room for a submenu");
     menu.push_under(
@@ -2281,6 +2282,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
             AppMenuItem::new(
                 AppMenuItemId::new(1).expect("a valid id"),
                 AppMenuLabel::new("Full screen").expect("a valid label"),
+                AppMenuSymbol::ZoomFit,
             )
             .with_mark(AppMenuMark::Check)
             .with_shortcut(AppMenuShortcut::new("Ctrl F").expect("a valid caption")),
@@ -2294,6 +2296,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         AppMenuRow::Submenu {
             label: AppMenuLabel::new("Colour").expect("a valid label"),
             enabled: true,
+            symbol: AppMenuSymbol::Colours,
         },
         0,
     )
@@ -2303,6 +2306,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
             AppMenuItem::new(
                 AppMenuItemId::new(3).expect("a valid id"),
                 AppMenuLabel::new("Green").expect("a valid label"),
+                AppMenuSymbol::ColourPrimary,
             )
             .disabled()
             .with_reason(AppMenuReason::new("No colour profile").expect("a valid reason")),
@@ -2316,6 +2320,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         AppMenuItem::new(
             AppMenuItemId::new(2).expect("a valid id"),
             AppMenuLabel::new("Quit").expect("a valid label"),
+            AppMenuSymbol::Quit,
         )
         .with_role(AppMenuRole::Destructive),
     ))
@@ -2326,6 +2331,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         AppMenuItem::new(
             AppMenuItemId::new(4).expect("a valid id"),
             AppMenuLabel::new("Rename").expect("a valid label"),
+            AppMenuSymbol::Rename,
         )
         .with_entry(AppMenuEntry {
             id: AppMenuItemId::new(90).expect("a valid id"),
@@ -2339,6 +2345,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
     menu.push(AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(5).expect("a valid id"),
         AppMenuLabel::new("Open With\u{2026}").expect("a valid label"),
+        AppMenuSymbol::OpenWith,
     )))
     .expect("room for the chooser row");
     let chooser = menu.len() - 1;
@@ -2347,6 +2354,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
             AppMenuItem::new(
                 AppMenuItemId::new(6).expect("a valid id"),
                 AppMenuLabel::new("View").expect("a valid label"),
+                AppMenuSymbol::Application,
             )
             .with_icon_bundle(
                 AppMenuBundle::new("/System/Applications/view.app").expect("a valid path"),
@@ -2361,6 +2369,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         AppMenuItem::new(
             AppMenuItemId::new(7).expect("a valid id"),
             AppMenuLabel::new("Backup").expect("a valid label"),
+            AppMenuSymbol::Drive,
         )
         .with_icon_asset(AppMenuAsset::new("disk-usb").expect("a valid asset id")),
     ))

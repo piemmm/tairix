@@ -61,7 +61,7 @@ fn a_document_round_trips_through_its_own_spelling() {
                 sound.theme = High Contrast\n\
                 sound.gain = -6.5dB\n\
                 sound.bell.enabled = off\n\
-                sound.error.file = /Users/ada/UserFiles/Music/oops.flac\n";
+                sound.error.file = /Users/ada/Home/Music/oops.flac\n";
     let (settings, refused) = load(text);
     assert!(refused.is_empty());
     assert!(!settings.enabled());
@@ -74,7 +74,7 @@ fn a_document_round_trips_through_its_own_spelling() {
             .file
             .as_ref()
             .map(tairix_appconf::SettingPath::as_str),
-        Some("/Users/ada/UserFiles/Music/oops.flac")
+        Some("/Users/ada/Home/Music/oops.flac")
     );
     let rendered = settings.document_of(SoundSettings::KEYS).render();
     let (again, refused) = load(&rendered);

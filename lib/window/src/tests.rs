@@ -19,9 +19,9 @@ use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick,
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView, BundleRunPath,
-    ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt, DragItems,
-    DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView, AppMenuSymbol,
+    BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt,
+    DragItems, DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
     MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
     SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
     APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX,
@@ -3969,11 +3969,13 @@ fn sample_open_menu() -> AppMenu {
     menu.push(AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(1).expect("a valid id"),
         AppMenuLabel::new("Copy").expect("a valid label"),
+        AppMenuSymbol::Copy,
     )))
     .expect("room");
     menu.push(AppMenuRow::Submenu {
         label: AppMenuLabel::new("Paste Special").expect("a valid label"),
         enabled: true,
+        symbol: AppMenuSymbol::Paste,
     })
     .expect("room for a submenu row");
     menu
@@ -4025,7 +4027,7 @@ fn a_menu_open_is_owner_bound_single_pending_and_answered_exactly_once() {
         assert_eq!(told_menu.len(), 2);
         assert!(told_menu.rows().any(|(row, _)| matches!(
             row,
-            AppMenuRowView::Submenu { label, enabled }
+            AppMenuRowView::Submenu { label, enabled, .. }
                 if label == "Paste Special" && enabled
         )));
     }
@@ -4413,6 +4415,7 @@ fn sample_app_bar(endpoint: u64) -> AppBar {
     menu.push(AppMenuRow::Item(AppMenuItem::new(
         AppMenuItemId::new(1).expect("a valid id"),
         AppMenuLabel::new("New window").expect("a valid label"),
+        AppMenuSymbol::NewWindow,
     )))
     .expect("room");
     menu.push(AppMenuRow::Info).expect("room");
@@ -6674,10 +6677,13 @@ fn a_refusal_while_another_is_up_waits_its_turn() {
     let mut notices = Notices::default();
     notices.refuse(From::Listing, "Not listed", "the volume went away");
     assert!(notices.is_showing(), "the window is answering one already");
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
     notices.refuse(From::Operation, "Copy stopped", "the destination is full");
     assert_eq!(
-        notices.raise(&mut client, EVENTS_A, window),
+        notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Nothing,
         "nothing goes up over the first"
     );
@@ -6688,7 +6694,10 @@ fn a_refusal_while_another_is_up_waits_its_turn() {
     );
     assert!(!notices.answered(2), "only its own alert answers it");
     assert!(notices.answered(1));
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
     assert_eq!(noticed(&loopback, 2).0, "Copy stopped");
     assert!(notices.answered(2));
     assert!(!notices.is_showing());
@@ -6702,24 +6711,33 @@ fn a_source_keeps_only_its_latest_refusal_waiting() {
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut notices = Notices::default();
     notices.refuse(From::Paste, "Not moved", "shown");
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
     for reason in ["stale", "newer", "newest"] {
         notices.refuse(From::Listing, "Not listed", reason);
     }
     notices.refuse(From::Paste, "Not moved", "after");
     assert!(notices.answered(1));
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
     assert_eq!(
         noticed(&loopback, 2).1,
         "Newest.",
         "it keeps its place in line with what it says now"
     );
     assert!(notices.answered(2));
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
     assert_eq!(noticed(&loopback, 3).1, "After.");
     assert!(notices.answered(3));
     assert_eq!(
-        notices.raise(&mut client, EVENTS_A, window),
+        notices.raise(&mut client, EVENTS_A, Some(window)),
         Raised::Nothing
     );
 }
@@ -6738,7 +6756,10 @@ fn a_notice_waits_while_its_application_has_every_alert_it_may() {
     }
     let mut notices = Notices::default();
     notices.refuse(From::Listing, "Not listed", "the volume went away");
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Full);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Full
+    );
     assert!(notices.is_showing(), "it is kept, not lost");
     let mut sink = QueueSink::default();
     loopback
@@ -6746,7 +6767,10 @@ fn a_notice_waits_while_its_application_has_every_alert_it_may() {
         .server
         .answer_alert(&mut sink, 1, 0, Activation::Withheld)
         .expect("answered");
-    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, Some(window)),
+        Raised::Up
+    );
 }
 
 #[test]
@@ -6758,10 +6782,26 @@ fn a_notice_the_desktop_will_not_show_is_handed_back_to_be_stated() {
     let mut notices = Notices::default();
     notices.refuse(From::Listing, "Not listed", "the volume went away");
     loopback.borrow_mut().host.refuse_alert = Some(Errno::NotSupported);
-    let Raised::Refused(Errno::NotSupported, notice) = notices.raise(&mut client, EVENTS_A, window)
+    let Raised::Refused(Errno::NotSupported, notice) =
+        notices.raise(&mut client, EVENTS_A, Some(window))
     else {
         panic!("refused");
     };
     assert_eq!(notice.headline(), "Not listed");
     assert!(!notices.is_showing(), "dropped once handed back");
+}
+
+/// A refusal no window asked for — an open that failed after the window had
+/// moved on — goes up holding none.
+#[test]
+fn a_notice_no_window_asked_for_goes_up_holding_none() {
+    use crate::notices::{Notices, Raised};
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut notices = Notices::default();
+    notices.refuse(From::Listing, "Not opened", "the volume went away");
+    assert_eq!(notices.raise(&mut client, EVENTS_A, None), Raised::Up);
+    let looped = loopback.borrow();
+    let (_, _, owner, _) = looped.host.alerts.last().expect("it went up");
+    assert_eq!(*owner, None, "it holds no window");
 }

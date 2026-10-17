@@ -36,6 +36,16 @@ no, como el de esta máquina; «Juego de instrucciones» del menú Ver lo lee co
 otro, y el campo de vista de la línea de estado ofrece la vista de código
 junto a texto y hexadecimal.
 
+Una imagen —PNG, JPEG, GIF, BMP, TIFF, WEBP, un archivo de icono o de
+puntero, un área de sprites de RISC OS o un documento OpenRaster— se abre en
+su lugar en la vista de datos: de qué está hecho el archivo, cada registro
+en su posición con su longitud y lo que declara, cada etiqueta EXIF por su
+nombre con su valor, y después cada byte del archivo en hexadecimal junto a
+su carácter. La vista de datos es de solo lectura; la vista hexadecimal
+edita los mismos bytes. La imagen la lee un tercer proceso de trabajo
+propio, también sin acceso a nada, y el menú Ver ofrece la vista de datos
+junto al texto y al hexadecimal.
+
 El código fuente se colorea: HTML, XML y SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python y scripts de shell. Los archivos de
 ajustes del sistema — ajustes de aplicaciones, la biblioteca de programas,

@@ -7849,6 +7849,7 @@ dependencies = [
  "tairix-font",
  "tairix-geometry",
  "tairix-help",
+ "tairix-image",
  "tairix-input",
  "tairix-log",
  "tairix-raster",

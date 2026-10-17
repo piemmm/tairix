@@ -52,7 +52,7 @@ use tairix_soundtheme::{
     CUE_ANSWER_DEADLINE_NS, DRAIN_SLACK_NS, MACHINE_SETTINGS, MAX_CUE_SECONDS, MAX_SOUND_BYTES,
 };
 
-use crate::bounds::{Admit, Principals, MAX_CONCURRENT_CUES};
+use crate::bounds::{Admit, Principals, MAX_CONCURRENT_CUES, MAX_JOINED_CUES};
 use crate::decode::{Decoded, Decoder, DECODE_BUDGET_NS};
 use crate::events;
 use crate::pcm::{CachedCue, CueCache, CueKey, CueOrigin, CuePcm};
@@ -110,6 +110,9 @@ struct Cue {
 struct Waiting {
     cue: Cue,
     job: u64,
+    key: CueKey,
+    /// The callers of repeats that joined it, waiting for it to play out.
+    joined: Vec<u64>,
 }
 
 /// A decode waiting for the decoder.
@@ -199,18 +202,25 @@ impl Reply {
 struct Playing<St> {
     stream: St,
     mailbox: u64,
+    /// The id the service granted the stream: a notification naming another
+    /// is a closed stream's, left in the mailbox this one inherited.
+    stream_id: u64,
     pcm: Arc<CuePcm>,
     written: u64,
     draining: bool,
     deadline: u64,
     event: SoundEvent,
+    key: CueKey,
+    tenancy: Tenancy,
     /// Whether it sounds a machine's moment, whose playing out is recorded.
     machine: bool,
-    /// The call to answer once it has played out.
-    reply: Option<u64>,
+    /// The calls to answer once it has played out: its own, and every
+    /// repeat's that joined it.
+    replies: Vec<u64>,
 }
 
 /// How a sounding cue's stream ended.
+#[derive(Copy, Clone)]
 enum Ending {
     /// Every frame reached the device.
     PlayedOut,
@@ -403,12 +413,23 @@ where
     }
 
     /// The deadline [`Self::deadline`] named has come.
+    ///
+    /// What an overdue cue's mailbox already holds is read first, so a cue
+    /// that played out while the authority was busy elsewhere is retired as
+    /// played rather than cut.
     pub fn on_timer(&mut self, now: u64) {
         self.pump_decoder(now);
         let mut at = 0;
         while at < self.playing.len() {
-            if now >= self.playing[at].deadline {
-                let cue = self.playing.swap_remove(at);
+            if now < self.playing[at].deadline {
+                at += 1;
+                continue;
+            }
+            let ending = self.advance(at);
+            let cue = self.playing.swap_remove(at);
+            if let Some(ending) = ending {
+                self.end(cue, ending);
+            } else {
                 self.audit_event(
                     events::CUE_CUT,
                     Level::Warn,
@@ -416,22 +437,25 @@ where
                     cue.event,
                 );
                 self.retire(cue);
-            } else {
-                at += 1;
             }
         }
     }
 
-    /// A sounding cue's mailbox was reported ready at `now`.
+    /// A sounding cue's mailbox was reported ready at `now`. It is read
+    /// before any deadline is kept, so what it reports is never cut.
     pub fn on_stream(&mut self, now: u64, mailbox: u64) {
+        if let Some(at) = self.playing.iter().position(|cue| cue.mailbox == mailbox) {
+            if let Some(ending) = self.advance(at) {
+                let cue = self.playing.swap_remove(at);
+                self.end(cue, ending);
+            }
+        }
         self.keep_time(now);
-        let Some(at) = self.playing.iter().position(|cue| cue.mailbox == mailbox) else {
-            return;
-        };
-        let Some(ending) = self.advance(at) else {
-            return;
-        };
-        let cue = self.playing.swap_remove(at);
+    }
+
+    /// Retire `cue`, whose stream ended as `ending`, recording a machine's
+    /// moment that played out.
+    fn end(&mut self, cue: Playing<Sp::Stream>, ending: Ending) {
         if matches!(ending, Ending::PlayedOut) && cue.machine {
             self.audit_event(
                 events::MACHINE_CUE_PLAYED,
@@ -706,15 +730,18 @@ where
             Ok(found) => found,
             Err(silence) => return Ok(self.silent(silence)),
         };
-        if self.waiting.len() + self.playing.len() >= MAX_CONCURRENT_CUES {
-            return Ok(self.silent(Silence::TooMany));
-        }
         // A session's own file is that session's data: it sounds only in its
         // room, so the audio service stops it when the room moves on.
         let tenancy = match key.origin {
             CueOrigin::Handed { session, .. } => Tenancy::Session(session),
             CueOrigin::Theme { .. } | CueOrigin::Machine(_) => tenancy,
         };
+        if let Some(decision) = self.join(&key, tenancy, answer, ticket) {
+            return Ok(decision);
+        }
+        if self.waiting.len() + self.playing.len() >= MAX_CONCURRENT_CUES {
+            return Ok(self.silent(Silence::TooMany));
+        }
         let cue = Cue {
             event,
             answer,
@@ -723,7 +750,7 @@ where
             ticket,
         };
         if let Some(CachedCue(pcm)) = self.cache.find(&(), &key).cloned() {
-            return self.play(now, cue, pcm);
+            return self.play(now, cue, (key, pcm), &mut Vec::new());
         }
         if self.refused.contains(&key) {
             self.tally.undecodable += 1;
@@ -731,7 +758,7 @@ where
         }
         let job = match self.jobs.iter().find(|job| job.key == key) {
             Some(job) => job.id,
-            None => match self.load(now, key, source)? {
+            None => match self.load(now, key.clone(), source)? {
                 Some(job) => job,
                 None => return Ok(self.silent(Silence::Undecodable)),
             },
@@ -739,8 +766,51 @@ where
         if self.waiting.try_reserve(1).is_err() {
             return Err(Errno::OutOfMemory);
         }
-        self.waiting.push(Waiting { cue, job });
+        self.waiting.push(Waiting {
+            cue,
+            job,
+            key,
+            joined: Vec::new(),
+        });
         Ok(Decision::Later)
+    }
+
+    /// Join a repeat of a sound already sounding or decoding for the same
+    /// room, rather than sounding it over itself: a burst of one event — nine
+    /// disks attaching at once — is one sound, heard once.
+    ///
+    /// A caller waiting for the sound to play out is answered when the one
+    /// it joined does; one waiting only for it to start is answered at once,
+    /// as coalesced. `None` when there is nothing to join.
+    fn join(
+        &mut self,
+        key: &CueKey,
+        tenancy: Tenancy,
+        answer: Answer,
+        ticket: u64,
+    ) -> Option<Decision> {
+        let joined = if let Some(cue) = self
+            .playing
+            .iter_mut()
+            .find(|cue| cue.key == *key && cue.tenancy == tenancy)
+        {
+            &mut cue.replies
+        } else {
+            &mut self
+                .waiting
+                .iter_mut()
+                .find(|waiting| waiting.key == *key && waiting.cue.tenancy == tenancy)?
+                .joined
+        };
+        let waits = matches!(answer, Answer::PlayedOut)
+            && joined.len() < MAX_JOINED_CUES
+            && joined.try_reserve(1).is_ok();
+        if waits {
+            joined.push(ticket);
+            self.tally.coalesced += 1;
+            return Some(Decision::Later);
+        }
+        Some(self.silent(Silence::Coalesced))
     }
 
     /// Where `event`'s sound, cued for `tenancy`, is and at what level, or why
@@ -952,11 +1022,24 @@ where
                 index += 1;
                 continue;
             }
-            let Waiting { cue, .. } = self.waiting.remove(index);
+            let Waiting {
+                cue,
+                key,
+                mut joined,
+                ..
+            } = self.waiting.remove(index);
             let decision = match &pcm {
-                Some(pcm) => self.play(now, cue, Arc::clone(pcm)),
+                Some(pcm) => self.play(now, cue, (key, Arc::clone(pcm)), &mut joined),
                 None => Ok(self.silent(Silence::Undecodable)),
             };
+            let fate = match &decision {
+                Ok(Decision::Now(outcome)) => Ok(*outcome),
+                Ok(Decision::Later) => Ok(CueOutcome::Played),
+                Err(err) => Err(*err),
+            };
+            for ticket in joined {
+                self.answer(ticket, fate);
+            }
             match decision {
                 Ok(Decision::Now(outcome)) => self.answer(cue.ticket, Ok(outcome)),
                 Ok(Decision::Later) => {}
@@ -980,8 +1063,17 @@ where
         self.cache.retain(&(), key, CachedCue(Arc::clone(pcm)));
     }
 
-    /// Open `cue`'s stream and start it sounding `pcm`.
-    fn play(&mut self, now: u64, cue: Cue, pcm: Arc<CuePcm>) -> Result<Decision, Errno> {
+    /// Open `cue`'s stream and start it sounding `pcm`, the sound `key`
+    /// names, taking `joined` — the callers of repeats that joined it — to
+    /// answer once it plays out. Joiners left behind never had a sound to
+    /// wait on, and the caller answers them with the cue's own fate.
+    fn play(
+        &mut self,
+        now: u64,
+        cue: Cue,
+        (key, pcm): (CueKey, Arc<CuePcm>),
+        joined: &mut Vec<u64>,
+    ) -> Result<Decision, Errno> {
         let frames = pcm.frames();
         let params = OpenParams {
             device_id: 0,
@@ -1010,6 +1102,7 @@ where
         }
         let mut playing = Playing {
             mailbox: self.speakers.mailbox(&stream),
+            stream_id: self.speakers.stream_id(&stream),
             stream,
             deadline: now
                 .saturating_add(pcm.duration().saturating_total_nanos())
@@ -1018,25 +1111,28 @@ where
             written: 0,
             draining: false,
             event: cue.event,
+            key,
+            tenancy: cue.tenancy,
             machine: matches!(cue.event.authority(), Class::Lifecycle),
-            reply: None,
+            replies: Vec::new(),
         };
         if let Err(err) = Self::begin(&mut self.speakers, &mut playing) {
             self.speakers.close(playing.stream);
             return Err(err);
         }
-        if self.playing.try_reserve(1).is_err() {
+        let waits = matches!(cue.answer, Answer::PlayedOut);
+        if self.playing.try_reserve(1).is_err() || (waits && joined.try_reserve(1).is_err()) {
             self.speakers.close(playing.stream);
             return Err(Errno::OutOfMemory);
         }
         self.tally.played += 1;
-        let decision = match cue.answer {
-            Answer::Started => Decision::Now(CueOutcome::Played),
-            Answer::PlayedOut => {
-                playing.reply = Some(cue.ticket);
-                Decision::Later
-            }
+        let decision = if waits {
+            joined.push(cue.ticket);
+            Decision::Later
+        } else {
+            Decision::Now(CueOutcome::Played)
         };
+        playing.replies = core::mem::take(joined);
         self.playing.push(playing);
         Ok(decision)
     }
@@ -1058,6 +1154,7 @@ where
         let cue = &mut playing[at];
         loop {
             let notify = match speakers.next_notify(&mut cue.stream) {
+                Ok(Some(notify)) if notify.stream_id() != cue.stream_id => continue,
                 Ok(Some(notify)) => notify,
                 Ok(None) => return None,
                 Err(_) => return Some(Ending::BrokeOff),
@@ -1114,7 +1211,7 @@ where
 
     /// Close an ended cue and answer whoever waits on it.
     fn retire(&mut self, cue: Playing<Sp::Stream>) {
-        if let Some(ticket) = cue.reply {
+        for &ticket in &cue.replies {
             self.answer(ticket, Ok(CueOutcome::Played));
         }
         self.speakers.close(cue.stream);

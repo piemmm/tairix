@@ -41,10 +41,15 @@ charter forbids.
   never credential material, a capability set, or a home path. The disc itself
   is the shared `tairix_icon::monogram_disc`, so the login screen and the
   desktop's own account capsule draw one picture, not two.
-- `Verifier` / `Verdict` — the seam the embedder drives. The surface holds no
-  credential store and no authority: it asks about `(account, secret)` and
-  reacts to `Verified`, `Refused`, or `Unreachable`. An embedder that
-  authenticates its own kernel-attested caller ignores the account.
+- `Verifier` / `Verdict` / `Ticket` — the seam the embedder drives. The
+  surface holds no credential store and no authority: it asks about
+  `(account, secret)` without waiting, says it is checking, and adopts the
+  `Verified`, `Refused`, or `Unreachable` that `AuthSurface::answer` brings
+  back under the asked offer's ticket. An embedder that authenticates its own
+  kernel-attested caller ignores the account.
+- `Asking` / `Courier` / `Tickets` — the one `Verifier` every embedder uses:
+  tickets from one book, and each offer handed to a courier that carries it
+  off the embedder's loop.
 - `Chrome` — the identity and the clock drawn in the top corners, in the
   muted ink. Display text, bounded on the way in, never read back for
   authority.

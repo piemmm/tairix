@@ -10,14 +10,14 @@ use tairix_browse::Browser;
 use super::{leave_directory, location_title, retitle, Leave};
 use crate::test_fs::{browser, FakeFs};
 
-/// A browser showing `/Users/ann/UserFiles`, three levels down the fixture.
+/// A browser showing `/Users/ann/Home`, three levels down the fixture.
 fn deep() -> Browser<FakeFs> {
     let mut browser = browser();
     browser
         .navigate_to(vec![
             "Users".to_string(),
             "ann".to_string(),
-            "UserFiles".to_string(),
+            "Home".to_string(),
         ])
         .expect("the fixture lists");
     browser

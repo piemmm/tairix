@@ -533,7 +533,7 @@ fn write_key_file(
 mod tests {
     use super::*;
     use crate::device::SECTOR_BYTES;
-    use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
+    use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS};
     use tairix_users::{
         appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS,
         HOME_MODE, HOME_SUBDIRS,
@@ -915,12 +915,12 @@ mod tests {
             assert_eq!(sec.gid, TEST_HOMES[0].2, "{name} carries its group");
         }
         let files = fs
-            .lookup(home, HOME_USER_FILES_DIR.as_bytes())
-            .expect("UserFiles exists");
-        for name in USER_FILES_SUBDIRS {
+            .lookup(home, HOME_FILES_DIR.as_bytes())
+            .expect("the home's Home folder exists");
+        for name in HOME_FILES_SUBDIRS {
             let node = fs
                 .lookup(files, name.as_bytes())
-                .unwrap_or_else(|_| panic!("{name} exists in a seeded UserFiles"));
+                .unwrap_or_else(|_| panic!("{name} exists in a seeded Home folder"));
             let sec = fs.security(node).expect("security present");
             assert_eq!(
                 (sec.mode, sec.uid, sec.gid),

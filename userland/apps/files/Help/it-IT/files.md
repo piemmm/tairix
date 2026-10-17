@@ -10,7 +10,7 @@ files — browser grafico del filesystem
 
 Apre una finestra del desktop che elenca il file system, a partire dalla
 `directory` indicata sulla riga di comando o, se non ne è indicata alcuna,
-dalla cartella `UserFiles` dell'utente che lo avvia (la sua directory home
+dalla cartella `Home` dell'utente che lo avvia (la sua directory home
 se quella non può essere elencata). Il titolo della finestra indica la
 directory corrente; la finestra ne elenca le voci, ogni voce selezionata
 evidenziata con il colore d'accento del tema attivo. Ogni lettura di una
@@ -21,7 +21,7 @@ indovinata.
 Il desktop avvia il browser per voi e lo tiene sulla barra delle icone: il
 menu della sua posizione elenca i vostri luoghi e tutto ciò che è montato, e
 sceglierne uno vi apre una finestra. Un clic sulla posizione ne apre una
-nella cartella `UserFiles`. Chiedere una cartella che ha già una finestra
+nella cartella `Home`. Chiedere una cartella che ha già una finestra
 porta quella finestra in primo piano anziché aprirne un'altra. Questa
 istanza non ha la voce *Esci*: fa parte del desktop, e chiuderne le finestre
 semplicemente la mette via.
@@ -73,6 +73,14 @@ Il sottomenu *Nuovo* del menu contestuale crea una cartella, o un documento
 vuoto di ogni tipo che un editor installato sa scrivere, e ne apre il nome
 per la modifica.
 
+Il sottomenu *Visualizza* del menu contestuale mostra le voci come icone
+grandi, l'impostazione predefinita; come icone piccole, ogni nome su una
+riga accanto alla sua immagine; o come elenco, una riga per voce con la
+dimensione, la data dell'ultima modifica e il tipo. Un'unità elencata tra
+esse mostra invece lo spazio libero, il file system e quanto bene funziona.
+Un clic sul titolo di una colonna ordina l'elenco in base a essa, e un
+secondo clic inverte l'ordine.
+
 `Alt+Enter` apre una finestra *Proprietà* sulla voce selezionata, come fa la
 voce *Proprietà* del menu contestuale. È una finestra a sé, per cui se ne
 possono aprire diverse insieme e l'elenco resta utilizzabile nel frattempo:
@@ -98,7 +106,7 @@ directory — `.` e `..` non lo sono, così che una scrittura non possa
 mai indicare un luogo diverso da come si legge. Una directory che
 infrange una di quelle regole, o che l'utente che ha avviato il
 programma non può elencare, viene rifiutata con il motivo sul flusso di
-errore standard e la finestra si apre invece sulla cartella `UserFiles`,
+errore standard e la finestra si apre invece sulla cartella `Home`,
 così che un argomento sbagliato non lasci mai l'utente senza finestra.
 Un secondo operando viene rifiutato del tutto anziché ignorato.
 

@@ -2423,7 +2423,7 @@ impl IconTile {
             font,
             width: band.right.saturating_sub(band.left),
             lines: band.lines,
-            align: TextAlign::Centre,
+            align: self.layout.align(),
             color,
             shadow: self.label_shadow,
             cut: self.name_cut,
@@ -2496,37 +2496,72 @@ impl IconTile {
     }
 }
 
-/// How an [`IconTile`] divides its bounds: a square picture at the top, then a
-/// band of as many whole name lines as the owner states.
+/// How an [`IconTile`] divides its bounds: a square picture, and a band of
+/// whole name lines either below it or beside it.
 ///
-/// The band sits a half inset below the picture and a half inset above the
-/// tile's foot, and the picture takes the height that leaves, capped by the
-/// width — so a cell sized with [`height_for`](Self::height_for) draws exactly
-/// the picture it was sized for. The one statement of the tile's geometry: the
-/// side an owner rasterises artwork at, the band a rename field is laid over,
-/// and the pixels the tile paints all read it.
+/// Stacked, the band sits a half inset below the picture and a half inset
+/// above the tile's foot, and the picture takes the height that leaves, capped
+/// by the width. Beside, the picture stands at the tile's leading edge as tall
+/// as the tile allows, and one line of name runs from it to the trailing edge,
+/// left-aligned and centred on the picture. Either way a cell sized with
+/// [`height_for`](Self::height_for) draws exactly the picture it was sized
+/// for. The one statement of the tile's geometry: the side an owner rasterises
+/// artwork at, the band a rename field is laid over, and the pixels the tile
+/// paints all read it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TileLayout {
-    name_lines: u32,
+    arrangement: Arrangement,
+}
+
+/// Where a tile's name sits against its picture.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Arrangement {
+    /// Below the picture, over this many whole lines.
+    Stacked(u32),
+    /// Beside the picture, on one line.
+    Beside,
 }
 
 impl TileLayout {
-    /// A layout reserving `name_lines` whole lines of name, at least one.
+    /// A layout reserving `name_lines` whole lines of name under the picture,
+    /// at least one.
     #[must_use]
     pub const fn new(name_lines: u32) -> Self {
         Self {
-            name_lines: if name_lines == 0 { 1 } else { name_lines },
+            arrangement: Arrangement::Stacked(if name_lines == 0 { 1 } else { name_lines }),
         }
     }
 
-    /// The tile height that seats a `side`-pixel picture above the name band.
+    /// A layout setting one line of name beside the picture.
+    #[must_use]
+    pub const fn beside() -> Self {
+        Self {
+            arrangement: Arrangement::Beside,
+        }
+    }
+
+    /// How many whole lines of name the layout reserves.
+    const fn name_lines(self) -> u32 {
+        match self.arrangement {
+            Arrangement::Stacked(lines) => lines,
+            Arrangement::Beside => 1,
+        }
+    }
+
+    /// The tile height that seats a `side`-pixel picture and the name band.
     #[must_use]
     pub fn height_for(self, side: u32, scale: Scale, theme: &Theme) -> u32 {
         let (pad, gap) = tile_insets(scale, theme);
-        pad.saturating_add(side)
-            .saturating_add(gap)
-            .saturating_add(self.band_height(scale, theme))
-            .saturating_add(gap)
+        match self.arrangement {
+            Arrangement::Stacked(_) => pad
+                .saturating_add(side)
+                .saturating_add(gap)
+                .saturating_add(self.band_height(scale, theme))
+                .saturating_add(gap),
+            Arrangement::Beside => side
+                .max(self.band_height(scale, theme))
+                .saturating_add(gap.saturating_mul(2)),
+        }
     }
 
     /// The pixel side of the square picture a tile occupying `bounds` draws.
@@ -2604,12 +2639,23 @@ impl TileLayout {
         let (_, margin) = tile_insets(scale, theme);
         let name =
             grown(self.name_rect(bounds, scale, theme, label, cut)?, margin).intersection(&bounds);
-        let floor = self
-            .core_rect(bounds, scale, theme)
-            .map_or(name.top(), |core| core.bottom());
-        let top = name.top().max(floor);
-        let height = u32::try_from(i64::from(name.bottom()) - i64::from(top)).unwrap_or(0);
-        let target = Rect::new(name.left(), top, name.width, height);
+        let core = self.core_rect(bounds, scale, theme);
+        let target = match self.arrangement {
+            Arrangement::Stacked(_) => {
+                let top = name
+                    .top()
+                    .max(core.map_or(name.top(), |core| core.bottom()));
+                let height = u32::try_from(i64::from(name.bottom()) - i64::from(top)).unwrap_or(0);
+                Rect::new(name.left(), top, name.width, height)
+            }
+            Arrangement::Beside => {
+                let left = name
+                    .left()
+                    .max(core.map_or(name.left(), |core| core.right()));
+                let width = u32::try_from(i64::from(name.right()) - i64::from(left)).unwrap_or(0);
+                Rect::new(left, name.top(), width, name.height)
+            }
+        };
         (!target.is_empty()).then_some(target)
     }
 
@@ -2629,21 +2675,33 @@ impl TileLayout {
             font,
             width: band.right.saturating_sub(band.left),
             lines: band.lines,
-            align: TextAlign::Centre,
+            align: self.align(),
             color: Color::TRANSPARENT,
             shadow: None,
             cut,
         }
         .extent(label);
         let lines = u32::try_from(lines).ok().filter(|lines| *lines > 0)?;
+        let left = match self.arrangement {
+            Arrangement::Stacked(_) => centre_x(width, band.left, band.right),
+            Arrangement::Beside => band.left,
+        };
         (width > 0).then(|| {
             Rect::new(
-                to_i32(centre_x(width, band.left, band.right)),
+                to_i32(left),
                 to_i32(band.top),
                 width,
                 font.line_height().saturating_mul(lines),
             )
         })
+    }
+
+    /// How each line of name is aligned in its band.
+    const fn align(self) -> TextAlign {
+        match self.arrangement {
+            Arrangement::Stacked(_) => TextAlign::Centre,
+            Arrangement::Beside => TextAlign::Leading,
+        }
     }
 
     /// The rectangle a tile occupying `bounds` draws its **name** in: the
@@ -2668,7 +2726,7 @@ impl TileLayout {
     fn band_height(self, scale: Scale, theme: &Theme) -> u32 {
         name_font(theme, scale)
             .line_height()
-            .saturating_mul(self.name_lines)
+            .saturating_mul(self.name_lines())
     }
 
     /// The band under the picture: its column `[left, right)`, the top of the
@@ -2683,14 +2741,32 @@ impl TileLayout {
     ) -> Option<LabelBand> {
         let (x, y, w, h) = surface_rect(bounds)?;
         let (pad, gap) = tile_insets(scale, theme);
-        let top = match self.icon_slot(bounds, scale, theme) {
-            Some((_, iy, side)) => iy.saturating_add(side).saturating_add(gap),
-            None => y.saturating_add(pad),
+        let line = font.line_height().max(1);
+        let (left, right, top, band_end) = match self.arrangement {
+            Arrangement::Stacked(_) => (
+                x.saturating_add(pad),
+                x.saturating_add(w).saturating_sub(pad),
+                match self.icon_slot(bounds, scale, theme) {
+                    Some((_, iy, side)) => iy.saturating_add(side).saturating_add(gap),
+                    None => y.saturating_add(pad),
+                },
+                y.saturating_add(h).saturating_sub(gap),
+            ),
+            Arrangement::Beside => {
+                let left = match self.icon_slot(bounds, scale, theme) {
+                    Some((ix, _, side)) => ix.saturating_add(side).saturating_add(gap),
+                    None => x.saturating_add(gap),
+                };
+                let top = y.saturating_add(h.saturating_sub(line) / 2);
+                (
+                    left,
+                    x.saturating_add(w).saturating_sub(gap),
+                    top,
+                    top.saturating_add(line),
+                )
+            }
         };
-        let left = x.saturating_add(pad);
-        let right = x.saturating_add(w).saturating_sub(pad);
-        let band_end = y.saturating_add(h).saturating_sub(gap);
-        let whole = (band_end.saturating_sub(top) / font.line_height().max(1)).min(self.name_lines);
+        let whole = (band_end.saturating_sub(top) / line).min(self.name_lines());
         let lines = usize::try_from(whole).unwrap_or(0);
         (right > left && lines > 0).then_some(LabelBand {
             left,
@@ -2706,6 +2782,10 @@ impl TileLayout {
     fn icon_slot(self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32)> {
         let (x, y, w, h) = surface_rect(bounds)?;
         let (pad, gap) = tile_insets(scale, theme);
+        if self.arrangement == Arrangement::Beside {
+            let side = h.checked_sub(gap.saturating_mul(2))?.min(w);
+            return (side > 0).then(|| (x.saturating_add(gap), y.saturating_add(gap), side));
+        }
         let avail_w = w.checked_sub(pad.saturating_mul(2))?;
         let below = gap
             .saturating_mul(2)

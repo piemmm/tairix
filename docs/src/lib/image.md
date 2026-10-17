@@ -11,8 +11,9 @@ master, or a photograph the user picked) are each decoded inside a
 minimum-capability parser sandbox before they ever reach the compositor,
 because neither ships from the system. This crate is the raster half of
 that pipeline (the vector half is `lib/svg`). The picture viewer
-(`plans/VIEW.md`) and the image editor (`plans/PAINT.md`) are the crate's
-other consumers, and every format they claim
+(`plans/VIEW.md`), the image editor (`plans/PAINT.md`) and the text editor's
+Data display ([Structure reports](#structure-reports)) are the crate's other
+consumers, and every format they claim
 lands here rather than beside them — being the one raster registry is what
 keeps a format's decoder in a single place. *Admitting* a format is still each
 consumer's own decision: the icon pipeline deliberately takes only PNG and
@@ -711,6 +712,55 @@ refused however small the box, so the work stays bounded with the memory.
   animation's first frame is composited and reduced.
 
 `decode` keeps its meaning for every format: natural size.
+
+## Structure reports
+
+`inspect::inspect(bytes, format)` answers what a picture file is made of as
+lines a person reads: a heading naming the format and the file's length, then
+each record of its container in file order — its offset, its name, its length,
+and what it declares — and, under the records that carry them, the facts they
+state.
+
+- **PNG**: every chunk, the header's size, depth, colour model and interlace,
+  the palette, transparency, density in pixels a metre and dots an inch, gamma,
+  sRGB intent, ICC profile name, modification time, animation control and each
+  frame's, a text chunk's keyword and text, and a CRC that does not match its
+  chunk. A run of `IDAT` (or `fdAT`) chunks is one line.
+- **JPEG**: every marker segment — the frame header's coding process,
+  precision, size and each component's sampling, the tables, the restart
+  interval, the JFIF density, XMP, an ICC profile's parts, Adobe's transform,
+  comments — and the entropy-coded data after each scan, with its restarts.
+- **GIF**: the screen, the colour tables, each frame's position, size,
+  interlace and data, graphic control's delay, disposal and transparency,
+  comments and application blocks.
+- **BMP** and an icon file's DIB pictures: the header version, size, row
+  order, depth, encoding, density, colour counts, masks and colour space.
+- **ICO/CUR**: the directory, each entry's size, depth or hot spot, and each
+  picture as a PNG or a DIB.
+- **TIFF**: the header and every directory of the chain, each tag named.
+- **WEBP**: every RIFF chunk — the bitstreams' sizes, the extended header's
+  canvas and features, alpha, animation and each frame with its own chunks.
+- **Sprite area**: the area header and each sprite's name, size, mode word,
+  mask and palette.
+- **OpenRaster**: the archive's members.
+
+An EXIF block — a JPEG's `APP1`, a PNG's `eXIf`, a WEBP's `EXIF` — is reported
+directory by directory (`exif`): the picture's, the camera's, the position's,
+interoperability and the thumbnail's, each tag by its standard name and its
+value in its unit — an exposure as a fraction of a second, an aperture as an
+f-number, a position in degrees, minutes and seconds, an enumeration by what
+its value means beside the value itself. A TIFF's own directories read
+through the same tables.
+
+The file is hostile, so the report is built in a parser sandbox
+(`tairix_sandbox::imageinspect`) and is bounded: at most `MAX_REPORT_LINES`
+lines of at most `MAX_LINE_BYTES` bytes, its last saying where it stopped
+should it fill. A record that will not read ends the walk with where and why,
+an EXIF entry list cut short is read as far as it goes, a value outside its
+block is said to be, a directory is never visited twice, and text the file
+carries is shown with its control bytes escaped. The TIFF directory layout the
+decoder, the orientation reader and the report share is one module (`ifd`):
+the decoder reads a directory strictly, the advisory readers entry by entry.
 
 ## Writing
 

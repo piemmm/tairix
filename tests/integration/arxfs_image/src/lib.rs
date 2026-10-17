@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
-use tairix_abi::home::HOME_USER_FILES_DIR;
+use tairix_abi::home::HOME_FILES_DIR;
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::{EntropySource, Keying, Security, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_users::{
@@ -94,7 +94,7 @@ pub const NEW_FILE_NAME: &[u8] = b"written.txt";
 pub const NEW_FILE_CONTENT: &[u8] = b"TAIRiX wrote this file to arxfs over virtio-blk.\n";
 
 /// A document planted among the fixture account's own files
-/// (`/Users/root/UserFiles`) on the users-root volume, so the desktop
+/// (`/Users/root/Home`) on the users-root volume, so the desktop
 /// session's trusted file picker — which opens there — has a real regular
 /// file to choose. Choosing it
 /// drives the CU6 one-shot `fd_grant`/`fd_redeem` delegation into `view`
@@ -457,7 +457,7 @@ pub fn build_users_root_image_keyed(
             // reach: the picker shows a regular file to choose, and the file
             // manager's window has a picture whose type an installed
             // application claims.
-            let files = fs.lookup(home, HOME_USER_FILES_DIR.as_bytes())?;
+            let files = fs.lookup(home, HOME_FILES_DIR.as_bytes())?;
             plant_home_file(&mut fs, files, HOME_DOC_NAME, HOME_DOC_CONTENT)?;
             plant_home_file(&mut fs, files, HOME_PICTURE_NAME, HOME_PICTURE_CONTENT)?;
         }
@@ -605,11 +605,11 @@ mod tests {
         // and the picture an installed application claims so the file
         // manager's own activation has somewhere to hand it.
         let files = fs
-            .lookup(home, HOME_USER_FILES_DIR.as_bytes())
-            .expect("/Users/root/UserFiles present");
-        for folder in tairix_abi::home::USER_FILES_SUBDIRS {
+            .lookup(home, HOME_FILES_DIR.as_bytes())
+            .expect("/Users/root/Home present");
+        for folder in tairix_abi::home::HOME_FILES_SUBDIRS {
             fs.lookup(files, folder.as_bytes())
-                .unwrap_or_else(|_| panic!("/Users/root/UserFiles/{folder} present"));
+                .unwrap_or_else(|_| panic!("/Users/root/Home/{folder} present"));
         }
         for (name, content) in [
             (HOME_DOC_NAME, HOME_DOC_CONTENT),
@@ -618,7 +618,7 @@ mod tests {
             let spelling = core::str::from_utf8(name).expect("a planted name is UTF-8");
             let node = fs
                 .lookup(files, name)
-                .unwrap_or_else(|_| panic!("/Users/root/UserFiles/{spelling} present"));
+                .unwrap_or_else(|_| panic!("/Users/root/Home/{spelling} present"));
             let sec = fs.security(node).expect("document security present");
             assert_eq!(sec.mode, 0o644, "{spelling}");
             assert_eq!(sec.uid, tairix_users::FIRST_USER_UID, "{spelling}");

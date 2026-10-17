@@ -1974,6 +1974,19 @@ pub enum AudioNotify {
 }
 
 impl AudioNotify {
+    /// The stream this notification is about, which may be a closed one
+    /// whose mailbox a later stream inherited.
+    #[must_use]
+    pub const fn stream_id(&self) -> u64 {
+        match self {
+            Self::SpaceAvailable { stream_id, .. }
+            | Self::StateChanged { stream_id, .. }
+            | Self::Xrun { stream_id, .. } => *stream_id,
+        }
+    }
+}
+
+impl AudioNotify {
     /// Encoded length of the notify frame.
     pub const WIRE_LEN: usize = AUDIO_NOTIFY_LEN;
 

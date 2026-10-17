@@ -17,10 +17,11 @@ use tairix_raster::Pixel;
 use tairix_theme::motion::SceneClock;
 use tairix_theme::{MotionInteraction, Theme, Timeline};
 
-use super::{LoginScreen, Step};
+use super::LoginScreen;
 use crate::accounts::SessionTransport;
 use crate::cursor::pointer_image;
 use crate::frame::{rect_of, Present, Scanout};
+use crate::test_courier::Inline;
 use crate::verify::Answer;
 use crate::wait::ENERGY_SAVING_AFTER_NS;
 
@@ -42,54 +43,53 @@ impl Drawn {
         verified: false,
         answer: None,
     };
+}
 
-    fn of<T: SessionTransport>(step: Step, login: &mut LoginScreen<T>) -> Self {
-        Self {
-            present: login.draw(),
-            verified: step.verified,
-            answer: step.answer,
-        }
+/// The screen as these tests run it: its authority carried at once.
+type Login = LoginScreen<Inline<Authority>>;
+
+/// The rest of a park round holding one input, which has been applied: every
+/// answer the authority has given adopted, then the frame drawn.
+fn round(login: &mut Login, now_ns: u64) -> Drawn {
+    let mut verified = false;
+    let mut answer = None;
+    while let Some(step) = login.collect(now_ns) {
+        verified |= step.verified;
+        answer = Some(step.answer);
+    }
+    Drawn {
+        present: login.draw(),
+        verified,
+        answer,
     }
 }
 
 /// `event` through `login` and the frame drawn, as a round holding just it.
-fn input<T: SessionTransport>(
-    login: &mut LoginScreen<T>,
-    event: &InputEvent,
-    now_ns: u64,
-) -> Drawn {
-    let step = login.on_input(event, now_ns);
-    Drawn::of(step, login)
+fn input(login: &mut Login, event: &InputEvent, now_ns: u64) -> Drawn {
+    login.on_input(event, now_ns);
+    round(login, now_ns)
 }
 
 /// A pointer report through `login` and the frame drawn.
-fn point<T: SessionTransport>(
-    login: &mut LoginScreen<T>,
-    report: &PointerInput,
-    now_ns: u64,
-) -> Drawn {
-    let step = login.on_pointer(report, now_ns);
-    Drawn::of(step, login)
+fn point(login: &mut Login, report: &PointerInput, now_ns: u64) -> Drawn {
+    login.on_pointer(report, now_ns);
+    round(login, now_ns)
 }
 
 /// A touch gesture through `login` and the frame drawn.
-fn gesture<T: SessionTransport>(
-    login: &mut LoginScreen<T>,
-    gesture: tairix_touch::Gesture,
-    now_ns: u64,
-) -> Drawn {
-    let step = login.on_gesture(gesture, now_ns);
-    Drawn::of(step, login)
+fn gesture(login: &mut Login, gesture: tairix_touch::Gesture, now_ns: u64) -> Drawn {
+    login.on_gesture(gesture, now_ns);
+    round(login, now_ns)
 }
 
 /// `login` brought up to date and the frame drawn.
-fn refreshed<T: SessionTransport>(
-    login: &mut LoginScreen<T>,
-    now_ns: u64,
-    wall: Option<Time64>,
-) -> Drawn {
+fn refreshed(login: &mut Login, now_ns: u64, wall: Option<Time64>) -> Drawn {
     login.refresh(now_ns, wall);
-    Drawn::of(Step::quiet(), login)
+    Drawn {
+        present: login.draw(),
+        verified: false,
+        answer: None,
+    }
 }
 
 /// A screen large enough for the panel and a row of tiles.
@@ -152,22 +152,18 @@ impl SessionTransport for Authority {
     }
 }
 
-fn screen(accounts: Vec<AccountTile>, authority: Authority) -> LoginScreen<Authority> {
+fn screen(accounts: Vec<AccountTile>, authority: Authority) -> Login {
     screen_in(accounts, authority, Theme::dark())
 }
 
-fn screen_in(
-    accounts: Vec<AccountTile>,
-    authority: Authority,
-    theme: Theme,
-) -> LoginScreen<Authority> {
+fn screen_in(accounts: Vec<AccountTile>, authority: Authority, theme: Theme) -> Login {
     LoginScreen::new(
         Scanout::new(mode()).expect("a valid mode"),
         theme,
         Scale::ONE,
         "TAIRiX 0.0.0 (tairix)".to_string(),
         accounts,
-        authority,
+        Inline::new(authority),
     )
 }
 
@@ -276,7 +272,7 @@ fn pixel_at(frame: &[u8], x: u32, y: u32) -> &[u8] {
 /// drawn. Only meaningful straight after a whole-screen composition: a
 /// frame composed within a damage rectangle is deliberately older than the
 /// surface outside it.
-fn drawn_over(login: &LoginScreen<Authority>) -> Vec<(i32, i32)> {
+fn drawn_over(login: &Login) -> Vec<(i32, i32)> {
     let order = ChannelOrder::for_format(mode().format).expect("a format the frame encodes");
     let surface = login.painted.as_ref().expect("a surface is kept");
     let frame = login.frame();
@@ -340,7 +336,7 @@ const MARK: Pixel = Pixel {
 };
 
 /// A screen with its pointer and its first frame already up.
-fn ready() -> LoginScreen<Authority> {
+fn ready() -> Login {
     let mut login = screen(
         vec![AccountTile::new("Ann Example", "ann")],
         Authority::accepting("ann", SECRET),
@@ -355,13 +351,13 @@ fn ready() -> LoginScreen<Authority> {
 /// A render cannot produce that colour, so a surface still carrying the
 /// stamp is demonstrably the one that was rendered before it — which is how
 /// these tests count renders without the screen counting them for them.
-fn stamp(login: &mut LoginScreen<Authority>, at: (i32, i32)) {
+fn stamp(login: &mut Login, at: (i32, i32)) {
     let surface = login.painted.as_mut().expect("a surface is kept");
     surface.set(on_screen(at.0), on_screen(at.1), MARK);
 }
 
 /// The kept surface's own pixel at `at`, or `None` when no surface is kept.
-fn kept(login: &LoginScreen<Authority>, at: (i32, i32)) -> Option<Pixel> {
+fn kept(login: &Login, at: (i32, i32)) -> Option<Pixel> {
     let surface = login.painted.as_ref()?;
     Some(
         surface
@@ -376,7 +372,7 @@ fn on_screen(value: i32) -> u32 {
 
 /// Pick the focused tile, then type `secret` and submit it. Returns the step
 /// the submitting event produced.
-fn offer<T: SessionTransport>(screen: &mut LoginScreen<T>, secret: &str, now_ns: u64) -> Drawn {
+fn offer(screen: &mut Login, secret: &str, now_ns: u64) -> Drawn {
     input(screen, &key(NamedKey::Enter), now_ns);
     for ch in secret.chars() {
         input(screen, &typed(ch), now_ns);
@@ -532,8 +528,7 @@ fn a_burst_of_keystrokes_is_painted_once_when_the_round_draws() {
     stamp(&mut login, centre());
     let before = login.frame().to_vec();
     for ch in "burst".chars() {
-        let step = login.on_input(&typed(ch), 0);
-        assert!(!step.verified);
+        login.on_input(&typed(ch), 0);
     }
     assert_eq!(
         kept(&login, centre()),
@@ -712,7 +707,7 @@ fn a_reduced_motion_fade_leaves_at_once() {
 
 /// A verified screen, its pointer drawn and its whole frame composed, at
 /// the moment before it begins leaving.
-fn about_to_leave() -> (LoginScreen<Authority>, u64) {
+fn about_to_leave() -> (Login, u64) {
     let mut login = ready();
     assert!(offer(&mut login, SECRET, 0).verified);
     // Typing a secret takes longer than picking the account animates, so
@@ -1627,7 +1622,7 @@ impl Display for Panel {
 
 /// A screen standing over the ribbon with its chrome told and its first frame
 /// composed, and no pointer drawn over either.
-fn ribboned() -> LoginScreen<Authority> {
+fn ribboned() -> Login {
     let mut login = screen(
         vec![AccountTile::new("Ann Example", "ann")],
         Authority::accepting("ann", SECRET),

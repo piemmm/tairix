@@ -6,8 +6,8 @@
 //! renderer ([`render`](mod@crate::render)) and the pointer hit-test
 //! ([`entry_index_at`](crate::render::entry_index_at)) consume, so a click can
 //! never resolve to a different item than the one the user saw. [`ViewLayout`]
-//! is the dispatch that lets a caller treat the two uniformly without
-//! branching on the browser's [`ViewMode`].
+//! is the dispatch that lets a caller treat them uniformly without branching
+//! on the browser's [`ViewMode`]; both icon displays are a [`GridView`].
 //!
 //! Each view is a fixed-height header (the toolbar) above the scrolling item
 //! area. The items are laid out at their natural size, unscrolled, and shown
@@ -38,29 +38,37 @@ use alloc::vec::Vec;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use tairix_geometry::{GridFill, GridRun, Point, Rect};
 
-/// Which of the two item views the browser is showing.
+/// How the browser shows its entries: the window's display.
 ///
-/// The two views share one selection cursor, one scroll offset, and one
-/// listing; only the geometry (a column of full-width rows vs. a wrapped grid
-/// of tiles) differs. Switching mode is a pure toggle on the
-/// [`Browser`](crate::Browser) — it never re-reads the directory or moves the
-/// selection to a different entry.
+/// The displays share one selection cursor, one scroll offset, and one
+/// listing; only the geometry differs — a column of full-width rows, or a
+/// wrapped grid of large or small tiles. Switching display never re-reads the
+/// directory or moves the selection to a different entry.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub enum ViewMode {
-    /// A vertical column of full-width rows (the default).
+    /// Each entry a large picture above its name, in a wrapped grid.
+    LargeIcons,
+    /// Each entry a small picture beside one line of its name, in rows across
+    /// the window.
+    SmallIcons,
+    /// One row per entry, its facts in columns under a header (the default).
     #[default]
     List,
-    /// A wrapped grid of icon tiles.
-    Grid,
 }
 
 impl ViewMode {
-    /// The other view — the mode the list/grid toggle switches to.
+    /// Every display, in the order a menu offers them and the toolbar steps
+    /// through them.
+    pub const ALL: [Self; 3] = [Self::LargeIcons, Self::SmallIcons, Self::List];
+
+    /// The display after this one in [`ALL`](Self::ALL), wrapping: what the
+    /// toolbar's view command switches to.
     #[must_use]
-    pub const fn toggled(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
-            Self::List => Self::Grid,
-            Self::Grid => Self::List,
+            Self::LargeIcons => Self::SmallIcons,
+            Self::SmallIcons => Self::List,
+            Self::List => Self::LargeIcons,
         }
     }
 }
@@ -457,7 +465,7 @@ impl GridFlow {
 /// The pixel metrics of one grid tile: its size, and the gap between tiles.
 ///
 /// Grouped rather than passed loose because the three are derived and consumed
-/// together — `render::grid_metrics` measures all three from the theme's body
+/// together — `render::Tiles::metrics` measures all three from the theme's body
 /// face at the desktop scale — and because three bare pixel counts in a
 /// positional argument list are easy to transpose.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -850,7 +858,8 @@ impl GridView {
     }
 }
 
-/// One of the two item-view geometries, chosen by the browser's [`ViewMode`].
+/// One of the two item-view geometries, chosen by the browser's [`ViewMode`]:
+/// the list, or the tile grid either icon display lays out.
 ///
 /// This is the single dispatch both the renderer and the pointer hit-test go
 /// through, so the list and the grid expose one scrolling/hit-testing contract

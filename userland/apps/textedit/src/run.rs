@@ -35,10 +35,15 @@ mod program {
     use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Region, Scale};
+    use tairix_image::inspect::ReportLine;
     use tairix_raster::Surface;
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_sandbox::decode::{self, DecodeService, Isa, MAX_INPUT};
+    use tairix_sandbox::imageinspect::{self, inspect_document, InspectFailure, InspectService};
+    use tairix_sandbox::imagerender::{
+        upload_document, UploadFailure, ViewFormat, MAX_DOCUMENT_BYTES,
+    };
     use tairix_sandbox::rt::{serve_stdio, serves, worker_role, RtLauncher};
     use tairix_sandbox::textsyntax::{
         detect, lex_lines, validate_document, LexedBatch, SyntaxFailure, TextSyntaxService,
@@ -46,7 +51,9 @@ mod program {
     };
     use tairix_sandbox::{ParserSandbox, WorkerExit};
     use tairix_syntax::{Diagnostic, Format, Severity};
-    use tairix_textedit::code::{list_code, CodeListing, Unlisted};
+    use tairix_textedit::answer::Unlisted;
+    use tairix_textedit::code::{list_code, CodeListing};
+    use tairix_textedit::data;
     use tairix_textedit::detect::format_for_name;
     use tairix_textedit::document::{Document, OutOfMemory, Snapshot, STEP_BYTES};
     use tairix_textedit::editor::{Conversion, Converted, Editor, Mode};
@@ -211,13 +218,78 @@ mod program {
     type CodeSandbox = ParserSandbox<RtLauncher, tairix_rt::LogSink>;
 
     /// What each worker is spawned to serve: a worker apiece, so an
-    /// executable's parsers never share an address space with the ones that
-    /// colour text.
+    /// executable's or a picture's parsers never share an address space with
+    /// the ones that colour text, or with each other.
     const CODE_SERVICE: &[u8] = b"code";
     const SYNTAX_SERVICE: &[u8] = b"syntax";
+    const DATA_SERVICE: &[u8] = b"data";
 
     /// The decode worker's answer wake.
     const CODE_TOKEN: u64 = APP_TOKEN + 1;
+
+    /// The picture worker's answer wake.
+    const DATA_TOKEN: u64 = APP_TOKEN + 2;
+
+    type DataSandbox = ParserSandbox<RtLauncher, tairix_rt::LogSink>;
+
+    /// A structure report of the document `stamp` names, asked as `id`.
+    struct DataJob {
+        stamp: Stamp,
+        id: u64,
+        snapshot: Arc<Snapshot>,
+        named: Option<ViewFormat>,
+    }
+
+    struct DataReply {
+        stamp: Stamp,
+        id: u64,
+        report: Result<Vec<ReportLine>, Unlisted>,
+    }
+
+    type DataWorker = Worker<DataSandbox, DataJob, DataReply>;
+
+    /// Hand the worker the snapshot a run at a time, so the editor never
+    /// holds a second copy of a picture, then ask for its report.
+    fn serve_data(sandbox: &mut DataSandbox, job: &mut DataJob) -> DataReply {
+        let snapshot = &job.snapshot;
+        let sent = upload_document(sandbox, snapshot.len(), |offset, into| {
+            Ok::<_, core::convert::Infallible>(read_at(snapshot, offset, into))
+        });
+        let report = match sent {
+            Ok(()) => inspect_document(sandbox, job.named).map_err(data::unreported),
+            Err(failure) if failure.out_of_memory() => Err(data::no_memory()),
+            Err(UploadFailure::Document(failure)) => {
+                Err(data::unreported(InspectFailure::Document(failure)))
+            }
+            Err(UploadFailure::Shrank | UploadFailure::NoMemory | UploadFailure::Read(_)) => {
+                Err(data::no_memory())
+            }
+        };
+        DataReply {
+            stamp: job.stamp,
+            id: job.id,
+            report,
+        }
+    }
+
+    /// Fill `into` from `snapshot` at `offset`, answering how much it holds.
+    fn read_at(snapshot: &Snapshot, offset: u64, into: &mut [u8]) -> usize {
+        let Ok(offset) = usize::try_from(offset) else {
+            return 0;
+        };
+        let mut filled = 0;
+        snapshot.walk(offset, |bytes| {
+            let take = bytes.len().min(into.len() - filled);
+            into[filled..filled + take].copy_from_slice(&bytes[..take]);
+            filled += take;
+            if filled == into.len() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        filled
+    }
 
     /// A listing of the document `stamp` names, asked as `id`.
     struct CodeJob {
@@ -315,6 +387,12 @@ mod program {
         code_busy: bool,
         /// The window after the one whose listing was asked last.
         next_code: usize,
+        /// Picture structure reports, one at a time.
+        data: Arc<DataWorker>,
+        _data_guard: WorkerGuard<DataSandbox, DataJob, DataReply>,
+        data_busy: bool,
+        /// The window after the one whose report was asked last.
+        next_data: usize,
         /// The instruction set this machine runs, which an `rxe` is read as.
         system: Option<Isa>,
     }
@@ -366,6 +444,16 @@ mod program {
             ));
             docapp::start_worker(APP_NAME, &code, set, CODE_TOKEN, "code")?;
             let code_guard = WorkerGuard::new(&code);
+            let data = Arc::new(DataWorker::new(
+                serve_data,
+                ParserSandbox::new(
+                    RtLauncher::own_binary(imageinspect::WORKER_MEMORY).serving(DATA_SERVICE),
+                    tairix_rt::LogSink,
+                ),
+                WorkerWake::create(),
+            ));
+            docapp::start_worker(APP_NAME, &data, set, DATA_TOKEN, "data")?;
+            let data_guard = WorkerGuard::new(&data);
             Ok(Self {
                 syntax,
                 _syntax_guard: guard,
@@ -375,6 +463,10 @@ mod program {
                 _code_guard: code_guard,
                 code_busy: false,
                 next_code: 0,
+                data,
+                _data_guard: data_guard,
+                data_busy: false,
+                next_data: 0,
                 system: tairix_rt::boot_facts()
                     .ok()
                     .map(|facts| Isa::of_arch(facts.arch)),
@@ -384,7 +476,8 @@ mod program {
         fn wakes(&self) -> Vec<(u64, Arc<dyn AnswerWake>)> {
             let syntax: Arc<dyn AnswerWake> = self.syntax.clone();
             let code: Arc<dyn AnswerWake> = self.code.clone();
-            alloc::vec![(APP_TOKEN, syntax), (CODE_TOKEN, code)]
+            let data: Arc<dyn AnswerWake> = self.data.clone();
+            alloc::vec![(APP_TOKEN, syntax), (CODE_TOKEN, code), (DATA_TOKEN, data)]
         }
 
         fn faces(theme: &Theme, scale: Scale) -> Faces {
@@ -462,12 +555,17 @@ mod program {
                 host.app.code_busy = false;
                 adopt_code(host, reply);
             }
+            while let Some(reply) = host.app.data.collect() {
+                host.app.data_busy = false;
+                adopt_data(host, reply);
+            }
         }
 
         fn turn(host: &mut Host<Self>, now_ns: u64) -> bool {
             let syntax = submit_syntax(host, now_ns);
             let code = submit_code(host);
-            syntax || code
+            let data = submit_data(host);
+            syntax || code || data
         }
 
         /// When the soonest store check falls due.
@@ -623,7 +721,7 @@ mod program {
                 Ok((_, snapshot)) => snapshot,
                 Err(unlisted) => {
                     let (layout, damage) = (&window.layout, &mut window.damage);
-                    window.view.code_refused(unlisted, layout, damage);
+                    window.view.display_refused(unlisted, layout, damage);
                     window.owe_reported();
                     continue;
                 }
@@ -640,6 +738,73 @@ mod program {
             return host.app.code.submit(job);
         }
         false
+    }
+
+    /// Hand the picture worker the next report any window wants, answering
+    /// whether the answer is already waiting.
+    ///
+    /// A document past what one report may read is refused here rather than
+    /// frozen for a worker that could only refuse it.
+    fn submit_data(host: &mut Host<TextEdit>) -> bool {
+        if host.app.data_busy {
+            return false;
+        }
+        let count = host.windows.len();
+        for turn in 0..count {
+            let index = (host.app.next_data + turn) % count;
+            let window = &mut host.windows[index];
+            if window.loading() {
+                continue;
+            }
+            let Some((id, named)) = window.view.data_want() else {
+                continue;
+            };
+            let snapshot = if window.view.editor().document().len() > MAX_DOCUMENT_BYTES {
+                Err(data::too_large())
+            } else {
+                window
+                    .view
+                    .editor_mut()
+                    .snapshot()
+                    .map_err(|OutOfMemory| data::no_memory())
+            };
+            let snapshot = match snapshot {
+                Ok((_, snapshot)) => snapshot,
+                Err(unlisted) => {
+                    let (layout, damage) = (&window.layout, &mut window.damage);
+                    window.view.display_refused(unlisted, layout, damage);
+                    window.owe_reported();
+                    continue;
+                }
+            };
+            let job = DataJob {
+                stamp: window.stamp(),
+                id,
+                snapshot,
+                named,
+            };
+            host.app.next_data = (index + 1) % count;
+            host.app.data_busy = true;
+            return host.app.data.submit(job);
+        }
+        false
+    }
+
+    /// Take in a report the picture worker read, for the document that asked
+    /// for it: one for a document since gone is let go.
+    fn adopt_data(host: &mut Host<TextEdit>, reply: DataReply) {
+        let Some(index) = host.showing(reply.stamp) else {
+            return;
+        };
+        let window = &mut host.windows[index];
+        if window.loading() {
+            return;
+        }
+        let (layout, damage) = (&window.layout, &mut window.damage);
+        window
+            .view
+            .data_reported(reply.id, reply.report, layout, damage);
+        window.owe_reported();
     }
 
     /// Take in a listing the decode worker built, for the document that asked
@@ -913,6 +1078,8 @@ mod program {
                 serve_stdio(&mut DecodeService).exit_code()
             } else if serves(SYNTAX_SERVICE) {
                 serve_stdio(&mut TextSyntaxService).exit_code()
+            } else if serves(DATA_SERVICE) {
+                serve_stdio(&mut InspectService::default()).exit_code()
             } else {
                 WorkerExit::Unserved.code()
             };

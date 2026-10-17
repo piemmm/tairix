@@ -9,7 +9,7 @@ use tairix_abi::driver::filesystem::{
     FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
 };
 use tairix_abi::driver::DriverError;
-use tairix_abi::home::{HOME_USER_FILES_DIR, USER_FILES_SUBDIRS};
+use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS};
 
 use crate::policy::{
     appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS, HOME_MODE,
@@ -83,8 +83,8 @@ where
 }
 
 /// Give `home`, owned by `(uid, gid)`, the fixed shape: every
-/// [`HOME_SUBDIRS`] folder, and every [`USER_FILES_SUBDIRS`] folder inside
-/// its `UserFiles`, each created owner-only for the account.
+/// [`HOME_SUBDIRS`] folder, and every [`HOME_FILES_SUBDIRS`] folder inside
+/// its `Home` folder, each created owner-only for the account.
 ///
 /// A name already present keeps whatever it holds — the account's own data is
 /// never rewritten — and a non-directory there is left alone rather than
@@ -124,8 +124,8 @@ where
         if appdata {
             tree.stamp(node, transit)?;
             ensure_appdata_root(tree, node)?;
-        } else if name == HOME_USER_FILES_DIR {
-            for child in USER_FILES_SUBDIRS {
+        } else if name == HOME_FILES_DIR {
+            for child in HOME_FILES_SUBDIRS {
                 ensure_dir(tree, node, child, private)?;
             }
         }

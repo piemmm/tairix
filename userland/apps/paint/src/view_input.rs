@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuSymbol as S};
 use tairix_colour::Rgba;
 use tairix_controls::{
     wheel_steps, Keystroke, PickerOutcome, ScrollAction, SwatchAction, SwatchMark, ToolActivation,
@@ -3388,87 +3388,39 @@ impl View {
     fn window_rows(&self, menu: &mut MenuBuilder) {
         let selected = self.selected_area().is_some();
         let picture = self.document.picture().is_some();
-        menu.item(
-            Action::Cut,
-            "Cut",
-            "Ctrl+X",
-            selected && picture,
-            Plate::Root,
-        );
-        menu.item(
-            Action::Copy,
-            "Copy",
-            "Ctrl+C",
-            selected && picture,
-            Plate::Root,
-        );
-        menu.item(Action::Paste, "Paste", "Ctrl+V", picture, Plate::Root);
-        menu.item(
-            Action::SelectAll,
-            "Select all",
-            "Ctrl+A",
-            picture,
-            Plate::Root,
-        );
-        menu.item(
-            Action::Deselect,
-            "Deselect",
-            "Ctrl+D",
-            selected,
-            Plate::Root,
-        );
+        clipboard_rows(menu, selected, picture);
         menu.separator(Plate::Root);
-        if let Some(file) = menu.submenu("File", Plate::Root) {
+        if let Some(file) = menu.submenu("File", S::File, Plate::Root) {
             file_rows(menu, file);
         }
-        if let Some(edit) = menu.submenu("Edit", Plate::Root) {
+        if let Some(edit) = menu.submenu("Edit", S::Edit, Plate::Root) {
             self.edit_rows(menu, edit, selected);
         }
-        if let Some(image) = menu.submenu("Image", Plate::Root) {
+        if let Some(image) = menu.submenu("Image", S::Image, Plate::Root) {
             self.image_rows(menu, image, picture);
         }
-        if let Some(layers) = menu.submenu("Layers", Plate::Root) {
+        if let Some(layers) = menu.submenu("Layers", S::Layers, Plate::Root) {
             self.layer_rows(menu, layers);
         }
-        if let Some(colours) = menu.submenu("Colours", Plate::Root) {
-            menu.item(
-                Action::EditPrimary,
-                "Edit primary colour",
-                "",
-                picture,
-                colours,
-            );
-            menu.item(
-                Action::EditSecondary,
-                "Edit secondary colour",
-                "",
-                picture,
-                colours,
-            );
-            menu.item(Action::SwapColours, "Swap colours", "X", true, colours);
-            menu.item(Action::ResetColours, "Reset colours", "", true, colours);
-            menu.mark(
-                Action::PickColour,
-                "Pick a colour from the picture",
-                "",
-                self.picking_colour,
-                colours,
-            );
+        if let Some(colours) = menu.submenu("Colours", S::Colours, Plate::Root) {
+            self.colour_rows(menu, colours, picture);
         }
-        if let Some(adjust) = menu.submenu("Adjust", Plate::Root) {
+        if let Some(adjust) = menu.submenu("Adjust", S::Adjust, Plate::Root) {
             self.adjust_rows(menu, adjust, picture);
         }
         let pages = self.document.is_pages();
-        if let Some(entries) = menu.submenu(if pages { "Pages" } else { "Sprites" }, Plate::Root) {
+        let entries_label = if pages { "Pages" } else { "Sprites" };
+        if let Some(entries) = menu.submenu(entries_label, S::Pages, Plate::Root) {
             self.entry_rows(menu, entries, pages);
         }
-        if let Some(view) = menu.submenu("View", Plate::Root) {
+        if let Some(view) = menu.submenu("View", S::View, Plate::Root) {
             self.view_rows(menu, view);
         }
-        if let Some(tools) = menu.submenu("Tools", Plate::Root) {
+        if let Some(tools) = menu.submenu("Tools", S::Tools, Plate::Root) {
             for tool in Tool::ALL {
                 menu.radio(
                     Action::Tool(tool),
+                    tool.symbol(),
                     tool.label(),
                     "",
                     tool == self.tool,
@@ -3476,6 +3428,50 @@ impl View {
                 );
             }
         }
+    }
+
+    /// The two inks: set, swapped, reset, or taken from the picture.
+    fn colour_rows(&self, menu: &mut MenuBuilder, plate: Plate, picture: bool) {
+        menu.item(
+            Action::EditPrimary,
+            S::ColourPrimary,
+            "Edit primary colour",
+            "",
+            picture,
+            plate,
+        );
+        menu.item(
+            Action::EditSecondary,
+            S::ColourSecondary,
+            "Edit secondary colour",
+            "",
+            picture,
+            plate,
+        );
+        menu.item(
+            Action::SwapColours,
+            S::ColourSwap,
+            "Swap colours",
+            "X",
+            true,
+            plate,
+        );
+        menu.item(
+            Action::ResetColours,
+            S::ColourReset,
+            "Reset colours",
+            "",
+            true,
+            plate,
+        );
+        menu.mark(
+            Action::PickColour,
+            S::PickColour,
+            "Pick a colour from the picture",
+            "",
+            self.picking_colour,
+            plate,
+        );
     }
 
     /// Every adjustment and filter, one with settings marked as opening
@@ -3489,28 +3485,58 @@ impl View {
                 String::from(filter.label())
             };
             let can = picture && !(palette && filter.neighbourly());
-            menu.item(Action::Adjust(index), &label, "", can, plate);
+            menu.item(
+                Action::Adjust(index),
+                filter.symbol(),
+                &label,
+                "",
+                can,
+                plate,
+            );
         }
     }
 
     /// The view's own commands, and the panes shown.
     fn view_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
-        menu.item(Action::ZoomIn, "Zoom in", "+", true, plate);
-        menu.item(Action::ZoomOut, "Zoom out", "-", true, plate);
-        menu.item(Action::Fit, "Fit in window", "Ctrl+0", true, plate);
-        menu.item(Action::Actual, "Actual size", "1", true, plate);
-        menu.mark(Action::Grid, "Grid", "Ctrl+'", self.grids.spaced, plate);
+        menu.item(Action::ZoomIn, S::ZoomIn, "Zoom in", "+", true, plate);
+        menu.item(Action::ZoomOut, S::ZoomOut, "Zoom out", "-", true, plate);
+        menu.item(
+            Action::Fit,
+            S::ZoomFit,
+            "Fit in window",
+            "Ctrl+0",
+            true,
+            plate,
+        );
+        menu.item(
+            Action::Actual,
+            S::ZoomActual,
+            "Actual size",
+            "1",
+            true,
+            plate,
+        );
+        menu.mark(
+            Action::Grid,
+            S::Grid,
+            "Grid",
+            "Ctrl+'",
+            self.grids.spaced,
+            plate,
+        );
         menu.mark(
             Action::PixelGrid,
+            S::PixelGrid,
             "Pixel grid",
             "G",
             self.grids.pixels,
             plate,
         );
-        if let Some(panes) = menu.submenu("Panes", plate) {
+        if let Some(panes) = menu.submenu("Panes", S::Panes, plate) {
             for kind in crate::pane::PaneKind::ALL {
                 menu.mark(
                     Action::Pane(kind),
+                    kind.symbol(),
                     kind.title(),
                     "",
                     self.shows(kind),
@@ -3518,7 +3544,14 @@ impl View {
                 );
             }
             menu.separator(panes);
-            menu.item(Action::ResetPanes, "Reset panes", "", true, panes);
+            menu.item(
+                Action::ResetPanes,
+                S::ResetPanes,
+                "Reset panes",
+                "",
+                true,
+                panes,
+            );
         }
     }
 
@@ -3526,16 +3559,25 @@ impl View {
         let (undo, redo) = self.document.can_undo_redo();
         menu.item(
             Action::Undo,
+            S::Undo,
             "Undo",
             "Ctrl+Z",
             undo || self.held.is_some(),
             plate,
         );
-        menu.item(Action::Redo, "Redo", "Ctrl+Shift+Z", redo, plate);
+        menu.item(Action::Redo, S::Redo, "Redo", "Ctrl+Shift+Z", redo, plate);
         menu.separator(plate);
-        menu.item(Action::Delete, "Clear selection", "Delete", selected, plate);
+        menu.item(
+            Action::Delete,
+            S::Erase,
+            "Clear selection",
+            "Delete",
+            selected,
+            plate,
+        );
         menu.item(
             Action::FillSelection,
+            S::FillSelection,
             "Fill with primary colour",
             "Alt+Backspace",
             self.document.picture().is_some(),
@@ -3543,6 +3585,7 @@ impl View {
         );
         menu.item(
             Action::Crop,
+            S::CropToSelection,
             "Crop to selection",
             "Ctrl+Shift+X",
             selected,
@@ -3550,6 +3593,7 @@ impl View {
         );
         menu.item(
             Action::PutDown,
+            S::PutDown,
             "Put down",
             "Enter",
             self.held.is_some(),
@@ -3559,32 +3603,84 @@ impl View {
 
     fn image_rows(&self, menu: &mut MenuBuilder, plate: Plate, picture: bool) {
         let kind = self.kind();
-        menu.item(Action::Resize, "Resize\u{2026}", "Ctrl+R", picture, plate);
+        menu.item(
+            Action::Resize,
+            S::Resize,
+            "Resize\u{2026}",
+            "Ctrl+R",
+            picture,
+            plate,
+        );
         menu.item(
             Action::CanvasSize,
+            S::CanvasSize,
             "Canvas size\u{2026}",
             "Ctrl+Shift+R",
             picture,
             plate,
         );
         menu.separator(plate);
-        menu.item(Action::RotateLeft, "Rotate left", "Ctrl+[", picture, plate);
+        menu.item(
+            Action::RotateLeft,
+            S::RotateLeft,
+            "Rotate left",
+            "Ctrl+[",
+            picture,
+            plate,
+        );
         menu.item(
             Action::RotateRight,
+            S::RotateRight,
             "Rotate right",
             "Ctrl+]",
             picture,
             plate,
         );
-        menu.item(Action::RotateHalf, "Rotate half a turn", "", picture, plate);
-        menu.item(Action::FlipAcross, "Flip left to right", "", picture, plate);
-        menu.item(Action::FlipDown, "Flip top to bottom", "", picture, plate);
+        menu.item(
+            Action::RotateHalf,
+            S::RotateHalf,
+            "Rotate half a turn",
+            "",
+            picture,
+            plate,
+        );
+        menu.item(
+            Action::FlipAcross,
+            S::FlipHorizontal,
+            "Flip left to right",
+            "",
+            picture,
+            plate,
+        );
+        menu.item(
+            Action::FlipDown,
+            S::FlipVertical,
+            "Flip top to bottom",
+            "",
+            picture,
+            plate,
+        );
         menu.separator(plate);
-        menu.item(Action::Invert, "Invert colours", "Ctrl+I", picture, plate);
-        menu.item(Action::Convert, "Colours\u{2026}", "", picture, plate);
+        menu.item(
+            Action::Invert,
+            S::InvertColours,
+            "Invert colours",
+            "Ctrl+I",
+            picture,
+            plate,
+        );
+        menu.item(
+            Action::Convert,
+            S::ColourModel,
+            "Colours\u{2026}",
+            "",
+            picture,
+            plate,
+        );
         let palette = picture && kind.palette().is_some();
         menu.item(
             Action::AddMask,
+            S::MaskAdd,
             "Add mask",
             "",
             palette && !kind.masked(),
@@ -3592,6 +3688,7 @@ impl View {
         );
         menu.item(
             Action::RemoveMask,
+            S::MaskRemove,
             "Remove mask",
             "",
             palette && kind.masked(),
@@ -3611,59 +3708,51 @@ impl View {
             .is_some_and(|layer| layer.visible);
         let below = colour && active > 0;
         let above = colour && active + 1 < count;
-        menu.item(Action::NewLayer, "New layer", "Ctrl+Shift+N", colour, plate);
-        menu.item(Action::DuplicateLayer, "Duplicate layer", "", colour, plate);
-        menu.item(Action::DeleteLayer, "Delete layer", "", count > 1, plate);
+        layer_edit_rows(menu, plate, colour, count > 1);
         menu.separator(plate);
-        menu.item(
-            Action::LayerAbove,
-            "Layer above",
-            "Ctrl+Page Up",
-            above,
-            plate,
-        );
-        menu.item(
-            Action::LayerBelow,
-            "Layer below",
-            "Ctrl+Page Down",
-            below,
-            plate,
-        );
-        menu.entry(
-            Action::GoToLayer,
-            GO_TO_LAYER,
-            "Go to layer\u{2026}",
-            "",
-            plate,
-        );
-        menu.separator(plate);
-        menu.item(
-            Action::RaiseLayer,
-            "Raise layer",
-            "Ctrl+Shift+Page Up",
-            above,
-            plate,
-        );
-        menu.item(
-            Action::LowerLayer,
-            "Lower layer",
-            "Ctrl+Shift+Page Down",
-            below,
-            plate,
-        );
+        layer_order_rows(menu, plate, above, below);
         let mergeable =
             below && picture.is_some_and(|picture| picture.shows(active - 1..active + 1));
-        menu.item(Action::MergeDown, "Merge down", "Ctrl+E", mergeable, plate);
+        menu.item(
+            Action::MergeDown,
+            S::MergeDown,
+            "Merge down",
+            "Ctrl+E",
+            mergeable,
+            plate,
+        );
         let flat = picture.is_none_or(Picture::single);
-        menu.item(Action::Flatten, "Flatten", "Ctrl+Shift+E", !flat, plate);
+        menu.item(
+            Action::Flatten,
+            S::Flatten,
+            "Flatten",
+            "Ctrl+Shift+E",
+            !flat,
+            plate,
+        );
         menu.separator(plate);
         if colour {
-            menu.mark(Action::ShowLayer, "Show layer", "", shown, plate);
+            menu.mark(
+                Action::ShowLayer,
+                S::Visible,
+                "Show layer",
+                "",
+                shown,
+                plate,
+            );
         } else {
-            menu.item(Action::ShowLayer, "Show layer", "", false, plate);
+            menu.item(
+                Action::ShowLayer,
+                S::Visible,
+                "Show layer",
+                "",
+                false,
+                plate,
+            );
         }
         menu.item(
             Action::LayerProperties,
+            S::Properties,
             "Layer properties\u{2026}",
             "",
             colour,
@@ -3679,6 +3768,7 @@ impl View {
         let many = count > 1;
         menu.item(
             Action::PreviousEntry,
+            S::Previous,
             "Previous",
             "Page Up",
             current > 0,
@@ -3686,21 +3776,30 @@ impl View {
         );
         menu.item(
             Action::NextEntry,
+            S::Next,
             "Next",
             "Page Down",
             current + 1 < count,
             plate,
         );
-        menu.entry(Action::GoTo, GO_TO_ENTRY, "Go to\u{2026}", "", plate);
+        menu.entry(
+            Action::GoTo,
+            GO_TO_ENTRY,
+            S::GoTo,
+            "Go to\u{2026}",
+            "",
+            plate,
+        );
         menu.separator(plate);
         let new = if pages {
             "New page\u{2026}"
         } else {
             "New sprite\u{2026}"
         };
-        menu.item(Action::NewEntry, new, "", true, plate);
+        menu.item(Action::NewEntry, S::NewDocument, new, "", true, plate);
         menu.item(
             Action::DuplicateEntry,
+            S::Duplicate,
             "Duplicate",
             "",
             self.document.picture().is_some(),
@@ -3712,12 +3811,27 @@ impl View {
                 .entry()
                 .name()
                 .map_or_else(String::new, ToString::to_string);
-            menu.entry(Action::Rename, RENAME_ENTRY, "Rename\u{2026}", &name, plate);
+            menu.entry(
+                Action::Rename,
+                RENAME_ENTRY,
+                S::Rename,
+                "Rename\u{2026}",
+                &name,
+                plate,
+            );
         }
-        menu.item(Action::DeleteEntry, "Delete", "", many, plate);
-        menu.item(Action::EntryUp, "Move up", "", current > 0, plate);
+        menu.destructive(Action::DeleteEntry, S::Delete, "Delete", "", many, plate);
+        menu.item(
+            Action::EntryUp,
+            S::MoveUp,
+            "Move up",
+            "",
+            current > 0,
+            plate,
+        );
         menu.item(
             Action::EntryDown,
+            S::MoveDown,
             "Move down",
             "",
             current + 1 < count,
@@ -3731,32 +3845,159 @@ impl View {
         for (rung, &zoom) in ZOOMS.iter().enumerate().rev() {
             label.clear();
             write_zoom(&mut label, Zoom::of(zoom).percent());
-            menu.radio(Action::Zoom(rung), &label, "", shown == Some(rung), plate);
+            menu.radio(
+                Action::Zoom(rung),
+                S::ZoomLevel,
+                &label,
+                "",
+                shown == Some(rung),
+                plate,
+            );
         }
     }
+}
+
+/// A colour picture's layers: add one, copy one, or take one away while
+/// another remains.
+fn layer_edit_rows(menu: &mut MenuBuilder, plate: Plate, colour: bool, several: bool) {
+    menu.item(
+        Action::NewLayer,
+        S::LayerNew,
+        "New layer",
+        "Ctrl+Shift+N",
+        colour,
+        plate,
+    );
+    menu.item(
+        Action::DuplicateLayer,
+        S::Duplicate,
+        "Duplicate layer",
+        "",
+        colour,
+        plate,
+    );
+    menu.destructive(
+        Action::DeleteLayer,
+        S::Delete,
+        "Delete layer",
+        "",
+        several,
+        plate,
+    );
+}
+
+/// Moving between the layers, and moving one through the stack.
+fn layer_order_rows(menu: &mut MenuBuilder, plate: Plate, above: bool, below: bool) {
+    menu.item(
+        Action::LayerAbove,
+        S::LayerAbove,
+        "Layer above",
+        "Ctrl+Page Up",
+        above,
+        plate,
+    );
+    menu.item(
+        Action::LayerBelow,
+        S::LayerBelow,
+        "Layer below",
+        "Ctrl+Page Down",
+        below,
+        plate,
+    );
+    menu.entry(
+        Action::GoToLayer,
+        GO_TO_LAYER,
+        S::GoTo,
+        "Go to layer\u{2026}",
+        "",
+        plate,
+    );
+    menu.separator(plate);
+    menu.item(
+        Action::RaiseLayer,
+        S::LayerRaise,
+        "Raise layer",
+        "Ctrl+Shift+Page Up",
+        above,
+        plate,
+    );
+    menu.item(
+        Action::LowerLayer,
+        S::LayerLower,
+        "Lower layer",
+        "Ctrl+Shift+Page Down",
+        below,
+        plate,
+    );
+}
+
+/// The clipboard and the selection, on the plate the menu opens with.
+fn clipboard_rows(menu: &mut MenuBuilder, selected: bool, picture: bool) {
+    menu.item(
+        Action::Cut,
+        S::Cut,
+        "Cut",
+        "Ctrl+X",
+        selected && picture,
+        Plate::Root,
+    );
+    menu.item(
+        Action::Copy,
+        S::Copy,
+        "Copy",
+        "Ctrl+C",
+        selected && picture,
+        Plate::Root,
+    );
+    menu.item(
+        Action::Paste,
+        S::Paste,
+        "Paste",
+        "Ctrl+V",
+        picture,
+        Plate::Root,
+    );
+    menu.item(
+        Action::SelectAll,
+        S::SelectAll,
+        "Select all",
+        "Ctrl+A",
+        picture,
+        Plate::Root,
+    );
+    menu.item(
+        Action::Deselect,
+        S::SelectNone,
+        "Deselect",
+        "Ctrl+D",
+        selected,
+        Plate::Root,
+    );
 }
 
 /// The File menu's rows, the same whatever the document.
 fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
     menu.item(
         Action::NewPicture,
+        S::NewDocument,
         "New picture\u{2026}",
         "Ctrl+N",
         true,
         plate,
     );
-    menu.item(Action::Open, "Open\u{2026}", "Ctrl+O", true, plate);
+    menu.item(Action::Open, S::Open, "Open\u{2026}", "Ctrl+O", true, plate);
     menu.separator(plate);
-    menu.item(Action::Save, "Save", "Ctrl+S", true, plate);
+    menu.item(Action::Save, S::Save, "Save", "Ctrl+S", true, plate);
     menu.item(
         Action::SaveAs,
+        S::SaveAs,
         "Save as\u{2026}",
         "Ctrl+Shift+S",
         true,
         plate,
     );
     menu.separator(plate);
-    menu.item(Action::Close, "Close", "Ctrl+W", true, plate);
+    menu.item(Action::Close, S::Close, "Close", "Ctrl+W", true, plate);
 }
 
 /// A part of the window the keyboard can be in.

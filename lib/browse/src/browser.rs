@@ -18,14 +18,13 @@ use alloc::vec::Vec;
 use core::mem;
 
 use tairix_abi::Errno;
-use tairix_icon::IconKind;
 
 use crate::activate::{Activation, BundleIntent};
 use crate::clipboard::{Clipboard, ClipboardOp};
 use crate::column::ScrollColumn;
 use crate::create::{validate_new_entry_name, CreateError};
 use crate::delete::DeletePlan;
-use crate::entry::{resolve_target, Entry, EntryKind, LinkTarget};
+use crate::entry::{resolve_target, DriveMark, Entry, EntryKind, LinkTarget};
 use crate::error::BrowseError;
 use crate::layout::{BandMarks, ViewMode};
 use crate::places::{PlaceKind, Places};
@@ -364,26 +363,34 @@ impl<S: DirectorySource> Browser<S> {
     /// the logarithm of its volumes, never their product.
     pub fn mark_volume_roots(&mut self, places: &Places) -> bool {
         let here = self.components.as_slice();
-        let mut roots: Vec<(&str, IconKind)> = places
+        let mut roots: Vec<(&str, DriveMark)> = places
             .rows()
             .iter()
             .filter(|place| place.kind() == PlaceKind::Volume)
-            .filter_map(|place| match place.components().split_last() {
-                Some((leaf, parent)) if parent == here => Some((leaf.as_str(), place.icon())),
-                _ => None,
-            })
+            .filter_map(
+                |place| match (place.components().split_last(), place.facts()) {
+                    (Some((leaf, parent)), Some(facts)) if parent == here => Some((
+                        leaf.as_str(),
+                        DriveMark {
+                            icon: place.icon(),
+                            facts: facts.clone(),
+                        },
+                    )),
+                    _ => None,
+                },
+            )
             .collect();
         if roots.is_empty() && !self.drives_shown {
             return false;
         }
-        roots.sort_unstable_by_key(|&(leaf, _)| leaf);
+        roots.sort_unstable_by(|a, b| a.0.cmp(b.0));
         let (mut changed, mut shown) = (false, false);
         for entry in &mut self.entries {
             let drive = if entry.is_directory() {
                 roots
-                    .binary_search_by_key(&entry.name(), |&(leaf, _)| leaf)
+                    .binary_search_by(|(leaf, _)| (*leaf).cmp(entry.name()))
                     .ok()
-                    .map(|at| roots[at].1)
+                    .map(|at| &roots[at].1)
             } else {
                 None
             };

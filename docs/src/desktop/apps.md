@@ -454,7 +454,7 @@ cursor:
   path and `go_up` climbs from there, with a fresh (empty) history — the one
   way a consumer starts somewhere other than `/` without a second navigation
   model. The desktop session's trusted picker opens at the user's
-  `UserFiles` this way (below).
+  `Home` folder this way (below).
 - `open_index` / `open_selected` descend into a directory entry; `go_up`
   climbs to the parent and returns `Ok(false)` at the root (no parent is not
   an error).
@@ -557,13 +557,24 @@ The answer is exactly one `WindowEvent::MenuClosed` naming the open id the
 window minted, so an answer to a gesture already settled cannot run a stale
 command; the `Run` binary routes the chosen command through
 `dispatch_context_command` to the **exact same** app verbs the toolbar and
-keyboard already drive — Open (`activate`), Open and Close (the same activation
-with the window closed behind the hand-off), Open With… (the chooser below),
+keyboard already drive — Open (`activate`), Open With… (the chooser below),
 Rename, Cut, Copy, Paste, Properties, and Delete (the same alert-confirmed
 `begin_delete` the `Delete` key opens, below) — so the menu can never diverge
 from them (`AGENTS.md` §2.2) and adds no authority (every verb is the user's own
 §5.3-checked action). A refused open is an answer: it is stated on `stderr` and
 the window carries on with no menu, never drawing one of its own.
+
+**Display ▸** sets how the window lays its items out: *Large icons*, the
+opening display; *Small icons*, a row-sized picture with one line of name
+beside it, many to a row as the RISC OS Filer's small icons are; or *List*, one
+row an item under a column header. The display in force is the group's marked
+choice, disabled with its reason. A list's columns are the name with its
+picture, the size, the modification to the minute and the content type's name;
+a drive's row states its free space, its filesystem and its health in those
+columns instead, and a listing of drives alone titles them so. A press on a
+title orders the listing by that column, a second reverses it
+(`SortMode::pressed`); the toolbar's view tool steps through the three
+displays.
 
 **Two of those rows carry a child as well as a command**, which is what a
 chevron on them means (`plans/NEW-MENUS.md` M6). **Rename** opens the in-place
@@ -681,14 +692,11 @@ press is comes from the app's own pure, host-tested `gesture` module:
 | double-click / `Enter` | activate: descend, run a bundle, or open a file |
 | shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
 | right-click | ask the desktop for the context menu on the item |
-| the **Open and Close** menu row | activate, then close this window |
 
 There is no right-*double*-click. The menu the first press opens is the
 desktop's chain and holds the seat's grab, so the second press is consumed there
 and never reaches the application — which is a property of the design, not a
-gap: an application never sees a press inside chrome it does not own. The "open
-this and I am done here" verb is a menu row instead, which is discoverable and
-reachable from the keyboard as the gesture never was
+gap: an application never sees a press inside chrome it does not own
 (`plans/NEW-MENUS.md` D20).
 
 The pairing is the shared, pure `click::DoubleClickTracker`
@@ -708,13 +716,6 @@ itself (`WindowEvent::Pointer`'s `modifiers`, stamped by the seat): a modifier
 key reaches no surface as a key, so an app could not otherwise know one is
 held. `Shift+Enter` is the same intent from the keyboard, resolved through the
 one `gesture::bundle_intent` spelling so the two cannot diverge.
-
-Open and Close closes the window **only** once the entry has been handed
-to another program (`AfterHandoff::CloseWindow` on a `LaunchBundle` or
-`OpenFile`). A folder just listed *is* the window's new content, so closing it
-would leave the user with nothing — which is why the row is offered only over a
-file or a bundle and states "a folder opens in this window" otherwise, rather
-than being drawn and quietly not closing.
 
 On any activation,
 a `Descended` reveals the selection and repaints, and a
@@ -937,8 +938,8 @@ read-only picker composes the same engine and never launches.
 `render_into(surface, browser, theme, font, viewport, tools, tool_model,
 artwork)` paints a command toolbar strip
 and the current directory into a caller-owned `tairix-raster` `Surface` the
-size of the viewport, in whichever of the two views the browser holds
-(`ViewMode::List` or `ViewMode::Grid`). The caller holds that surface for the
+size of the viewport, in whichever of the three displays the browser holds
+(`ViewMode::LargeIcons`, `ViewMode::SmallIcons` or `ViewMode::List`). The caller holds that surface for the
 life of its window, which is what makes a repaint clipped to reported
 rectangles sound: every pixel outside the clip is the one already on screen.
 The file manager applies every queued event before it paints, folding each
@@ -946,11 +947,11 @@ round's damage into its window's `tairix_window::Owed` account, and paints
 each owed rectangle once a turn under its own clip; the views skip, before
 composing it, every entry whose cell the clip excludes, so a growing band
 costs its moving edges rather than its area (`plans/FILES-INTERACTION.md`
-FI19). The **file manager opens on the icon
-grid** (`MANAGER_VIEW_MODE`, with `MANAGER_TOOLBAR_BAND` saying no chrome band
-is drawn) and its toolbar toggle switches to the list; the engine's own default
-and the trusted file picker stay `List`, since a chooser wants names, sizes
-and dates rather than tiles. Those two are engine constants rather than app
+FI19). The **file manager opens on large
+icons** (`MANAGER_VIEW_MODE`, with `MANAGER_TOOLBAR_BAND` saying no chrome band
+is drawn), and its toolbar's view tool and the *Display* submenu move between
+the three displays; the engine's own default and the trusted file picker stay
+`List`, since a chooser wants names, sizes and dates rather than tiles. Those two are engine constants rather than app
 literals because where an item is *drawn* depends on them, and the QEMU
 vertical that drives a gesture into a manager window reconstructs that
 rectangle host-side from the same two values. `tools` is the manager-only
@@ -958,31 +959,41 @@ rectangle host-side from the same two values. `tools` is the manager-only
 `MANAGER_TOOLS`, the read-only picker an empty slice. The toolbar strip is drawn at the top
 (see the frame model above); the item area sits below it
 (`chrome_height` = the toolbar strip when it is shown, and zero when it is
-not), the one header offset
-the item views, the scrollbar gutter, and every hit-test share so paint and
-hit-test can never disagree (`AGENTS.md` §2.2). The window title carries the
+not); a list's column header lies under it (`listing_top` is where any display's
+first item begins), the one offset the item views, the scrollbar gutter, and
+every hit-test share so paint and hit-test can never disagree
+(`AGENTS.md` §2.2). The window title carries the
 current path, so no band of the window is spent restating it. In the **list**
 view each entry is a
-shared `lib/controls` `TableRow` with an aligned **name / size / modified**
-column layout — the same collection control (and the same one column-width
-definition) the trusted picker uses, so the file manager and the picker are
+shared `lib/controls` `TableRow` under a `TableHeader`, with aligned **name /
+size / modified / type** columns (`ListColumns::Files`), or **name / free /
+filesystem / health** for a listing of drives alone (`ListColumns::Drives`) —
+the same collection control (and the same one column-width definition) the
+trusted picker uses, so the file manager and the picker are
 one coherent themed surface rather than a browser-private row painter
 (`AGENTS.md` §2.2). A name is spelled bare, whatever the entry is, and the row's
 name cell carries the entry's icon — the same `icon_for_entry` classification
 the grid tile draws, painted as the built-in glyph — so a folder is told from a
 file by that icon rather than by a name suffix. The size column
 is blank for a directory or bundle and otherwise the binary-unit `format_size`
-(`1.5 MiB`); the modified column is `format_date` (an ISO `YYYY-MM-DD`, blank
-at the epoch so a stampless file is never given a fabricated date, §21). In the
-**grid** view each entry is a shared `lib/controls` `IconTile` — its file-type
-icon over that same label, with no plate of its own, so a folder reads as a field
+(`1.5 MiB`); the modified column is `format_minute` (an ISO `YYYY-MM-DD HH:MM`,
+blank at the epoch so a stampless file is never given a fabricated date, §21);
+the type column is the content type's name (`MediaType::name`), which is also
+what the Kind order sorts files by. A drive's row states its free space (said
+to be free under a Size title), its filesystem and its health in the words its
+Properties window uses. In the **large icons** display each entry is a shared
+`lib/controls` `IconTile` — its file-type icon over that same label, with no plate of its own, so a folder reads as a field
 of icons rather than a grid of boxes and only a hovered, selected, or focused
 entry paints anything behind its icon — wrapped into as many columns as fit the
 width. A tile's name is whole, over two lines when it needs them, and a name
 too long for those is cut in its middle (`render::name_cut`) so its extension
 always shows; every picture casts a small soft shadow, and a thumbnail is
-outlined one pixel around its own bounds; the two views share one selection model, so toggling never moves the
-selection or re-reads the directory. The icon is `icon_for_entry(entry,
+outlined one pixel around its own bounds. **Small icons** sets a row-sized
+picture beside one line of name (`TileLayout::beside`), without the shadow.
+`render::Tiles` is the one place the two tile displays differ, so the paint,
+the hit-test, the marquee, the rename field and a drop all read the same tile.
+The displays share one selection model, so switching never moves the selection
+or re-reads the directory. The icon is `icon_for_entry(entry,
 parent)`: one classification both views and both consumers draw from
 (`AGENTS.md` §2.2) and a
 **display hint only** — it decides a glyph, never an operation; authority stays
@@ -991,7 +1002,7 @@ in the VFS and the launcher. It is the shared registry's glyph
 hold something takes the filled-folder icon instead — see *Folder occupancy*
 below. `render` takes a
 trailing `artwork: &mut dyn tairix_icon::IconArtwork` lookup and asks it for
-each tile's icon at the exact side `render::TILE_LAYOUT` reserves, blitting
+each tile's icon at the exact side its `Tiles::layout` reserves, blitting
 the real icon artwork when the system ships and can decode it and drawing the
 built-in vector glyph when it cannot — so a missing or refused asset degrades
 to a meaningful icon and can never blank the tile (`AGENTS.md` §10). A tile
@@ -1026,9 +1037,9 @@ scrolls. Both flows share one cell geometry (`cell_rect` laid out,
 `shown_rect` on screen), one hit-test (`entry_index_at`), and one set of counts
 (`cells_per_line`, `lines_total`, and the `visible_range(offset)` the painter
 iterates), so the two surfaces cannot drift apart. The tile itself is shared the same way: the
-`render` helpers `grid_metrics`, `grid_tile`, and `entry_label` are public, so
-the desktop paints the *same* `IconTile` — same icon side, same wrapped and
-elided label, same selection state — as the file manager's grid rather than a
+`render::Tiles::Large` metrics and tile and `entry_label` are public, so the
+desktop paints the *same* `IconTile` — same icon side, same wrapped and elided
+label, same selection state — as the file manager's large icons rather than a
 lookalike.
 
 A line holds only whole tiles — a tile cut across its line could never be
@@ -1207,7 +1218,7 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   glyph, and the refusal itself is cached so a broken asset is not re-read every
   frame.
 - **Only what is drawn is decoded.** The renderer asks the lookup for the
-  visible tiles alone, at the exact side `render::TILE_LAYOUT` reserves, so a
+  visible tiles alone, at the exact side `render::Tiles::layout` reserves, so a
   hundred-entry directory costs one read and one decode per *visible kind* — not
   per entry — and scrolling decodes only the kinds that just came into view.
   Nothing pre-warms an icon for an entry that is scrolled out of sight.
@@ -1294,15 +1305,18 @@ seam.
 **Order.** One deterministic order, so the rail never reshuffles between two
 paints of the same state:
 
-1. `Home`, `Desktop`, `UserFiles` — the user's own places, derived from their
-   home components. They are always listed, whether or not the directories
-   exist (the model does no I/O and cannot know); a shortcut that turns out to
-   be missing fails closed on activation and says so.
-2. `Apps`, `System` — the machine's application and system roots.
-3. a separation, then the mounted volumes, sorted by label.
+1. `Home` — the user's own files, the `Home` folder in their home directory —
+   and `Desktop`, derived from their home components. They are always listed,
+   whether or not the directories exist (the model does no I/O and cannot
+   know); a shortcut that turns out to be missing fails closed on activation
+   and says so.
+2. a separation, then the attached storage — the `/Storage` catalog and each
+   volume directly beneath it — sorted by label.
 
-With no home components the three home-derived rows are dropped rather than
-spelled as rows that navigate nowhere.
+With no home components the home-derived rows are dropped rather than spelled
+as rows that navigate nowhere. The system's own tree is no place: `/System`,
+its writable mounts and the root volume are not the user's storage, and are
+reached by navigating as any folder is.
 
 **Volumes come from the live mount table, and the medium is real data.** The
 app reads the ungated `MOUNT_LIST` query through `lib/procinfo`'s
@@ -1328,8 +1342,11 @@ holding no mount point costs it one comparison per place.
 
 **Malformed input is dropped, not repaired.** A volume whose label is empty,
 longer than `MAX_PLACE_LABEL`, or carries a control character; whose target is
-not an absolute path; or whose target duplicates a row already accepted (a
-fixed place included) is left out. The mount table reports what the machine has
+not an absolute path, or is neither the storage catalog nor directly beneath
+it; or whose target duplicates a row already accepted (a fixed place included)
+is left out. What a volume states — its filesystem, its free space and its
+availability (`VolumeFacts`) — travels with its row, and onto the directory
+entry its root is listed as. The mount table reports what the machine has
 mounted, including text this process did not author, so it is validated rather
 than trusted.
 
@@ -1465,10 +1482,13 @@ intent, never an escalation, so a refused re-listing leaves the browser exactly
 where it was. A `CloseRequested` from the desktop ends it cleanly, and every
 bring-up refusal exits fail-loud with its reason on `stderr`. It opens at the
 directory named as its first argument, the operand validated fail-closed
-before any syscall, or at the launching user's `UserFiles` when none is named.
-A refused location is stated on `stderr` and degrades through `UserFiles`, the
-home directory and the root view in turn, so a bad argument never leaves the
-user without a window. The autostarted file manager takes the first slot on the taskbar's
+before any syscall, or at the launching user's `Home` folder when none is
+named. A refused location is stated on `stderr` and degrades through `Home`,
+the home directory and the root view in turn, so a bad argument never leaves the
+user without a window. An open the hand-over to an application refuses — the
+file cannot be read, no installed application opens it, or the application
+cannot be started — is stated in an alert holding no window, since the window
+that asked may have moved on, and on `stderr` where the desktop draws none. The autostarted file manager takes the first slot on the taskbar's
 application strip and opens a window on demand (`plans/NEW-TASKBAR.md` T4).
 
 ### In-place rename
@@ -1546,7 +1566,7 @@ follows the entry to its new name. The trusted file picker composes the same
 
 The desktop session's trusted file picker (the CU6 delegation UI,
 `plans/APPWIN.md` AW5) opens where a bare file-manager window does, at the
-logged-in user's `UserFiles`: the session parses its `HOME` (exported by
+logged-in user's `Home` folder: the session parses its `HOME` (exported by
 login) through the shared `vfs::components_from_absolute_path` and starts at
 the first of `bare_open_places`. A start that is refused, at once or when its
 pending listing lands, climbs to the nearest folder above it that lists; an
@@ -1555,7 +1575,7 @@ pick. The read-only picker composes the same `Browser`, starting elsewhere.
 
 Opening a file into a viewer through this picker works as follows
 (`plans/NEW-FILEMANAGER.md` FM9-b): the session launches `view`, which (handed
-no document) asks the picker, the picker opens at `/Users/root/UserFiles`, a click on the
+no document) asks the picker, the picker opens at `/Users/root/Home`, a click on the
 planted document row concludes the pick, and the session delegates the chosen
 file to `view` through the CU6 one-shot `fd_grant` / `fd_redeem` — `view` then
 reads exactly that one file with no filesystem capability of its own.

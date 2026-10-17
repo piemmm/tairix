@@ -23,10 +23,10 @@
 //! filesystem rather than a handle on one window. So it offers neither of the
 //! convention's rows — a component states no identity panel of its own and is
 //! not the user's to quit — and instead lists the places the browser's own
-//! rail lists: the user's home and folders, the machine's roots, then whatever
-//! is mounted right now, each beside the picture the rail draws it with — a
-//! folder, or the drive a volume is on. Choosing one opens a window there, and
-//! a primary click on the slot opens one among the user's own files
+//! rail lists: the user's `Home` and `Desktop` folders, then the storage
+//! attached right now, each beside the picture the rail draws it with — the
+//! house, a folder, or the drive a volume is on. Choosing one opens a window
+//! there, and a primary click on the slot opens one among the user's own files
 //! ([`DESKTOP_SLOT_CLICK`]).
 //!
 //! # The row cap is a display cap, and it is stated
@@ -39,7 +39,7 @@
 
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuItem, AppMenuItemId, AppMenuLabel,
-    AppMenuRow, APP_MENU_MAX_ROWS,
+    AppMenuRow, AppMenuSymbol, APP_MENU_MAX_ROWS,
 };
 use tairix_abi::Errno;
 use tairix_browse::{PlaceKind, Places};
@@ -108,7 +108,7 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
             menu.push(AppMenuRow::Separator)?;
             ruled = true;
         }
-        let mut row = AppMenuItem::new(id, label);
+        let mut row = AppMenuItem::new(id, label, place_symbol(place.kind()));
         if let Ok(asset) = AppMenuAsset::new(place.icon().asset_id()) {
             row = row.with_icon_asset(asset);
         }
@@ -127,6 +127,15 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
         },
         skipped,
     ))
+}
+
+/// What a row opening a place of `kind` does.
+const fn place_symbol(kind: PlaceKind) -> AppMenuSymbol {
+    match kind {
+        PlaceKind::Home => AppMenuSymbol::Home,
+        PlaceKind::UserFolder => AppMenuSymbol::Folder,
+        PlaceKind::Volume => AppMenuSymbol::Drive,
+    }
 }
 
 /// The index into [`Places::rows`] that the chosen row `item` names, or `None`

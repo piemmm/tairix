@@ -370,11 +370,11 @@ with the shared `sort_entries`, classifies each child with the shared
 content-type registry (see [File-type classification](apps.md#file-type-classification--the-one-content-type-registry)),
 and lays its tiles out with the shared `GridView` under
 `GridFlow::ColumnsFromLeading` or `ColumnsFromTrailing` — the file manager's
-own grid flows rows from the leading edge; the desktop's column hugs one
+own large icons flow rows from the leading edge; the desktop's column hugs one
 vertical edge and grows a new column inward as it fills, but both share one
 cell geometry and one hit-test (`lib/browse::layout`). It paints through the
-same public `grid_tile` /
-`grid_metrics` helpers and the shell's own icon-artwork lookup, so a folder
+same public `render::Tiles::Large` tile and metrics and the shell's own
+icon-artwork lookup, so a folder
 shows the shipped folder artwork — the picture of what it holds once its probe
 has answered ([Folder occupancy](apps.md#folder-occupancy)) — a file its
 content-class artwork, and an application bundle the icon it carries in its own
@@ -1773,11 +1773,12 @@ load-bearing:
   the seat's pointer and keyboard *straight into the lock* rather than
   through `DesktopShell::pump`/`handle`, so no motion, click, or keystroke
   reaches the window manager, the taskbar, a served application, or the
-  confirmation prompt. When a password is verified part-way through a drained
-  batch, the remainder of that batch is drained and **discarded**: it is the
-  tail of the gesture that typed the password, and delivering it into the
-  session the instant it becomes visible would leak part of a password entry
-  into whatever holds focus.
+  confirmation prompt. Before the broker's answer is adopted the seat is
+  drained into the lock once more (`adopt_unlocks`): whatever is queued at
+  that instant — the release of the submitting Enter, a keystroke behind it —
+  was typed at the locked screen, so it is spent on the lock, which takes
+  nothing while it checks, rather than spilt into whatever holds focus on the
+  desktop the unlock uncovers.
 - **It stays on top.** `keep_topmost` raises it immediately before every
   composite — beneath only the screensaver, when one is up — so an
   application that opens or raises a window behind the lock cannot surface
@@ -1793,15 +1794,23 @@ password to the per-console **elevation broker** — the login supervisor that
 started this session — through the one shared client, `tairix_rt::elevate`,
 as an `ElevateRequest::Verify`. The broker attests the caller's identity from
 the kernel, checks the password against *that* uid, audits the decision, and
-answers; the lock believes only `Verified`. A refusal, a transport failure, a
+answers; the lock believes only `Verified`. The broker derives a key from the
+password on purpose, and the serve loop that would wait for it composites
+every window, so the offer is never awaited: the lock's `Asking` copies the
+password into an `UnlockAsk` — a buffer sized to it, erased once the broker
+has answered and again when dropped — and hands it to the session's unlock
+worker. The lock says it is checking and takes no keystroke until the answer
+wakes the loop (`ScreenLock::answer`); only the answer to the offer it is
+waiting on is adopted. A kernel that grants no thread leaves the exchange on
+the serve loop, stated once on `stderr`: slower, never wrong. A refusal, a transport failure, a
 broker that is not there, and a reply it cannot parse are all one answer:
 still locked (`AGENTS.md` §5.4). It deliberately keeps no attempt counter and
 no rate limit — the broker owns that policy and audits every attempt, and a
 second copy here would be a second place to get it wrong (`AGENTS.md` §2.2).
 
-The password lives in exactly one place, the masked field's own bounded,
-pre-reserved buffer, and is erased on every path out of the prompt: verified,
-refused, unreachable, or abandoned when the session tears down. The field is
+Until it is offered, the password lives in exactly one place, the masked
+field's own bounded, pre-reserved buffer, which is erased the moment the
+password is handed to the worker, and on every other path out of the prompt. The field is
 `tairix_controls::SecretField` — the one shared masked entry, never a second
 one — which shows the console's `[input active...]` marker in place of
 anything typed, reserves its buffer once so typing can never reallocate and
@@ -1977,7 +1986,7 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   thread alone under `idle`, and paints on the same cadence. With `screensaver.raytrace.save` on, the engine
   keeps a copy of each picture as it traces it, and once the picture is whole
   and on screen the tracing thread writes it as a PNG into
-  `UserFiles/Pictures/Raytracing/` under the account's home, making the
+  `Home/Pictures/Raytracing/` under the account's home, making the
   folders it needs, naming it for the setting and the moment it was finished
   (its scene's seed when the clock is not set), and taking the next number
   rather than writing over any picture already there, and a picture that
@@ -2155,6 +2164,11 @@ What the prompt does with an offer is post it, and nothing more. It sends
 `ElevateRequest::Launch` through the one shared client, `tairix_rt::elevate`;
 the broker re-authenticates the named account exactly as a fresh login would,
 audits the attempt, and starts `datetime.app` **as that account**. The
+exchange runs on the session's elevation worker, never the serve loop: the
+password is copied into an `ElevateAsk` and erased from the sheet, which says
+it is checking and takes no input — not even a cancel, which could not recall
+a launch already under way — until the answer wakes the loop
+(`ElevatePrompt::answer`). The
 session learns the started pid or the refusal, and never the reason behind a
 refusal — the broker answers a wrong password, an unknown account, and a
 locked account indistinguishably. The blocking `Run` exchange would not do
@@ -2181,8 +2195,9 @@ Every path out of the prompt fails closed or states itself:
   since the field zeroises its buffer as it is dropped.
 
 The password is held in exactly the same one place, and by the same shared
-masked field, as the screen lock's (above): there is no second credential
-buffer and no second text entry anywhere in the session.
+masked field, as the screen lock's (above), until the same kind of erased
+hand-over carries it off the loop: there is no second text entry anywhere in
+the session.
 
 ## Routing one seat's input to the taskbar and the window manager
 

@@ -36,6 +36,16 @@ dieses Rechners; „Befehlssatz“ im Menü Ansicht liest ihn als einen anderen,
 und das Ansichtsfeld der Statuszeile bietet die Code-Ansicht neben Text und
 Hex an.
 
+Ein Bild — PNG, JPEG, GIF, BMP, TIFF, WEBP, eine Symbol- oder Zeigerdatei,
+ein RISC-OS-Sprite-Bereich oder ein OpenRaster-Dokument — öffnet sich
+stattdessen in der Datenansicht: woraus die Datei besteht, jeder Datensatz
+an seiner Position mit seiner Länge und dem, was er angibt, jedes EXIF-Tag
+mit Namen und Wert, danach jedes Byte der Datei als Hexwert neben seinem
+Zeichen. Die Datenansicht ist schreibgeschützt; die Hex-Ansicht bearbeitet
+dieselben Bytes. Das Bild liest ein dritter, eigener Arbeitsprozess,
+ebenfalls ohne jeden Zugriff, und das Menü Ansicht bietet die Datenansicht
+neben Text und Hex an.
+
 Quelltexte werden eingefärbt: HTML, XML und SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python und Shell-Skripte. Die
 Einstellungsdateien des Systems — Anwendungseinstellungen, die

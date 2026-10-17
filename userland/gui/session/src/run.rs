@@ -137,29 +137,30 @@ mod program {
     };
     use tairix_desktop_session::windows::{sheet_artwork, window_menu_placement};
     use tairix_desktop_session::{
-        admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
-        drain_locked, drop_is_noteworthy, encode_switchboard_reply, focus_reports, land_preview,
-        launch_argv, load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report,
-        open_entry, open_tray, parse, publish_pinboard, reap_launched, relay_power,
-        resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
-        serve_pinboard, serve_switchboard_request, size_state_name, tool_move_event,
-        window_control_alternate_event, window_control_event, Acquisition, AidPolicy, Answer,
-        AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
-        AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop,
-        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal,
-        ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
-        FrameStatsSink, GestureRefusal, HangTracker, HoldBack, IconRasteriser, IdleAction,
-        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
-        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
-        LoadedPrograms, MachineWatch, OwedReport, OwnPick, OwnerBundleGate, OwnerWindow,
-        PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall, PinboardRefusal, Prepared,
-        PresentedOwners, PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun,
-        PreviewTarget, PromptOutcome, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt,
-        Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
-        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlotAnswer, SoundCall,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd, TrialOutcome,
+        admitted_pid, adopt_unlocks, catalogued, chain_geometry, deliver_pending_open,
+        desktop_info, drain_away, drain_locked, drop_is_noteworthy, encode_switchboard_reply,
+        focus_reports, land_preview, launch_argv, load_pinboard as read_pinboard_store,
+        load_programs, maybe_send_seat_report, open_entry, open_tray, parse, publish_pinboard,
+        reap_launched, relay_power, resize_drag_event, resolve_launch, resolve_window_identities,
+        seat_held, serve_park_ns, serve_pinboard, serve_switchboard_request, size_state_name,
+        tool_move_event, window_control_alternate_event, window_control_event, Acquisition,
+        AidPolicy, Answer, AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader,
+        ArtworkSandbox, AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery,
+        Departure, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
+        DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface,
+        DropRefusal, ElevateAsk, ElevatePrompt, Elevator, FrameContent, FramePacer,
+        FrameReportGate, FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker,
+        HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
+        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport,
+        OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied,
+        PinboardCall, PinboardRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone,
+        PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Requester,
+        ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaverIdentity, SaverSetup,
+        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
+        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
+        ShellWindowHost, SizedRecord, SlotAnswer, SoundCall, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd, TrialOutcome, UnlockAsk,
         WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH,
         APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
         CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE,
@@ -179,7 +180,7 @@ mod program {
     use tairix_display::{
         DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay, RtShmMapper, SwitchedOff,
     };
-    use tairix_greeter::{Verdict, Verifier};
+    use tairix_greeter::{Asking, Courier, Ticket, Tickets, Verdict};
     use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
     use tairix_keymap::modifiers_to_abi;
     use tairix_log::{
@@ -394,6 +395,14 @@ mod program {
     /// The wait-set token of the `CueAuthority` notice: the cue authority
     /// started, and holds none of this session's choices.
     const CUE_AUTHORITY_TOKEN: u64 = 19;
+
+    /// The wait-set token of the unlock worker's wake: the broker answered a
+    /// password offered at the screen lock.
+    const UNLOCK_TOKEN: u64 = 20;
+
+    /// The wait-set token of the elevation worker's wake: the broker answered
+    /// an account offered at the credential prompt.
+    const ELEVATE_TOKEN: u64 = 21;
 
     /// The frame ring the session presents through: its own frames, owned by
     /// the ring and unmapped with it.
@@ -796,38 +805,65 @@ mod program {
         }
     }
 
-    /// The [`Verifier`] the running desktop uses: the per-console elevation
-    /// broker served by the login supervisor that started this session.
-    ///
-    /// The request goes through the shared runtime client, which derives
-    /// this process's console from its kernel-attested origin and erases the
-    /// request buffer on every return path. The broker re-reads the caller's
-    /// identity from the kernel rather than trusting anything sent to it, so
-    /// no caller can ask it to check a password against another account.
-    struct BrokerUnlocker;
+    /// The thread the screen lock's passwords go to the per-console elevation
+    /// broker on — the login supervisor that started this session — so the key
+    /// it derives from each never stalls the compositor.
+    type UnlockWorker = Worker<(), UnlockAsk, (Ticket, Verdict)>;
 
-    impl Verifier for BrokerUnlocker {
-        /// The account name the surface offers is ignored: the broker
-        /// re-reads the caller's identity from the kernel and checks the
-        /// password against that uid, so naming an account here could only
-        /// ever ask for one this process is not.
-        fn verify(&mut self, _account: &str, password: &str) -> Verdict {
-            let mut reply = [0u8; ELEVATE_MAX_REPLY];
-            match tairix_rt::elevate(&ElevateRequest::Verify { password }, &mut reply) {
-                Ok(ElevateReply::Verified) => Verdict::Verified,
-                Ok(ElevateReply::Refused(_)) => Verdict::Refused,
-                // Every other reply answers a request this surface did not
-                // send. A broker that sent one is not speaking this
-                // protocol, and a lock does not open on a reply it did not
-                // understand.
-                Ok(
-                    ElevateReply::Completed { .. }
-                    | ElevateReply::Launched { .. }
-                    | ElevateReply::Captured { .. }
-                    | ElevateReply::Overran { .. },
-                )
-                | Err(_) => Verdict::Unreachable,
-            }
+    /// What the screen lock asks through: its worker, which carries a question
+    /// on the serve loop's own task only where the kernel granted no thread.
+    struct ToBroker(alloc::sync::Arc<UnlockWorker>);
+
+    impl Courier for ToBroker {
+        type Answer = (Ticket, Verdict);
+
+        /// The account name is not carried: the broker re-reads the caller's
+        /// identity from the kernel and checks the password against that uid,
+        /// so naming an account could only ever ask for one this process is
+        /// not.
+        fn send(
+            &mut self,
+            ticket: Ticket,
+            _account: &str,
+            password: &str,
+        ) -> Result<(), Self::Answer> {
+            let ask = UnlockAsk::new(ticket, password).ok_or((ticket, Verdict::Unreachable))?;
+            self.0.submit(ask);
+            Ok(())
+        }
+
+        fn receive(&mut self) -> Option<Self::Answer> {
+            self.0.collect()
+        }
+    }
+
+    /// The broker's answer to one question at the lock, its password erased
+    /// before returning. A password that is not text was never one the broker
+    /// could check.
+    fn ask_broker(_: &mut (), ask: &mut UnlockAsk) -> (Ticket, Verdict) {
+        let verdict = ask.password().map_or(Verdict::Refused, broker_verdict);
+        ask.erase();
+        (ask.ticket(), verdict)
+    }
+
+    /// The broker's verdict on `password` for this process's own attested
+    /// identity. The runtime client erases its request buffer on every return
+    /// path.
+    fn broker_verdict(password: &str) -> Verdict {
+        let mut reply = [0u8; ELEVATE_MAX_REPLY];
+        match tairix_rt::elevate(&ElevateRequest::Verify { password }, &mut reply) {
+            Ok(ElevateReply::Verified) => Verdict::Verified,
+            Ok(ElevateReply::Refused(_)) => Verdict::Refused,
+            // Every other reply answers a request this surface did not send.
+            // A broker that sent one is not speaking this protocol, and a lock
+            // does not open on a reply it did not understand.
+            Ok(
+                ElevateReply::Completed { .. }
+                | ElevateReply::Launched { .. }
+                | ElevateReply::Captured { .. }
+                | ElevateReply::Overran { .. },
+            )
+            | Err(_) => Verdict::Unreachable,
         }
     }
 
@@ -2490,6 +2526,42 @@ mod program {
         }
         let _effects_guard = tairix_rt::work::WorkerGuard::new(&effects_worker);
         let mut effects = Effects::new();
+        // Each password offered at the screen lock waits on the broker's key
+        // derivation away from the loop that composites every window.
+        let unlock_worker = alloc::sync::Arc::new(Worker::new(
+            ask_broker,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Worker::start(&unlock_worker) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no unlock thread ({reason:?}); the screen lock waits for each answer on the serve loop"
+                ),
+            );
+        }
+        let _unlock_guard = tairix_rt::work::WorkerGuard::new(&unlock_worker);
+        let mut unlocker = Asking::new(ToBroker(alloc::sync::Arc::clone(&unlock_worker)));
+        let elevate_worker = alloc::sync::Arc::new(Worker::new(
+            launch_elevated,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Worker::start(&elevate_worker) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no elevation thread ({reason:?}); the credential prompt waits for each answer on the serve loop"
+                ),
+            );
+        }
+        let _elevate_guard = tairix_rt::work::WorkerGuard::new(&elevate_worker);
+        let mut elevator = RtElevator {
+            worker: alloc::sync::Arc::clone(&elevate_worker),
+            tickets: Tickets::default(),
+            unasked: None,
+        };
         // This session took the seat before it got here.
         effects.seat(true);
         let sound_themes = list_sound_themes();
@@ -2927,6 +2999,30 @@ mod program {
                     EXIT_WAIT_FAILED,
                     "sound-choices wake wait refused",
                 );
+            }
+        }
+        if let Some(read) = unlock_worker.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                UNLOCK_TOKEN,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "unlock wake wait refused");
+            }
+        }
+        if let Some(read) = elevate_worker.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                ELEVATE_TOKEN,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "elevation wake wait refused");
             }
         }
         // A member reports a generation that moves after it joins, so each
@@ -4464,21 +4560,37 @@ mod program {
                     }
                     Some(Err(_)) | None => {}
                 }
-            } else if token == SEAT_TOKEN && lock.is_locked() {
+            } else if token == ELEVATE_TOKEN {
+                elevate_worker.wake().drain();
+                adopt_elevations(&mut elevator, &mut elevate, &mut shell, &mut compositor);
+            } else if token == UNLOCK_TOKEN || (token == SEAT_TOKEN && lock.is_locked()) {
+                if token == UNLOCK_TOKEN {
+                    unlock_worker.wake().drain();
+                }
+                let now = tairix_rt::clock_get();
+                let mut holder = Seat {
+                    shell: &mut shell,
+                    compositor: &mut compositor,
+                    menu: &mut menu,
+                    lock: &mut lock,
+                };
                 // The lock's surface only hides the session; this drain is
-                // what keeps the seat's input from reaching it.
-                let drained = drain_locked(
-                    &mut Seat {
-                        shell: &mut shell,
-                        compositor: &mut compositor,
-                        menu: &mut menu,
-                        lock: &mut lock,
-                    },
-                    &mut pointer,
-                    &mut keyboard,
-                    &mut BrokerUnlocker,
-                    tairix_rt::clock_get(),
-                );
+                // what keeps the seat's input from reaching it. An answer
+                // already back — carried here for want of a thread — is
+                // adopted on the same turn.
+                let drained = if token == SEAT_TOKEN {
+                    drain_locked(&mut holder, &mut pointer, &mut keyboard, &mut unlocker, now)
+                } else {
+                    Ok(())
+                }
+                .and_then(|()| {
+                    adopt_unlocks(
+                        &mut holder,
+                        (&mut pointer, &mut keyboard),
+                        &mut unlocker,
+                        now,
+                    )
+                });
                 if let Err(err) = drained {
                     return drain_fault(&mut shell, &mut compositor, err);
                 }
@@ -4508,6 +4620,7 @@ mod program {
                         picker: &mut picker,
                         confirm: &mut confirm,
                         elevate: &mut elevate,
+                        elevator: &mut elevator,
                         resolution: &mut resolution,
                         account,
                         shown_name,
@@ -4538,6 +4651,9 @@ mod program {
                     }
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 }
+                // An answer already back — carried here for want of a thread —
+                // is adopted on the same turn.
+                adopt_elevations(&mut elevator, &mut elevate, &mut shell, &mut compositor);
                 // A window minimised while the machine was already short of
                 // memory had its content released by the gesture itself, so
                 // its client is told here rather than waiting for a band
@@ -6848,6 +6964,7 @@ mod program {
         picker: &'a mut SessionPicker<S, F>,
         confirm: &'a mut ConfirmPrompt,
         elevate: &'a mut ElevatePrompt,
+        elevator: &'a mut RtElevator,
         resolution: &'a mut ResolutionPrompt,
         account: &'a str,
         shown_name: &'a str,
@@ -6940,7 +7057,7 @@ mod program {
                 self.server,
                 self.sink,
                 self.picker,
-                (self.confirm, self.elevate, self.resolution),
+                (self.confirm, (self.elevate, self.elevator), self.resolution),
                 seat.lock,
                 seat.menu,
                 self.account,
@@ -7847,9 +7964,9 @@ mod program {
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
-        (confirm, elevate, resolution): (
+        (confirm, (elevate, elevator), resolution): (
             &mut ConfirmPrompt,
-            &mut ElevatePrompt,
+            (&mut ElevatePrompt, &mut RtElevator),
             &mut ResolutionPrompt,
         ),
         lock: &mut ScreenLock,
@@ -8004,7 +8121,7 @@ mod program {
                         let outcome = elevate.handle_click(
                             local,
                             tairix_rt::clock_get(),
-                            &mut RtElevator,
+                            elevator,
                             shell,
                             compositor,
                         );
@@ -8162,7 +8279,7 @@ mod program {
                             let outcome = elevate.handle_key(
                                 &record,
                                 tairix_rt::clock_get(),
-                                &mut RtElevator,
+                                elevator,
                                 shell,
                                 compositor,
                             );
@@ -9072,35 +9189,90 @@ mod program {
     /// What the credential prompt says the account is wanted for.
     const SET_TIME_PURPOSE: &str = "Setting the date and time needs an account that may.";
 
+    /// The thread the credential prompt's offers go to the broker on, so the
+    /// key it derives and the program it starts never stall the compositor.
+    type ElevateWorker = Worker<(), ElevateAsk, (Ticket, Result<i64, Errno>)>;
+
     /// The production elevation seam: post the offered credentials to this
-    /// console's broker and let it re-authenticate and start the program.
+    /// console's broker on its worker, and let the broker re-authenticate and
+    /// start the program.
     ///
     /// The desktop never authenticates anybody and never spawns the elevated
-    /// program itself; it carries the offer and reads the verdict.
-    struct RtElevator;
+    /// program itself; it carries the offer and reads the answer.
+    struct RtElevator {
+        worker: alloc::sync::Arc<ElevateWorker>,
+        tickets: Tickets,
+        /// The answer to an offer no memory could hold, owed before any the
+        /// worker brings back.
+        unasked: Option<(Ticket, Result<i64, Errno>)>,
+    }
+
+    impl RtElevator {
+        /// The oldest answer that has landed, taken once.
+        fn landed(&mut self) -> Option<(Ticket, Result<i64, Errno>)> {
+            self.unasked.take().or_else(|| self.worker.collect())
+        }
+    }
 
     impl Elevator for RtElevator {
-        fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i64, Errno> {
-            let mut reply = [0u8; ELEVATE_MAX_REPLY];
-            match tairix_rt::elevate(
-                &ElevateRequest::Launch {
-                    username,
-                    password,
-                    program,
-                },
-                &mut reply,
-            )? {
-                ElevateReply::Launched { pid } => Ok(pid),
-                ElevateReply::Refused(err) => Err(err),
-                // Every other reply answers a request this session did not
-                // send. A broker that sent one is not speaking this
-                // protocol, and nothing was started on a reply the session
-                // did not understand.
-                ElevateReply::Completed { .. }
-                | ElevateReply::Verified
-                | ElevateReply::Captured { .. }
-                | ElevateReply::Overran { .. } => Err(Errno::OutOfRange),
+        fn ask(&mut self, username: &str, password: &str, program: &str) -> Ticket {
+            let ticket = self.tickets.issue();
+            match ElevateAsk::new(ticket, username, password, program) {
+                Some(ask) => {
+                    self.worker.submit(ask);
+                }
+                None => self.unasked = Some((ticket, Err(Errno::OutOfMemory))),
             }
+            ticket
+        }
+    }
+
+    /// The broker's answer to one offer at the credential prompt, its password
+    /// erased before returning. A password that is not text was never one the
+    /// broker could check.
+    fn launch_elevated(_: &mut (), ask: &mut ElevateAsk) -> (Ticket, Result<i64, Errno>) {
+        let answer = ask
+            .password()
+            .map_or(Err(Errno::PermissionDenied), |password| {
+                launch_as(ask.username(), password, ask.program())
+            });
+        ask.erase();
+        (ask.ticket(), answer)
+    }
+
+    /// Have the broker authenticate `password` for `username` and start
+    /// `program` as that account, answering the started program's pid.
+    fn launch_as(username: &str, password: &str, program: &str) -> Result<i64, Errno> {
+        let mut reply = [0u8; ELEVATE_MAX_REPLY];
+        match tairix_rt::elevate(
+            &ElevateRequest::Launch {
+                username,
+                password,
+                program,
+            },
+            &mut reply,
+        )? {
+            ElevateReply::Launched { pid } => Ok(pid),
+            ElevateReply::Refused(err) => Err(err),
+            // Every other reply answers a request this session did not send.
+            // A broker that sent one is not speaking this protocol, and
+            // nothing was started on a reply the session did not understand.
+            ElevateReply::Completed { .. }
+            | ElevateReply::Verified
+            | ElevateReply::Captured { .. }
+            | ElevateReply::Overran { .. } => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// Adopt every answer the broker has given the credential prompt.
+    fn adopt_elevations(
+        elevator: &mut RtElevator,
+        elevate: &mut ElevatePrompt,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        while let Some(answer) = elevator.landed() {
+            report_elevation(elevate.answer(answer, shell, compositor));
         }
     }
 

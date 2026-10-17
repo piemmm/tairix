@@ -21,6 +21,8 @@ use tairix_sandbox::decode::{
 use tairix_sandbox::listing::{code_lines, failure_reason, region_line, CodeLine};
 use tairix_sandbox::{Launcher, ParserSandbox, SandboxError};
 
+use crate::answer::{Answered, Unlisted};
+
 /// Most lines a listing holds: past it the listing stops and says so.
 pub const MAX_LISTING_LINES: usize = 32 * 1024;
 
@@ -48,17 +50,6 @@ pub struct CodeListing {
     pub isa: Isa,
     /// The widest line, in columns.
     pub widest: usize,
-}
-
-/// Why a document has no listing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Unlisted {
-    /// Why, in words.
-    pub reason: String,
-    /// Whether asking again would be refused alike. A passing refusal, for
-    /// want of memory or of a decode worker, is asked again once the display
-    /// is shown afresh.
-    pub lasting: bool,
 }
 
 impl Unlisted {
@@ -282,28 +273,9 @@ pub struct CodeDisplay {
     showing: bool,
     /// The instruction set the user chose, when they chose one.
     choice: Option<Isa>,
-    listing: Listing,
+    listing: Answered<CodeListing>,
     /// The first line shown.
     top: usize,
-    /// The id the next listing is asked by.
-    next_id: u64,
-}
-
-/// Where the window's listing stands.
-#[derive(Debug)]
-enum Listing {
-    /// Nothing is asked for: the display has not shown, or what it showed is
-    /// out of date.
-    Unasked,
-    /// The worker is listing the document as it was at `generation`.
-    Asking { id: u64, generation: u64 },
-    /// The listing of the document as it was at `generation`.
-    Listed {
-        listing: CodeListing,
-        generation: u64,
-    },
-    /// Why there is none, for the document as it was at `generation`.
-    Refused { unlisted: Unlisted, generation: u64 },
 }
 
 impl CodeDisplay {
@@ -314,9 +286,8 @@ impl CodeDisplay {
         tairix_binfmt::detect(head).map(|_| Self {
             showing: true,
             choice: None,
-            listing: Listing::Unasked,
+            listing: Answered::new(),
             top: 0,
-            next_id: 1,
         })
     }
 
@@ -331,11 +302,8 @@ impl CodeDisplay {
     pub fn show(&mut self, showing: bool) -> bool {
         let changed = self.showing != showing;
         self.showing = showing;
-        if changed
-            && showing
-            && matches!(&self.listing, Listing::Refused { unlisted, .. } if !unlisted.lasting)
-        {
-            self.listing = Listing::Unasked;
+        if changed && showing {
+            self.listing.forget_passing();
         }
         changed
     }
@@ -354,7 +322,7 @@ impl CodeDisplay {
         if unchanged {
             return false;
         }
-        self.listing = Listing::Unasked;
+        self.listing.forget();
         self.top = 0;
         true
     }
@@ -367,65 +335,30 @@ impl CodeDisplay {
         if !self.showing {
             return None;
         }
-        let current = match &self.listing {
-            Listing::Unasked => false,
-            Listing::Asking { generation: of, .. }
-            | Listing::Listed { generation: of, .. }
-            | Listing::Refused { generation: of, .. } => *of == generation,
-        };
-        if current {
-            return None;
-        }
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.listing = Listing::Asking { id, generation };
-        Some((id, self.choice))
+        self.listing.want(generation).map(|id| (id, self.choice))
     }
 
     /// Take in the listing asked as `id`, answering whether it was the one
     /// waited for: an answer to an ask since replaced is let go.
     pub fn listed(&mut self, id: u64, listing: Result<CodeListing, Unlisted>) -> bool {
-        let Listing::Asking {
-            id: asked,
-            generation,
-        } = self.listing
-        else {
-            return false;
-        };
-        if asked != id {
-            return false;
-        }
-        self.listing = match listing {
-            Ok(listing) => Listing::Listed {
-                listing,
-                generation,
-            },
-            Err(unlisted) => Listing::Refused {
-                unlisted,
-                generation,
-            },
-        };
+        let taken = self.listing.take(id, listing);
         self.top = self.top.min(self.line_count().saturating_sub(1));
-        true
+        taken
     }
 
     /// Refuse the listing of the document at `generation` without asking the
     /// worker, as `unlisted` says.
     pub fn refuse(&mut self, unlisted: Unlisted, generation: u64) {
-        self.listing = Listing::Refused {
-            unlisted,
-            generation,
-        };
+        self.listing.refuse(unlisted, generation);
         self.top = 0;
     }
 
     /// The lines listed, empty until a listing lands.
     #[must_use]
     pub fn lines(&self) -> &[CodeLine] {
-        match &self.listing {
-            Listing::Listed { listing, .. } => &listing.lines,
-            Listing::Unasked | Listing::Asking { .. } | Listing::Refused { .. } => &[],
-        }
+        self.listing
+            .answer()
+            .map_or(&[], |listing| listing.lines.as_slice())
     }
 
     /// How many lines the display scrolls through: the listing's, or the one
@@ -437,30 +370,20 @@ impl CodeDisplay {
 
     /// The widest listed line, in columns.
     #[must_use]
-    pub const fn widest(&self) -> usize {
-        match &self.listing {
-            Listing::Listed { listing, .. } => listing.widest,
-            Listing::Unasked | Listing::Asking { .. } | Listing::Refused { .. } => 0,
-        }
+    pub fn widest(&self) -> usize {
+        self.listing.answer().map_or(0, |listing| listing.widest)
     }
 
     /// What the display says in place of a listing, while it has none.
     #[must_use]
     pub fn note(&self) -> Option<&str> {
-        match &self.listing {
-            Listing::Listed { .. } => None,
-            Listing::Unasked | Listing::Asking { .. } => Some(LISTING),
-            Listing::Refused { unlisted, .. } => Some(&unlisted.reason),
-        }
+        self.listing.note(LISTING)
     }
 
     /// The instruction set the listing was read as, once it is listed.
     #[must_use]
-    pub const fn isa(&self) -> Option<Isa> {
-        match &self.listing {
-            Listing::Listed { listing, .. } => Some(listing.isa),
-            Listing::Unasked | Listing::Asking { .. } | Listing::Refused { .. } => None,
-        }
+    pub fn isa(&self) -> Option<Isa> {
+        self.listing.answer().map(|listing| listing.isa)
     }
 
     /// The first line shown.

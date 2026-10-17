@@ -4,6 +4,7 @@
 
 use alloc::string::String;
 
+use tairix_abi::window_ipc::AppMenuSymbol;
 use tairix_inline::ArrayVec;
 
 /// One pane of the window's chrome.
@@ -34,6 +35,16 @@ impl PaneKind {
             Self::Tools => "Tools",
             Self::Colour => "Colour",
             Self::Adjustment => "Adjustment",
+        }
+    }
+
+    /// The function the Panes menu names it by.
+    #[must_use]
+    pub const fn symbol(self) -> AppMenuSymbol {
+        match self {
+            Self::Tools => AppMenuSymbol::Tools,
+            Self::Colour => AppMenuSymbol::Colours,
+            Self::Adjustment => AppMenuSymbol::Adjust,
         }
     }
 

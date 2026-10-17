@@ -9,6 +9,7 @@
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRole, AppMenuRow,
+    AppMenuSymbol,
 };
 use tairix_abi::Errno;
 
@@ -42,6 +43,19 @@ const fn label(control: TaskControl) -> &'static str {
     }
 }
 
+/// The function `control`'s row shows.
+const fn symbol(control: TaskControl) -> AppMenuSymbol {
+    match control {
+        TaskControl::Switch => AppMenuSymbol::SwitchTo,
+        TaskControl::Reveal => AppMenuSymbol::Visible,
+        TaskControl::Pause => AppMenuSymbol::Pause,
+        TaskControl::Resume => AppMenuSymbol::Resume,
+        TaskControl::LowerPriority => AppMenuSymbol::LowerPriority,
+        TaskControl::OpenLogs => AppMenuSymbol::Logs,
+        TaskControl::ForceQuit => AppMenuSymbol::ForceQuit,
+    }
+}
+
 /// Whether `control` begins a new group, drawing a divider above it.
 const fn opens_group(control: TaskControl) -> bool {
     matches!(
@@ -71,7 +85,7 @@ pub fn task_menu(task: &TaskSummary) -> Result<AppMenu, Errno> {
             menu.push(AppMenuRow::Separator)?;
         }
         let id = AppMenuItemId::for_index(index).ok_or(Errno::OutOfRange)?;
-        let mut item = AppMenuItem::new(id, AppMenuLabel::new(label(control))?);
+        let mut item = AppMenuItem::new(id, AppMenuLabel::new(label(control))?, symbol(control));
         if control == TaskControl::ForceQuit {
             item = item.with_role(AppMenuRole::Destructive);
         }

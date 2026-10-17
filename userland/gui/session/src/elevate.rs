@@ -34,6 +34,14 @@
 //! pretending anything happened. The broker refuses a wrong password, an
 //! unknown account, and a locked account indistinguishably, and this prompt
 //! repeats exactly what it was told rather than guessing which it was.
+//!
+//! # Never waiting on the broker
+//!
+//! The broker derives a key from every password on purpose, and the serve
+//! loop that would wait for it composites every window on the screen. So an
+//! offer is *asked* — the password handed to an [`ElevateAsk`] and erased from
+//! the sheet, which says it is checking and takes no input — and the broker's
+//! answer is adopted later through [`ElevatePrompt::answer`].
 
 use alloc::string::String;
 
@@ -44,6 +52,8 @@ use tairix_controls::{
     CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::Scale;
+use tairix_greeter::Ticket;
+use tairix_util::secret::WipedBuf;
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Surface, WindowId};
 
 use crate::shell::DesktopShell;
@@ -77,23 +87,81 @@ pub use tairix_controls::CREDENTIAL_NOT_STARTED_REASON as NOT_STARTED_REASON;
 /// The prompt window's title.
 const TITLE: &str = "Authenticate";
 
-/// The exchange the prompt performs once the user offers credentials.
+/// The exchange the prompt asks for once the user offers credentials.
 ///
 /// Injected so the whole prompt — its editing, its wording, its refusal
 /// handling, its erasure of the secret — is exercised on the host without a
-/// kernel. The implementation posts to the console's elevation broker; the
-/// prompt itself holds no authority and performs no privileged work.
+/// kernel. The implementation posts to the console's elevation broker off the
+/// serve loop; the prompt itself holds no authority and performs no
+/// privileged work.
 pub trait Elevator {
-    /// Offer `password` for `username` and, if it authenticates, start
-    /// `program` as that account without waiting for it, answering its pid.
+    /// Ask the broker to authenticate `password` for `username` and, if it
+    /// does, to start `program` as that account without waiting for it,
+    /// answering the ticket its answer will carry back to
+    /// [`ElevatePrompt::answer`].
     ///
-    /// # Errors
-    ///
-    /// [`Errno::PermissionDenied`] for a refused authentication — the broker
-    /// gives one indistinguishable answer for a wrong password, an unknown
-    /// account, and a locked one. Any other code reports a mechanical
-    /// failure, such as a program that would not start.
-    fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i64, Errno>;
+    /// `password` is the prompt's to erase once this returns, so an
+    /// implementor that carries it later copies it into an [`ElevateAsk`].
+    /// One that cannot ask at all still answers, so no prompt is left
+    /// checking.
+    fn ask(&mut self, username: &str, password: &str, program: &str) -> Ticket;
+}
+
+/// One account the prompt asks the broker to start a program as, on its way
+/// off the serve loop: the password held in a buffer sized to it so it never
+/// moves, erased once the broker has answered and again when it is dropped —
+/// carried, displaced, or never sent at all.
+pub struct ElevateAsk {
+    ticket: Ticket,
+    username: String,
+    program: String,
+    password: WipedBuf,
+}
+
+impl ElevateAsk {
+    /// The question `ticket` names: start `program` as `username` once
+    /// `password` authenticates it. `None` when no memory holds the password.
+    #[must_use]
+    pub fn new(ticket: Ticket, username: &str, password: &str, program: &str) -> Option<Self> {
+        let mut held = WipedBuf::with_capacity(password.len()).ok()?;
+        held.extend_zeroed(password.len())?
+            .copy_from_slice(password.as_bytes());
+        Some(Self {
+            ticket,
+            username: String::from(username),
+            program: String::from(program),
+            password: held,
+        })
+    }
+
+    /// The offer this question answers for.
+    #[must_use]
+    pub const fn ticket(&self) -> Ticket {
+        self.ticket
+    }
+
+    /// The account to start the program as.
+    #[must_use]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// The program to start.
+    #[must_use]
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// The password, as the text it was offered as.
+    #[must_use]
+    pub fn password(&self) -> Option<&str> {
+        core::str::from_utf8(&self.password).ok()
+    }
+
+    /// Erase the password now, rather than when the question is dropped.
+    pub fn erase(&mut self) {
+        self.password.wipe();
+    }
 }
 
 /// How the prompt ended, or that it has not.
@@ -113,12 +181,13 @@ pub enum PromptOutcome {
     Cancelled,
 }
 
-/// One showing prompt: the program it will start, its compositor window, and
-/// the sheet asking for the account.
+/// One showing prompt: the program it will start, its compositor window, the
+/// sheet asking for the account, and the offer the broker is checking.
 struct ActivePrompt {
     program: String,
     wm: WindowId,
     sheet: CredentialSheet,
+    asked: Option<Ticket>,
 }
 
 /// The session's credential-prompt slot.
@@ -180,8 +249,40 @@ impl ElevatePrompt {
             program: String::from(program),
             wm,
             sheet,
+            asked: None,
         });
         true
+    }
+
+    /// Adopt the broker's `answer` to the offer `ticket` names: the started
+    /// program's pid, or why nothing started.
+    ///
+    /// Returns [`PromptOutcome::Started`] for a launch the prompt was waiting
+    /// on, by which time its window is closed. A refusal states its reason
+    /// and asks again. An answer to an offer this prompt is not waiting on —
+    /// one an abandoned prompt asked — changes nothing.
+    pub fn answer(
+        &mut self,
+        (ticket, answer): (Ticket, Result<i64, Errno>),
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> PromptOutcome {
+        let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.asked == Some(ticket))
+        else {
+            return PromptOutcome::Pending;
+        };
+        active.asked = None;
+        match answer {
+            Ok(pid) => self.conclude(shell, compositor, Some(pid)),
+            Err(err) => {
+                active.sheet.refuse(refusal(err));
+                self.repaint(shell, compositor);
+                PromptOutcome::Pending
+            }
+        }
     }
 
     /// Apply one input event — pointer or key — taken at `now_ns` to the
@@ -321,12 +422,13 @@ impl ElevatePrompt {
         PromptOutcome::Pending
     }
 
-    /// Take the prompt down without offering anything.
+    /// Take the prompt down without offering anything more.
     ///
     /// Used when the session is tearing the desktop down or the theme it was
     /// drawn against is gone. The secret goes with the sheet, which zeroises
     /// its buffer as it is dropped, so an abandoned prompt leaves no
-    /// plaintext behind.
+    /// plaintext behind. An offer already with the broker is answered to
+    /// nobody: nothing adopts it.
     pub fn abandon(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
         let _ = self.conclude(shell, compositor, None);
     }
@@ -375,39 +477,28 @@ impl ElevatePrompt {
             .map_or(0, |secret| secret.chars().count())
     }
 
-    /// Offer what has been typed to the broker.
-    ///
-    /// A refusal keeps the prompt up with the reason stated and the password
-    /// cleared — zeroised as the field discards it — so another try starts
-    /// from empty.
+    /// Ask the broker about what has been typed, the sheet saying it is
+    /// checking — the password erased from it — until the answer comes back.
     fn offer(
         &mut self,
         elevator: &mut dyn Elevator,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> PromptOutcome {
-        let outcome = {
-            let Some(active) = self.active.as_mut() else {
-                return PromptOutcome::Pending;
-            };
-            // The sheet refuses an unofferable password itself; one reaching
-            // here anyway is refused as the authority would refuse it.
-            active
-                .sheet
-                .secret()
-                .ok_or(Errno::PermissionDenied)
-                .and_then(|secret| elevator.launch(active.sheet.account(), secret, &active.program))
+        let Some(active) = self.active.as_mut() else {
+            return PromptOutcome::Pending;
         };
-        match outcome {
-            Ok(pid) => self.conclude(shell, compositor, Some(pid)),
-            Err(err) => {
-                if let Some(active) = self.active.as_mut() {
-                    active.sheet.refuse(refusal(err));
-                }
-                self.repaint(shell, compositor);
-                PromptOutcome::Pending
+        // The sheet refuses an unofferable password itself; one reaching here
+        // anyway is refused as the authority would refuse it.
+        match active.sheet.secret() {
+            Some(secret) => {
+                active.asked = Some(elevator.ask(active.sheet.account(), secret, &active.program));
+                active.sheet.check();
             }
+            None => active.sheet.refuse(refusal(Errno::PermissionDenied)),
         }
+        self.repaint(shell, compositor);
+        PromptOutcome::Pending
     }
 
     /// Close the prompt window and produce the outcome. `started` carries the

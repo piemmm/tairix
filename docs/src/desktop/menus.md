@@ -197,6 +197,31 @@ user, a child of a row is placed by the chain against the row it hangs off.
 And the field **cannot be masked** — the model has no way to say so — so a menu
 row is structurally incapable of being a password prompt.
 
+## Every row states its function
+
+Every chooseable row and every submenu row names what it does from one closed
+vocabulary, `AppMenuSymbol` (`lib/abi/src/window_ipc/symbol.rs`), and the
+desktop chooses the picture drawn to the left of its label
+(`tairix_icon::menu_symbol_icon`). An application names a function, never a
+picture, so Delete looks the same in every menu and a redrawn picture lands in
+every menu at once. The symbol is mandatory — `AppMenuItem::new` and
+`AppMenuRow::Submenu` take one, as do the desktop's own `ChainRow`s — and costs
+two bytes of the row record, none of the text block; a decoder refuses an item
+or submenu whose symbol is zero or unknown, and any other row whose symbol is
+not zero.
+
+The picture is chrome: a monochrome glyph drawn in the row's foreground, dark on
+a light theme and light on a dark one. A **destructive** row's picture is the
+theme's danger hue — on the solid danger highlight it takes the highlight's own
+foreground, and a disabled row's is muted — while its label keeps the plate's
+foreground and its danger rail stays. A plate holding a ticked or bulleted row
+keeps a gutter for the mark before the picture column, so a toggle or a choice
+still shows its function and every label on the plate lines up; a plate with no
+mark reserves none. A glyph is rasterised once per chain
+(`ChainModel::resolve_glyphs`, at the side every plate draws it at, which a
+change of scale or theme ends the chain over), so a highlight move tints two
+retained masks and a submenu reopened rasterises nothing.
+
 ## A row may carry its own icon
 
 A row may name the application bundle its icon comes from, and the desktop
@@ -205,8 +230,8 @@ through — the same request a taskbar slot makes, so a candidate row and that
 application's slot show the same picture. The artwork layer reads the bundle's
 own *signed* manifest and draws only the icon that manifest declares, so a row
 naming something that is not a bundle resolves to nothing and falls back to its
-built-in glyph. Resolution happens before the paint; the paint itself reads
-nothing.
+built-in glyph, then to its symbol's picture. Resolution happens before the
+paint; the paint itself reads nothing.
 
 ## The grab
 

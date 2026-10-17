@@ -213,14 +213,18 @@ at the screen".
 ### G2.1 As built
 
 ```rust
-pub struct AuthSurface;      // new(account) | with_accounts(tiles); on_event, render,
+pub struct AuthSurface;      // new(account) | with_accounts(tiles); on_event, answer, render,
                              //   notice, field_rect, column_rect,
                              //   selected_account, set_chrome, set_cooldown
 pub struct AccountTile;      // new(display, login), with_live_session, monogram
 pub struct Chrome;           // identity, clock
 pub struct Outcome;          // redraw(), verified(), damage()
 pub struct EventContext<'a>; // screen, scale, theme, verifier
-pub trait  Verifier { fn verify(&mut self, account: &str, secret: &str) -> Verdict; }
+pub trait  Verifier { fn ask(&mut self, account: &str, secret: &str) -> Ticket; }
+pub struct Ticket;           // which offer an answer is about
+pub struct Tickets;          // issue
+pub trait  Courier { type Answer; fn send(..) -> Result<(), Answer>; fn receive(..); }
+pub struct Asking<C>;        // the one Verifier: tickets + a courier; landed
 pub enum   Verdict { Verified, Refused, Unreachable }
 pub enum   Backdrop { Desktop, Scene { ground: Color } }
 pub fn panel_rect(screen: Rect, scale: Scale) -> Rect;
@@ -236,8 +240,14 @@ login screen's — it opens on the chooser.
   `[input active...]` marker (which leaks neither the characters nor their
   count), and the volatile wipe on discard are the one shared
   implementation. The marker's dots are stepped by the surface's own
-  `motion_due`/`advance` schedule. The surface erases the field on
-  every terminal transition — verified, refused, unreachable, and drop.
+  `motion_due`/`advance` schedule. The surface erases the field the moment
+  it hands the secret to the verifier, as well as on every step between
+  accounts and on drop.
+- **The answer is never awaited.** The authority derives a key from every
+  secret on purpose, so `ask` returns a ticket and the answer comes back on a
+  later round through `answer`; meanwhile the surface says it is checking and
+  its field takes no input. Only an answer carrying the ticket of the offer it
+  waits on is adopted.
   The field holds at most `tairix_abi::account::MAX_PASSWORD_LEN` bytes, the
   one bound every prompt, wire and the verifier share: the buffer is reserved
   once and never grown, so no copy of a secret is left in a freed block, and
@@ -804,9 +814,11 @@ spinning.
 The desktop's `ScreenLock` (`userland/gui/session/src/lock.rs`) is the same
 surface as the greeter with the account fixed to the session's own and the
 chooser and session actions suppressed. It composes `lib/greeter` and keeps
-only its embedder duties: the compositor window, `keep_topmost`,
-`LockedDrain`, the window-space mapping, and a `Verifier` over the
-per-console elevation broker — which verifies against the caller's
+only its embedder duties: the compositor window, `keep_topmost`, the
+window-space mapping, `adopt_unlocks` — which drains the seat into the lock
+before adopting an answer, so nothing typed at the locked screen reaches the
+desktop it uncovers — and an `Asking` over the per-console elevation broker,
+carried on a worker thread, which verifies against the caller's
 kernel-attested uid, never a supplied name. No panel, field, layout, or
 wording remains duplicated in the session crate.
 

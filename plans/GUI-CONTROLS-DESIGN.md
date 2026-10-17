@@ -910,7 +910,8 @@ Menus are pinned command plates. They are not floating ornament.
 - A plate rounds itself and casts a drop shadow. Its heading band's ground is part of the plate rather than a fill over it, and a first or last row's highlight, rail and focus ring follow the plate's corners, so nothing a plate draws reaches past its own silhouette and the compositor never cuts it a second time.
 - Each menu item is a row control with label, optional icon, shortcut, and state.
 - A row is the text-plate height, so it is never shorter than the minimum target. A group break is its rule with half a control gap either side.
-- Dangerous items use a danger rim only on their item row.
+- Dangerous items use a danger rim only on their item row, and draw their
+  icon in the danger hue.
 - Disabled items show the reason when focused or inspected.
 - Nested menus open from the row edge with a short anchor trace.
 
@@ -1353,11 +1354,12 @@ coordinate and the press latch do not.
 #### MenuMark — a menu row's state
 
 A menu row states an independent setting or a chosen alternative with a
-**mark** in the leading icon column ([`MenuMark`]: none, a tick, or a filled
-bullet). A row states either an icon or a mark, never both: they share the one
-reserved column, so a mark replaces the icon rather than crowding it, and a
-marked row's label still lines up with an unmarked one's. Both are shapes
-rather than colours, so the state is legible without colour vision.
+**mark** ([`MenuMark`]: none, a tick, or a filled bullet). On a plate whose
+rows carry icons the marks take a gutter of their own before the icon column,
+so a marked row still shows what it does; on a plate with none the mark takes
+the one leading column. Either way the columns are the plate's, so a marked
+row's label lines up with an unmarked one's. Both are shapes rather than
+colours, so the state is legible without colour vision.
 
 ### 11.27 TraySignal
 

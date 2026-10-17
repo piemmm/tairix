@@ -87,10 +87,10 @@ mod tests {
 
     #[test]
     fn a_path_is_held_in_its_canonical_spelling() {
-        let path = SettingPath::new("/Users/ada/UserFiles/./Music/../Music/bell.flac")
+        let path = SettingPath::new("/Users/ada/Home/./Music/../Music/bell.flac")
             .expect("an absolute path");
-        assert_eq!(path.as_str(), "/Users/ada/UserFiles/Music/bell.flac");
-        assert_eq!(path.into_string(), "/Users/ada/UserFiles/Music/bell.flac");
+        assert_eq!(path.as_str(), "/Users/ada/Home/Music/bell.flac");
+        assert_eq!(path.into_string(), "/Users/ada/Home/Music/bell.flac");
     }
 
     #[test]

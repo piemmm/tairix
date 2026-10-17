@@ -45,8 +45,8 @@ use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::window_ipc::{AlertButtonRole, PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
 use tairix_abi::{Errno, FS_NAME_MAX};
 use tairix_browse::render::{
-    entry_index_at, listing_damage, render_into, reveal_selection, scroll_pointer, scroll_wheel,
-    shown_listing, toolbar_command_at,
+    entry_index_at, header_sort_at, listing_damage, render_into, reveal_selection, scroll_pointer,
+    scroll_wheel, shown_listing, toolbar_command_at,
 };
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
@@ -470,7 +470,7 @@ const fn title_prefix(saving: bool, folder: bool) -> &'static str {
 pub struct SessionPicker<S: DirectorySource, F: FnMut() -> S> {
     source: F,
     /// Root-first components of the directory each pick opens at — the
-    /// user's `UserFiles` in production, so the picker starts among the
+    /// user's `Home` folder in production, so the picker starts among the
     /// user's own files rather than at the storage-forest root. Empty means
     /// the root `/`.
     start: Vec<String>,
@@ -495,7 +495,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
 
     /// Open each pick at the directory named by root-first `start` instead of
     /// the root — the session points its picker at the logged-in user's
-    /// `UserFiles` so the user lands among their own files. A start that
+    /// `Home` folder so the user lands among their own files. A start that
     /// cannot be listed climbs to the nearest folder above it that can, and
     /// only a refusal of the root itself refuses the pick (see
     /// [`begin`](PickerSlot::begin)).
@@ -738,6 +738,21 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     Ok(true) => NavOutcome::Redraw,
                     Ok(false) | Err(_) => NavOutcome::None,
                 }
+            });
+        }
+        if let Some(order) = self.active.as_ref().and_then(|active| {
+            header_sort_at(
+                &active.browser,
+                scale,
+                theme,
+                viewport,
+                PICKER_TOOLBAR,
+                local,
+            )
+        }) {
+            return self.navigate(shell, compositor, move |browser| {
+                browser.set_sort_mode(order);
+                NavOutcome::Redraw
             });
         }
         let index = self.active.as_ref().and_then(|active| {
