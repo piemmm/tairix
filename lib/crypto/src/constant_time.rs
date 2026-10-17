@@ -46,16 +46,7 @@ fn fold_difference<I: Iterator<Item = (u8, u8)>>(pairs: I) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{ct_eq, fold_difference};
-
-    /// `splitmix64` finaliser — a self-contained deterministic PRNG so the
-    /// randomised cases need no external crate and never flake.
-    fn next(state: &mut u64) -> u64 {
-        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = *state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
+    use tairix_mix::SplitMix64;
 
     /// An iterator wrapper that records, in a borrowed counter, how many
     /// items the consumer actually pulled. Driving [`fold_difference`] with
@@ -145,27 +136,27 @@ mod tests {
     /// with slice equality. Deterministic, so it can never flake.
     #[test]
     fn agrees_with_reference_equality() {
-        let mut state = 0x0123_4567_89AB_CDEFu64;
+        let mut draws = SplitMix64::new(0x0123_4567_89AB_CDEF);
         for _ in 0..4096 {
-            let len = (next(&mut state) % 48) as usize;
+            let len = (draws.next_u64() % 48) as usize;
             let mut a = [0u8; 48];
             let mut b = [0u8; 48];
             for byte in a.iter_mut().take(len) {
-                *byte = (next(&mut state) & 0xFF) as u8;
+                *byte = (draws.next_u64() & 0xFF) as u8;
             }
             // Half the time compare against an independent buffer; the other
             // half against a copy that is then perturbed with low
             // probability, so the suite exercises both equal and near-equal
             // inputs.
-            if next(&mut state) & 1 == 0 {
+            if draws.next_u64() & 1 == 0 {
                 for byte in b.iter_mut().take(len) {
-                    *byte = (next(&mut state) & 0xFF) as u8;
+                    *byte = (draws.next_u64() & 0xFF) as u8;
                 }
             } else {
                 b[..len].copy_from_slice(&a[..len]);
-                if len > 0 && next(&mut state).is_multiple_of(4) {
-                    let pos = usize::try_from(next(&mut state) % len as u64).expect("pos < len");
-                    b[pos] ^= 1 + (next(&mut state) & 0x7F) as u8;
+                if len > 0 && draws.next_u64().is_multiple_of(4) {
+                    let pos = usize::try_from(draws.next_u64() % len as u64).expect("pos < len");
+                    b[pos] ^= 1 + (draws.next_u64() & 0x7F) as u8;
                 }
             }
             assert_eq!(ct_eq(&a[..len], &b[..len]), a[..len] == b[..len]);

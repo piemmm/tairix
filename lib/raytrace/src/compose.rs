@@ -18,6 +18,7 @@ mod footprint;
 mod landscape;
 mod lattice;
 mod plants;
+mod ranking;
 mod snowman;
 mod still;
 mod stones;
@@ -34,17 +35,25 @@ use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use core::ops::ControlFlow;
 
+use footprint::{Footprints, Taken};
+use landscape::Lawning;
+use landscape::{Scheme, Vantage};
+use stones::Bed;
 use tairix_colour::srgb_to_linear;
+use tairix_land::Season;
+use tairix_mix::numbered;
 use tairix_parallel::JobRunner;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
+use waterside::Margins;
+use woodland::{Growing, Wood};
 
 use crate::body;
 use crate::cactus::{Bristling, Flesh};
 use crate::camera::Camera;
 use crate::deadwood::{log, stump, Decay, Sprouting, Top, Woods};
 use crate::detail::{Densities, Detail, Spines};
-use crate::far_wood::{self, FarWood, Matching, Surveying};
+use crate::far_wood::{self, FarWood, Surveying};
 use crate::grass::{Lawn, Tops};
 use crate::heightfield::Heightfield;
 use crate::land::{Build, Land};
@@ -54,23 +63,16 @@ use crate::mud::{tile, Crust};
 use crate::pigment::Pigment;
 use crate::prototype::{Building, Prototype, BUILD_UNIT};
 use crate::rock::{Habit, Wearing};
-use crate::sample::mix64;
-use crate::scene::{Exposure, Object, Parts};
+use crate::scene::{Exposure, Object, Objects, Parts};
+use crate::sea::Sea;
 use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
 use crate::sky::{Dome, Sky};
 use crate::snowman::{carrot, stick, Ball, Rolling};
 use crate::stand::Stand;
-use crate::terrain::Sea;
-use crate::tree::{fern, palm, Growth, Season, Species, Stock};
+use crate::tree::{fern, palm, Growth, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
 use crate::waterside::{patch, Margin, Marsh};
-use footprint::{Footprints, Taken};
-use landscape::Lawning;
-use landscape::{Scheme, Vantage};
-use stones::Bed;
-use waterside::Margins;
-use woodland::{Growing, Wood};
 
 /// The settings a scene can be set in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -512,7 +514,6 @@ impl Grow {
 pub(crate) struct Composition {
     stage: Stage,
     dice: Dice,
-    aspect: f64,
     /// The picture's height in pixels, which how finely its lawns need drawing
     /// follows.
     height: u32,
@@ -541,23 +542,22 @@ enum Job {
     Plant(Planting),
     /// Grow the planned prototypes.
     Grow(Grow),
-    /// Match a wood carried on far off to the trees stood before it, survey
-    /// it, then trace it.
+    /// Survey a wood carried on far off, then trace it.
     Beyond(Beyond),
     /// Build the atmosphere's tables and the cloud's, then light the clouds
     /// by the air.
     Sky,
 }
 
-/// A wood carried on far off, matched to the trees stood before it,
-/// surveyed, and then traced, a step at a time.
+/// A wood carried on far off, surveyed once the prototypes its trees are
+/// measured by grow, and then traced, a step at a time.
 #[allow(
     clippy::large_enum_variant,
     reason = "a wood or two at once, and a box could not fail gracefully"
 )]
 #[derive(Debug)]
 enum Beyond {
-    Matching(Matching),
+    Carried(FarWood),
     Surveying(Surveying),
     Tracing(FarWood),
 }
@@ -620,13 +620,13 @@ impl Composition {
         let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
         let mut stage = Stage::new(detail.densities())?;
         stage.pixel = MIDDLING_FOV / f64::from(size.1);
+        stage.aspect = f64::from(size.0) / f64::from(size.1);
         let composed = compose(setting, &mut stage, &mut dice)?;
         let mut jobs = VecDeque::new();
         jobs.try_reserve(MAX_FIELDS + 4).ok()?;
         let mut composition = Self {
             stage,
             dice,
-            aspect: f64::from(size.0) / f64::from(size.1),
             height: size.1,
             seen: None,
             jobs,
@@ -659,9 +659,9 @@ impl Composition {
             stage
                 .beyond
                 .drain(..)
-                .map(|matching| Job::Beyond(Beyond::Matching(matching))),
+                .map(|wood| Job::Beyond(Beyond::Carried(wood))),
         );
-        let camera = stage.camera(&look.view, self.aspect);
+        let camera = stage.camera(&look.view, stage.aspect);
         let eye = camera.eye();
         let pixel = camera.pixel_angle(self.height);
         for lawn in &mut stage.lawns {
@@ -717,12 +717,10 @@ impl Composition {
                 .get(fill.field)
                 .map_or(1.0, |field| fill.done(field)),
             Job::Grow(grow) => grow.done(),
-            // Matching reads a fraction of the places a survey does.
-            Job::Beyond(Beyond::Matching(matching)) => 0.15 * matching.done(),
-            Job::Beyond(Beyond::Surveying(surveying)) => 0.15 + 0.85 * surveying.done(),
+            Job::Beyond(Beyond::Surveying(surveying)) => surveying.done(),
             Job::Beyond(Beyond::Tracing(_)) => 1.0,
             Job::Sky => self.seen.as_ref().map_or(0.0, |(look, _)| look.sky.done()),
-            Job::Land(_) | Job::Plant(_) => 0.0,
+            Job::Beyond(Beyond::Carried(_)) | Job::Land(_) | Job::Plant(_) => 0.0,
         }
     }
 
@@ -789,21 +787,11 @@ impl Composition {
                     Progress::Again(Job::Grow(grow))
                 }
             }
-            Job::Beyond(Beyond::Matching(matching)) => {
-                let next = match matching.step(&self.stage.fields, runner)? {
-                    ControlFlow::Continue(matching) => Beyond::Matching(matching),
-                    ControlFlow::Break(wood) => {
-                        Beyond::Surveying(wood.surveying(&self.stage.prototypes)?)
-                    }
-                };
-                Progress::Again(Job::Beyond(next))
-            }
+            Job::Beyond(Beyond::Carried(wood)) => Progress::Again(Job::Beyond(Beyond::Surveying(
+                wood.surveying(&self.stage.prototypes)?,
+            ))),
             Job::Beyond(Beyond::Surveying(surveying)) => {
-                let ground = (
-                    self.stage.fields.as_slice(),
-                    self.stage.prototypes.as_slice(),
-                );
-                let next = match surveying.step(ground, runner)? {
+                let next = match surveying.step(&self.stage.fields, runner)? {
                     ControlFlow::Continue(surveying) => Beyond::Surveying(surveying),
                     ControlFlow::Break(wood) => Beyond::Tracing(wood),
                 };
@@ -955,9 +943,7 @@ impl Dice {
     /// The draws of the `index`th of the streams keyed from `seed`.
     fn keyed(seed: u64, index: usize) -> Self {
         let index = u64::try_from(index).unwrap_or(u64::MAX);
-        Self(NonCryptoRng::seed_from_u64(mix64(
-            seed ^ mix64(index.wrapping_add(1)),
-        )))
+        Self(NonCryptoRng::seed_from_u64(numbered(seed, index)))
     }
 
     /// Either way round.
@@ -1004,16 +990,15 @@ enum View {
 /// The pieces of a scene as they are set out.
 #[derive(Debug)]
 struct Stage {
-    objects: Vec<Object>,
+    objects: Objects,
     faces: Vec<Face>,
     fields: Vec<Heightfield>,
     prototypes: Vec<Prototype>,
     lawns: Vec<Lawn>,
     /// The woods carried on far off, each traced once surveyed, and those
-    /// still to be matched and surveyed once the prototypes they are
-    /// measured by grow.
+    /// still to be surveyed once the prototypes they are measured by grow.
     far_woods: Vec<FarWood>,
-    beyond: Vec<Matching>,
+    beyond: Vec<FarWood>,
     /// The fields' crops standing as plants about the eye.
     stands: Vec<Stand>,
     /// The prototypes planned, grown in order into `prototypes` before the
@@ -1046,6 +1031,8 @@ struct Stage {
     /// About the angle a pixel spans, the picture seen through a middling
     /// lens: how small a piece may be and still be seen.
     pixel: f64,
+    /// The picture's width over its height, which a scene frames in.
+    aspect: f64,
     /// How much the scene sets out.
     densities: &'static Densities,
 }
@@ -1081,7 +1068,7 @@ const GLASS_SHADOW: f64 = 0.62;
 impl Stage {
     fn new(densities: &'static Densities) -> Option<Self> {
         let mut stage = Self {
-            objects: Vec::new(),
+            objects: Objects::new(),
             faces: Vec::new(),
             fields: Vec::new(),
             prototypes: Vec::new(),
@@ -1105,10 +1092,10 @@ impl Stage {
             shades: None,
             subject: Aabb::EMPTY,
             pixel: MIDDLING_FOV / 1080.0,
+            aspect: 16.0 / 9.0,
             densities,
         };
-        let reserved = stage.objects.try_reserve(256).is_ok()
-            && stage.faces.try_reserve(256).is_ok()
+        let reserved = stage.faces.try_reserve(256).is_ok()
             && stage.fields.try_reserve_exact(MAX_FIELDS).is_ok()
             && stage.fills.try_reserve_exact(MAX_FIELDS).is_ok()
             && stage.materials.try_reserve(64).is_ok()
@@ -1170,18 +1157,19 @@ impl Stage {
                 self.subject = self.subject.union(bounds);
             }
         }
-        push(
-            &mut self.objects,
-            self.densities.objects,
-            Object {
+        if self.objects.len() >= self.densities.objects {
+            return None;
+        }
+        self.objects
+            .try_push(Object {
                 shape,
                 material,
                 texture,
                 light: None,
                 filter,
                 in_view: true,
-            },
-        )
+            })
+            .ok()
     }
 
     /// Add the bounded convex solid of `faces`, given in its own frame,
@@ -1378,11 +1366,10 @@ impl Stage {
         push(&mut self.woods, MAX_WOODS, wood).map(|_| ())
     }
 
-    /// Carry a wood on far off, `matching` the trees stood before it, to be
-    /// surveyed once the prototypes its trees are measured by grow; `None`
-    /// when the stage will not hold it.
-    fn carry_on(&mut self, matching: Matching) -> Option<()> {
-        push(&mut self.beyond, MAX_WOODS, matching).map(|_| ())
+    /// Carry `wood` on far off, to be surveyed once the prototypes its trees
+    /// are measured by grow; `None` when the stage will not hold it.
+    fn carry_on(&mut self, wood: FarWood) -> Option<()> {
+        push(&mut self.beyond, MAX_WOODS, wood).map(|_| ())
     }
 
     /// Trace `wood`, a wood far off and surveyed, as objects of its own, one
@@ -2429,11 +2416,11 @@ impl Composition {
             .collect()
     }
 
-    /// How many woods carried on far off are still to be matched.
+    /// How many woods carried on far off are still to be surveyed.
     fn carried_on(&self) -> usize {
         self.jobs
             .iter()
-            .filter(|job| matches!(job, Job::Beyond(Beyond::Matching(_))))
+            .filter(|job| matches!(job, Job::Beyond(Beyond::Carried(_))))
             .count()
     }
 }

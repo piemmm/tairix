@@ -7,12 +7,12 @@
 //! as a share of its half width there. How dry a leaf is rides in the low
 //! bits of its key, so the builder that drew its droop drew its drying.
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, noise2, smoothstep};
 use tairix_util::mathf;
 
 use crate::ground::fade;
-use crate::noise::{cell, noise2, smoothstep};
 use crate::pigment::Spot;
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// How many steps a leaf's dryness is kept in, in its key's low bits.

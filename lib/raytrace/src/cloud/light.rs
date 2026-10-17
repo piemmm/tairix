@@ -16,10 +16,13 @@
 //! above; each meets the cloud where it truly stands, drawn against a bound
 //! of the extinction and kept as often as the cloud there has it (Woodcock
 //! et al., "Techniques used in the GEM code for Monte Carlo neutronics
-//! calculations", 1965). It scatters isotropically through the extinction
-//! scaled by `1 − g` — the similarity principle, which keeps how far light
-//! diffuses (van de Hulst, "Multiple Light Scattering", 1980) — and off the
-//! ground as its albedo has it, until it leaves by the top. The track it
+//! calculations", 1965). The sun's beam runs on through δ-Eddington's
+//! extinction, its phase's forward peak taken as carrying on unscattered
+//! (Joseph, Wiscombe and Weinman, 1976), and first scatters through the rest
+//! of the phase; from then on a photon scatters isotropically through the
+//! extinction scaled by `1 − g` — the similarity principle, which keeps how
+//! far light diffuses (van de Hulst, "Multiple Light Scattering", 1980) — and
+//! off the ground as its albedo has it, until it leaves by the top. The track it
 //! lays through a voxel is that voxel's share of the diffuse light's
 //! fluence, the track's direction its share of the net flux, and what leaves
 //! by the floor having scattered is the light the bank sheds below. A voxel's
@@ -39,15 +42,14 @@ use core::f64::consts::{PI, TAU};
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::smoothstep;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use super::form::Edges;
 use super::{sunlight_at, Cloudbank, Holding, Reader, RIM};
-use crate::band;
-use crate::noise::smoothstep;
-use crate::sample::{mix32, unit};
-use crate::vector::{cell_of, real, single, whole, Vec3};
+use crate::vector::{above, cell_of, real, single, whole, Vec3};
 
 /// How finely a bank's light is solved.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -94,9 +96,10 @@ const FIXED: f64 = 16_777_216.0;
 /// would only ever have lit further in.
 const MOST_STEPS: u32 = 1 << 14;
 /// Photons in a batch, and batches a core follows in a unit: some
-/// milliseconds' work, in pieces small enough that a photon wandering long
-/// leaves no core idle behind it.
-const PHOTON_BATCH: usize = 16;
+/// milliseconds' work under the heaviest cloud, a photon through a heap's
+/// fine light up to some hundreds of microseconds, in batches small enough
+/// that a photon wandering long leaves no core idle behind it.
+const PHOTON_BATCH: usize = 2;
 const BATCHES: usize = 16;
 /// Photons sent through a level in each round, for each of its voxels
 /// holding cloud, and the most rounds sent: each a fresh draw of every
@@ -113,11 +116,11 @@ const LEAST_WEIGHT: f64 = 1.0 / 32.0;
 /// reaches; and the steps its sixteen bits hold it in.
 const DEEPEST: f64 = 50.0;
 const DEPTH_SCALE: f64 = DEEPEST / 65_535.0;
-/// Rows of voxels a core fills in a unit: of voxelling, a voxel some tenths
-/// of a microsecond; and of a field's pass, some nanoseconds. And rows of a
-/// level's columns it finds what the weather holds over, a column up to a
-/// microsecond.
-const VOXEL_ROWS: usize = 24;
+/// Rows of voxels a core fills in a unit where each is read once: a read of
+/// a heap's cloud, and its bound, some microseconds; and of a field's pass,
+/// some nanoseconds. And rows of a level's columns it finds what the weather
+/// holds over, a column up to a microsecond.
+const VOXEL_ROWS: usize = 12;
 const FIELD_ROWS: usize = 256;
 const STAND_ROWS: usize = 8;
 /// Cells of one tally a core lays at nought in a unit: a megabyte of fresh
@@ -163,9 +166,10 @@ const FIELD_PASSES: usize = FLUENCES * PASSES + FLUXES * (1 + 3 * SMOOTHINGS[1])
 const _: () = assert!(PASSES == 1 + 3 * SMOOTHINGS[0]);
 
 /// The shape of a level: its half breadth either way of the bank's middle,
-/// its voxels along each side and up, a voxel's breadth and height, and how
+/// its voxels along each side and up, a voxel's breadth and height, how
 /// many times finer than its voxels it holds its light where cloud stands,
-/// one where it holds it in its voxels alone.
+/// one where it holds it in its voxels alone, and the samples along each
+/// side of a voxel its extinction is read at.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 struct Grid {
     half: f64,
@@ -174,9 +178,21 @@ struct Grid {
     breadth: f64,
     height: f64,
     fine: usize,
+    side: usize,
 }
 
 impl Grid {
+    /// Rows of voxels a core fills in a unit: [`VOXEL_ROWS`] over the reads
+    /// each voxel takes.
+    const fn voxel_rows(self) -> usize {
+        let reads = self.side * self.side * self.side;
+        if reads > 1 {
+            VOXEL_ROWS.div_ceil(reads)
+        } else {
+            VOXEL_ROWS
+        }
+    }
+
     const fn voxels(self) -> usize {
         self.cells * self.cells * self.layers
     }
@@ -296,11 +312,9 @@ impl Grid {
             map.get(j * cells + i)
                 .map_or(none, |&value| f64::from(value))
         };
-        let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
-        Some(lerp(
-            lerp(at(i, j), at(i1, j), fu),
-            lerp(at(i, j1), at(i1, j1), fu),
-            fw,
+        Some(mathf::bilinear(
+            [at(i, j), at(i1, j), at(i, j1), at(i1, j1)],
+            (fu, fw),
         ))
     }
 }
@@ -860,6 +874,8 @@ impl Lights {
                     } else {
                         1
                     },
+                    // Two a side where a voxel spans more than a billow.
+                    side: if breadth > bank.finest_billow() { 2 } else { 1 },
                 },
                 ..Volume::default()
             });
@@ -888,10 +904,11 @@ impl Lights {
             let fine = if grid.fine > 1 { cloudy } else { 0.0 };
             let tallied = real(grid.voxels()) + fine * real(grid.fine_cells());
             real(grid.cells) / real(STAND_ROWS)
-                + rows / real(VOXEL_ROWS)
+                + rows / real(grid.voxel_rows())
                 + real(grid.layers.max(grid.cells))
                 + real(FLUENCES + FLUXES) * tallied / real(TALLY_CELLS)
-                + rounds * ROUND * real(grid.fine * grid.fine) * cloudy / real(PHOTON_BATCH)
+                + rounds * ROUND * real(grid.fine * grid.fine) * cloudy
+                    / real(PHOTON_BATCH * BATCHES)
                 + real(FIELD_PASSES + 1) * rows / real(FIELD_ROWS)
                 + real(FIELD_PASSES) * fine / real(FIELD_BLOCKS)
         };
@@ -944,7 +961,7 @@ impl Lights {
             }
             Stage::Voxels(level, row) => {
                 let solving = self.solving.as_mut()?;
-                let end = (row + VOXEL_ROWS * width).min(rows_of(solving));
+                let end = (row + solving.volume.grid.voxel_rows() * width).min(rows_of(solving));
                 voxel_rows(solving, bank, row..end, runner)?;
                 if end >= rows_of(solving) {
                     Stage::Sweep(level, 0)
@@ -1031,7 +1048,9 @@ impl Lights {
         let solving = self.solving.as_mut()?;
         let total = usize::try_from(solving.plan.counts.iter().sum::<u64>()).ok()?;
         let batches = total.div_ceil(PHOTON_BATCH);
-        let end = (first + BATCHES * runner.width().max(1)).min(batches);
+        let end = first
+            .saturating_add(BATCHES.saturating_mul(runner.width().max(1)))
+            .min(batches);
         let laid = follow(solving, bank, first..end, runner);
         solving.plan.laid = solving.plan.laid.saturating_add(laid);
         if end < batches {
@@ -1247,7 +1266,7 @@ fn stand_rows(
     let stands = solving
         .stands
         .get_mut(rows.start * grid.cells..rows.end * grid.cells)?;
-    band::for_each(runner, stands, (rows.start, grid.cells), &|j, band| {
+    tairix_parallel::for_each_band(runner, stands, (rows.start, grid.cells), &|j, band| {
         for (i, stand) in band.iter_mut().enumerate() {
             let low = (
                 west + real(i) * grid.breadth,
@@ -1269,16 +1288,12 @@ fn voxel_rows(
     runner: &dyn JobRunner,
 ) -> Option<()> {
     let grid = solving.volume.grid;
-    let cells = grid.cells;
-    let billow = bank.finest_billow();
-    // Two samples a side where a voxel spans more than a billow, a quarter
-    // of its breadth either way of its middle.
-    let side = if grid.breadth > billow { 2 } else { 1 };
+    let (cells, side) = (grid.cells, grid.side.max(1));
     let reader = Reader { bank };
     let sigma = solving
         .sigma
         .get_mut(rows.start * cells..rows.end * cells)?;
-    band::for_each(runner, sigma, (rows.start, cells), &|row, band| {
+    tairix_parallel::for_each_band(runner, sigma, (rows.start, cells), &|row, band| {
         let (k, j) = (row / cells, row % cells);
         for (i, slot) in band.iter_mut().enumerate() {
             let (x, altitude, z) = grid.middle(bank, (i, k, j));
@@ -1309,7 +1324,8 @@ fn voxel_rows(
     let bounds = solving
         .bounds
         .get_mut(rows.start * cells..rows.end * cells)?;
-    band::for_each(runner, bounds, (rows.start, cells), &|row, band| {
+    let (west, south) = (bank.centre.0 - grid.half, bank.centre.1 - grid.half);
+    tairix_parallel::for_each_band(runner, bounds, (rows.start, cells), &|row, band| {
         let (k, j) = (row / cells, row % cells);
         let low = bank.floor + real(k) * grid.height;
         for (i, slot) in band.iter_mut().enumerate() {
@@ -1317,7 +1333,13 @@ fn voxel_rows(
                 .get(j * cells + i)
                 .copied()
                 .unwrap_or([Holding::NONE; 2]);
-            *slot = single(bank.densest(&over, (low, low + grid.height), FOOTPRINT));
+            let corner = (
+                west + real(i) * grid.breadth,
+                south + real(j) * grid.breadth,
+            );
+            let square = (corner, (corner.0 + grid.breadth, corner.1 + grid.breadth));
+            // Rounded up, so no cloud is ever met more often than it holds.
+            *slot = above(bank.densest(&over, square, (low, low + grid.height), FOOTPRINT));
         }
     });
     if rows.end >= grid.rows() {
@@ -1444,7 +1466,7 @@ impl Sweep {
         let (across, (da, db)) = (self.across(), self.shift());
         let mut values = fallible::filled(across.0 * across.1, 0.0f32)?;
         let (sigma, depth) = (&solving.sigma, &solving.depth);
-        band::for_each(runner, &mut values, (0, across.0), &|b, band| {
+        tairix_parallel::for_each_band(runner, &mut values, (0, across.0), &|b, band| {
             for (a, slot) in band.iter_mut().enumerate() {
                 let voxel = self.voxel(index, (a, b));
                 let own = sigma
@@ -1482,12 +1504,13 @@ impl Sweep {
                             .map_or(0.0, |&value| f64::from(value))
                     };
                     let blend = |values: &[f32]| {
-                        let lerp = |x: f64, y: f64, t: f64| x + (y - x) * t;
-                        lerp(
-                            lerp(read(values, a0, b0), read(values, a1, b0), fa),
-                            lerp(read(values, a0, b1), read(values, a1, b1), fa),
-                            fb,
-                        )
+                        let corners = [
+                            read(values, a0, b0),
+                            read(values, a1, b0),
+                            read(values, a0, b1),
+                            read(values, a1, b1),
+                        ];
+                        mathf::bilinear(corners, (fa, fb))
                     };
                     blend(depth) + f64::midpoint(own, blend(sigma)) * self.step
                 } else {
@@ -1526,7 +1549,7 @@ fn above_rows(
         .volume
         .above
         .get_mut(rows.start * cells..rows.end * cells)?;
-    band::for_each(runner, columns, (rows.start, cells), &|j, band| {
+    tairix_parallel::for_each_band(runner, columns, (rows.start, cells), &|j, band| {
         for (i, slot) in band.iter_mut().enumerate() {
             let (x, _, z) = grid.middle(bank, (i, 0, j));
             *slot = single(high.shadow(point(bank, (x, bank.ceiling, z)), bank.sun));
@@ -1554,12 +1577,6 @@ fn kept_above(bank: &Cloudbank, volume: &Volume, at: (f64, f64, f64)) -> f64 {
         .column(bank, (&volume.above, 1), ceiling_under(bank, at), 1.0)
         .unwrap_or(1.0)
         .clamp(0.0, 1.0)
-}
-
-/// The scaled extinction photons are followed through, over `bank`'s own:
-/// the similarity principle's `1 − g`.
-fn scaled(bank: &Cloudbank) -> f64 {
-    1.0 - bank.scattering().asymmetry
 }
 
 /// The level's photons planned: a round of them for its voxels holding
@@ -1668,6 +1685,28 @@ fn isotropic(draws: &mut Draws) -> Vec3 {
     Vec3::new(level * mathf::cos(around), rise, level * mathf::sin(around))
 }
 
+/// The way a photon along `way` leaves a scattering through Henyey and
+/// Greenstein's phase of mean cosine `g`.
+fn scattered(way: Vec3, g: f64, draws: &mut Draws) -> Vec3 {
+    let draw = draws.next();
+    let cos = if g.abs() < 1e-6 {
+        1.0 - 2.0 * draw
+    } else {
+        let s = (1.0 - g * g) / (1.0 - g + 2.0 * g * draw);
+        ((1.0 + g * g - s * s) / (2.0 * g)).clamp(-1.0, 1.0)
+    };
+    let helper = if way.y.abs() < 0.9 {
+        Vec3::UP
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let a = way.cross(helper).normalized();
+    let b = way.cross(a);
+    let sin = mathf::sqrt((1.0 - cos * cos).max(0.0));
+    let around = TAU * draws.next();
+    (way * cos + (a * mathf::cos(around) + b * mathf::sin(around)) * sin).normalized()
+}
+
 /// A unit way drawn upward as a diffuse surface sends its light.
 fn lambertian(draws: &mut Draws) -> Vec3 {
     let out = mathf::sqrt(draws.next());
@@ -1696,8 +1735,8 @@ fn follow(solving: &Solving, bank: &Cloudbank, drawn: Range<usize>, runner: &dyn
         0u64,
         &|batch| {
             let walker = Walker::new(solving, bank);
-            let first = batch * PHOTON_BATCH;
-            (first..(first + PHOTON_BATCH).min(total))
+            let first = batch.saturating_mul(PHOTON_BATCH);
+            (first..first.saturating_add(PHOTON_BATCH).min(total))
                 .map(|index| u64::from(walker.send(index)))
                 .sum()
         },
@@ -1800,6 +1839,12 @@ struct Walker<'a> {
     /// and of what it meets the cloud scatters; and the ground's albedo.
     factor: [f64; 2],
     scaled: f64,
+    /// The share of the extinction the sun's beam is followed through,
+    /// δ-Eddington's, and the mean cosine it first scatters through: a
+    /// collimated beam's first orders run forward, which isotropic
+    /// scattering would turn back, while past them the two diffuse alike.
+    forwarded: f64,
+    rest: f64,
     survives: f64,
     albedo: f64,
     /// The sunlight on the open ground over the beam's through the level's
@@ -1832,7 +1877,9 @@ impl<'a> Walker<'a> {
                     0.0
                 }
             }),
-            scaled: scaled(bank),
+            scaled: 1.0 - bank.scattering().asymmetry,
+            forwarded: 1.0 - bank.scattering().forward(),
+            rest: bank.scattering().remainder(),
             survives: bank.scattering().albedo,
             albedo: albedo.clamp(0.0, 1.0),
             grounded: if across > 0.0 { ground / across } else { 0.0 },
@@ -1883,6 +1930,16 @@ impl<'a> Walker<'a> {
         )
     }
 
+    /// The share of the extinction `photon` is followed through: the sun's
+    /// beam δ-Eddington's, a scattered photon the similarity principle's.
+    const fn followed_through(&self, photon: &Photon) -> f64 {
+        if photon.beam {
+            self.forwarded
+        } else {
+            self.scaled
+        }
+    }
+
     /// The extinction of the bank's own cloud at `at`, in voxels: nought at
     /// once where its weather says none can stand.
     fn extinction(&self, at: [f64; 3]) -> f64 {
@@ -1908,15 +1965,18 @@ impl<'a> Walker<'a> {
         while steps < MOST_STEPS {
             match self.fly(&mut photon, (&mut steps, &mut pending, &mut laid), draws) {
                 Flight::Collided => {
-                    // The beam's power where it first scatters.
-                    if photon.beam {
+                    // The beam's power where it first scatters, and its way
+                    // on through the phase past its forward peak.
+                    photon.way = if photon.beam {
                         let at = self.place(photon.at);
                         photon.weight = sunlight(self.bank, &self.solving.volume, at)
                             / self.solving.plan.brightest.max(f64::MIN_POSITIVE);
                         photon.beam = false;
-                    }
+                        scattered(photon.way, self.rest, draws)
+                    } else {
+                        isotropic(draws)
+                    };
                     photon.weight *= self.survives;
-                    photon.way = isotropic(draws);
                     photon.scattered = true;
                 }
                 Flight::Escaped => break,
@@ -2032,7 +2092,8 @@ impl<'a> Walker<'a> {
                 .then(|| runs.block(grid, voxel))
                 .flatten()
                 .map(|block| (block, along(t)));
-            let bound = self.scaled
+            let scaled = self.followed_through(photon);
+            let bound = scaled
                 * self
                     .solving
                     .bounds
@@ -2055,7 +2116,7 @@ impl<'a> Walker<'a> {
                     *steps += 1;
                     let mut place = along(within);
                     place[1] = place[1].clamp(real(cell[1]), real(cell[1] + 1) - 1e-9);
-                    let share = self.scaled * self.extinction(place) / bound;
+                    let share = scaled * self.extinction(place) / bound;
                     if draws.next() < share {
                         met = Some((within, place));
                         break;
@@ -2246,7 +2307,7 @@ fn field_pass(
         let scale =
             solving.plan.reference / (FIXED * grid.breadth * grid.height * rounds(&solving.plan));
         let values = solving.field.get_mut(range)?;
-        let most = band::fold(
+        let most = tairix_parallel::fold_bands(
             runner,
             values,
             (rows.start, cells),
@@ -2285,7 +2346,7 @@ fn field_pass(
         (&solving.smoothed, &mut solving.field)
     };
     let values = target.get_mut(range.clone())?;
-    band::for_each(runner, values, (rows.start, cells), &|row, band| {
+    tairix_parallel::for_each_band(runner, values, (rows.start, cells), &|row, band| {
         let (k, j) = (row / cells, row % cells);
         let at = |i: usize, k: usize, j: usize| {
             f64::from(source.get(grid.index((i, k, j))).copied().unwrap_or(0.0))
@@ -2347,7 +2408,7 @@ fn fine_pass(
             / (FIXED * grid.breadth * grid.height * rounds(&solving.plan));
         let first = range.start;
         let values = solving.field.get_mut(range)?;
-        let most = band::fold(
+        let most = tairix_parallel::fold_bands(
             runner,
             values,
             band,
@@ -2382,7 +2443,7 @@ fn fine_pass(
     let (along, up) = (grid.cells * grid.fine, grid.layers * grid.fine);
     let first = blocks.start;
     let values = target.get_mut(range.clone())?;
-    band::for_each(runner, values, band, &|number, values| {
+    tairix_parallel::for_each_band(runner, values, band, &|number, values| {
         let from = first + number * BAND_BLOCKS;
         for (offset, slot) in values.iter_mut().enumerate() {
             let (block, within) = (from + offset / per, offset % per);
@@ -2523,7 +2584,7 @@ fn map_rows(solving: &mut Solving, rows: Range<usize>, runner: &dyn JobRunner) -
         .depth
         .codes
         .get_mut(rows.start * cells..rows.end * cells)?;
-    band::for_each(runner, codes, (rows.start, cells), &|row, band| {
+    tairix_parallel::for_each_band(runner, codes, (rows.start, cells), &|row, band| {
         for (i, slot) in band.iter_mut().enumerate() {
             *slot = packing.code(f64::from(
                 source.get(row * cells + i).copied().unwrap_or(0.0),

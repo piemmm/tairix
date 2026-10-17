@@ -16,15 +16,15 @@
 //! enough to see, and what covers it is still coloured where it grows, read
 //! from the same point either way.
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cells3, noise3, smoothstep, NOISE_SLOPE};
 use tairix_util::mathf;
 
 use crate::cover::{Cover, Growth, Lodging, Shown, DEEPEST};
 use crate::cut::{gradient, slope, Cutting, Seeking};
 use crate::material::Material;
-use crate::noise::{cells3, noise3, smoothstep, NOISE_SLOPE};
 use crate::pigment::Pigment;
 use crate::prototype::point;
-use crate::sample::{mix32, unit};
 use crate::shape::{reciprocal, Aabb, Hit};
 use crate::straw::{self, Shows, Straw};
 use crate::vector::{singles, Frame, Pose, Ray, Vec3};

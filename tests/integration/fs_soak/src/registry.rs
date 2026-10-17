@@ -187,8 +187,8 @@ fn soak(
     loop {
         let began = Instant::now();
         pass(device_bytes, seed)?;
-        // SplitMix64-style advance: deterministic, full-period.
-        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        // SplitMix64's own advance: deterministic, full-period.
+        seed = seed.wrapping_add(tairix_mix::GOLDEN_GAMMA);
         if !room_for_another_pass(deadline, began.elapsed()) {
             return Ok(());
         }

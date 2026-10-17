@@ -12,8 +12,9 @@
 //! - [`hillslope`] — linear diffusion, and talus: ground steeper than its
 //!   angle of repose slumps.
 //! - [`droplet`] — particle hydraulic erosion: droplets that carry sediment
-//!   down the slope they read and drop it where they slow, tile by tile, the
-//!   tiles of a phase at once across a runner.
+//!   down the slope they read and drop it where they slow, from tiles keyed
+//!   by their place on a lattice fixed to the land, so a region worn in
+//!   pieces matches it worn whole.
 //! - [`route`] — A\* with integer costs: the least-cost path between two
 //!   samples under a caller's pricing of each step.
 //!
@@ -26,6 +27,8 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+// Bit for bit on every target: no float max or min, which may pick either zero.
+#![deny(clippy::disallowed_methods)]
 
 extern crate alloc;
 
@@ -43,7 +46,9 @@ pub use grid::{FlowDir, Grid, NEIGHBOURS};
 pub enum TerrainError {
     /// The heap refused room for a working buffer.
     OutOfMemory,
-    /// A buffer does not hold one value per sample of its grid.
+    /// The pass was asked of what it cannot be: a buffer or a region that
+    /// does not fit its grid, a law or a land past what it holds, or a step
+    /// out of turn.
     Shape,
 }
 

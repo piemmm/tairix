@@ -1,7 +1,8 @@
 use alloc::vec::Vec;
 
+use tairix_mix::{mix32, unit};
+
 use super::*;
-use crate::sample::{mix32, unit};
 
 /// Let a stone reaching `r` fall at `x` and set it where it rests.
 fn drop(pile: &mut Pile, r: f64, x: f64) -> Stone {

@@ -150,6 +150,10 @@ run = [
     # library's store logic is handed.
     "tairix-appdata/rt",
 ]
+# The long host tests that survey whole realms, whose cost grows with every
+# chunk they solve: `ci-long` and `cargo xtask test --scenes` run them, and `ci`
+# only lints them.
+scene-tests = []
 
 [dev-dependencies]
 # The shared control fixtures, so the settings window's tests route a key as

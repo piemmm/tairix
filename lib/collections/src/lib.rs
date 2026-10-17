@@ -37,6 +37,9 @@
 //! * [`ByteQueue`] — a bounded byte FIFO whose contents stay one contiguous
 //!   run, so a stream is parsed or transformed in place where `VecDeque`
 //!   would wrap it.
+//! * [`ChunkVec`] — a growable list in fixed chunks whose elements never move,
+//!   so a push never copies what it holds. What a `Vec` large enough for its
+//!   doubling copy to stall its holder was standing in for.
 //!
 //! ## Rules every container here obeys
 //!
@@ -72,6 +75,7 @@ extern crate alloc;
 use core::fmt;
 
 pub mod bytequeue;
+pub mod chunkvec;
 pub mod group;
 pub mod heap;
 pub mod lru;
@@ -84,6 +88,7 @@ pub mod set;
 pub mod smallvec;
 
 pub use bytequeue::{ByteQueue, QueueError};
+pub use chunkvec::ChunkVec;
 pub use heap::IndexedHeap;
 pub use lru::LruMap;
 pub use map::HashMap;

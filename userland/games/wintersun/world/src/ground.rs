@@ -461,11 +461,10 @@ fn palette(biome: Biome, site: &GroundSite) -> [(Ground, f64); PALETTE_SLOTS] {
         ],
         Biome::BeachDune => {
             // A cold or a hard-rock shore is shingle; a warm soft one sand.
-            let shingle = (1.0 - rise(site.celsius, 6.0, 8.0)).max(if site.rock.is_hard() {
-                0.45
-            } else {
-                0.0
-            });
+            let shingle = mathf::fmax(
+                1.0 - rise(site.celsius, 6.0, 8.0),
+                if site.rock.is_hard() { 0.45 } else { 0.0 },
+            );
             [
                 (sand(site), 0.55 * (1.0 - shingle)),
                 (Ground::DuneSand, 0.35 * (1.0 - shingle) * p),

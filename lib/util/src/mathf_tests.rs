@@ -10,9 +10,9 @@ extern crate std;
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
-    acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, ln, reduce,
-    round, round_i32, sin, smoothstep, smoothstepf, sqrt, tan, Phasor, EXP_MAX_ARG, EXP_MIN_ARG,
-    REDUCIBLE,
+    acos, asin, atan, atan2, bilinear, byte, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot,
+    ln, power, real, reduce, round, round_i32, share, sin, single, smoothstep, smoothstepf, sqrt,
+    tan, tanh, Phasor, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -175,6 +175,46 @@ fn single_precision_smoothstep_tracks_the_double_one() {
     }
     assert_eq!(smoothstepf(f32::NAN).to_bits(), 0.0_f32.to_bits());
     assert_eq!(smoothstepf(2.0).to_bits(), 1.0_f32.to_bits());
+}
+
+/// Rounding to single precision takes the nearest value, a tie to the even
+/// one, and overflows to infinity rather than wrapping.
+#[test]
+fn single_precision_rounds_to_the_nearest_and_ties_to_even() {
+    assert_eq!(single(0.1).to_bits(), 0x3dcc_cccd);
+    // Halfway between 1 and the next single, `1 + 2^-23`: the tie goes to 1,
+    // and the next tie up to `1 + 2^-22`, both even.
+    let half_ulp = 1.0 / 16_777_216.0;
+    assert_eq!(single(1.0 + half_ulp).to_bits(), 1.0_f32.to_bits());
+    assert_eq!(
+        single(1.0 + 3.0 * half_ulp).to_bits(),
+        (1.0_f32 + 2.0 * f32::EPSILON).to_bits()
+    );
+    assert_eq!(single(1e300).to_bits(), f32::INFINITY.to_bits());
+    assert_eq!(single(-1e300).to_bits(), f32::NEG_INFINITY.to_bits());
+    assert_eq!(single(-0.0).to_bits(), (-0.0_f32).to_bits());
+}
+
+/// A bilinear blend is each corner at its corner, the mean at the middle, and
+/// a straight line along each edge.
+#[test]
+fn a_bilinear_blend_meets_its_corners_and_runs_straight_along_its_edges() {
+    let corners = [1.0, 3.0, 5.0, 11.0];
+    for (at, blend) in [
+        ((0.0, 0.0), 1.0),
+        ((1.0, 0.0), 3.0),
+        ((0.0, 1.0), 5.0),
+        ((1.0, 1.0), 11.0),
+        ((0.5, 0.5), 5.0),
+        ((0.25, 0.0), 1.5),
+        ((1.0, 0.5), 7.0),
+    ] {
+        assert_eq!(
+            bilinear(corners, at).to_bits(),
+            f64::to_bits(blend),
+            "{at:?}"
+        );
+    }
 }
 
 /// A coordinate a hostile document drove far out of range must clamp to the
@@ -664,4 +704,52 @@ fn logarithm_saturates_instead_of_diverging() {
         assert_eq!(ln(x), f64::MIN, "ln({x})");
     }
     assert_eq!(ln(f64::INFINITY), f64::MAX);
+}
+
+#[test]
+fn a_power_of_a_positive_base_matches_the_host_and_is_nought_below_it() {
+    for (x, p) in [
+        (2.0_f64, 3.0_f64),
+        (0.5, 0.25),
+        (9.0, 0.5),
+        (1e-3, 2.0 / 3.0),
+    ] {
+        let expected = x.powf(p);
+        assert!((power(x, p) - expected).abs() <= 4.0 * f64::EPSILON * expected);
+    }
+    assert!(power(0.0, 2.0).abs() < f64::EPSILON);
+    assert!(power(-4.0, 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn the_hyperbolic_tangent_is_odd_bounded_and_matches_the_host() {
+    for x in [-20.0_f64, -1.5, -0.25, 0.0, 0.25, 1.5, 20.0] {
+        assert!((tanh(x) - x.tanh()).abs() <= 4.0 * f64::EPSILON);
+        assert!((tanh(-x) + tanh(x)).abs() < f64::EPSILON);
+        assert!(tanh(x).abs() <= 1.0);
+    }
+}
+
+#[test]
+fn a_count_is_exact_until_it_saturates() {
+    assert!((real(0)).abs() < f64::EPSILON);
+    assert!((real(1_048_577) - 1_048_577.0).abs() < f64::EPSILON);
+    assert!((real(usize::MAX) - f64::from(u32::MAX)).abs() < f64::EPSILON);
+}
+
+#[test]
+fn a_share_is_held_to_whole_and_whole_with_nothing_to_do() {
+    assert!((share(1, 4) - 0.25).abs() < f64::EPSILON);
+    assert!((share(9, 4) - 1.0).abs() < f64::EPSILON);
+    assert!((share(0, 0) - 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn a_byte_rounds_a_share_and_holds_it_to_the_unit() {
+    assert_eq!(byte(0.0), 0);
+    assert_eq!(byte(1.0), 255);
+    assert_eq!(byte(0.5), 128);
+    assert_eq!(byte(-3.0), 0);
+    assert_eq!(byte(7.0), 255);
+    assert_eq!(byte(f64::NAN), 0);
 }

@@ -2,13 +2,12 @@ use alloc::vec::Vec;
 
 use super::{SeedKey, Stage};
 
-const STAGES: [Stage; 13] = [
+const STAGES: [Stage; 12] = [
     Stage::Plates,
     Stage::Continent,
     Stage::Ridge,
     Stage::Warp,
     Stage::Detail,
-    Stage::Dune,
     Stage::Climate,
     Stage::Biome,
     Stage::Scatter,
@@ -17,6 +16,14 @@ const STAGES: [Stage; 13] = [
     Stage::Province,
     Stage::Wander,
 ];
+
+/// Every stage keeps the value it was given, and none takes a retired one:
+/// a value moved re-rolls every realm drawn from it.
+#[test]
+fn every_stage_keeps_its_frozen_value() {
+    let values: Vec<u64> = STAGES.iter().map(|&stage| stage as u64).collect();
+    assert_eq!(values, [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13]);
+}
 
 #[test]
 fn a_lattice_value_is_a_pure_function_of_its_inputs() {

@@ -127,7 +127,7 @@ pub fn slump_measure(
                 let over = excess(before, (index, next), distance, law);
                 if over > 0.0 {
                     total += over;
-                    steepest = steepest.max(over);
+                    steepest = mathf::fmax(steepest, over);
                 }
             }
             sheds[index] = Shed {

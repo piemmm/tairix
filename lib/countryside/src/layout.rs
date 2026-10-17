@@ -14,7 +14,8 @@
 use alloc::vec::Vec;
 
 use tairix_parallel::{for_each, JobRunner};
-use tairix_util::{fallible, mathf};
+use tairix_util::fallible;
+use tairix_util::mathf::{self, real};
 
 use crate::boundary::{self, Boundary, Kind, Side, Style, Survey};
 use crate::farm::{self, Farmstead};
@@ -83,7 +84,7 @@ impl Way {
                 .stations
                 .iter()
                 .map(|station| station.width)
-                .fold(0.0, f64::max)
+                .fold(0.0, mathf::fmax)
             + id.rank.laying().verge;
         let bounds = line.bounds(reach)?;
         let mut hasher = key.hasher(Stage::Way);
@@ -184,7 +185,7 @@ impl<G: Waters + ?Sized> Land<'_, G> {
             ) else {
                 continue;
             };
-            let reach = 0.5 * a.width.max(b.width) + way.id.rank.laying().verge;
+            let reach = 0.5 * mathf::fmax(a.width, b.width) + way.id.rank.laying().verge;
             let squared = plane::onto_segment(at, a.at, b.at).1;
             if squared < reach * reach
                 && nearest.is_none_or(|(least, id)| (squared, way.id) < (least, id))
@@ -694,17 +695,21 @@ const FARTHEST: f64 = 1.0e6;
 
 impl Laying {
     /// The laying of `countryside` over `region`; `Err` where its holdings'
-    /// spacing or its villages' are outside what a layout lays out, or the
-    /// region is not a rectangle within reach of the origin.
+    /// spacing or its villages' are outside what a layout lays out, its
+    /// custom, mix or warm way are not finite weights and a finite way, or
+    /// the region is not a rectangle within reach of the origin.
     pub fn new(countryside: Countryside, region: Rect) -> Result<Self, Error> {
         let spacing = countryside.spacing;
         let villages = countryside.villages;
         let within = |value: f64| value.abs() <= FARTHEST;
         let sane = (SPACING.0..=SPACING.1).contains(&spacing)
+            && villages.fits()
             && villages.spacing >= 2.0 * spacing
             && villages.spacing <= 64.0 * spacing
-            && (0.0..=1.0).contains(&villages.exclusion)
-            && (0.0..=1.0).contains(&villages.gathers)
+            && countryside.style.fits()
+            && countryside.mix.fits()
+            && countryside.warm.x.is_finite()
+            && countryside.warm.y.is_finite()
             && [region.low.x, region.low.y, region.high.x, region.high.y]
                 .into_iter()
                 .all(within)
@@ -1105,7 +1110,7 @@ impl Laying {
             None
         } else {
             Some(
-                Filed::new(nodes.iter().map(|node| node.at), longest.max(1e-6))
+                Filed::new(nodes.iter().map(|node| node.at), mathf::fmax(longest, 1e-6))
                     .ok_or(Error::OutOfMemory)?,
             )
         };
@@ -2148,7 +2153,7 @@ fn filed_corridors(
         let verge = rank.laying().verge;
         for (segment, pair) in line.stations.windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
-            let reach = 0.5 * a.width.max(b.width) + verge;
+            let reach = 0.5 * mathf::fmax(a.width, b.width) + verge;
             let Some(bounds) = Rect::of([a.at, b.at]).map(|rect| rect.grown(reach)) else {
                 continue;
             };
@@ -2163,15 +2168,6 @@ fn filed_corridors(
     }
     filed.sort();
     Ok((stretches, filed))
-}
-
-/// A count as `f64`.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "a holding's gateways are counted far within an f64's whole numbers"
-)]
-fn real(count: usize) -> f64 {
-    count as f64
 }
 
 #[cfg(test)]

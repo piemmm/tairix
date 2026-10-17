@@ -363,7 +363,7 @@ pub fn worth_holding(coord: ChunkCoord, visible: Bounds) -> bool {
 /// The ground a client holds: generated chunks, in coordinate order, kept
 /// to the working set of the view looking at them ([`worth_holding`]).
 ///
-/// Solving a chunk is tens of milliseconds of work, so a view that moves or
+/// Solving a chunk is a large part of a second of work, so a view that moves or
 /// resizes keeps the chunks it still covers rather than solving them again.
 #[derive(Debug, Default)]
 pub struct HeldGround {

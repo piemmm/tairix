@@ -1,7 +1,9 @@
 use alloc::vec::Vec;
 
+use tairix_land::attributes::Attributes;
+
 use super::*;
-use crate::heightfield::{Attributes, Heightfield};
+use crate::heightfield::Heightfield;
 use crate::shade::{Crown, Shade};
 use crate::shape::Shape;
 use crate::vector::PACKET;
@@ -445,7 +447,7 @@ fn fallen_leaves_slide_off_a_steep_bank() {
 #[test]
 fn grass_shows_only_what_stands_above_the_snow() {
     let tallest = |depth: f64| {
-        let kept = crate::snow::kept(depth);
+        let kept = tairix_land::snow::kept(depth);
         let hits = met(
             &lawn(0.0),
             level(Some([0, 128, 0, 0, 255, kept, 0, 0])),

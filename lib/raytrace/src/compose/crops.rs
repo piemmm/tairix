@@ -4,14 +4,15 @@
 //! like too far off to make out a leaf, which the ground paints instead.
 
 use tairix_countryside::usage::Crop;
+use tairix_land::grown::{self, Grown, Stage, CODES};
+use tairix_land::Season;
 
 use super::fields::maize;
 use super::rgb;
-use crate::farmed::{self, Grown, Stage, CODES};
+use crate::farmed;
 use crate::grass::{GrassKind, Habit, Head, CROP_KINDS, WILD_KINDS};
 use crate::ground::Far;
 use crate::pigment::Blades;
-use crate::tree::Season;
 
 /// What a farmed land's fields grow in its sward in a season: each kind and
 /// its colours, and what it looks like from afar; and which of them each
@@ -512,7 +513,7 @@ pub(super) fn sowing(season: Season, shoots: f64, stood: (f64, f64)) -> Sowing {
         .iter_mut()
         .zip(sowing.far.iter_mut())
         .zip(WILD_KINDS..);
-    for grown in farmed::growths(season) {
+    for grown in grown::growths(season) {
         let Some(look) = look(grown) else {
             continue;
         };

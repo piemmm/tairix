@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use tairix_terrain::grid::Grid;
 use tairix_terrain::route::{Routed, Router};
-use tairix_util::mathf;
+use tairix_util::mathf::{self, byte, real, single};
 
 use crate::ground::Ground;
 use crate::key::{Key, Stage};
@@ -270,8 +270,11 @@ impl Square {
             return Err(Error::Shape);
         }
         let margin = 0.3 * span + 4.0 * laying.step;
-        let origin = Point::new(from.x.min(to.x) - margin, from.y.min(to.y) - margin);
-        let reach = (from.x - to.x).abs().max((from.y - to.y).abs()) + 2.0 * margin;
+        let origin = Point::new(
+            mathf::fmin(from.x, to.x) - margin,
+            mathf::fmin(from.y, to.y) - margin,
+        );
+        let reach = mathf::fmax((from.x - to.x).abs(), (from.y - to.y).abs()) + 2.0 * margin;
         let wanted = mathf::ceil(reach / laying.step) + 1.0;
         let side = u32::try_from(mathf::round_i32(wanted.clamp(3.0, f64::from(MOST_SIDE))))
             .map_err(|_| Error::Shape)?;
@@ -322,8 +325,10 @@ impl Square {
     /// The columns and the rows of its points within `rect`; `None` for none.
     fn covering(&self, rect: Rect) -> Option<(RangeInclusive<usize>, RangeInclusive<usize>)> {
         let top = f64::from(self.side - 1);
-        let first = |low: f64, origin: f64| mathf::ceil((low - origin) / self.step).max(0.0);
-        let last = |high: f64, origin: f64| mathf::floor((high - origin) / self.step).min(top);
+        let first =
+            |low: f64, origin: f64| mathf::fmax(mathf::ceil((low - origin) / self.step), 0.0);
+        let last =
+            |high: f64, origin: f64| mathf::fmin(mathf::floor((high - origin) / self.step), top);
         let (x0, x1) = (
             first(rect.low.x, self.origin.x),
             last(rect.high.x, self.origin.x),
@@ -471,7 +476,7 @@ impl Routing {
         for (rank, line) in greater {
             for pair in line.stations.windows(2) {
                 let (from, to) = (pair[0], pair[1]);
-                let reach = 0.5 * from.width.max(to.width) + 0.5 * rank.laying().verge;
+                let reach = 0.5 * mathf::fmax(from.width, to.width) + 0.5 * rank.laying().verge;
                 let Some(bounds) = Rect::of([from.at, to.at]).map(|rect| rect.grown(reach)) else {
                     continue;
                 };
@@ -526,7 +531,10 @@ impl Routing {
             };
             self.barred
                 .push((bounds, shape.copied().ok_or(Error::OutOfMemory)?));
-            let Some((xs, ys)) = self.square.covering(bounds.grown(clearance.max(near))) else {
+            let Some((xs, ys)) = self
+                .square
+                .covering(bounds.grown(mathf::fmax(clearance, near)))
+            else {
                 continue;
             };
             for row in ys {
@@ -689,9 +697,7 @@ impl Routing {
             let way = way_at(&stations, index);
             // The wander dies away at either end, where the way meets what it
             // joins.
-            let taper = (walked / 30.0)
-                .min((length - walked) / 30.0)
-                .clamp(0.0, 1.0);
+            let taper = mathf::fmin(walked / 30.0, (length - walked) / 30.0).clamp(0.0, 1.0);
             let wander = laying.wander * taper * swing(seed, walked / 70.0);
             let wandered = at + way.left() * wander;
             // It never wanders into what it keeps clear of.
@@ -880,7 +886,7 @@ impl View<'_> {
         let rise = f64::from(next.height - here.height).abs();
         let grade = rise / (self.square.step * run / STRAIGHT);
         let climb = (grade / laying.grade) * (grade / laying.grade);
-        let steep = 40.0 * ((grade - laying.steepest) / laying.steepest).max(0.0);
+        let steep = 40.0 * mathf::fmax((grade - laying.steepest) / laying.steepest, 0.0);
         let wet = 3.0 * f64::from(next.wet) / 255.0;
         // Water is crossed where it is narrowest: a bridge costs a highway, a
         // road or a lane dear, a ford a track less, stepping stones a path
@@ -895,7 +901,7 @@ impl View<'_> {
             }
         };
         let cost = run * (1.0 + climb + steep + wet + water);
-        let counted = u64::try_from(mathf::round_i32(cost.min(2.0e9))).unwrap_or(u64::MAX);
+        let counted = u64::try_from(mathf::round_i32(mathf::fmin(cost, 2.0e9))).unwrap_or(u64::MAX);
         u32::try_from(counted.max(OFF_HALF * halves)).ok()
     }
 
@@ -1036,8 +1042,11 @@ fn chaikin(
 /// `points` laid again at stations `spacing` apart along it, its ends kept.
 fn resampled(points: &[Point], spacing: f64) -> Result<Vec<Point>, Error> {
     let length = plane::length(points);
-    let count = usize::try_from(mathf::round_i32(mathf::ceil(length / spacing).max(1.0)))
-        .map_err(|_| Error::Shape)?;
+    let count = usize::try_from(mathf::round_i32(mathf::fmax(
+        mathf::ceil(length / spacing),
+        1.0,
+    )))
+    .map_err(|_| Error::Shape)?;
     let mut stations = Vec::new();
     stations
         .try_reserve_exact(count + 1)
@@ -1077,29 +1086,6 @@ fn graded(stations: &mut [Station], grade: f64, spacing: f64) {
         let held = stations[index + 1].level;
         stations[index].level = stations[index].level.clamp(held - most, held + most);
     }
-}
-
-/// A share in `0.0..=1.0` as a byte.
-fn byte(share: f64) -> u8 {
-    u8::try_from(mathf::round_i32((share.clamp(0.0, 1.0)) * 255.0)).unwrap_or(u8::MAX)
-}
-
-/// `value` as `f32`, rounded as every target rounds it.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "a height is held to a float's precision, as every grid of a land holds it"
-)]
-fn single(value: f64) -> f32 {
-    value as f32
-}
-
-/// A count as `f64`.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "a lattice's points and a line's stations are counted far within an f64's whole numbers"
-)]
-fn real(count: usize) -> f64 {
-    count as f64
 }
 
 #[cfg(test)]

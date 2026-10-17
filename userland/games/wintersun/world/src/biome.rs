@@ -23,6 +23,8 @@
 //! mean temperature `T` and a rain season `s`, against which a place's
 //! rain is read.
 
+use tairix_util::mathf;
+
 use crate::blend::{Blend, Kind};
 use crate::climate::LAPSE_RATE;
 use crate::geology::Lithology;
@@ -198,7 +200,7 @@ impl Conditions {
     #[must_use]
     pub fn moisture(&self) -> f64 {
         let threshold = 20.0 * (self.celsius + 7.0 + 7.0 * self.rain_season);
-        self.precipitation / threshold.max(ARIDITY_FLOOR_MILLIMETRES)
+        self.precipitation / mathf::fmax(threshold, ARIDITY_FLOOR_MILLIMETRES)
     }
 }
 
@@ -251,7 +253,7 @@ fn climate(site: &Conditions, raw: &mut [f64; BIOME_COUNT]) {
     let moor = oceanic(site) * rise(warm, 5.0, 4.0);
     // The cold is the altitude's where the same place at sea level would
     // grow trees.
-    let sea_level_warm = warm + LAPSE_RATE * site.elevation_units.max(0.0);
+    let sea_level_warm = warm + LAPSE_RATE * mathf::fmax(site.elevation_units, 0.0);
     let alpine = rise(sea_level_warm, TREELINE_CELSIUS, 3.0);
     let open = treeless * (1.0 - barren);
     add(raw, Biome::PolarDesert, treeless * barren);
@@ -462,7 +464,7 @@ fn terrain(site: &Conditions, raw: &mut [f64; BIOME_COUNT]) {
     };
     // A flat deep in a catchment is fed from below; one high in it only by
     // the rain.
-    let fen = (base_fen + 0.4 * rise(site.wetness, 0.88, 0.15)).min(1.0);
+    let fen = mathf::fmin(base_fen + 0.4 * rise(site.wetness, 0.88, 0.15), 1.0);
     take(
         raw,
         0.9 * sodden,

@@ -9,14 +9,14 @@
 use alloc::vec::Vec;
 use core::f64::consts::TAU;
 
+use tairix_mix::{mix32, next_key};
+use tairix_noise::{noise3, smoothstep};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
-use crate::noise::{noise3, smoothstep};
 use crate::pigment::Spot;
 use crate::prototype::{normals_of, Building, Facet, Part, Prototype, Tube};
 use crate::rock::{icosahedron, subdivide};
-use crate::sample::mix32;
 use crate::vector::{singles, Vec3};
 
 /// The most dents a ball was patted into.
@@ -379,7 +379,7 @@ pub(crate) fn stick(length: f64, radius: f64, bark: u16, seed: u64) -> Option<Bu
             ))
         .normalized();
         let next = at + heading * step;
-        key = mix32(key ^ 0x9e37_79b9);
+        key = next_key(key);
         parts.try_reserve(1).ok()?;
         parts.push(Part::Tube(Tube::new(
             (at, next),
@@ -433,7 +433,7 @@ fn twig(
         let wander = |dice: &mut NonCryptoRng| 0.5 * (dice.next_f64() - 0.5);
         heading = (heading + Vec3::new(wander(dice), wander(dice), wander(dice))).normalized();
         let next = at + heading * step;
-        *key = mix32(*key ^ 0x9e37_79b9);
+        *key = next_key(*key);
         parts.try_reserve(1).ok()?;
         parts.push(Part::Tube(Tube::new(
             (at, next),

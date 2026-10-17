@@ -19,6 +19,9 @@ workspace = true
 # HKDF-Expand over the same HMAC; no new external dependency is introduced.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 
+# `SplitMix64`, the seeder both generators expand a `u64` seed with.
+tairix-mix = { path = "../mix", version = "=0.0.0" }
+
 # The CSPRNG working state (the DRBG `Key`/`V` and the seed scratch) is key
 # material: an attacker who reads it can predict every future output. Per
 # ("zero-on-free for any allocation that ever held credentials,

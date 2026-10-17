@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::band;
 use crate::vector::real;
 
 /// A square lattice of cells about the eye: its first cell's corner, its
@@ -101,7 +100,7 @@ impl Lattice {
     ) -> Option<Vec<Option<T>>> {
         let count = rows.len().checked_mul(self.side)?;
         let mut cells = fallible::collected(count, core::iter::repeat_with(|| None))?;
-        band::for_each(
+        tairix_parallel::for_each_band(
             runner,
             &mut cells,
             (rows.start, self.side),

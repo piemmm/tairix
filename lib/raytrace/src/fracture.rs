@@ -9,10 +9,10 @@
 
 use core::f64::consts::{PI, TAU};
 
+use tairix_noise::{noise3, smoothstep};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
-use crate::noise::{noise3, smoothstep};
 use crate::prototype::Mesh;
 use crate::vector::{real, wrapped, Frame, Vec3};
 

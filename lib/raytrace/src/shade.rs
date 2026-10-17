@@ -15,10 +15,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_noise::{cell, smoothstep};
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::noise::{cell, smoothstep};
 use crate::vector::{byte, real, share};
 
 /// A crown: where its trunk stands, and how far it reaches from it.
@@ -355,7 +355,7 @@ impl Casting {
         let (starts, sorted) = (&self.starts, &self.sorted);
         let span = next * BAND_ROWS * columns..(end * BAND_ROWS).min(rows) * columns;
         let cover = self.cover.get_mut(span)?;
-        crate::band::for_each(
+        tairix_parallel::for_each_band(
             runner,
             cover,
             (next, BAND_ROWS * columns),
@@ -491,7 +491,7 @@ fn smooth_rows(
     let Some(band) = grid.get_mut(rows.start * length..rows.end * length) else {
         return false;
     };
-    crate::band::fold(
+    tairix_parallel::fold_bands(
         runner,
         band,
         (0, BAND_ROWS * length),
@@ -522,7 +522,7 @@ fn turn(
     let Some(written) = to.get_mut(rows.start * rows_of..rows.end * rows_of) else {
         return;
     };
-    crate::band::for_each(
+    tairix_parallel::for_each_band(
         runner,
         written,
         (rows.start / BAND_ROWS, BAND_ROWS * rows_of),
@@ -581,7 +581,7 @@ impl Sampling {
         let Some(cover) = self.cover.get_mut(span) else {
             return true;
         };
-        let touched = crate::band::fold(
+        let touched = tairix_parallel::fold_bands(
             runner,
             cover,
             (self.next / BAND_ROWS, BAND_ROWS * columns),

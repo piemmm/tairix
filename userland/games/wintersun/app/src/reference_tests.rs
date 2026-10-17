@@ -67,7 +67,8 @@ impl PressureGauge for Starved {
 /// tones as though it were the scene.
 #[test]
 fn a_drawing_the_cache_cost_a_tile_is_refused() {
-    let mut world = World::generate().expect("the reference realm generates");
+    let mut world =
+        World::generate(&tairix_parallel::SERIAL).expect("the reference realm generates");
     let set = Set::new().expect("the shipped set");
     let clips = set.clips().expect("the shipped clips");
     let mut window = Surface::new(320, 240).expect("a frame fits");
@@ -88,7 +89,8 @@ fn a_drawing_the_cache_cost_a_tile_is_refused() {
 /// failure a reproducibility check is most likely to have.
 #[test]
 fn every_window_size_draws_real_terrain_with_the_whole_cast() {
-    let mut world = World::generate().expect("the reference realm generates");
+    let mut world =
+        World::generate(&tairix_parallel::SERIAL).expect("the reference realm generates");
     for (width, height) in WINDOW_SIZES {
         let (pixels, figures) = window_frame(&mut world, width, height, &mut cache(&Unpressured));
         assert!(
@@ -112,7 +114,8 @@ fn every_window_size_draws_real_terrain_with_the_whole_cast() {
 /// drawn with a cache sixteen times larger.
 #[test]
 fn the_pinned_cache_never_shapes_the_picture() {
-    let mut world = World::generate().expect("the reference realm generates");
+    let mut world =
+        World::generate(&tairix_parallel::SERIAL).expect("the reference realm generates");
     for (width, height) in WINDOW_SIZES {
         let (pinned, _) = window_frame(&mut world, width, height, &mut cache(&Unpressured));
         let mut ample = MaterialCache::new(
@@ -131,9 +134,11 @@ fn the_pinned_cache_never_shapes_the_picture() {
 
 #[test]
 fn the_scene_is_the_same_every_time_it_is_drawn() {
-    let mut world = World::generate().expect("the reference realm generates");
+    let mut world =
+        World::generate(&tairix_parallel::SERIAL).expect("the reference realm generates");
     let (first, _) = window_frame(&mut world, 1024, 768, &mut cache(&Unpressured));
-    let mut again = World::generate().expect("the reference realm generates");
+    let mut again =
+        World::generate(&tairix_parallel::SERIAL).expect("the reference realm generates");
     let (second, _) = window_frame(&mut again, 1024, 768, &mut cache(&Unpressured));
     assert!(
         first == second,

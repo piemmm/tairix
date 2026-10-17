@@ -420,9 +420,9 @@ fn trace_rounded(
     let r = real(radius) * factor + pad;
     let quarter = count / 4;
     room(out, 4 * (quarter + 1))?;
-    let step = core::f64::consts::FRAC_PI_2 / real_count(quarter);
+    let step = core::f64::consts::FRAC_PI_2 / mathf::real(quarter);
     let offset = |index: usize| {
-        let angle = step * real_count(index);
+        let angle = step * mathf::real(index);
         (
             i64::from(mathf::round_i32(r * mathf::cos(angle))),
             i64::from(mathf::round_i32(r * mathf::sin(angle))),
@@ -460,8 +460,8 @@ fn vertices_for(radius: f64) -> usize {
     let step = 2.0 * mathf::acos(1.0 - TOLERANCE / radius);
     let count = mathf::clamp(
         mathf::ceil(core::f64::consts::TAU / step),
-        real_count(FEWEST_VERTICES),
-        real_count(MOST_VERTICES),
+        mathf::real(FEWEST_VERTICES),
+        mathf::real(MOST_VERTICES),
     );
     usize::try_from(mathf::round_i32(count))
         .unwrap_or(FEWEST_VERTICES)
@@ -477,7 +477,7 @@ fn placement(count: usize, coverage: Coverage) -> (f64, f64) {
     match coverage {
         Coverage::Area => (1.0, 0.0),
         Coverage::Centre => (
-            1.0 / mathf::cos(core::f64::consts::PI / real_count(count)),
+            1.0 / mathf::cos(core::f64::consts::PI / mathf::real(count)),
             1.0,
         ),
     }
@@ -487,11 +487,6 @@ fn placement(count: usize, coverage: Coverage) -> (f64, f64) {
 /// can place.
 fn real(value: i64) -> f64 {
     f64::from(i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX }))
-}
-
-/// A vertex count as `f64`.
-fn real_count(count: usize) -> f64 {
-    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// The stadium a disc of `radius` sweeps from `a` to `b`: a half circle about
@@ -518,13 +513,13 @@ fn trace_capsule(
         mathf::atan2(by - ay, bx - ax)
     };
     let normal = facing + core::f64::consts::FRAC_PI_2;
-    let step = core::f64::consts::PI / real_count(half);
+    let step = core::f64::consts::PI / mathf::real(half);
     for (centre, from) in [
         ((bx, by), normal),
         ((ax, ay), normal - core::f64::consts::PI),
     ] {
         for index in 0..=half {
-            let angle = from - step * real_count(index);
+            let angle = from - step * mathf::real(index);
             out.push(vertex(
                 centre.0 + r * mathf::cos(angle),
                 centre.1 + r * mathf::sin(angle),
@@ -563,9 +558,9 @@ impl Oval {
         let (rx, ry) = (real(self.rx) * factor + pad, real(self.ry) * factor + pad);
         let quarter = count / 4;
         room(out, count)?;
-        let step = core::f64::consts::FRAC_PI_2 / real_count(quarter);
+        let step = core::f64::consts::FRAC_PI_2 / mathf::real(quarter);
         let offset = |index: usize| {
-            let angle = step * real_count(index);
+            let angle = step * mathf::real(index);
             (
                 i64::from(mathf::round_i32(rx * mathf::cos(angle))),
                 i64::from(mathf::round_i32(ry * mathf::sin(angle))),

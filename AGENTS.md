@@ -667,13 +667,16 @@ tairix/
 │   ├── input/           # Shared pointer input-event vocabulary.
 │   ├── kalloc/          # Freeing kernel heap allocator.
 │   ├── keymap/          # Shared terminal key map.
+│   ├── land/            # Land generator: relief, courses, channels, snow, crops, levels.
 │   ├── linkclient/      # Supplier-link clients: DMA channels, clocks.
 │   ├── log/             # Structured logging.
 │   ├── memguard/        # Guard-region poison: the shared sentinel + canary window.
+│   ├── mix/             # Integer finalisers: SplitMix64, lowbias32, stream keys.
 │   ├── multiboot2/      # Shared Multiboot2 information-structure wire layout.
 │   ├── net/             # Network protocol engine (wire protocols).
 │   ├── netchan/         # NIC device-channel driver side (netchan-v1 server).
 │   ├── netconfig/       # network.conf per-interface configuration store engine.
+│   ├── noise/           # Procedural noise: gradient, octave, ridged, cellular.
 │   ├── pagezero/        # Page/region zeroing.
 │   ├── parallel/        # Bounded data-parallel work engine (JobRunner + pool).
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
@@ -696,6 +699,7 @@ tairix/
 │   ├── rng/             # RNG: CSPRNG + entropy seam + fast non-crypto generator.
 │   ├── rt/              # The pure-Rust userland runtime.
 │   ├── sandbox/         # The parser-sandbox seam.
+│   ├── scatter/         # Keyed scatter: places on a land-fixed lattice, thinned by rank.
 │   ├── seat/            # Arch-neutral seat model.
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
 │   │                    #   MPEG audio, streamed from any input; the gated

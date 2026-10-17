@@ -58,21 +58,23 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   `Maximum`; a pixel at most 128 samples, a path at most nine bounces, and a
   point under or over water gathers about 256 beams a level at most. Every unit of
   preparation is a fixed amount of work a core, whatever the scene holds: a
-  band of a grid's rows or of a shade's, a turn of a land's droplet tiles, a
-  slice of a prototype's or the scene's hierarchy, a band of a wood's places
-  or a run of their ranking, a few rows of the water's edge's lattice, a band
-  of the coarse grid's shelter from the wind where snow lies, a few thousand
-  of a snowball's vertices shaped, a hundred or so of the caustics' survey
-  points, a
-  couple of thousand of their beams or a few thousand of their pyramids'
-  nodes, 48 steps of a stone's wear, a few rows of a stream's flow, a few rows
-  of a radiosity record's hemisphere, a few rows of a cloud
-  level's weather or bands, a few columns or rows of its distances to its
-  footprints' edges, a few rows of what its weather holds over its light's
-  columns or of its light's voxels, a slice of its sweep toward the sun, a
-  megabyte of one of its tallies laid at nought, a few batches of its photons
-  or a pass of its fields or its fine fields, each level's maps reserved whole
-  and written as their rows are filled.
+  band of a grid's rows or of a shade's, a batch of a land's droplet tiles'
+  windows gathered or a few hundred droplets of each run, a few thousand of its coarse samples or a thousand of a finer level's
+  vertices filled, settled or read for their shelter from the wind, a band of
+  the scene's objects' boxes, a slice of a prototype's or the scene's
+  hierarchy's items visited, a batch of a wood's lattice read and ruled on or
+  of its trees stood, a few rows of the water's edge's lattice, a few
+  thousand of a snowball's vertices shaped, a hundred or so of the caustics'
+  survey points, a couple of thousand of their beams or a few thousand of
+  their pyramids' nodes, 48 steps of a stone's wear, a few rows of a stream's
+  flow, a few rows of a radiosity record's hemisphere, a few bands of a cloud
+  level's heaps drawn or rows of its cells listing them, a few rows of its
+  weather or bands, a few columns or rows of its distances to its footprints'
+  edges, a few rows of what its weather holds over its light's columns or of
+  its light's voxels, a slice of its sweep toward the sun, a megabyte of one
+  of its tallies laid at nought, a few batches of its photons or a pass of its
+  fields or its fine fields, each level's maps reserved whole and written as
+  their rows are filled.
 
 ## Tests
 
@@ -107,9 +109,11 @@ glowing bluer with the Earth's light, only the Earth's left at new moon, its
 disc bringing its whole light at any phase, and no star shining through it; the air
 lit by the sun only where the sun reaches it, and a meter that holds a sky
 below white but lets the sun blow out; a wood covering the share of ground asked, its gaps opening where its
-lattice holds them, its trees spaced by their crowns with the short beneath
-the tall, sown all about the eye near it and across the view beyond, none
-walling off the view, and a forest standing thousands of trees and its fallen
+lattice holds them, its canopy and the subcanopy beneath it each spaced by
+one rule on a lattice fixed to the land, no subcanopy tree in a canopy
+tree's room, the same trees at a place from wherever it is seen and its wood
+far off the very canopy it keeps past those stood one by one, none walling
+off the view, and a forest standing thousands of trees and its fallen
 among them clear of the eye; the shade crowns cast and the sky they hide, and
 the air beneath them roofed; fallen trunks lying along the ground, thrown or
 snapped, each break torn wood bristling with laths, every stub and torn root
@@ -161,12 +165,19 @@ standing over the cell beneath each point on every level, far cloud lit by the
 sun at its own place and shading the ground from a low sun, an overcast grey to
 the horizon, and a point drawn along the air falling as its sunlight is
 gathered; a deck's footprints covering its share of the sky and a heap
-deeper the broader its field; a column's edge its distance to the nearest
+deeper the broader its field; a deck's heaps covering its share of the sky,
+as broad as cumulus fields fall and as deep as their breadth, the same heaps
+whatever square they are drawn for, every read and band meeting each heap
+whose cloud can reach it and none past it, no lattice cell drawing the most
+it holds however crowded its deck, and a lattice too fine to draw refused; a box's
+turrets reaching no further than its own reach; a column's edge its distance to the nearest
 place its cover crosses a footprint's edge, an envelope rising from its edge
 to its depth, a place lying within it by the chord beside it and no nearer
 than it truly is outside, and the highest a cloud can stand found to half a
 metre; a fringe cut into filaments low down and puffs high up, read as its
-wisps' mean where they are too fine to see; a cloud's light the same however
+wisps' mean where they are too fine to see, its mean summed through it what
+that mean sums to, and an edge read through any footprint holding the water a
+sharp read does; a cloud's light the same however
 many cores solve it, its units counted up to their whole only once it is
 solved, no cloud denser than its voxel's bound, each voxel
 holding cloud held finely once and its track laid whole in its fine cells
@@ -175,9 +186,11 @@ laid at nought a share a core at a time within their room and a field over no
 cells moving straight on, a place reading the fine light where it is held,
 heaps lit finely within their reach and sheets not, nor in a picture too
 small for their fine cells, the light under a thin veil the sky's and the lit
-ground's own, a thick overcast letting down what diffuses through a
-lossless slab as deep, and a heap's top lying the deeper in the shadow of a
-deck above it; a bridge's deck and a row of arches keeping trees off the strip
+ground's own, a veil glowing by the sunlight it scatters once, a thick
+overcast letting down what diffuses through a lossless slab as deep, a base,
+unbroken or broken, reading as photons followed through its cloud and its
+whole phase let the light down, and a heap's top lying the deeper in the
+shadow of a deck above it; a bridge's deck and a row of arches keeping trees off the strip
 beneath them, a strip claimed with no gap at its edges, a narrow slanting
 river wet in every cell it crosses, and woods with nothing beneath them still
 casting their shade; a seed showing the same place at either detail, `Simple` standing
@@ -189,8 +202,9 @@ however its measurement was divided; a grid of any size met at the
 nearest of its cells and sealed the same, its mean to the last bit, across any
 number of cores, written only as its rows are filled, and a canopy grid as
 large as its lawn and no larger; a shade cast in bands bit for bit the shade
-cast whole, and sampled in bands as alone; a wood's places ranked tallest
-first as one sort would; prototypes of every kind grown a core apiece a unit;
+cast whole, and sampled in bands as alone; a stream bed's stones ranked
+largest first as one sort would; prototypes of every kind grown a core apiece
+a unit;
 radiosity records laid the same however their rows fall across units, holding
 within fifteen degrees of turn; a land lying as its grids hold it,
 its rivers running downhill and its road dry but where it bridges them; the

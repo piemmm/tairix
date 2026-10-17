@@ -37,8 +37,8 @@
 use zeroize::Zeroize;
 
 use tairix_crypto::{chacha12_keystream, StreamKey, StreamNonce, STREAM_KEY_LEN};
+use tairix_mix::SplitMix64;
 
-use crate::noncrypto::SplitMix64;
 use crate::rand::RandU64;
 
 /// Keystream bytes one refill generates: exactly four 64-byte cipher blocks,
@@ -114,7 +114,7 @@ impl<const N: usize> FastRng<N> {
         let mut key = [0u8; STREAM_KEY_LEN];
         let mut i = 0;
         while i < STREAM_KEY_LEN {
-            let word = sm.next().to_le_bytes();
+            let word = sm.next_u64().to_le_bytes();
             let mut j = 0;
             while j < 8 {
                 key[i + j] = word[j];

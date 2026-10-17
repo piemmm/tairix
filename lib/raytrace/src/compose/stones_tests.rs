@@ -5,8 +5,9 @@
 
 use alloc::vec::Vec;
 
+use tairix_land::course::{Courses, Mark, Reach};
+
 use super::*;
-use crate::course::{Courses, Mark, Reach};
 use crate::detail::Detail;
 
 fn brook(lithology: Lithology, run: f64) -> Brook {
@@ -154,7 +155,7 @@ fn straight_land_from(level: f64) -> Land {
             }
         })
         .collect();
-    crate::channel::survey(&mut marks, 1).expect("surveyed");
+    tairix_land::channel::survey(&mut marks, 1).expect("surveyed");
     let reach = Reach {
         per_width: 2.0,
         beyond: 10.0,
@@ -259,7 +260,7 @@ fn drift_in_the_water_reaches_the_flow_as_one_obstacle() {
         &mut dice,
         (
             crate::compose::plants::Kind::Oak,
-            crate::tree::Season::Summer,
+            tairix_land::Season::Summer,
         ),
     )
     .expect("drift");
@@ -366,7 +367,7 @@ fn branches_jam_against_a_spanning_trunk() {
         &mut dice,
         (
             crate::compose::plants::Kind::Oak,
-            crate::tree::Season::Summer,
+            tairix_land::Season::Summer,
         ),
     )
     .expect("drift");

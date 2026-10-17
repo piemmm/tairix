@@ -1,8 +1,9 @@
+use tairix_land::attributes::{Attributes, CHANNELS, GROWN, SNOW};
+use tairix_land::snow;
+
 use super::*;
 use crate::compose::testland;
 use crate::detail::Detail;
-use crate::heightfield::{Attributes, CHANNELS, GROWN, SNOW};
-use crate::snow;
 
 /// A pat is a low mound a unit across, highest at its middle and sunk at
 /// its ragged edge, the younger the higher.
@@ -82,8 +83,9 @@ fn pats_lie_only_on_grazed_ground() {
         let land = testland::land(&mut stage, &|_, _| 0.0, lie);
         let before = stage.objects.len();
         lay(&mut stage, &land, (Point::new(0.0, 0.0), 40.0), 9).expect("laid");
-        stage.objects[before..]
-            .iter()
+        stage
+            .objects
+            .iter_from(before)
             .filter_map(|object| match object.shape {
                 Shape::Instance { pose, .. } => Some(mathf::hypot(pose.at.x, pose.at.z)),
                 _ => None,
@@ -111,8 +113,9 @@ fn pats_lie_beneath_the_snow_and_none_it_buries() {
         let land = testland::land(&mut stage, &|_, _| 0.0, lie);
         let before = stage.objects.len();
         lay(&mut stage, &land, (Point::new(0.0, 0.0), 40.0), 9).expect("laid");
-        let feet: alloc::vec::Vec<f64> = stage.objects[before..]
-            .iter()
+        let feet: alloc::vec::Vec<f64> = stage
+            .objects
+            .iter_from(before)
             .filter_map(|object| match object.shape {
                 Shape::Instance { pose, .. } => Some(pose.at.y),
                 _ => None,

@@ -5,6 +5,8 @@
 //! on steep or wet ground far from it — and the one kind of bale a field cut
 //! for hay or straw is baled in.
 
+use tairix_util::mathf;
+
 use crate::field::Field;
 use crate::key::{Key, Stage};
 use crate::plane::Point;
@@ -78,6 +80,25 @@ pub struct Mix {
     pub overgrown: f64,
 }
 
+impl Mix {
+    /// Whether it weighs its uses at all: every weight a finite number, none
+    /// below nought.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        [
+            self.arable,
+            self.pasture,
+            self.meadow,
+            self.orchard,
+            self.vineyard,
+            self.woodlot,
+            self.overgrown,
+        ]
+        .into_iter()
+        .all(|weight| weight.is_finite() && weight >= 0.0)
+    }
+}
+
 /// What a field is used for, and how a cut one is baled.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Usage {
@@ -115,7 +136,7 @@ pub fn usage(key: Key, mix: &Mix, field: &Field, (farm, warm): (Option<Point>, P
     let near = farm.map_or(0.0, |farm| {
         (1.0 - (field.middle - farm).length() / 700.0).clamp(0.0, 1.0)
     });
-    let sunny = (field.slope.min(0.3) * 4.0) * field.fall.dot(warm).max(0.0);
+    let sunny = (mathf::fmin(field.slope, 0.3) * 4.0) * mathf::fmax(field.fall.dot(warm), 0.0);
     let weights = [
         (
             Use::Arable(Crop::Wheat),
@@ -123,18 +144,21 @@ pub fn usage(key: Key, mix: &Mix, field: &Field, (farm, warm): (Option<Point>, P
         ),
         (
             Use::Pasture,
-            mix.pasture * (0.5 + field.slope.min(0.5) + field.wet),
+            mix.pasture * (0.5 + mathf::fmin(field.slope, 0.5) + field.wet),
         ),
-        (Use::Meadow, mix.meadow * level * (0.4 + field.wet.min(0.6))),
+        (
+            Use::Meadow,
+            mix.meadow * level * (0.4 + mathf::fmin(field.wet, 0.6)),
+        ),
         (Use::Orchard, mix.orchard * near * (0.3 + sunny) * dry),
         (Use::Vineyard, mix.vineyard * sunny * dry),
         (
             Use::Woodlot,
-            mix.woodlot * (0.2 + field.slope.min(0.6) * 2.0) * (1.0 - near),
+            mix.woodlot * (0.2 + mathf::fmin(field.slope, 0.6) * 2.0) * (1.0 - near),
         ),
         (
             Use::Overgrown,
-            mix.overgrown * (0.2 + field.slope.min(0.6) + field.wet) * (1.0 - near),
+            mix.overgrown * (0.2 + mathf::fmin(field.slope, 0.6) + field.wet) * (1.0 - near),
         ),
     ];
     let mut used = draws.pick(&weights).unwrap_or(Use::Pasture);

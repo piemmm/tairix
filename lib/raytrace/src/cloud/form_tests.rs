@@ -2,9 +2,10 @@
 //! weather covers its share of the sky, its cloud keeps within the bands
 //! its cells hold, and its water grows denser up from its base.
 
+use tairix_mix::{mix32, unit};
+
 use super::*;
 use crate::cloud::{Deck, Matter};
-use crate::sample::{mix32, unit};
 
 const HEAPS: Deck = Deck {
     base: 1200.0,
@@ -161,19 +162,15 @@ fn no_cloud_stands_outside_its_cells_band_or_its_bounding_read() {
                 let across = (draw(key, 7), draw(key, 8));
                 let altitude = deck.base - 400.0 + 3000.0 * draw(key, 9);
                 let grained = Vec3::new(x0 + across.0 * spacing, altitude, z0 + across.1 * spacing);
-                let column = Blend { corners, across };
-                let bounding = cloud(
-                    &deck,
-                    &textures,
-                    (&column, altitude),
-                    grained,
-                    Edges::Bounding(1.0),
-                );
+                let Some(placed) = Blend { corners, across }.placed(&deck, altitude) else {
+                    continue;
+                };
+                let bounding = cloud(&deck, &textures, placed, grained, Edges::Bounding(1.0));
                 for footprint in [1.0, 16.0, 120.0] {
                     let Some(held) = cloud(
                         &deck,
                         &textures,
-                        (&column, altitude),
+                        placed,
                         grained,
                         Edges::Resolved(footprint),
                     ) else {
@@ -553,17 +550,17 @@ fn an_unresolved_fringe_reads_as_the_mean_the_wisps_leave() {
 /// stands thinner than a resolved one's, however its wisps fall.
 #[test]
 fn a_fringe_reaches_out_low_down_and_bounds_every_resolved_read() {
-    assert!((fringe(&HEAPS, 1.0) - FRINGE.0 * HEAPS.billow).abs() < 1e-12);
-    assert!((fringe(&HEAPS, 0.0) - FRINGE.1 * HEAPS.billow).abs() < 1e-12);
+    assert!((Edge::of(&HEAPS, 1.0, 0.0).outer() - FRINGE.0 * HEAPS.billow).abs() < 1e-12);
+    assert!((Edge::widest(&HEAPS, 0.0).outer() - FRINGE.1 * HEAPS.billow).abs() < 1e-12);
     assert!(FRINGE.0 < FRINGE.1);
     let textures = textures();
-    let widths = (SKIN, fringe(&HEAPS, 0.0));
+    let edge = Edge::widest(&HEAPS, 0.0);
     for step in 0..200u32 {
-        let surface = -widths.1 + (widths.1 + SKIN) * f64::from(step) / 200.0;
+        let surface = -edge.outer() + (edge.outer() + edge.inner()) * f64::from(step) / 200.0;
         let billowing = draw(step, 21);
         let bounding = textures.fringed(
             surface,
-            widths,
+            edge,
             billowing,
             &Turrets {
                 out: 0.0,
@@ -575,7 +572,7 @@ fn a_fringe_reaches_out_low_down_and_bounds_every_resolved_read() {
                 out: 0.0,
                 wisps: Some((wisp, kept)),
             };
-            assert!(textures.fringed(surface, widths, billowing, &read) <= bounding + 1e-12);
+            assert!(textures.fringed(surface, edge, billowing, &read) <= bounding + 1e-12);
         }
     }
 }
@@ -584,10 +581,100 @@ fn a_fringe_reaches_out_low_down_and_bounds_every_resolved_read() {
 /// with a coarser footprint only as far as a billow.
 #[test]
 fn a_clouds_edge_widens_with_its_footprint_up_to_a_billow() {
-    assert!((skin(&HEAPS, 0.0) - SKIN).abs() < 1e-12);
-    assert!((skin(&HEAPS, 100.0) - 100.0).abs() < 1e-12);
-    assert!((skin(&HEAPS, 1e9) - HEAPS.billow).abs() < 1e-12);
+    let inner = |footprint: f64| Edge::of(&HEAPS, 0.5, footprint).inner();
+    assert!((inner(0.0) - 0.5 * SKIN).abs() < 1e-12);
+    assert!((inner(100.0) - f64::midpoint(SKIN, 100.0)).abs() < 1e-12);
+    assert!((inner(1e9) - f64::midpoint(SKIN, HEAPS.billow)).abs() < 1e-12);
     assert!((edges_footprint(&HEAPS, Edges::Averaged) - AVERAGED * HEAPS.billow).abs() < 1e-12);
+}
+
+/// The fringe's mean summed through it is what its mean, read at each place
+/// through the wisps, sums to: so a blurred read, which averages the sum,
+/// holds the water a sharp read does on the whole.
+#[test]
+fn a_fringes_summed_mean_is_what_its_mean_sums_to() {
+    let textures = textures();
+    for billowing in [0.0, 0.3, 0.55, 1.0] {
+        let steps = 4000u32;
+        let mut summed = 0.0;
+        for step in 0..=steps {
+            let into = f64::from(step) / f64::from(steps);
+            let tabled = textures.fringe_sum_at(into, billowing);
+            assert!(
+                (tabled - summed).abs() < 2e-3,
+                "{billowing} at {into}: {tabled} against {summed}"
+            );
+            let width = 1.0 / f64::from(steps);
+            let mean = |at: f64| textures.fringe_mean_at(diluted(at), billowing);
+            summed += 0.5 * width * (mean(into) + mean(into + width).min(1.0));
+        }
+        assert!(
+            (textures.fringe_sum_at(1.5, billowing) - textures.fringe_sum_at(1.0, billowing) - 0.5)
+                .abs()
+                < 1e-12
+        );
+        assert!(textures.fringe_sum_at(-0.5, billowing).abs() < 1e-12);
+    }
+}
+
+/// However coarse the footprint a cloud's edge is read through, it holds the
+/// water a sharp read does: read across the edge and on into the body, the
+/// cloud comes to the same, so a far look or a long look toward the sun
+/// sees as much of it as a near one. The density runs from none to the
+/// whole body without a step or a fall, as sharp reads always stood.
+#[test]
+fn a_clouds_edge_holds_as_much_water_through_any_footprint() {
+    let summed = |edge: Edge| {
+        let (from, to) = (-edge.outer() - 10.0, edge.inner() + 10.0);
+        let steps = 200_000u32;
+        let width = (to - from) / f64::from(steps);
+        let mut sum = 0.0;
+        let mut last = 0.0;
+        for step in 0..=steps {
+            let at = from + width * f64::from(step);
+            let density = edge.density(at);
+            assert!(
+                (0.0..=1.0).contains(&density),
+                "{edge:?} at {at}: {density}"
+            );
+            assert!(
+                density >= last - 1e-12,
+                "{edge:?} falls at {at}: {density} < {last}"
+            );
+            last = density;
+            let weight = if step == 0 || step == steps { 0.5 } else { 1.0 };
+            sum += weight * density * width;
+        }
+        assert!((edge.density(from)).abs() < 1e-12 && (edge.density(to) - 1.0).abs() < 1e-12);
+        // Where a sharp boundary holding as much would stand.
+        to - sum
+    };
+    for billowing in [0.0, 0.4, 1.0] {
+        let sharp = summed(Edge::of(&HEAPS, billowing, 0.0));
+        let fringe = Edge::of(&HEAPS, billowing, 0.0).outer();
+        let (outer, inner) = (-fringe, 0.5 * SKIN);
+        assert!(
+            sharp > outer && sharp < inner,
+            "{sharp} beyond {outer}..{inner}"
+        );
+        for footprint in [0.01, 1.0, SKIN, 40.0, AVERAGED * HEAPS.billow, 300.0, 1e9] {
+            let read = summed(Edge::of(&HEAPS, billowing, footprint));
+            assert!(
+                (read - sharp).abs() < 1e-3,
+                "{billowing} through {footprint}: boundary {read} against {sharp}"
+            );
+        }
+    }
+    let sharp = Edge::of(&HEAPS, 0.4, 0.0);
+    let just = Edge::of(
+        &HEAPS,
+        0.4,
+        2.0 * SHARPEST_BLUR * (sharp.fringe + 0.5 * SKIN),
+    );
+    for step in 0..100u32 {
+        let at = -sharp.outer() + (sharp.outer() + sharp.inner()) * f64::from(step) / 100.0;
+        assert!((sharp.density(at) - just.density(at)).abs() < 1e-5, "{at}");
+    }
 }
 
 /// A place lies no further within its envelope for a column less far within
@@ -659,4 +746,58 @@ fn the_highest_a_cloud_can_stand_is_found_to_half_a_metre() {
         }
     }
     assert!(found > 500, "{found} reached");
+}
+
+/// Over any box, the turrets push the envelope out no further than the box's
+/// own reach says, at any footprint a read is taken through, and that reach
+/// is never more than the turrets' reach anywhere: the bound a voxel of the
+/// bank's light draws photons against holds every read within it.
+#[test]
+fn a_boxs_turrets_reach_no_further_than_its_own_reach() {
+    let textures = textures();
+    let mut tighter = 0u32;
+    for deck in [HEAPS, SHEET] {
+        let period = deck.billow * 8.0;
+        let per = real(SHAPE_SIDE) / period;
+        let anywhere = textures.reach(&deck);
+        for index in 0..400u32 {
+            let low = Vec3::new(
+                -60_000.0 + 120_000.0 * draw(index, 51),
+                800.0 + 3_000.0 * draw(index, 52),
+                -60_000.0 + 120_000.0 * draw(index, 53),
+            );
+            let size = 2.0 * mathf::exp(mathf::ln(4_000.0) * draw(index, 54));
+            let high = low + Vec3::new(size, 0.3 * size, size);
+            let footprint = [1.0, 16.0, 300.0][usize::try_from(index % 3).unwrap_or(0)];
+            let bound = textures.reach_over(&deck, (low, high), footprint);
+            assert!(bound <= anywhere + 1e-9, "{bound} past {anywhere}");
+            tighter += u32::from(bound < 0.8 * anywhere);
+            for sample in 0..40u32 {
+                let key = index * 64 + sample;
+                let at = low
+                    + Vec3::new(
+                        size * draw(key, 55),
+                        0.3 * size * draw(key, 56),
+                        size * draw(key, 57),
+                    );
+                let out: f64 = BUBBLES
+                    .iter()
+                    .zip(bubble_reach(&deck))
+                    .enumerate()
+                    .map(|(scale, (&(times, start, _), reach))| {
+                        let weight = resolved_scale(scale, footprint, period) * reach;
+                        if weight <= 0.0 {
+                            return 0.0;
+                        }
+                        weight * (textures.shape.at(at * per * times + start) - textures.shape_mean)
+                    })
+                    .sum();
+                assert!(out <= bound + 1e-9, "{out} past {bound} at {at:?}");
+            }
+        }
+    }
+    assert!(
+        tighter > 100,
+        "only {tighter} boxes bounded tighter than anywhere"
+    );
 }

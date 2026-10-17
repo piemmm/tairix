@@ -16,15 +16,15 @@
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
+use tairix_mix::mix32;
+use tairix_noise::noise3;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::flare::{Flare, Lobe, MOST_LOBES};
 use crate::foot::{Foot, FLARE_TOP, ROOTS, SWELL, SWELL_REACH};
 use crate::fracture::{past, running, snapped, tear, Break, Grain, HOLLOWS};
-use crate::noise::noise3;
 use crate::prototype::{point, Assembly, Building, Mesh, Part, Tube};
-use crate::sample::mix32;
 use crate::tree::{leaf, Leafing};
 use crate::vector::{real, single, wrapped, Frame, Vec3};
 
@@ -135,7 +135,7 @@ impl Timber {
 
     /// A key not yet taken.
     fn next_key(&mut self) -> u32 {
-        self.key = mix32(self.key ^ 0x9e37_79b9);
+        self.key = tairix_mix::next_key(self.key);
         self.key
     }
 

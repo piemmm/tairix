@@ -113,7 +113,11 @@ first, through the shared deferral desk (`terrain::ChunkDesk`). One chunk's
 answer never supersedes another's, so an ask made while a solve is in flight
 is declined rather than allowed to discard that solve; an ask the worker has
 not yet taken is replaced by the next one, so it always starts on the nearest
-ground still missing.
+ground still missing. Before the window opens the realm's land is refined
+across every core, and the worn ground its chunks are solved from is kept in
+one `lib/reclaim` cache the landing search and the worker share, so a chunk
+beside one already solved wears only the ground no earlier chunk reached; a
+change of memory-pressure band gives it back with the material tiles.
 
 ### The light
 
@@ -392,11 +396,12 @@ busy machine that has shown it can keep up, detail too dear for the machine, a
 larger window, a pause, and a restore that does not hold — the stored choice
 over the shared fake app-data service, the settings window's drag, detents,
 chooser, layout and scoped repaint, the icon-bar declaration, the start search
-over synthetic hollows and river beds and over the realms the client itself
-opens, the render target and its bands, the terrain lattice, the light model,
-the cast and the figure pass — culling, depth order, the waterline, and bands
-drawing exactly what one band draws — the pacing, the input mapping and the
-size-state model.
+over synthetic hollows and river beds, the render target and its bands, the
+terrain lattice, the light model, the cast and the figure pass — culling,
+depth order, the waterline, and bands drawing exactly what one band draws —
+the pacing, the input mapping and the size-state model. The start search over
+the realms the client itself opens runs with the scene tests
+(`--features scene-tests`), as each generates a realm.
 `tests/bands.rs` asserts that cutting a peopled frame for any number of
 threads produces the identical picture. `tests/proptest_model.rs` is the
 invariant model over generated window, input and frame-cost programs — it is

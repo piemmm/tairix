@@ -3,17 +3,19 @@
 //! it is and lit by the light followed through it.
 //!
 //! A cloudbank is up to two decks of cloud over the round Earth, as far as
-//! any of it can be seen. Each deck has a weather map — how far within a
+//! any of it can be seen. A heaped deck stands as heaps of its own, each a
+//! thermal's (`heaps`); any other has a weather map — how far within a
 //! footprint each column stands, and where its base and top lie there — over
-//! which its clouds stand as `form` lays them: heaps or sheets on flat bases,
-//! pushed out into turrets on turrets and frayed past them, their water's
-//! extinction rising with height.
+//! which its sheets lie. Either way its clouds stand as `form` lays them, on
+//! flat bases, pushed out into turrets on turrets and frayed past them, their
+//! water's extinction rising with height.
 //! Heights are taken over the Earth's curve about its centre below the eye,
 //! as the air's are, so a deck seen low down runs on to the horizon. Its maps
 //! are laid in levels about the eye, each twice the last's breadth in as many
 //! columns (Losasso and Hoppe, "Geometry Clipmaps", 2004), each level's
 //! weather drawn only as finely as its columns hold and its rim blended into
-//! the next's, so no seam shows where they meet.
+//! the next's, so no seam shows where they meet; a level lists the heaps over
+//! it cell by cell, the same heaps on every level.
 //!
 //! A ray gathers what the cloud scatters toward it step by step, each step's
 //! light integrated exactly over the step (Hillaire, "Physically Based Sky,
@@ -24,7 +26,8 @@
 //! cloud's phase, through the optical depth toward the sun that short taps
 //! through its own edges and the bank's light (`light`) beyond them hold — so
 //! a cloud shades its own turrets and every cloud behind it; the sunlight its
-//! forward peak carries on, scattered once more; and the diffuse light the
+//! forward peak carries on, scattered toward the ray through the phase
+//! composed with that peak; and the diffuse light the
 //! photons followed through the bank laid down there, its fluence and its
 //! net flux through the full phase. Each step's sunlight has crossed the air
 //! to its own place at the angle the sun stands there, so a deck still above
@@ -32,31 +35,32 @@
 //! toward a set sun is lit after the cloud overhead has gone grey.
 
 mod form;
+mod heaps;
 mod light;
 
 use alloc::vec::Vec;
 use core::f64::consts::{PI, SQRT_2};
-use core::ops::Range;
+use core::ops::{Range, RangeInclusive};
 
+use form::{band_over, weather, Blend, Column, Edges, Envelope, Textures, EMPTY_BAND};
+use heaps::{cellular, Heaps};
+use light::Lights;
+pub(crate) use light::Resolution;
+use tairix_noise::smoothstep;
 use tairix_parallel::JobRunner;
 use tairix_util::mathf;
 
 use crate::atmosphere::GROUND;
-use crate::band;
 use crate::lanes::Corners;
-use crate::noise::smoothstep;
+use crate::shade::Rect;
 use crate::shape::{quadratic, reciprocal};
 use crate::vector::{cell_of, real, single, Ray, Vec3};
 use crate::walk::Walk;
 
-use form::{band_over, weather, Blend, Column, Edges, Envelope, Textures, EMPTY_BAND};
-use light::Lights;
-pub(crate) use light::Resolution;
-
-/// What a deck's weather holds over a square: the heights between which its
-/// cloud's bands let it stand, and of the weather any read over it is
-/// blended to, the furthest within a footprint, the deepest, and the lowest
-/// and highest base.
+/// What a field deck's weather holds over a square: the heights between
+/// which its cloud's bands let it stand, and of the weather any read over it
+/// is blended to, the furthest within a footprint, the deepest, and the
+/// lowest and highest base.
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Holding {
     band: (f64, f64),
@@ -130,10 +134,26 @@ pub(crate) struct Scattering {
     pub(crate) asymmetry: f64,
 }
 
+impl Scattering {
+    /// The share of the phase δ-Eddington takes as running on unscattered,
+    /// its forward peak (Joseph, Wiscombe and Weinman, 1976).
+    pub(crate) const fn forward(self) -> f64 {
+        self.asymmetry * self.asymmetry
+    }
+
+    /// The mean cosine of the rest of the phase, past its forward peak.
+    pub(crate) const fn remainder(self) -> f64 {
+        self.asymmetry / (1.0 + self.asymmetry)
+    }
+}
+
 /// Cells along each side of a level's weather map: a multiple of four, so a
 /// level's square lies on whole cells of the next and its columns on every
 /// other one of the next's.
 const WEATHER_CELLS: usize = 384;
+
+/// The columns and rows of a level's weather cells a square covers.
+type Cells = (RangeInclusive<usize>, RangeInclusive<usize>);
 const _: () = assert!(WEATHER_CELLS.is_multiple_of(4));
 /// The share of a level's half-breadth over which its rim is blended into
 /// the next level's, its weather's and its light's alike.
@@ -163,7 +183,8 @@ const UNLIT: f64 = 8.0;
 const FARTHEST_TAP: f64 = 4.0;
 
 /// The most steps a ray takes through the bank, seen directly and seen
-/// otherwise; and the transmittance below which what lies beyond is hidden.
+/// otherwise; and the transmittance at which it stops, what lies beyond
+/// hidden and what lies deeper sending on its last sample's light.
 const FINE_STEPS: u32 = 1024;
 const COARSE_STEPS: u32 = 32;
 /// Within a cloud's billows a ray seen directly steps so many of its
@@ -220,8 +241,10 @@ const ICE: Scattering = Scattering {
 struct Level {
     /// Half its breadth, either way of the bank's middle.
     half: f64,
-    /// Each deck's map and its cells' bands, empty for a deck the bank lacks.
+    /// Each deck's map, or its heaps where it stands as heaps, and its cells'
+    /// bands; empty for a deck the bank lacks.
     weather: [Vec<Column>; 2],
+    heaps: [Heaps; 2],
     bands: [Vec<(f32, f32)>; 2],
 }
 
@@ -230,14 +253,21 @@ impl Level {
     /// their rows are filled, so no unit of building fills more than its own
     /// rows; `None` when the heap will not hold them.
     fn new(half: f64, decks: &[Option<Deck>; 2]) -> Option<Self> {
-        let maps = |deck: &Option<Deck>| room(deck.is_some(), points(WEATHER_CELLS));
+        let maps = |deck: &Option<Deck>| room(fielded(deck.as_ref()), points(WEATHER_CELLS));
         let banded = |deck: &Option<Deck>| room(deck.is_some(), WEATHER_CELLS * WEATHER_CELLS);
         Some(Self {
             half,
             weather: [maps(&decks[0])?, maps(&decks[1])?],
+            heaps: [Heaps::default(), Heaps::default()],
             bands: [banded(&decks[0])?, banded(&decks[1])?],
         })
     }
+}
+
+/// Whether `deck` is a deck whose weather is a field of cloud mapped by its
+/// levels' columns.
+fn fielded(deck: Option<&Deck>) -> bool {
+    deck.is_some_and(|deck| !cellular(deck))
 }
 
 /// What a level's edges are found from while they are, held for one level
@@ -267,8 +297,8 @@ impl Edging {
     fn new(decks: &[Option<Deck>; 2]) -> Option<Self> {
         let rooms = || -> Option<[Vec<f32>; 2]> {
             Some([
-                room(decks[0].is_some(), points(WEATHER_CELLS))?,
-                room(decks[1].is_some(), points(WEATHER_CELLS))?,
+                room(fielded(decks[0].as_ref()), points(WEATHER_CELLS))?,
+                room(fielded(decks[1].as_ref()), points(WEATHER_CELLS))?,
             ])
         };
         Some(Self {
@@ -391,9 +421,12 @@ fn inner((column, row): (usize, usize)) -> bool {
 enum Stage {
     Shape(usize),
     Detail(usize),
-    /// A level's weather, from the coarsest in, each followed by the
-    /// distances to its footprints' edges, down its columns and then along
-    /// its rows, and then its bands: by level, then row or column.
+    /// A level's heaps, from the coarsest in, drawn by bands and then listed
+    /// by rows of its cells; its weather, followed by the distances to its
+    /// footprints' edges, down its columns and then along its rows; and then
+    /// its bands: by level, then row or column.
+    Heaps(usize, usize),
+    Lists(usize, usize),
     Weather(usize, usize),
     Squares(usize, usize),
     Edges(usize, usize),
@@ -410,9 +443,10 @@ impl Stage {
         match self {
             Self::Shape(_) => (form::SHAPE_SIDE, 1),
             Self::Detail(_) => (form::DETAIL_SIDE, 4),
+            Self::Heaps(..) | Self::Lists(..) => (WEATHER_CELLS, 8),
             Self::Weather(..) => (WEATHER_CELLS + 1, 8),
             Self::Squares(..) | Self::Edges(..) => (WEATHER_CELLS + 1, EDGE_LINES),
-            Self::Bands(..) => (WEATHER_CELLS, 16),
+            Self::Bands(..) => (WEATHER_CELLS, 4),
             Self::Light | Self::Done => (1, 1),
         }
     }
@@ -422,6 +456,8 @@ impl Stage {
         match self {
             Self::Shape(row)
             | Self::Detail(row)
+            | Self::Heaps(_, row)
+            | Self::Lists(_, row)
             | Self::Weather(_, row)
             | Self::Squares(_, row)
             | Self::Edges(_, row)
@@ -435,6 +471,8 @@ impl Stage {
         match self {
             Self::Shape(_) => Self::Shape(row),
             Self::Detail(_) => Self::Detail(row),
+            Self::Heaps(level, _) => Self::Heaps(level, row),
+            Self::Lists(level, _) => Self::Lists(level, row),
             Self::Weather(level, _) => Self::Weather(level, row),
             Self::Squares(level, _) => Self::Squares(level, row),
             Self::Edges(level, _) => Self::Edges(level, row),
@@ -443,22 +481,43 @@ impl Stage {
         }
     }
 
-    /// The stage after this one in a bank of `levels` levels.
-    fn after(self, levels: usize) -> Self {
+    /// The stage after this one in a bank of `levels` levels, its decks
+    /// standing as heaps or lying as fields as `kinds` has them.
+    fn after(self, levels: usize, kinds: Kinds) -> Self {
+        let mapped = |level: usize| {
+            if kinds.fields {
+                Self::Weather(level, 0)
+            } else {
+                Self::Bands(level, 0)
+            }
+        };
+        let begun = |level: usize| {
+            if kinds.heaps {
+                Self::Heaps(level, 0)
+            } else {
+                mapped(level)
+            }
+        };
         match self {
             Self::Shape(_) => Self::Detail(0),
-            Self::Detail(_) => levels
-                .checked_sub(1)
-                .map_or(Self::Light, |level| Self::Weather(level, 0)),
+            Self::Detail(_) => levels.checked_sub(1).map_or(Self::Light, begun),
+            Self::Heaps(level, _) => Self::Lists(level, 0),
+            Self::Lists(level, _) => mapped(level),
             Self::Weather(level, _) => Self::Squares(level, 0),
             Self::Squares(level, _) => Self::Edges(level, 0),
             Self::Edges(level, _) => Self::Bands(level, 0),
-            Self::Bands(level, _) => level
-                .checked_sub(1)
-                .map_or(Self::Light, |finer| Self::Weather(finer, 0)),
+            Self::Bands(level, _) => level.checked_sub(1).map_or(Self::Light, begun),
             Self::Light | Self::Done => Self::Done,
         }
     }
+}
+
+/// Which kinds of deck a bank holds: any standing as heaps, and any lying as
+/// a field.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Kinds {
+    heaps: bool,
+    fields: bool,
 }
 
 /// What lights the bank, once the air says.
@@ -622,6 +681,31 @@ impl Cloudbank {
         )
     }
 
+    /// The box of deck `slot`'s billows' coordinates the box over the square
+    /// `square` between heights `low` and `high` lies within, as the deck's
+    /// grain draws it.
+    fn grained_box(
+        &self,
+        slot: usize,
+        deck: &Deck,
+        (square, (low, high)): (Rect, (f64, f64)),
+    ) -> (Vec3, Vec3) {
+        let (mut least, mut most) = (Vec3::splat(f64::INFINITY), Vec3::splat(f64::NEG_INFINITY));
+        for (x, z) in [
+            square.0,
+            (square.1 .0, square.0 .1),
+            (square.0 .0, square.1 .1),
+            square.1,
+        ] {
+            for altitude in [low, high] {
+                let at = self.grained(slot, deck, Vec3::new(x, altitude, z));
+                least = least.min(at);
+                most = most.max(at);
+            }
+        }
+        (least, most)
+    }
+
     /// The heights between which the bank lies.
     pub(crate) const fn span(&self) -> (f64, f64) {
         (self.floor, self.ceiling)
@@ -672,6 +756,8 @@ impl Cloudbank {
         match stage {
             Stage::Shape(_) => self.textures.fill_shape(start..end, runner, seed),
             Stage::Detail(_) => self.textures.fill_detail(start..end, runner, seed ^ 0xd37a),
+            Stage::Heaps(level, _) => self.fill_heaps(level, start..end, runner)?,
+            Stage::Lists(level, _) => self.list_heaps(level, start..end, runner)?,
             Stage::Weather(level, _) => self.fill_weather(level, start..end, runner),
             Stage::Squares(level, _) => self.fill_squares(level, start..end, runner)?,
             Stage::Edges(level, _) => self.fill_edges(level, start..end, runner)?,
@@ -679,7 +765,7 @@ impl Cloudbank {
             Stage::Light | Stage::Done => {}
         }
         self.stage = if end >= rows {
-            stage.after(self.levels.len())
+            stage.after(self.levels.len(), self.kinds())
         } else {
             stage.at(end)
         };
@@ -701,7 +787,7 @@ impl Cloudbank {
                 done = total + real(self.stage.row()) / real(per);
             }
             total += units;
-            stage = stage.after(self.levels.len());
+            stage = stage.after(self.levels.len(), self.kinds());
         }
         let (lit, lighting) = self.lights.units();
         match self.stage {
@@ -709,6 +795,22 @@ impl Cloudbank {
             Stage::Done => (total + lighting, total + lighting),
             _ => (done, total + lighting),
         }
+    }
+
+    /// Which kinds of deck the bank holds.
+    fn kinds(&self) -> Kinds {
+        let mut kinds = Kinds {
+            heaps: false,
+            fields: false,
+        };
+        for deck in self.decks.iter().flatten() {
+            if cellular(deck) {
+                kinds.heaps = true;
+            } else {
+                kinds.fields = true;
+            }
+        }
+        kinds
     }
 
     /// The seed the bank's textures are drawn from: its first deck's.
@@ -746,34 +848,88 @@ impl Cloudbank {
         }
     }
 
-    /// What each deck's weather holds over the square from `low` to `high`,
-    /// `(x, z)` each, on every level any of it is read from: the bands of the
-    /// weather cells under it, and the most and least of the columns any
-    /// read over it is blended from.
-    fn weather_over(&self, low: (f64, f64), high: (f64, f64)) -> [Holding; 2] {
-        let mut overs = [Holding::NONE; 2];
+    /// Each level holding any of the square `low..high`, from the finest, and
+    /// the columns and rows of its weather cells the square covers, passed to
+    /// `visit`, until a level holds the whole of it.
+    fn each_level_over(&self, (low, high): Rect, mut visit: impl FnMut(&Level, Cells)) {
         let (cx, cz) = self.centre;
-        // As the levels' squares measure it, its nearest and farthest from
-        // the middle: each level holding the one is read over some of it.
+        // As the levels' squares measure it, its nearest from the middle:
+        // each level holding it is read over some of the square.
         let nearest = (cx.clamp(low.0, high.0) - cx)
             .abs()
             .max((cz.clamp(low.1, high.1) - cz).abs());
-        let farthest = [low.0 - cx, high.0 - cx, low.1 - cz, high.1 - cz]
-            .into_iter()
-            .fold(0.0, |most: f64, offset| most.max(offset.abs()));
-        let (last, points) = (WEATHER_CELLS - 1, WEATHER_CELLS + 1);
+        let farthest = self.farthest((low, high));
         for level in &self.levels {
             if nearest >= level.half {
                 continue;
             }
+            visit(level, self.cells_under(level, (low, high)));
+            // A level holding all of it leaves the coarser ones none to read.
+            if farthest < level.half {
+                break;
+            }
+        }
+    }
+
+    /// The finest level holding the whole of the square `low..high` in
+    /// weather cells at least as broad as it, the coarsest if none does, and
+    /// the columns and rows of its cells the square covers.
+    fn level_holding(&self, (low, high): Rect) -> Option<(&Level, Cells)> {
+        let (breadth, farthest) = (
+            (high.0 - low.0).max(high.1 - low.1),
+            self.farthest((low, high)),
+        );
+        let level = self
+            .levels
+            .iter()
+            .find(|level| {
+                farthest < level.half && 2.0 * level.half / real(WEATHER_CELLS) >= breadth
+            })
+            .or_else(|| self.levels.last())?;
+        Some((level, self.cells_under(level, (low, high))))
+    }
+
+    /// How far the square `low..high` reaches from the bank's middle, as
+    /// the levels' squares measure it.
+    fn farthest(&self, (low, high): Rect) -> f64 {
+        let (cx, cz) = self.centre;
+        [low.0 - cx, high.0 - cx, low.1 - cz, high.1 - cz]
+            .into_iter()
+            .fold(0.0, |most: f64, offset| most.max(offset.abs()))
+    }
+
+    /// The columns and rows of `level`'s weather cells the square `low..high`
+    /// covers, as far as the level's square reaches.
+    fn cells_under(&self, level: &Level, (low, high): Rect) -> Cells {
+        let size = 2.0 * level.half / real(WEATHER_CELLS);
+        let cell = |value: f64, from: f64| cell_of((value - from) / size).0.min(WEATHER_CELLS - 1);
+        let (west, south) = (self.centre.0 - level.half, self.centre.1 - level.half);
+        (
+            cell(low.0, west)..=cell(high.0, west),
+            cell(low.1, south)..=cell(high.1, south),
+        )
+    }
+
+    /// What each field deck's weather holds over the square `low..high`; a
+    /// deck standing as heaps holds nothing here, its heaps bounding the
+    /// square's cloud one by one.
+    fn weather_over(&self, low: (f64, f64), high: (f64, f64)) -> [Holding; 2] {
+        let mut overs = [Holding::NONE; 2];
+        let (cx, cz) = self.centre;
+        let points = WEATHER_CELLS + 1;
+        self.each_level_over((low, high), |level, (columns, rows)| {
             let size = 2.0 * level.half / real(WEATHER_CELLS);
-            let cell = |value: f64, from: f64| cell_of((value - from) / size).0.min(last);
             let (west, south) = (cx - level.half, cz - level.half);
-            let (columns, rows) = (
-                cell(low.0, west)..=cell(high.0, west),
-                cell(low.1, south)..=cell(high.1, south),
-            );
-            for ((bands, map), over) in level.bands.iter().zip(&level.weather).zip(&mut overs) {
+            for (((bands, map), over), deck) in level
+                .bands
+                .iter()
+                .zip(&level.weather)
+                .zip(&mut overs)
+                .zip(&self.decks)
+            {
+                if !fielded(deck.as_ref()) {
+                    continue;
+                }
                 for row in rows.clone() {
                     let along = row * WEATHER_CELLS;
                     let cells = bands.get(along + columns.start()..=along + columns.end());
@@ -809,43 +965,104 @@ impl Cloudbank {
                     }
                 }
             }
-            // A level holding all of it leaves the coarser ones none to read.
-            if farthest < level.half {
-                break;
-            }
-        }
+        });
         overs
     }
 
     /// The most extinction any of its cloud holds between heights `low` and
-    /// `high`, read through a `footprint` metres across, each deck's weather
-    /// as `overs` has it: none where its bands or its envelope leave no room
-    /// for it, and elsewhere, however its turrets lie, no denser than its
-    /// whole density risen from the lowest base to the top of the span.
-    fn densest(&self, overs: &[Holding; 2], (low, high): (f64, f64), footprint: f64) -> f64 {
+    /// `high` over the square `square`, read through a `footprint` metres
+    /// across, each field deck's weather as `overs` has it: none where its
+    /// bands or its envelope leave no room for it, and elsewhere, however its
+    /// turrets lie, no denser than its whole density risen from the lowest
+    /// base to the top of the span; and each heap's the same, heap by heap.
+    fn densest(
+        &self,
+        overs: &[Holding; 2],
+        square: Rect,
+        (low, high): (f64, f64),
+        footprint: f64,
+    ) -> f64 {
         self.decks
             .iter()
             .zip(overs)
-            .map(|(deck, over)| {
+            .enumerate()
+            .map(|(slot, (deck, over))| {
                 let (lowest, highest) = over.band;
-                match deck {
-                    Some(deck)
-                        if high > lowest
-                            && low < highest
-                            && high > over.base.0
-                            && form::may_hold(
-                                deck,
-                                &self.textures,
-                                (over.edge, over.depth, low - over.base.1),
-                                footprint,
-                            ) =>
-                    {
-                        form::extinction(deck, high.min(highest) - lowest)
-                    }
-                    _ => 0.0,
+                let Some(deck) = deck else {
+                    return 0.0;
+                };
+                let reach = self.textures.reach_over(
+                    deck,
+                    self.grained_box(slot, deck, (square, (low, high))),
+                    footprint,
+                );
+                if cellular(deck) {
+                    // Each level's cells list every heap whose cloud can
+                    // reach them, so one holding the square bounds it alone.
+                    return self.level_holding(square).map_or(0.0, |(level, cells)| {
+                        level.heaps.get(slot).map_or(0.0, |heaps| {
+                            heaps.densest(cells, square, (low, high), (deck, reach, footprint))
+                        })
+                    });
+                }
+                let holds = high > lowest
+                    && low < highest
+                    && high > over.base.0
+                    && form::may_hold(
+                        deck,
+                        (over.edge, form::shape(deck, over.depth), low - over.base.1),
+                        (reach, footprint),
+                    );
+                if holds {
+                    form::extinction(deck, high.min(highest) - lowest)
+                } else {
+                    0.0
                 }
             })
             .sum()
+    }
+
+    /// Level `index`'s heaps drawn over bands `bands` across `runner`, for
+    /// each deck standing as heaps, begun at its first; `None` when the heap
+    /// will not hold them.
+    fn fill_heaps(
+        &mut self,
+        index: usize,
+        bands: Range<usize>,
+        runner: &dyn JobRunner,
+    ) -> Option<()> {
+        let (decks, centre) = (self.decks, self.centre);
+        let level = self.levels.get_mut(index)?;
+        for (deck, heaps) in decks.iter().zip(level.heaps.iter_mut()) {
+            let Some(deck) = deck.as_ref().filter(|deck| cellular(deck)) else {
+                continue;
+            };
+            if bands.start == 0 {
+                let margin = form::standing_margin(deck, self.textures.reach(deck));
+                *heaps = Heaps::begin(deck, (centre, level.half), margin)?;
+            }
+            heaps.draw(deck, bands.clone(), runner)?;
+        }
+        Some(())
+    }
+
+    /// Level `index`'s heaps listed over rows `rows` of its cells across
+    /// `runner`, for each deck standing as heaps; `None` when the heap will
+    /// not hold the lists.
+    fn list_heaps(
+        &mut self,
+        index: usize,
+        rows: Range<usize>,
+        runner: &dyn JobRunner,
+    ) -> Option<()> {
+        let decks = self.decks;
+        let level = self.levels.get_mut(index)?;
+        for (deck, heaps) in decks.iter().zip(level.heaps.iter_mut()) {
+            if deck.as_ref().is_some_and(cellular) {
+                heaps.list(rows.clone(), runner)?;
+            }
+        }
+        Some(())
     }
 
     /// Level `index`'s weather rows `rows`, its rim's bases and tops blended
@@ -873,7 +1090,7 @@ impl Cloudbank {
             .zip(along_rows.iter_mut())
             .zip([0, 1].map(|slot| next.and_then(|next| next.weather.get(slot))))
         {
-            let Some(deck) = deck else {
+            let Some(deck) = deck.as_ref().filter(|deck| !cellular(deck)) else {
                 continue;
             };
             let (Some(cells), Some(covers), Some(along_rows)) = (
@@ -935,7 +1152,7 @@ impl Cloudbank {
             .zip(along_columns.iter_mut())
             .zip(from_rows.iter_mut())
         {
-            if deck.is_none() {
+            if !fielded(deck.as_ref()) {
                 continue;
             }
             let (Some(along_columns), Some(from_rows)) = (
@@ -1025,13 +1242,13 @@ impl Cloudbank {
             .zip(from_rows)
             .zip([0, 1].map(|slot| next.and_then(|next| next.weather.get(slot))))
         {
-            if deck.is_none() {
+            if !fielded(deck.as_ref()) {
                 continue;
             }
             let Some(cells) = map.get_mut(rows.start * points..rows.end * points) else {
                 continue;
             };
-            let laid = band::fold(
+            let laid = tairix_parallel::fold_bands(
                 runner,
                 cells,
                 (0, points * EDGE_LINES),
@@ -1089,13 +1306,20 @@ impl Cloudbank {
     fn fill_bands(&mut self, index: usize, rows: Range<usize>, runner: &dyn JobRunner) {
         let decks = self.decks;
         let reach = decks.map(|deck| deck.map_or(0.0, |deck| self.textures.reach(&deck)));
-        let Some(Level { weather, bands, .. }) = self.levels.get_mut(index) else {
+        let Some(Level {
+            weather,
+            heaps,
+            bands,
+            ..
+        }) = self.levels.get_mut(index)
+        else {
             return;
         };
         let points = WEATHER_CELLS + 1;
-        for (((deck, map), cells), reach) in decks
+        for ((((deck, map), heaps), cells), reach) in decks
             .iter()
             .zip(weather.iter())
+            .zip(heaps.iter())
             .zip(bands.iter_mut())
             .zip(reach)
         {
@@ -1105,20 +1329,39 @@ impl Cloudbank {
             let Some(cells) = rows_of(cells, rows.clone(), WEATHER_CELLS, EMPTY_BAND) else {
                 continue;
             };
-            band::for_each(runner, cells, (rows.start, WEATHER_CELLS), &|row, band| {
-                let at = |column: usize, row: usize| {
-                    map.get(row * points + column).copied().unwrap_or_default()
-                };
-                for (column, slot) in band.iter_mut().enumerate() {
-                    let corners = [
-                        at(column, row),
-                        at(column + 1, row),
-                        at(column, row + 1),
-                        at(column + 1, row + 1),
-                    ];
-                    *slot = band_over(deck, corners, reach);
-                }
-            });
+            if cellular(deck) {
+                let margin = form::standing_margin(deck, reach);
+                tairix_parallel::for_each_band(
+                    runner,
+                    cells,
+                    (rows.start, WEATHER_CELLS),
+                    &|row, band| {
+                        for (column, slot) in band.iter_mut().enumerate() {
+                            *slot = heaps.band((column, row), margin);
+                        }
+                    },
+                );
+                continue;
+            }
+            tairix_parallel::for_each_band(
+                runner,
+                cells,
+                (rows.start, WEATHER_CELLS),
+                &|row, band| {
+                    let at = |column: usize, row: usize| {
+                        map.get(row * points + column).copied().unwrap_or_default()
+                    };
+                    for (column, slot) in band.iter_mut().enumerate() {
+                        let corners = [
+                            at(column, row),
+                            at(column + 1, row),
+                            at(column, row + 1),
+                            at(column + 1, row + 1),
+                        ];
+                        *slot = band_over(deck, corners, reach);
+                    }
+                },
+            );
         }
     }
 
@@ -1294,6 +1537,10 @@ impl Cloudbank {
             weight += lost;
             kept *= through;
             if kept < OPAQUE {
+                // What lies deeper sends on what this sample does.
+                light += source * (kept / extinction.max(1e-12));
+                depth += at * kept;
+                weight += kept;
                 kept = 0.0;
                 break;
             }
@@ -1311,8 +1558,15 @@ impl Cloudbank {
         Glance {
             out: -dir,
             phase: match self.medium() {
-                Matter::Water => dual_phase(cos, DROPLET_LOBES.0, DROPLET_LOBES.1),
+                Matter::Water => dual_phase(cos, (DROPLET_LOBES.0, BACK_LOBE), DROPLET_LOBES.1),
                 Matter::Ice => henyey_greenstein(cos, ICE_ASYMMETRY),
+            },
+            onward: match self.medium() {
+                Matter::Water => {
+                    let (forward, share) = DROPLET_LOBES;
+                    dual_phase(cos, (forward * forward, BACK_LOBE * forward), share)
+                }
+                Matter::Ice => henyey_greenstein(cos, ICE_ASYMMETRY * ICE_ASYMMETRY),
             },
         }
     }
@@ -1322,12 +1576,13 @@ impl Cloudbank {
     /// `altitude` above the scene's level and `height` of the way from the
     /// bank's floor to its ceiling, its edges taken as `edges` has them.
     ///
-    /// The sun's light scattered once, exactly, through the phase; what of it
-    /// the phase's forward peak carries on unscattered by the scaled
-    /// extinction the photons were followed through, scattered once more
-    /// evenly by the rest of the phase; and the diffuse light, its fluence
-    /// and its net flux through the full phase's asymmetry, so cloud seen
-    /// toward where its diffuse light runs is the brighter.
+    /// The sun's light scattered once, exactly, through the phase; what the
+    /// phase's forward peak carries on past that, through the δ-Eddington
+    /// extinction the beam photons were followed through, scattered toward
+    /// the ray through the phase composed with the peak; and the diffuse
+    /// light, its fluence and its net flux through the full phase's
+    /// asymmetry, so cloud seen toward where its diffuse light runs is the
+    /// brighter.
     fn source(
         &self,
         (lighting, glance): (&Lighting, &Glance),
@@ -1341,10 +1596,10 @@ impl Cloudbank {
         let sunlight = sunlight_at(lighting, height, cosine);
         let sun = sunlight * self.lights.above(self, at);
         let scattering = self.scattering();
-        let g = scattering.asymmetry;
-        let (direct, carried) = (mathf::exp(-optical), mathf::exp(-(1.0 - g) * optical));
+        let (g, forward) = (scattering.asymmetry, scattering.forward());
+        let (direct, carried) = (mathf::exp(-optical), mathf::exp(-(1.0 - forward) * optical));
         let once = sun * (glance.phase * direct);
-        let peak = sun * ((1.0 - g) / (4.0 * PI) * (carried - direct).max(0.0));
+        let peak = sun * (glance.onward * (carried - direct).max(0.0));
         let reading = self.lights.reading(self, at).unwrap_or_default();
         let [sunlit, skylit] = reading.fluence.map(|fluence| fluence.max(0.0));
         let (sun_tint, sky_tint) = (tint(sunlight), tint(lighting.above));
@@ -1571,8 +1826,8 @@ impl Course {
 }
 
 /// A blend of a forward and a backward Henyey–Greenstein lobe.
-fn dual_phase(cos: f64, g: f64, back: f64) -> f64 {
-    henyey_greenstein(cos, g) * (1.0 - back) + henyey_greenstein(cos, BACK_LOBE) * back
+fn dual_phase(cos: f64, (forward, backward): (f64, f64), back: f64) -> f64 {
+    henyey_greenstein(cos, forward) * (1.0 - back) + henyey_greenstein(cos, backward) * back
 }
 
 fn henyey_greenstein(cos: f64, g: f64) -> f64 {
@@ -1659,6 +1914,10 @@ struct Sample {
 struct Glance {
     out: Vec3,
     phase: f64,
+    /// The phase composed with its forward lobe, for the light the forward
+    /// peak carries on already spread by that lobe: Henyey–Greenstein lobes
+    /// compose as the product of their asymmetries.
+    onward: f64,
 }
 
 /// The weather cell a march stands over: the heights each deck's cloud
@@ -1744,18 +2003,39 @@ impl Reader<'_> {
         // curve.
         let lying = Vec3::new(point.x, altitude, point.z);
         let mut held: Option<(Sample, f64)> = None;
-        for ((slot, deck), map) in bank.decks.iter().enumerate().zip(&level.weather) {
+        for (((slot, deck), map), heaps) in bank
+            .decks
+            .iter()
+            .enumerate()
+            .zip(&level.weather)
+            .zip(&level.heaps)
+        {
             let Some(deck) = deck else {
                 continue;
             };
-            let Some((corners, across)) = about(map, WEATHER_CELLS + 1, place) else {
+            let placed = if cellular(deck) {
+                let cell = |at: f64| cell_of(at).0.min(WEATHER_CELLS - 1);
+                let within = (0.0..real(WEATHER_CELLS)).contains(&place.0)
+                    && (0.0..real(WEATHER_CELLS)).contains(&place.1);
+                within
+                    .then(|| {
+                        heaps.placed(
+                            cell(place.1) * WEATHER_CELLS + cell(place.0),
+                            (point.x, point.z),
+                            altitude,
+                            form::read_margin(deck, &bank.textures, edges),
+                        )
+                    })
+                    .flatten()
+            } else {
+                about(map, WEATHER_CELLS + 1, place)
+                    .and_then(|(corners, across)| Blend { corners, across }.placed(deck, altitude))
+            };
+            let Some(placed) = placed else {
                 continue;
             };
-            let column = Blend { corners, across };
             let grained = bank.grained(slot, deck, lying);
-            let Some(cloud) =
-                form::cloud(deck, &bank.textures, (&column, altitude), grained, edges)
-            else {
+            let Some(cloud) = form::cloud(deck, &bank.textures, placed, grained, edges) else {
                 continue;
             };
             let own = cloud.extinction;
@@ -1823,10 +2103,7 @@ impl Reader<'_> {
                 None => clear += reach - last,
             }
             last = reach;
-            if tapped > UNLIT {
-                return tapped;
-            }
-            if clear >= margin || last >= FARTHEST_TAP * billow {
+            if tapped > UNLIT || clear >= margin || last >= FARTHEST_TAP * billow {
                 break;
             }
             tap += 1;

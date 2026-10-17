@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use super::*;
+use tairix_parallel::SERIAL;
 use tairix_wintersun_net::value::EntityKind;
 use tairix_wintersun_rules::clock::TickRate;
 use tairix_wintersun_rules::entity::SpawnSpec;
@@ -11,12 +12,13 @@ use tairix_wintersun_rules::stat::Stats;
 use tairix_wintersun_rules::terrain::{cell_at, TerrainCell};
 use tairix_wintersun_rules::zone::Zone;
 use tairix_wintersun_world::geom::Elevation;
+use tairix_wintersun_world::land::{Keeping, Unkept};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 
 /// A body a little wider than the player's.
 const RADIUS: u16 = 400;
 
-fn realm(seed: u64, ocean_permille: u16) -> RealmField {
+fn realm(seed: u64, ocean_permille: u16) -> RealmLand {
     let params = RealmParams::new(RealmSpec {
         seed,
         extent_chunks: 8,
@@ -26,13 +28,24 @@ fn realm(seed: u64, ocean_permille: u16) -> RealmField {
         ..RealmParams::default_realm(seed).spec()
     })
     .expect("the spec is in range");
-    RealmField::generate(params).expect("the realm generates")
+    land_of(params)
+}
+
+fn land_of(params: RealmParams) -> RealmLand {
+    let field = RealmField::generate(params).expect("the realm generates");
+    RealmLand::new(field, &SERIAL).expect("the realm's land refines")
+}
+
+/// Where a session starts in `land`, the chunks it tries sharing the ground
+/// they are worn from, as the client's do.
+fn landing(land: &RealmLand) -> Result<Landfall, ClientError> {
+    landfall((land, &mut Keeping::within(usize::MAX)), RADIUS, &SERIAL)
 }
 
 /// Whether a body could stand on the cell at the origin.
-fn origin_stands(field: &RealmField) -> bool {
+fn origin_stands(land: &RealmLand) -> bool {
     let chunk = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })
-        .and_then(|build| build.finish(field))
+        .and_then(|build| build.finish(land, &mut Unkept, &SERIAL))
         .expect("the origin's chunk generates");
     let window = [&chunk];
     let terrain = ChunkTerrain::new(&window).expect("one chunk is sorted");
@@ -40,6 +53,7 @@ fn origin_stands(field: &RealmField) -> bool {
     footprint_clear(&terrain, cell_at(at), at, RADIUS)
 }
 
+#[cfg(feature = "scene-tests")]
 /// The cells of the landing chunk a body can reach from the start, found by
 /// walking the rules' own step test outward: the claim [`Landfall::room`]
 /// makes, checked without the labelling that made it.
@@ -82,8 +96,8 @@ fn dry_start(landfall: &Landfall) -> bool {
 
 #[test]
 fn a_session_starts_where_the_zone_admits_a_body() {
-    let field = realm(0x1A2D_FA11, 380);
-    let landfall = landfall(&field, RADIUS).expect("the realm has ground");
+    let land = realm(0x1A2D_FA11, 380);
+    let landfall = landing(&land).expect("the realm has ground");
     assert_eq!(landfall.chunk.coord(), cell_at(landfall.at).chunk());
 
     let window = [&landfall.chunk];
@@ -100,28 +114,25 @@ fn a_session_starts_where_the_zone_admits_a_body() {
 
 #[test]
 fn a_realm_with_water_at_its_centre_starts_on_land() {
-    let field = (0..512_u64)
+    let land = (0..512_u64)
         .map(|seed| realm(0x5EA0_0000 + seed, 600))
-        .find(|field| !origin_stands(field))
+        .find(|land| !origin_stands(land))
         .expect("some realm has water at its centre");
-    let landfall = landfall(&field, RADIUS).expect("the realm has ground");
+    let landfall = landing(&land).expect("the realm has ground");
     assert!(dry_start(&landfall), "the start holds a body, dry");
 }
 
 #[test]
 fn a_realm_of_open_sea_has_nowhere_to_start() {
-    let field = realm(0x0CEA_0000, 1000);
-    assert!(matches!(
-        landfall(&field, RADIUS),
-        Err(ClientError::NoGround)
-    ));
+    let land = realm(0x0CEA_0000, 1000);
+    assert!(matches!(landing(&land), Err(ClientError::NoGround)));
 }
 
 #[test]
 fn the_start_is_a_pure_function_of_the_realm() {
-    let field = realm(0x1A2D_FA11, 380);
-    let first = landfall(&field, RADIUS).expect("the realm has ground");
-    let again = landfall(&field, RADIUS).expect("the realm has ground");
+    let land = realm(0x1A2D_FA11, 380);
+    let first = landing(&land).expect("the realm has ground");
+    let again = landing(&land).expect("the realm has ground");
     assert_eq!(first.at, again.at);
     assert_eq!(first.room, again.room);
 }
@@ -130,15 +141,15 @@ fn the_start_is_a_pure_function_of_the_realm() {
 /// a lake shore or a walled hollow nearest the centre is certain to come up
 /// — the search once started nearly half of them in one — and one centred
 /// on open sea, whose nearest shore is beach under cliffs.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn every_start_the_client_would_open_on_is_dry_with_room_to_walk() {
     let seeds = (0..16_u64)
         .map(|n| 0x5EED_0000 + n * 7919)
         .chain([0x5EF4_2115]);
     for seed in seeds {
-        let field =
-            RealmField::generate(RealmParams::default_realm(seed)).expect("the realm generates");
-        let landfall = landfall(&field, RADIUS).expect("the realm has ground");
+        let landfall =
+            landing(&land_of(RealmParams::default_realm(seed))).expect("the realm has ground");
         assert!(dry_start(&landfall), "seed {seed:#x} starts in water");
         assert!(
             landfall.room >= ROOM_CELLS,
@@ -253,8 +264,8 @@ fn ground_all_under_water_has_no_start() {
 
 #[test]
 fn every_candidate_chunk_is_named_once_nearest_first() {
-    let field = realm(0x1A2D_FA11, 380);
-    let chunks = nearest_land(&field).expect("the scan fits");
+    let land = realm(0x1A2D_FA11, 380);
+    let chunks = nearest_land(land.field()).expect("the scan fits");
     assert!(!chunks.is_empty() && chunks.len() <= TRIES);
     let mut unique: Vec<ChunkCoord> = chunks.clone();
     unique.sort_unstable_by_key(|coord| (coord.y, coord.x));

@@ -228,6 +228,47 @@ fn grounds_that_meet_in_nature_stay_distinguishable() {
     }
 }
 
+/// Every pair of grounds that share a cell of `chunk` or stand in neighbouring
+/// cells of it, handed to `meet`.
+#[cfg(feature = "scene-tests")]
+fn grounds_meeting_in(
+    chunk: &tairix_wintersun_world::chunk::Chunk,
+    meet: &mut impl FnMut(
+        tairix_wintersun_world::ground::Ground,
+        tairix_wintersun_world::ground::Ground,
+    ),
+) {
+    use alloc::vec::Vec;
+    use tairix_wintersun_world::geom::CHUNK_CELLS;
+    use tairix_wintersun_world::ground::Ground;
+
+    /// A share of a cell a player sees as a ground of its own.
+    const VISIBLE: u8 = 32;
+
+    for cy in 0..CHUNK_CELLS {
+        for cx in 0..CHUNK_CELLS {
+            let here = chunk.ground(cx, cy);
+            let seen: Vec<Ground> = here
+                .slots()
+                .filter(|&(_, weight)| weight >= VISIBLE)
+                .map(|(ground, _)| ground)
+                .collect();
+            for (i, &a) in seen.iter().enumerate() {
+                for &b in &seen[i + 1..] {
+                    meet(a, b);
+                }
+            }
+            if cx + 1 < CHUNK_CELLS {
+                meet(here.dominant(), chunk.ground(cx + 1, cy).dominant());
+            }
+            if cy + 1 < CHUNK_CELLS {
+                meet(here.dominant(), chunk.ground(cx, cy + 1).dominant());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "scene-tests")]
 #[test]
 fn grounds_the_world_lays_together_stay_distinguishable() {
     // Every pair of grounds that share a cell, or stand in neighbouring
@@ -239,13 +280,13 @@ fn grounds_the_world_lays_together_stay_distinguishable() {
     use tairix_wintersun_net::value::ChunkCoord;
     use tairix_wintersun_world::blend::Kind;
     use tairix_wintersun_world::chunk::ChunkBuild;
-    use tairix_wintersun_world::geom::CHUNK_CELLS;
     use tairix_wintersun_world::ground::Ground;
+    use tairix_wintersun_world::land::{Keeping, RealmLand};
     use tairix_wintersun_world::params::{RealmParams, RealmSpec};
     use tairix_wintersun_world::realm::RealmField;
 
-    /// A share of a cell a player sees as a ground of its own.
-    const VISIBLE: u8 = 32;
+    /// The worn ground a realm's chunks keep for one another.
+    const WORN_BYTES: usize = 64 * 1024 * 1024;
 
     let base = RealmSpec {
         extent_chunks: 64,
@@ -289,34 +330,17 @@ fn grounds_the_world_lays_together_stay_distinguishable() {
     };
     for spec in realms {
         let params = RealmParams::new(spec).expect("legal");
-        let field = RealmField::generate(params).expect("solves");
+        let land = RealmField::generate(params)
+            .and_then(|field| RealmLand::new(field, &tairix_parallel::SERIAL))
+            .expect("solves");
+        let mut worn = Keeping::within(WORN_BYTES);
         let half = params.half_extent_chunks();
         for y in (-half..half).step_by(8) {
             for x in (-half..half).step_by(8) {
                 let chunk = ChunkBuild::new(ChunkCoord { x, y })
-                    .and_then(|build| build.finish(&field))
+                    .and_then(|build| build.finish(&land, &mut worn, &tairix_parallel::SERIAL))
                     .expect("builds");
-                for cy in 0..CHUNK_CELLS {
-                    for cx in 0..CHUNK_CELLS {
-                        let here = chunk.ground(cx, cy);
-                        let seen: Vec<Ground> = here
-                            .slots()
-                            .filter(|&(_, weight)| weight >= VISIBLE)
-                            .map(|(ground, _)| ground)
-                            .collect();
-                        for (i, &a) in seen.iter().enumerate() {
-                            for &b in &seen[i + 1..] {
-                                meet(a, b);
-                            }
-                        }
-                        if cx + 1 < CHUNK_CELLS {
-                            meet(here.dominant(), chunk.ground(cx + 1, cy).dominant());
-                        }
-                        if cy + 1 < CHUNK_CELLS {
-                            meet(here.dominant(), chunk.ground(cx, cy + 1).dominant());
-                        }
-                    }
-                }
+                grounds_meeting_in(&chunk, &mut meet);
             }
         }
     }

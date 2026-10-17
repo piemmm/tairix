@@ -8,7 +8,8 @@
 //! placement is a **jittered grid with a priority rule**: every scatter
 //! cell offers exactly one candidate, at a hashed position with a hashed
 //! priority, and a candidate survives only if nothing within its
-//! exclusion radius outranks it.
+//! exclusion radius outranks it: `lib/scatter`'s rule, which the desktop's
+//! ray tracer spaces its woods by too.
 //!
 //! That gives the two properties dart-throwing is used for — a minimum
 //! spacing, and no visible grid — while depending on nothing outside the
@@ -22,6 +23,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_parallel::SERIAL;
+use tairix_scatter::{Cell, Offers, Span, Thinning};
 use tairix_util::mathf;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
 
@@ -129,11 +132,12 @@ struct Candidate {
 ///
 /// # Errors
 ///
-/// [`WorldError::OutOfMemory`] if the item list does not fit.
+/// [`WorldError::OutOfMemory`] if the item list does not fit, and
+/// [`WorldError::OutOfRange`] where the thinning refuses the chunk's rows.
 pub fn for_chunk(
     key: SeedKey,
     chunk: ChunkCoord,
-    footing: &dyn Fn(CellCoord) -> Footing,
+    footing: &(dyn Fn(CellCoord) -> Footing + Sync),
 ) -> Result<Vec<Scattered>, WorldError> {
     let origin = chunk_origin(chunk);
     #[allow(
@@ -141,77 +145,87 @@ pub fn for_chunk(
         reason = "the scatter step is a small constant"
     )]
     let step = SCATTER_STEP as i32;
-    let cells = CHUNK_CELLS.div_ceil(SCATTER_STEP);
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "a chunk is CHUNK_CELLS cells across"
-    )]
-    let span = cells as i32;
-
+    let cells = i64::from(CHUNK_CELLS.div_ceil(SCATTER_STEP));
     // Scatter-cell indices are absolute, so a scatter cell has the same
     // identity whichever chunk asks about it — which is what makes the
     // seam between two chunks agree.
-    let base = (origin.x.div_euclid(step), origin.y.div_euclid(step));
-
-    // The chunk's scatter cells plus one ring, because a candidate just
-    // outside can exclude one just inside. Every offer is computed once
-    // here rather than re-derived by each of its neighbours' exclusion
-    // tests, which is the difference between one pass over the halo and
-    // nine.
-    let halo = span + 2;
-    let mut offers = Vec::new();
-    let across = usize::try_from(halo).unwrap_or(0);
-    offers
-        .try_reserve_exact(across * across)
+    let base = (
+        i64::from(origin.x.div_euclid(step)),
+        i64::from(origin.y.div_euclid(step)),
+    );
+    let mut spans = Vec::new();
+    spans
+        .try_reserve_exact(usize::try_from(cells).unwrap_or(0))
         .map_err(|_| WorldError::OutOfMemory)?;
-    for row in 0..halo {
-        for column in 0..halo {
-            let cell = (base.0 + column - 1, base.1 + row - 1);
-            offers.push(offer(key, cell, step, footing));
-        }
-    }
-
+    spans.extend((base.1..base.1 + cells).map(|row| Span {
+        row,
+        columns: (base.0, base.0 + cells),
+    }));
+    let offered = Offered { key, step, footing };
+    let mut thinning = Thinning::new(spans, offered.reach(), 1)?;
+    let mut kept = Vec::new();
+    while !thinning.step(&offered, &SERIAL, &mut kept)? {}
     let mut placed = Vec::new();
     placed
-        .try_reserve((cells as usize) * (cells as usize))
+        .try_reserve(kept.len())
         .map_err(|_| WorldError::OutOfMemory)?;
-
-    for cy in 0..span {
-        for cx in 0..span {
-            let cell = (base.0 + cx, base.1 + cy);
-            let Some(candidate) = offers[index_of(cx, cy, halo)] else {
-                continue;
-            };
-            if outranked(&offers, cx, cy, halo, cell, candidate) {
-                continue;
-            }
-            let Some(at) = candidate.at.centre() else {
-                continue;
-            };
-            placed.push(Scattered {
-                at: WorldPoint {
-                    x: at.x + candidate.sub.0,
-                    y: at.y + candidate.sub.1,
-                },
-                kind: candidate.kind,
-                host: candidate.host,
-                variant: candidate.variant,
-                scale: candidate.scale,
-            });
-        }
-    }
+    placed.extend(kept.into_iter().filter_map(|(_, candidate)| {
+        let at = candidate.at.centre()?;
+        Some(Scattered {
+            at: WorldPoint {
+                x: at.x + candidate.sub.0,
+                y: at.y + candidate.sub.1,
+            },
+            kind: candidate.kind,
+            host: candidate.host,
+            variant: candidate.variant,
+            scale: candidate.scale,
+        })
+    }));
     Ok(placed)
 }
 
-/// The offer slot for a chunk-relative scatter cell, which the halo shifts
-/// by one.
-fn index_of(cx: i32, cy: i32, halo: i32) -> usize {
-    // Callers pass a chunk-relative cell, so both components are in
-    // `-1..=span`; a value outside that would index the halo's first slot
-    // rather than wrap into another row.
-    let column = usize::try_from(cx + 1).unwrap_or(0);
-    let row = usize::try_from(cy + 1).unwrap_or(0);
-    row * usize::try_from(halo).unwrap_or(1) + column
+/// The scatter cells' candidates, read where `footing` says what each stands
+/// on.
+struct Offered<'a> {
+    key: SeedKey,
+    step: i32,
+    footing: &'a (dyn Fn(CellCoord) -> Footing + Sync),
+}
+
+impl Offers for Offered<'_> {
+    type Offer = Candidate;
+    type Rank = u64;
+    type Bound = ();
+
+    fn reach(&self) -> u32 {
+        // No exclusion reaches past the ring of neighbouring scatter cells.
+        1
+    }
+
+    fn offer(&self, (x, y): Cell) -> Option<Self::Offer> {
+        let cell = (i32::try_from(x).ok()?, i32::try_from(y).ok()?);
+        offer(self.key, cell, self.step, self.footing)
+    }
+
+    fn rank(&self, candidate: &Self::Offer) -> Self::Rank {
+        candidate.priority
+    }
+
+    fn crowds(&self, candidate: &Self::Offer, other: &Self::Offer) -> bool {
+        let reach = i64::from(candidate.kind.exclusion_cells());
+        let ox = i64::from(other.at.x - candidate.at.x).abs();
+        let oy = i64::from(other.at.y - candidate.at.y).abs();
+        ox.max(oy) < reach
+    }
+
+    fn bound(&self, _: &Self::Offer) {}
+
+    fn join(&self, (): (), (): ()) {}
+
+    fn within(&self, _: &Self::Offer, (): (), cells: u32) -> bool {
+        cells <= self.reach()
+    }
 }
 
 /// The candidate a scatter cell offers, if the ground admits one.
@@ -266,42 +280,6 @@ fn offer(
         // tie.
         priority: key.lattice(Stage::Scatter, cell.0, cell.1),
     })
-}
-
-/// Whether anything within the candidate's exclusion radius outranks it.
-fn outranked(
-    offers: &[Option<Candidate>],
-    cx: i32,
-    cy: i32,
-    halo: i32,
-    cell: (i32, i32),
-    candidate: Candidate,
-) -> bool {
-    let reach = i64::from(candidate.kind.exclusion_cells());
-
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let Some(other) = offers[index_of(cx + dx, cy + dy, halo)] else {
-                continue;
-            };
-            // A strict comparison on the priority, then on the scatter
-            // cell: a total order, so of any two candidates exactly one
-            // yields and neither is dropped for the other's sake.
-            let neighbour = (cell.0 + dx, cell.1 + dy);
-            if (other.priority, neighbour) <= (candidate.priority, cell) {
-                continue;
-            }
-            let ox = i64::from(other.at.x - candidate.at.x).abs();
-            let oy = i64::from(other.at.y - candidate.at.y).abs();
-            if ox.max(oy) < reach {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// How a biome is covered: the one grouping both what grows in it and how

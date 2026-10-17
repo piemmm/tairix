@@ -1,4 +1,4 @@
-use super::{billow, fbm, ridged, value, warp, LACUNARITY, OCTAVES, PERSISTENCE};
+use super::{fbm, ridged, value, warp, LACUNARITY, OCTAVES, PERSISTENCE};
 use crate::seed::{SeedKey, Stage};
 
 const KEY: SeedKey = SeedKey::new(0xA5A5_1234);
@@ -39,7 +39,6 @@ fn the_summed_forms_stay_in_their_stated_ranges() {
         let t = f64::from(step) * 0.173;
         assert!((-1.0..=1.0).contains(&fbm(KEY, Stage::Continent, t, t * 0.61)));
         assert!((0.0..=1.0).contains(&ridged(KEY, Stage::Ridge, t, t * 0.61)));
-        assert!((0.0..=1.0).contains(&billow(KEY, Stage::Dune, t, t * 0.61)));
     }
 }
 

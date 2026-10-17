@@ -79,6 +79,8 @@ tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # `NetChannelClient` against, so the two halves of `netchan-v1` are proven
 # against the one shared server. Test scaffolding only.
 tairix-netchan = { path = "../../../lib/netchan", version = "=0.0.0" }
+# The tests' reproducible SplitMix64 draws.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

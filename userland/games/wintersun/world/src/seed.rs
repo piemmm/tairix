@@ -17,6 +17,18 @@
 use tairix_hash::FastHash;
 use tairix_rng::{unit_from, NonCryptoRng, RandU64};
 
+/// The word `key` assigns lattice point `(x, y)` of whatever `tag` names:
+/// the tag and the point hashed as little-endian bytes, so the word is the
+/// same on every target.
+#[must_use]
+pub fn lattice_word(key: u64, tag: u64, (x, y): (i32, i32)) -> u64 {
+    let mut message = [0u8; 16];
+    message[0..8].copy_from_slice(&tag.to_le_bytes());
+    message[8..12].copy_from_slice(&x.to_le_bytes());
+    message[12..16].copy_from_slice(&y.to_le_bytes());
+    FastHash::hash_bytes(key, &message)
+}
+
 /// What a stream or lattice value belongs to.
 ///
 /// The discriminants are frozen: changing one re-rolls every realm ever
@@ -33,10 +45,9 @@ pub enum Stage {
     Ridge = 3,
     /// Domain warp applied to the relief lattices.
     Warp = 4,
-    /// Fine per-cell relief detail.
+    /// The seed the land's relief below the coarse step is drawn under.
     Detail = 5,
-    /// Dune billow inside arid, low-relief ground.
-    Dune = 6,
+    // 6, the dunes' billow, is retired.
     /// The jitter on the temperature field.
     Climate = 7,
     /// The patch field that varies a biome's grounds across it.
@@ -72,11 +83,7 @@ impl SeedKey {
     /// the same word on every target, and no traversal order can change it.
     #[must_use]
     pub fn lattice(self, stage: Stage, x: i32, y: i32) -> u64 {
-        let mut message = [0u8; 16];
-        message[0..8].copy_from_slice(&(stage as u64).to_le_bytes());
-        message[8..12].copy_from_slice(&x.to_le_bytes());
-        message[12..16].copy_from_slice(&y.to_le_bytes());
-        FastHash::hash_bytes(self.seed, &message)
+        lattice_word(self.seed, stage as u64, (x, y))
     }
 
     /// The lattice value scaled into `0.0..1.0`.

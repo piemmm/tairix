@@ -9,6 +9,7 @@
 
 use core::f64::consts::TAU;
 
+use tairix_mix::{mix32, mix64, unit};
 use tairix_util::mathf;
 
 /// The golden ratio, `(1 + √5) / 2`.
@@ -17,27 +18,6 @@ pub(crate) const GOLDEN_RATIO: f64 = 1.618_033_988_749_895;
 /// The golden angle, `2π / φ²`: points turned this far apart spread evenly
 /// round a circle however many there are.
 pub(crate) const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
-
-/// A 32-bit integer finaliser with low bias (Wellons, "lowbias32").
-pub(crate) const fn mix32(mut x: u32) -> u32 {
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x7feb_352d);
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x846c_a68b);
-    x ^ (x >> 16)
-}
-
-/// The `SplitMix64` finaliser.
-pub(crate) const fn mix64(mut x: u64) -> u64 {
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
-}
-
-/// `bits` as a fraction in `0.0..1.0`.
-pub(crate) fn unit(bits: u32) -> f64 {
-    f64::from(bits) * (1.0 / 4_294_967_296.0)
-}
 
 /// Pairs drawn from the scrambled Sobol sequence; later pairs, deep in a path
 /// where stratification buys little, are hashed outright.
@@ -174,6 +154,20 @@ const FILTER_DEVIATION: f64 = 0.5;
 /// centre, where the filter is cut off, having fallen to about a hundredth of
 /// its peak.
 const FILTER_SHARE: f64 = 0.997_300_203_936_739_8;
+
+/// The count a Poisson draw of mean `mean` gives `draw` of the way through
+/// its distribution, `0.0..1.0`, found by summing its terms: no more than
+/// `most`.
+pub(crate) fn poisson(mean: f64, draw: f64, most: u32) -> u32 {
+    let mut term = mathf::exp(-mean);
+    let (mut total, mut count) = (term, 0);
+    while total <= draw && count < most {
+        count += 1;
+        term *= mean / f64::from(count);
+        total += term;
+    }
+    count
+}
 
 /// An offset of less than three deviations, in pixels, distributed as the
 /// pixel's Gaussian reconstruction filter, from a number in `0.0..1.0`: the

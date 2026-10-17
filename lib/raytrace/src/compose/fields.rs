@@ -27,6 +27,11 @@ use tairix_countryside::layout::Layout;
 use tairix_countryside::plane::{self, Walk};
 use tairix_countryside::usage::Use;
 use tairix_countryside::{self as countryside, Point};
+use tairix_land::course::{traced, Courses, Indexing, Mark, Reach, INDEX_UNIT};
+use tairix_land::grown::Grown;
+use tairix_land::Season;
+use tairix_mix::mix64;
+use tairix_noise::noise2;
 use tairix_parallel::{for_each, JobRunner};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
@@ -36,17 +41,12 @@ use super::landscape::{ground_of, Vantage};
 use super::plants::{self, Grove, Kind, Stand};
 use super::woodland::ACROSS;
 use super::{Dice, Stage};
-use crate::course::{traced, Courses, Indexing, Mark, Reach, INDEX_UNIT};
 use crate::detail::Bounds as Reaches;
-use crate::farmed::Grown;
 use crate::fracture::{running, tear, Break, Grain};
 use crate::ground::Bounds as Painted;
 use crate::heightfield::Heightfield;
 use crate::land::Land;
-use crate::noise::noise2;
-use crate::sample::mix64;
 use crate::solid::Form;
-use crate::tree::Season;
 use crate::vector::{share, wrapped, Frame, Pose, Vec3};
 use crate::wood::{rooted, Habit};
 
@@ -123,6 +123,14 @@ pub(super) struct Fielding {
     phase: Phase,
 }
 
+/// The crops a farmed land's fields stand about the eye, in the order they
+/// are stood.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Crop {
+    Maize,
+    Vines,
+}
+
 /// Where a farmed land's setting out stands.
 #[allow(
     clippy::large_enum_variant,
@@ -138,8 +146,17 @@ enum Phase {
     },
     /// The cut fields' bales being laid.
     Bales,
-    /// The maize fields and vineyards about the eye being stood as plants.
-    Crops,
+    /// The maize fields, then the vineyards, about the eye being stood as
+    /// plants, one a unit, from `parcel` among the layout's: those `crops`
+    /// stands, and the plants each kind stands built as first wanted.
+    Crops {
+        parcel: usize,
+        crops: Crop,
+        maize: maize::Built,
+        vines: Option<vines::Made>,
+    },
+    /// The pats its stock leave being laid.
+    Pats,
     /// The near boundaries from `next`, the walls among them being laid ahead
     /// of it from those before `ahead`, and the hedge in hand being planted.
     Boundaries {
@@ -159,6 +176,23 @@ enum Phase {
     /// The stonework raised, then each timber.
     Raising,
     Done,
+}
+
+impl Phase {
+    /// The crops being stood from the first parcel, the maize fields first.
+    const CROPS: Self = Self::Crops {
+        parcel: 0,
+        crops: Crop::Maize,
+        maize: [None; 2],
+        vines: None,
+    };
+    /// The near boundaries being set out from the nearest.
+    const BOUNDARIES: Self = Self::Boundaries {
+        next: 0,
+        ahead: 0,
+        walls: Vec::new(),
+        hedging: None,
+    };
 }
 
 impl Fielding {
@@ -315,7 +349,7 @@ impl Fielding {
         match &self.phase {
             Phase::Woodlots { .. } => 0.0,
             Phase::Bales => 0.02 + 0.03 * self.baling.as_ref().map_or(1.0, Baling::done),
-            Phase::Crops => 0.05,
+            Phase::Crops { .. } | Phase::Pats => 0.05,
             Phase::Boundaries { next, .. } => 0.05 + 0.8 * share(*next, self.near.len()),
             Phase::Distant(distant) => 0.85 + 0.05 * distant.done(),
             Phase::Painting { hedges, .. } => 0.9 + if hedges.is_some() { 0.04 } else { 0.0 },
@@ -350,19 +384,20 @@ impl Fielding {
                     None => true,
                 };
                 if baled {
-                    Phase::Crops
+                    Phase::CROPS
                 } else {
                     Phase::Bales
                 }
             }
-            Phase::Crops => {
-                self.crops(stage, (land, layout))?;
-                Phase::Boundaries {
-                    next: 0,
-                    ahead: 0,
-                    walls: Vec::new(),
-                    hedging: None,
-                }
+            Phase::Crops {
+                parcel,
+                crops,
+                maize,
+                vines,
+            } => self.crops(stage, (land, layout), (parcel, crops), (maize, vines))?,
+            Phase::Pats => {
+                pats::lay(stage, land, (self.eye, self.reach.pats), self.grazing())?;
+                Phase::BOUNDARIES
             }
             Phase::Boundaries {
                 mut next,
@@ -427,23 +462,57 @@ impl Fielding {
         Some(matches!(self.phase, Phase::Done))
     }
 
-    /// Stand the crops of `layout` near the eye on `land`: its maize and its
-    /// vines, and the pats its stock leave.
-    fn crops(&self, stage: &mut Stage, (land, layout): (&Land, &Layout)) -> Option<()> {
-        maize::stand(
-            stage,
-            (land, layout),
-            self.eye,
-            (maize::standing(&self.reach), self.crops),
-        )?;
-        vines::stand(
-            stage,
-            (land, layout),
-            (self.eye, self.season),
-            (self.reach.vines, mix64(self.crops ^ 0x76)),
-        )?;
-        pats::lay(stage, land, (self.eye, self.reach.pats), self.grazing())?;
-        Some(())
+    /// Stand the next of `layout`'s fields of `crops` near the eye on `land`
+    /// from `parcel`, looking at no more than a unit's parcels, each kind's
+    /// plants built into `maize` and `vines` as first wanted: the phase after.
+    fn crops(
+        &self,
+        stage: &mut Stage,
+        (land, layout): (&Land, &Layout),
+        (mut parcel, crops): (usize, Crop),
+        (mut maize, mut vines): (maize::Built, Option<vines::Made>),
+    ) -> Option<Phase> {
+        let parcels = layout.parcels();
+        for _ in 0..PLACES_A_UNIT {
+            let Some(field) = parcels.get(parcel) else {
+                break;
+            };
+            parcel += 1;
+            let stood = match crops {
+                Crop::Maize => maize::stand(
+                    stage,
+                    (land, field),
+                    self.eye,
+                    (maize::standing(&self.reach), self.crops),
+                    &mut maize,
+                )?,
+                Crop::Vines => vines::stand(
+                    stage,
+                    (land, field),
+                    (self.eye, self.season),
+                    (self.reach.vines, mix64(self.crops ^ 0x76)),
+                    &mut vines,
+                )?,
+            };
+            if stood {
+                break;
+            }
+        }
+        Some(match (parcel >= parcels.len(), crops) {
+            (false, _) => Phase::Crops {
+                parcel,
+                crops,
+                maize,
+                vines,
+            },
+            (true, Crop::Maize) => Phase::Crops {
+                parcel: 0,
+                crops: Crop::Vines,
+                maize,
+                vines,
+            },
+            (true, Crop::Vines) => Phase::Pats,
+        })
     }
 
     /// Raise on `stage` what its masons built and its bales.

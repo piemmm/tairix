@@ -5,10 +5,11 @@
 
 use alloc::vec::Vec;
 
+use tairix_land::attributes::Attributes;
+
 use super::*;
 use crate::compose::testland::{grounded, land};
 use crate::detail::Detail;
-use crate::heightfield::Attributes;
 use crate::shape::Shape;
 
 /// Dry ground neither worn nor built up, on no road, bare of snow.

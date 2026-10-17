@@ -5,6 +5,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use tairix_mix::SplitMix64;
+
 use super::iface::ServiceHint;
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, Net, NetOffloads};
 use tairix_abi::driver::net_channel::RxFilterPolicy;
@@ -68,21 +70,16 @@ fn name(text: &str) -> [u8; IF_NAME_LEN] {
 }
 
 /// A deterministic RFC 8981 temporary-address randomness source for the
-/// tests (splitmix64): distinct identifiers, reproducible run to run.
+/// tests (`SplitMix64`): distinct identifiers, reproducible run to run.
 /// The service normally injects a CSPRNG-backed one; the engine consults
 /// it only while `net.ipv6.privacy` is enabled.
 #[derive(Debug)]
-struct TestTempSource(u64);
+struct TestTempSource(SplitMix64);
 
 impl tairix_net::iface::TempAddrSource for TestTempSource {
     fn fill_random(&mut self, out: &mut [u8]) {
         for chunk in out.chunks_mut(8) {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^= z >> 31;
-            let bytes = z.to_le_bytes();
+            let bytes = self.0.next_u64().to_le_bytes();
             let len = chunk.len();
             chunk.copy_from_slice(&bytes[..len]);
         }
@@ -90,7 +87,7 @@ impl tairix_net::iface::TempAddrSource for TestTempSource {
 }
 
 fn test_temp_source() -> alloc::boxed::Box<dyn tairix_net::iface::TempAddrSource> {
-    alloc::boxed::Box::new(TestTempSource(0x1234_5678))
+    alloc::boxed::Box::new(TestTempSource(SplitMix64::new(0x1234_5678)))
 }
 
 fn test_temp_factory() -> crate::iface::TempAddrFactory {
@@ -131,20 +128,14 @@ fn settings_with_budget(socket_budget_bytes: u64) -> NetworkSettings {
 }
 
 /// A deterministic DHCPv4 client randomness factory for the tests: a
-/// splitmix64 sequence per source, so transaction ids and backoff jitter
+/// `SplitMix64` sequence per source, so transaction ids and backoff jitter
 /// are distinct yet reproducible run to run. The service normally injects
 /// a CSPRNG-backed one.
 fn test_dhcp_rng_factory() -> crate::iface::DhcpRngFactory {
     alloc::boxed::Box::new(|| {
-        let mut state: u64 = 0xD1CE_5EED_0000_0001;
-        alloc::boxed::Box::new(move || {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^= z >> 31;
-            (z >> 32) as u32
-        }) as alloc::boxed::Box<dyn FnMut() -> u32>
+        let mut draws = SplitMix64::new(0xD1CE_5EED_0000_0001);
+        alloc::boxed::Box::new(move || (draws.next_u64() >> 32) as u32)
+            as alloc::boxed::Box<dyn FnMut() -> u32>
     })
 }
 

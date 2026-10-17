@@ -37,14 +37,17 @@
 //! in only by the host harness crates and the `tools/xtask` orchestrator, so
 //! it is never part of any TAIRiX build graph.
 //!
-//! It deliberately depends on nothing: the seed is a *test-input* seed, not a
-//! security seed, so it must not route through `lib/crypto` / `lib/rng`
-//! (the charter governs the kernel CSPRNG, not host test tooling).
+//! It depends on nothing but `lib/mix`'s finaliser: the seed is a
+//! *test-input* seed, not a security seed, so it must not route through
+//! `lib/crypto` / `lib/rng` (the charter governs the kernel CSPRNG, not host
+//! test tooling).
 
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use tairix_mix::SplitMix64;
 
 /// Seed environment variable the `cargo xtask fuzz` orchestrator exports and
 /// the fuzz harnesses read.
@@ -90,22 +93,12 @@ pub const RNGSOAK_BUDGET_ENV: &str = "TAIRIX_RNGSOAK_BUDGET_SECS";
 /// pass; unset selects the harness's own smoke count.
 pub const RNGSOAK_BYTES_ENV: &str = "TAIRIX_RNGSOAK_BYTES";
 
-/// `SplitMix64`'s Weyl increment, 2^64 divided by the golden ratio.
-const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
-
-/// `SplitMix64`'s output finaliser: a bijection with full avalanche.
-fn mix(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
 /// Hash `x` to a well-spread 64-bit value, so even sequential inputs (a
 /// counter, a job index) map to unrelated outputs. Equal to the first draw
 /// of `Prng::new(x)`.
 #[must_use]
 pub fn splitmix64(x: u64) -> u64 {
-    mix(x.wrapping_add(GOLDEN_GAMMA))
+    SplitMix64::new(x).next_u64()
 }
 
 /// Draw a fresh, hard-to-repeat seed from host entropy.
@@ -263,19 +256,18 @@ pub fn expand_seed(seed: u64) -> [u8; 32] {
 /// per run. A bounded or narrow draw consumes one word whatever its argument,
 /// so where a stream goes never depends on a bound drawn from it.
 #[derive(Debug)]
-pub struct Prng(u64);
+pub struct Prng(SplitMix64);
 
 impl Prng {
     /// A generator whose stream is fixed by `seed`. Every seed is valid.
     #[must_use]
     pub fn new(seed: u64) -> Self {
-        Self(seed)
+        Self(SplitMix64::new(seed))
     }
 
     /// The next 64-bit value.
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(GOLDEN_GAMMA);
-        mix(self.0)
+        self.0.next_u64()
     }
 
     /// The next 32-bit value.

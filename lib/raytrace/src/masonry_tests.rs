@@ -1,8 +1,10 @@
 //! Host tests of masonry's colour: each unit its own shade, and each face
 //! weathered as water and age leave it.
 
+use tairix_land::attributes::QUANTITIES;
+
 use super::*;
-use crate::heightfield::{Grows, QUANTITIES};
+use crate::heightfield::Grows;
 
 fn masonry(unit: Unit) -> Masonry {
     Masonry {

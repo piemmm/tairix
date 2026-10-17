@@ -3,11 +3,12 @@
 
 use core::ops::Range;
 
+use tairix_land::attributes::Attributes;
 use tairix_parallel::JobRunner;
 
 use crate::grass::Lawn;
-use crate::heightfield::{apart, Attributes, Heightfield, Sealing};
-use crate::terrain::Sea;
+use crate::heightfield::{apart, Heightfield, Sealing};
+use crate::sea::Sea;
 use crate::vector::{real, share, single};
 
 /// What fills a grid.

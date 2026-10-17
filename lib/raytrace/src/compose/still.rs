@@ -3,6 +3,7 @@
 
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_land::Season;
 use tairix_util::mathf;
 
 use super::landscape::{self, Lawning, Vantage, GREEN};
@@ -17,7 +18,6 @@ use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
 use crate::scene::Exposure;
 use crate::sky::{Dome, Gradient, Sky};
-use crate::tree::Season;
 use crate::vector::{Frame, Vec3};
 
 const CLASSIC: Climate = Climate {

@@ -45,7 +45,7 @@ use crate::view::Viewport;
 /// engine or the world generator beneath them changes this. It is the
 /// record of what the game looks like, not a number to be re-derived when a
 /// test fails.
-pub const REFERENCE_DIGEST: u64 = 0xF36D_3D73_9A14_2B07;
+pub const REFERENCE_DIGEST: u64 = 0x0DA7_63C6_E985_3298;
 
 /// The window the reference frames are drawn at.
 ///
@@ -96,7 +96,7 @@ pub fn reference() -> Result<u64, ClientError> {
 /// Draw each of [`FRAMES`] in order, handing `each` the frame and the
 /// renderer that drew it.
 fn draw_frames(mut each: impl FnMut(&Surface, &Renderer)) -> Result<(), ClientError> {
-    let mut world = reference::World::generate()?;
+    let mut world = reference::World::generate(&tairix_parallel::SERIAL)?;
     let set = Set::new().map_err(|_| ClientError::Figure)?;
     let clips = set.clips().map_err(|_| ClientError::Figure)?;
     let mut cache = reference::cache(&tairix_reclaim::Unpressured);

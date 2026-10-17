@@ -27,7 +27,6 @@ use core::ops::Range;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::band;
 use crate::refraction::{refractivity, Refraction};
 use crate::vector::{cell_of, real, single, singles, Vec3};
 
@@ -44,13 +43,67 @@ pub(crate) const WAVELENGTHS: [f64; 3] = [0.680, 0.550, 0.440];
 /// Rayleigh scattering at sea level, per kilometre, and its scale height.
 const RAYLEIGH: Vec3 = Vec3::new(5.802e-3, 13.558e-3, 33.1e-3);
 const RAYLEIGH_HEIGHT: f64 = 8.0;
-/// Haze's scattering and absorption at sea level on a clear day, and its
-/// scale height.
-const MIE_SCATTER: f64 = 3.996e-3;
-const MIE_ABSORB: f64 = 0.444e-3;
-const MIE_HEIGHT: f64 = 1.2;
-/// How much haze throws light forward.
-const MIE_G: f64 = 0.8;
+/// A layer of aerosol as measured: its floor and ceiling above the sea, in
+/// kilometres; the height over which its extinction falls by `e` above its
+/// floor; its extinction at 0.55 µm at its floor, per kilometre; its
+/// single-scattering albedo; and its Ångström exponents below and above
+/// 0.5 µm.
+#[derive(Copy, Clone, Debug)]
+struct Layer {
+    floor: f64,
+    ceiling: f64,
+    scale: f64,
+    extinction: f64,
+    albedo: f64,
+    angstrom: (f64, f64),
+}
+
+/// A clear day's aerosol, as Hess, Koepke and Schult's OPAC has it ("Optical
+/// Properties of Aerosols and Clouds", BAMS 1998, Tables 3 and 5): the
+/// continental clean mixing layer at 80% humidity, then the free
+/// troposphere's background 0.013 deep and the stratosphere's 0.005 deep,
+/// the two spread evenly through their layers. A scene's haze multiplies
+/// the mixing layer's.
+const AEROSOLS: [Layer; 3] = [
+    Layer {
+        floor: 0.0,
+        ceiling: 2.0,
+        scale: 8.0,
+        extinction: 0.026,
+        albedo: 0.972,
+        angstrom: (1.10, 1.42),
+    },
+    Layer {
+        floor: 2.0,
+        ceiling: 12.0,
+        scale: f64::INFINITY,
+        extinction: 0.013 / 10.0,
+        albedo: 0.934,
+        angstrom: (1.21, 1.58),
+    },
+    Layer {
+        floor: 12.0,
+        ceiling: 35.0,
+        scale: f64::INFINITY,
+        extinction: 0.005 / 23.0,
+        albedo: 1.0,
+        angstrom: (0.74, 1.14),
+    },
+];
+/// The heights the aerosol's layers end at, where its extinction steps.
+const AEROSOL_EDGES: [f64; 3] = [
+    AEROSOLS[0].ceiling,
+    AEROSOLS[1].ceiling,
+    AEROSOLS[2].ceiling,
+];
+/// The wavelength OPAC's extinction is given at, and the one its Ångström
+/// exponents change at, in micrometres.
+const AEROSOL_REFERENCE: f64 = 0.55;
+const ANGSTROM_SWITCH: f64 = 0.5;
+/// Haze's asymmetry, the mixing layer's in OPAC (Table 3), and the
+/// Cornette–Shanks parameter that scatters with it.
+const HAZE_ASYMMETRY: f64 = 0.709;
+const MIE_G: f64 = cornette_shanks(HAZE_ASYMMETRY);
 /// Ozone's absorption at the peak of its layer, which is 30 km thick about
 /// 25 km up.
 const OZONE: Vec3 = Vec3::new(0.650e-3, 1.881e-3, 0.085e-3);
@@ -150,14 +203,52 @@ fn centre(index: usize, count: usize) -> f64 {
 #[derive(Copy, Clone, Debug)]
 struct Medium {
     rayleigh: Vec3,
-    mie: f64,
+    mie: Vec3,
     extinction: Vec3,
+}
+
+/// A scene's aerosol in each channel: each layer's extinction and
+/// scattering at its floor, per kilometre.
+#[derive(Copy, Clone, Debug)]
+struct Haze {
+    layers: [(Layer, Vec3, Vec3); 3],
+}
+
+impl Layer {
+    /// This layer's extinction at `wavelength` micrometres, as a share of
+    /// its extinction at 0.55 µm.
+    fn spectral(&self, wavelength: f64) -> f64 {
+        // Each exponent holds over its own side of 0.5 µm, so a wavelength
+        // short of it is reached through that switch.
+        let (short, long) = self.angstrom;
+        let falling = |exponent: f64, (from, to): (f64, f64)| mathf::power(from / to, exponent);
+        if wavelength < ANGSTROM_SWITCH {
+            falling(long, (AEROSOL_REFERENCE, ANGSTROM_SWITCH))
+                * falling(short, (ANGSTROM_SWITCH, wavelength))
+        } else {
+            falling(long, (AEROSOL_REFERENCE, wavelength))
+        }
+    }
+}
+
+impl Haze {
+    /// The aerosol of a day `haze` times as hazy as a clear one.
+    fn of(haze: f64) -> Self {
+        let layers = AEROSOLS.map(|layer| {
+            let [red, green, blue] = WAVELENGTHS.map(|wavelength| layer.spectral(wavelength));
+            let mixing = if layer.floor <= 0.0 { haze } else { 1.0 };
+            let extinction = Vec3::new(red, green, blue) * (layer.extinction * mixing);
+            (layer, extinction, extinction * layer.albedo)
+        });
+        Self { layers }
+    }
 }
 
 /// The atmosphere of one scene: its air, the sun in it, and its tables.
 #[derive(Clone, Debug)]
 pub(crate) struct Atmosphere {
     air: Air,
+    haze: Haze,
     refraction: Refraction,
     /// Each channel's bending, against the green's.
     dispersion: Vec3,
@@ -240,6 +331,7 @@ impl Atmosphere {
         let [red, green, blue] = WAVELENGTHS.map(refractivity);
         Some(Self {
             air,
+            haze: Haze::of(air.haze),
             refraction: Refraction::new(green),
             dispersion: Vec3::new(red / green, 1.0, blue / green),
             paths: Paths::new()?,
@@ -273,9 +365,9 @@ impl Atmosphere {
         match self.stage {
             Stage::Paths(row) => {
                 let end = (row + unit).min(PATHS.1);
-                let (air, refraction) = (self.air, &self.refraction);
+                let (haze, refraction) = (&self.haze, &self.refraction);
                 self.paths.fill(row..end, runner, &|row, slot| {
-                    path_row(&air, refraction, row, slot);
+                    path_row(haze, refraction, row, slot);
                 });
                 if end >= PATHS.1 {
                     let most = self.paths.most_bent() * self.dispersion.max_element();
@@ -287,9 +379,9 @@ impl Atmosphere {
             }
             Stage::Multiple(row) => {
                 let end = (row + unit).min(MULTIPLE.1);
-                let (air, paths) = (self.air, &self.paths);
+                let (air, haze, paths) = (self.air, &self.haze, &self.paths);
                 fill_rows(&mut self.multiple, row..end, runner, &|u, v| {
-                    multiple_texel(&air, paths, u, v)
+                    multiple_texel((&air, haze), paths, u, v)
                 });
                 self.stage = if end >= MULTIPLE.1 {
                     Stage::View(0)
@@ -301,6 +393,7 @@ impl Atmosphere {
                 let end = (row + unit).min(VIEW.1);
                 let reader = Reader {
                     air: &self.air,
+                    haze: &self.haze,
                     paths: &self.paths,
                     multiple: &self.multiple,
                 };
@@ -356,6 +449,7 @@ impl Atmosphere {
         let per_row = azimuths * slices;
         let reader = Reader {
             air: &self.air,
+            haze: &self.haze,
             paths: &self.paths,
             multiple: &self.multiple,
         };
@@ -365,7 +459,7 @@ impl Atmosphere {
         else {
             return;
         };
-        band::for_each(runner, cells, (rows.start, per_row), &|row, band| {
+        tairix_parallel::for_each_band(runner, cells, (rows.start, per_row), &|row, band| {
             let v = centre(row, AERIAL.1);
             for (column, slices) in band.chunks_mut(AERIAL.2).enumerate() {
                 let u = centre(column, azimuths);
@@ -736,7 +830,7 @@ fn fill_rows(
     let Some(cells) = table.cells.get_mut(start * columns..end * columns) else {
         return;
     };
-    band::for_each(runner, cells, (start, columns), &|row, cells| {
+    tairix_parallel::for_each_band(runner, cells, (start, columns), &|row, cells| {
         let v = centre(row, height);
         for (column, cell) in cells.iter_mut().enumerate() {
             *cell = singles(texel(centre(column, columns), v));
@@ -747,6 +841,7 @@ fn fill_rows(
 /// What finished tables read from.
 struct Reader<'a> {
     air: &'a Air,
+    haze: &'a Haze,
     paths: &'a Paths,
     multiple: &'a Table,
 }
@@ -798,25 +893,22 @@ impl Reader<'_> {
         let sun = self.air.sun;
         let cos = dir.dot(sun);
         let eye = Vec3::new(0.0, eye_radius(self.air), 0.0);
-        let step = (to - from) / f64::from(steps.max(1));
         let mut gathered = Scattered::NONE;
-        for index in 0..steps {
-            let t = from + (f64::from(index) + 0.5) * step;
+        for (t, step) in stations((eye.y, dir.y), (from, to), steps) {
             let point = eye + dir * t;
             let r = point.length();
             let up = point / r;
-            let medium = medium(r - GROUND, self.air.haze);
+            let medium = medium(r - GROUND, self.haze);
             let sun_cos = up.dot(sun);
             // The sun's light arrives bent toward the vertical, and scatters
             // about the way it arrives.
             let single = self.paths.bent(r, sun_cos).map_or(Vec3::ZERO, |bent| {
                 let cos = bent.toward(cos, up.dot(dir));
-                (medium.rayleigh * rayleigh_phase(cos)
-                    + Vec3::splat(medium.mie * mie_phase(cos, MIE_G)))
+                (medium.rayleigh * rayleigh_phase(cos) + medium.mie * mie_phase(cos, MIE_G))
                     * bent.lit()
             });
             let multiple = self.multiple(r, sun_cos);
-            let scattering = medium.rayleigh + Vec3::splat(medium.mie);
+            let scattering = medium.rayleigh + medium.mie;
             let through = (medium.extinction * -step).exp();
             let kept = gathered.kept;
             gathered.sun += kept * integrated(single * self.air.solar, medium.extinction, through);
@@ -831,6 +923,47 @@ impl Reader<'_> {
         }
         gathered
     }
+}
+
+/// The middles of the steps a ray from radius `r` rising at cosine `mu`
+/// takes from `from` to `to` kilometres, about `steps` of them, and their
+/// lengths: no step straddling a height the aerosol's extinction steps at,
+/// so a midpoint never stands for air of another layer.
+fn stations(
+    (r, mu): (f64, f64),
+    (from, to): (f64, f64),
+    steps: u32,
+) -> impl Iterator<Item = (f64, f64)> {
+    let mut ends = [to; 2 * AEROSOL_EDGES.len() + 1];
+    let mut count = 0;
+    for edge in AEROSOL_EDGES {
+        let edge = GROUND + edge;
+        let (b, c) = (r * mu, r * r - edge * edge);
+        let disc = b * b - c;
+        if disc > 0.0 {
+            let root = mathf::sqrt(disc);
+            for t in [-b - root, -b + root] {
+                if let Some(slot) = ends.get_mut(count).filter(|_| t > from && t < to) {
+                    *slot = t;
+                    count += 1;
+                }
+            }
+        }
+    }
+    if let Some(ends) = ends.get_mut(..=count) {
+        ends.sort_unstable_by(f64::total_cmp);
+    }
+    let span = (to - from).max(f64::MIN_POSITIVE);
+    let mut start = from;
+    ends.into_iter().take(count + 1).flat_map(move |end| {
+        let length = end - start;
+        let taken = u32::try_from(mathf::round_i32(f64::from(steps) * length / span))
+            .unwrap_or(0)
+            .max(1);
+        let (begin, step) = (start, length / f64::from(taken));
+        start = end;
+        (0..taken).map(move |index| (begin + (f64::from(index) + 0.5) * step, step))
+    })
 }
 
 /// The light a step adds of `source` over a stretch that keeps `through` of
@@ -862,19 +995,40 @@ fn eye_radius(air: &Air) -> f64 {
     radius(air, air.eye.y).max(GROUND + 1e-3)
 }
 
-/// The air `height` kilometres up.
-fn medium(height: f64, haze: f64) -> Medium {
+/// The air `height` kilometres up, under `haze`.
+fn medium(height: f64, haze: &Haze) -> Medium {
     let height = height.max(0.0);
     let rayleigh = RAYLEIGH * mathf::exp(-height / RAYLEIGH_HEIGHT);
-    let haze_density = mathf::exp(-height / MIE_HEIGHT) * haze;
+    let (mut mie, mut aerosol) = (Vec3::ZERO, Vec3::ZERO);
+    for (layer, extinction, scattering) in &haze.layers {
+        if (layer.floor..layer.ceiling).contains(&height) {
+            let density = mathf::exp(-(height - layer.floor) / layer.scale);
+            aerosol += *extinction * density;
+            mie += *scattering * density;
+        }
+    }
     let ozone = (1.0 - (height - 25.0).abs() / 15.0).max(0.0);
     Medium {
         rayleigh,
-        mie: MIE_SCATTER * haze_density,
-        extinction: rayleigh
-            + Vec3::splat((MIE_SCATTER + MIE_ABSORB) * haze_density)
-            + OZONE * ozone,
+        mie,
+        extinction: rayleigh + aerosol + OZONE * ozone,
     }
+}
+
+/// The Cornette–Shanks parameter whose phase function scatters with mean
+/// cosine `asymmetry`: that function's mean cosine is
+/// `3g(g² + 4) / 5(g² + 2)`, solved for `g` by Newton's method.
+const fn cornette_shanks(asymmetry: f64) -> f64 {
+    let mut g = asymmetry;
+    let mut round = 0;
+    while round < 16 {
+        let square = g * g;
+        let excess = 3.0 * g * (square + 4.0) - 5.0 * asymmetry * (square + 2.0);
+        let slope = 9.0 * square + 12.0 - 10.0 * asymmetry * g;
+        g -= excess / slope;
+        round += 1;
+    }
+    g
 }
 
 /// How far a ray from radius `r` whose cosine to the vertical is `mu` runs
@@ -1044,7 +1198,7 @@ impl Paths {
         let Some(slots) = self.rows.get_mut(rows.start..end) else {
             return;
         };
-        band::for_each(runner, slots, (rows.start, 1), &|row, slots| {
+        tairix_parallel::for_each_band(runner, slots, (rows.start, 1), &|row, slots| {
             for slot in slots {
                 fill(row, slot);
             }
@@ -1120,11 +1274,11 @@ fn grazing(refraction: &Refraction, r: f64) -> f64 {
 /// Fill `slot`, row `row` of the bent paths: trace its rays out from the
 /// grazing one to the zenith, then turn them about for the light reaching
 /// it from each true direction.
-fn path_row(air: &Air, refraction: &Refraction, row: usize, slot: &mut Row) {
+fn path_row(haze: &Haze, refraction: &Refraction, row: usize, slot: &mut Row) {
     let (columns, _) = PATHS;
     let r = row_radius(row);
     let lowest = grazing(refraction, r);
-    let extinction = |height: f64| medium(height, air.haze).extinction;
+    let extinction = |height: f64| medium(height, haze).extinction;
     let mut seen = [0.0; PATHS.0];
     let mut true_zenith = [0.0; PATHS.0];
     let mut depth = [Vec3::ZERO; PATHS.0];
@@ -1133,7 +1287,7 @@ fn path_row(air: &Air, refraction: &Refraction, row: usize, slot: &mut Row) {
         let mu = lowest + (1.0 - lowest) * up * up;
         let zenith = mathf::acos(mu.clamp(-1.0, 1.0));
         let path = refraction
-            .trace((r, mu), (GROUND, TOP), &extinction)
+            .trace((r, mu), (GROUND, TOP), (&extinction, &AEROSOL_EDGES))
             .unwrap_or(crate::refraction::Path {
                 zenith,
                 depth: Vec3::splat(f64::from(f32::MAX)),
@@ -1215,7 +1369,7 @@ fn tilt((cos, sin): (f64, f64), by: f64) -> (f64, f64) {
 /// The multiple-scattering table's texel `(u, v)`: at the height `v` names
 /// with the sun at the cosine `u` names, what scattering again and again
 /// adds per unit of scattering, for a unit sun (Hillaire, section 5.5).
-fn multiple_texel(air: &Air, paths: &Paths, u: f64, v: f64) -> Vec3 {
+fn multiple_texel((air, haze): (&Air, &Haze), paths: &Paths, u: f64, v: f64) -> Vec3 {
     let mu_sun = 2.0 * u - 1.0;
     let r = GROUND + v * DEPTH + 1e-3;
     let sun = Vec3::new(mathf::sqrt((1.0 - mu_sun * mu_sun).max(0.0)), mu_sun, 0.0);
@@ -1230,14 +1384,12 @@ fn multiple_texel(air: &Air, paths: &Paths, u: f64, v: f64) -> Vec3 {
         let dir = Vec3::new(level * mathf::cos(around), rise, level * mathf::sin(around));
         let ground = ground_distance(r, dir.y);
         let length = ground.unwrap_or_else(|| top_distance(r, dir.y));
-        let step = length / f64::from(MULTIPLE_STEPS);
         let mut kept = Vec3::ONE;
-        for sample in 0..MULTIPLE_STEPS {
-            let t = (f64::from(sample) + 0.5) * step;
+        for (t, step) in stations((r, dir.y), (0.0, length), MULTIPLE_STEPS) {
             let point = origin + dir * t;
             let radius = point.length();
-            let medium = medium(radius - GROUND, air.haze);
-            let scattering = medium.rayleigh + Vec3::splat(medium.mie);
+            let medium = medium(radius - GROUND, haze);
+            let scattering = medium.rayleigh + medium.mie;
             let sunlit = paths.sunlit(radius, (point / radius).dot(sun));
             let through = (medium.extinction * -step).exp();
             let gathered = integrated(scattering, medium.extinction, through) * kept;
@@ -1277,7 +1429,8 @@ fn rayleigh_phase(cos: f64) -> f64 {
     3.0 / (16.0 * PI) * (1.0 + cos * cos)
 }
 
-/// Cornette and Shanks' phase function for haze, of asymmetry `g`.
+/// Cornette and Shanks' phase function for haze, of parameter `g`: the one
+/// [`cornette_shanks`] gives scatters with the haze's asymmetry.
 fn mie_phase(cos: f64, g: f64) -> f64 {
     let g2 = g * g;
     let base = (1.0 + g2 - 2.0 * g * cos).max(1e-9);

@@ -511,7 +511,10 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
     let cos_radius = mathf::cos(0.27f64.to_radians());
     let solid = TAU * (1.0 - cos_radius);
     crate::scene::Scene::new(Parts {
-        objects: vec![plane(-0.5, 1, None), plane(0.0, 0, Some(Vec3::splat(0.98)))],
+        objects: crate::scene::objects_of([
+            plane(-0.5, 1, None),
+            plane(0.0, 0, Some(Vec3::splat(0.98))),
+        ]),
         faces: Vec::new(),
         fields: Vec::new(),
         prototypes: Vec::new(),
@@ -652,7 +655,8 @@ fn beams_are_laid_the_same_on_any_runner() {
 /// The pool with its water's waves framed by `frame`.
 fn framed(frame: Frame) -> crate::scene::Scene {
     let mut scene = pool(0.004);
-    scene.objects[1].texture = Pose::new(Vec3::new(0.3, 0.0, -0.7), frame);
+    scene.objects.get_mut(1).expect("the water").texture =
+        Pose::new(Vec3::new(0.3, 0.0, -0.7), frame);
     scene
 }
 
@@ -687,7 +691,7 @@ fn laid_and_afresh(scene: &crate::scene::Scene) -> (Vec<Beam>, Vec<Beam>) {
         &mut laid,
         &mut Sweep::new(),
     );
-    let object = &scene.objects[sheet.object];
+    let object = scene.objects.get(sheet.object).expect("the sheet's water");
     let waves = scene.water(sheet.object).expect("water").waves;
     let (corner, step) = (tile.corner(), cell(FINEST));
     let afresh = (0..laid.len())

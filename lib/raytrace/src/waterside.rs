@@ -16,15 +16,16 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_land::Season;
+use tairix_mix::mix32;
+use tairix_noise::smoothstep;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::leaf::Outline;
 use crate::lily::{self, Pad, Petal, Sheet, Trim, SINUS};
-use crate::noise::smoothstep;
 use crate::prototype::{round, Assembly, Blade, Building, Mapping, Part, Tube};
-use crate::sample::{mix32, GOLDEN_ANGLE};
-use crate::tree::Season;
+use crate::sample::GOLDEN_ANGLE;
 use crate::vector::{cell_of, power, real, single, singles, wrapped, Vec3};
 
 /// A plant of the water's edge.

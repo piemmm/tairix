@@ -1,0 +1,18 @@
+[package]
+name = "tairix-noise"
+description = "TAIRiX procedural noise: Perlin's improved gradient noise over the plane and in three dimensions, octave sums resolved to a footprint, ridged octaves, turbulence and Worley's cellular noise, each lattice point hashed rather than tabled. The land generator and the ray tracer draw from it. no_std, allocation-free, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The lowbias32 finaliser every lattice point is hashed by.
+tairix-mix = { path = "../mix", version = "=0.0.0" }
+# The bounded maths and the three-vector the noise is computed in.
+tairix-util = { path = "../util", version = "=0.0.0" }

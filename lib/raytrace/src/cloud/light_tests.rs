@@ -2,10 +2,11 @@
 //! solve it, photons meet only cloud that stands, their light is counted in
 //! the units it falls in, and the sun's optical depth deepens through cloud.
 
+use tairix_mix::{mix32, unit};
+
 use super::*;
 use crate::atmosphere::GROUND;
 use crate::cloud::{Deck, Lighting, Matter, SCREEN_PIXEL, SUNLIGHT_LEVELS, SUN_COSINES};
-use crate::sample::{mix32, unit};
 
 const HEAPS: Deck = Deck {
     base: 1200.0,
@@ -257,10 +258,7 @@ fn no_cloud_holds_more_than_its_voxels_bound() {
                 .density_at(point(&bank, at), at.1, Edges::Resolved(FOOTPRINT))
                 .map_or(0.0, |sample| sample.extinction);
             let bound = f64::from(solving.bounds[grid.index(voxel)]);
-            assert!(
-                extinction <= bound * (1.0 + 1e-6),
-                "{extinction} past {bound} at {at:?}"
-            );
+            assert!(extinction <= bound, "{extinction} past {bound} at {at:?}");
             if extinction > 0.0 {
                 assert!(
                     bank.may_stand((at.0, at.2), at.1),
@@ -793,3 +791,7 @@ fn a_picture_too_coarse_for_its_fine_cells_holds_the_light_in_voxels() {
         );
     }
 }
+
+#[cfg(feature = "scene-tests")]
+#[path = "light_reference_tests.rs"]
+mod reference;

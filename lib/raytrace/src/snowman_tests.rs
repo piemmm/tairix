@@ -7,8 +7,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_land::attributes::QUANTITIES;
+
 use super::*;
-use crate::heightfield::{Grows, QUANTITIES};
+use crate::heightfield::Grows;
 use crate::vector::Ray;
 
 const ROLLED: Making = Making {

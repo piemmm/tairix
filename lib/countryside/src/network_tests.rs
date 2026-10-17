@@ -74,7 +74,7 @@ fn the_neighbourhood_graph_joins_every_node_and_no_third_lies_in_any_lune() {
         let span = squared(nodes[a].at, nodes[b].at);
         for (c, node) in nodes.iter().enumerate() {
             if c != a && c != b {
-                let far = squared(node.at, nodes[a].at).max(squared(node.at, nodes[b].at));
+                let far = mathf::fmax(squared(node.at, nodes[a].at), squared(node.at, nodes[b].at));
                 assert!(far >= span, "{c} lies in the lune of {a}–{b}");
             }
         }

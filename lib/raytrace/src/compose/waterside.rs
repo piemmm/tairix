@@ -17,6 +17,9 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2};
 
+use tairix_land::Season;
+use tairix_mix::{mix32, unit};
+use tairix_noise::{fbm2, hash2, smoothstep};
 use tairix_parallel::JobRunner;
 use tairix_util::mathf;
 
@@ -28,12 +31,9 @@ use crate::land::Land;
 use crate::leaf::Outline;
 use crate::lily::Lily;
 use crate::material::{Finish, Material, Relief};
-use crate::noise::{fbm2, hash2, smoothstep};
 use crate::pigment::{Foliage, Pigment};
-use crate::sample::{mix32, unit};
 use crate::shade::Shades;
 use crate::shape::Shape;
-use crate::tree::Season;
 use crate::vector::{real, share, Frame, Pose, Vec3};
 use crate::waterside::{Margin, Marsh};
 

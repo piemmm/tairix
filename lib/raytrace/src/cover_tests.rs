@@ -5,8 +5,9 @@
 
 use alloc::vec::Vec;
 
+use tairix_mix::{mix32, unit};
+
 use super::*;
-use crate::sample::{mix32, unit};
 
 fn cover(substrate: Substrate) -> Cover {
     Cover {

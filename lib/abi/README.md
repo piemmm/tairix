@@ -7,9 +7,9 @@ time, and the wire protocol of every system service.
 
 ## Design
 
-- `no_std`, no dependencies, no allocation. Encoders and decoders work over
-  borrowed byte slices, so the same code runs in the kernel, a freestanding
-  driver and a wasm program.
+- `no_std`, no allocation, and no dependency but `lib/mix`'s finalisers.
+  Encoders and decoders work over borrowed byte slices, so the same code runs
+  in the kernel, a freestanding driver and a wasm program.
 - Every wire type has a fixed `#[repr(C)]` layout. The C headers under
   `include/` are generated from this crate (`cargo xtask c-header --write`),
   and `cargo xtask c-header` fails on drift; `cargo xtask abi-check` holds the

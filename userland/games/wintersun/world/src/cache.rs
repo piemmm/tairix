@@ -1,8 +1,8 @@
 //! The chunk cache.
 //!
-//! A generated chunk is never stored: recomputing it is cheaper than
-//! reading it back, and a world that is a pure function of its seed has
-//! nothing to store that the seed does not already say. What a chunk is,
+//! A generated chunk is never stored: a world that is a pure function of
+//! its seed has nothing to store that the seed does not already say. What a
+//! chunk is,
 //! is *worth keeping while the player is standing on it* — which is a
 //! cache, and a cache in TAIRiX is governed rather than merely bounded.
 //!
@@ -19,16 +19,18 @@
 
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
+use tairix_parallel::JobRunner;
 use tairix_reclaim::{
     CacheBudget, CacheCandidate, CachedBytes, InvalidationSource, PressureGauge, RebuildCost,
     ReclaimCache, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, Served,
 };
+use tairix_util::secret::wipe_with;
 use tairix_wintersun_net::value::ChunkCoord;
 
 use crate::chunk::{Chunk, ChunkBuild};
 use crate::error::WorldError;
+use crate::land::{Block, Kept, RealmLand, Store};
 use crate::params::RealmParams;
-use crate::realm::RealmField;
 
 /// Per-entry bookkeeping the cache charges on top of a chunk's payload:
 /// the key, the map node, and the recency link.
@@ -75,8 +77,8 @@ impl ChunkCache {
         let candidate = CacheCandidate {
             class: Some(ReclaimClass::RuntimeCache),
             owner: Some(ReclaimOwner::UserlandProcess(owner)),
-            // A chunk is a coarse-field read, several noise fields, a
-            // carve, a classification and a scatter pass.
+            // A chunk is a coarse-field read, its ground refined from the
+            // realm's land, a carve, a classification and a scatter pass.
             rebuild_cost: RebuildCost::Expensive,
             sensitivity: Some(Sensitivity::Public),
             // Nothing invalidates a chunk but the realm it belongs to
@@ -104,17 +106,18 @@ impl ChunkCache {
     ///
     /// # Errors
     ///
-    /// Whatever generation refuses — in practice
-    /// [`WorldError::OutOfMemory`], since the parameters were validated
-    /// before the field was solved.
+    /// Whatever generation refuses: [`WorldError::OutOfMemory`] when its
+    /// working memory does not fit, and [`WorldError::OutOfRange`] for a chunk
+    /// off the realm's land.
     pub fn get_or_generate(
         &mut self,
-        field: &RealmField,
+        (land, store): (&RealmLand, &mut dyn Store),
         coord: ChunkCoord,
+        runner: &dyn JobRunner,
     ) -> Result<Served<'_, Chunk>, WorldError> {
         let mut refused = None;
-        let served = self.cache.get_or_build(&field.params(), coord, || {
-            match ChunkBuild::new(coord).and_then(|build| build.finish(field)) {
+        let served = self.cache.get_or_build(&land.field().params(), coord, || {
+            match ChunkBuild::new(coord).and_then(|build| build.finish(land, store, runner)) {
                 Ok(chunk) => Some(chunk),
                 Err(error) => {
                     refused = Some(error);
@@ -144,6 +147,87 @@ impl ChunkCache {
     #[must_use]
     pub fn charged_bytes(&self) -> usize {
         self.cache.charged_bytes()
+    }
+}
+
+/// A block of a realm's fine ground, as the ground cache charges it.
+#[derive(Debug)]
+struct Worn(Kept);
+
+impl CachedBytes for Worn {
+    fn payload_bytes(&self) -> usize {
+        self.0.bytes()
+    }
+
+    fn wipe(&mut self) {
+        // Public terrain, overwritten all the same rather than merely dropped.
+        wipe_with(&mut self.0.ground, 0.0);
+        wipe_with(&mut self.0.track, 0.0);
+    }
+}
+
+/// A bounded, reclaimable cache of the blocks a realm's fine ground is worn
+/// in, so a chunk beside one already solved pays only for the ground no
+/// earlier chunk reached. Each block is a pure function of the realm and its
+/// place, so one dropped is made again to the bit.
+#[derive(Debug)]
+pub struct GroundCache {
+    params: RealmParams,
+    cache: ReclaimCache<Block, Worn, RealmParams, BuildFastHash>,
+}
+
+impl GroundCache {
+    /// A cache of `params`'s blocks sized from the memory the machine
+    /// reported, `backing_bytes`, as the chunk cache is.
+    #[must_use]
+    pub fn new(
+        (owner, params): (&'static str, RealmParams),
+        backing_bytes: usize,
+        pressure: &'static (dyn PressureGauge + 'static),
+        sink: &'static (dyn Sink + Sync),
+    ) -> Self {
+        let candidate = CacheCandidate {
+            class: Some(ReclaimClass::RuntimeCache),
+            owner: Some(ReclaimOwner::UserlandProcess(owner)),
+            // A block is a fill of the land and a pass of droplets over it.
+            rebuild_cost: RebuildCost::Expensive,
+            sensitivity: Some(Sensitivity::Public),
+            invalidation: Some(InvalidationSource::GenerationToken),
+            rule: Some(ReclaimRule::Drop),
+            entry_metadata_bytes: ENTRY_METADATA_BYTES,
+        };
+        Self {
+            params,
+            cache: ReclaimCache::new(
+                "wintersun-ground",
+                candidate,
+                CacheBudget::from_backing(backing_bytes),
+                pressure,
+                sink,
+                BuildFastHash::new(),
+            ),
+        }
+    }
+
+    /// Shrink to the current pressure band, returning the entries released.
+    pub fn enforce_pressure(&mut self) -> usize {
+        self.cache.enforce_pressure()
+    }
+}
+
+impl Store for GroundCache {
+    fn read(&mut self, block: Block, read: &mut dyn FnMut(&Kept)) -> bool {
+        match self.cache.find(&self.params, &block) {
+            Some(worn) => {
+                read(&worn.0);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn keep(&mut self, block: Block, kept: Kept) {
+        self.cache.retain(&self.params, block, Worn(kept));
     }
 }
 

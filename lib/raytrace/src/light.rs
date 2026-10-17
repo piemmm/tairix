@@ -9,10 +9,11 @@
 
 use core::f64::consts::TAU;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::smoothstep;
 use tairix_util::mathf;
 
-use crate::noise::smoothstep;
-use crate::sample::{cone, mix32, unit};
+use crate::sample::cone;
 use crate::sky::Sky;
 use crate::vector::{Frame, Vec3};
 

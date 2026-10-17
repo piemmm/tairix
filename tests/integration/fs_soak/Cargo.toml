@@ -25,6 +25,8 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # the one seam every fuzz/proptest harness uses. Test
 # scaffolding only.
 tairix-fuzzseed = { path = "../../fuzzseed", version = "=0.0.0" }
+# SplitMix64's increment, which each pass's seed is advanced by.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
 tairix-drv-fs-ext4 = { path = "../../../drivers/filesystem/ext4", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }

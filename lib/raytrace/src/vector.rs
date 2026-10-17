@@ -1,32 +1,16 @@
 //! Rays, over the shared vectors, frames and poses the tracer is written in,
 //! and the scalars it counts, narrows and shapes with.
 
+use tairix_noise::cell;
 use tairix_util::mathf;
+pub(crate) use tairix_util::mathf::{byte, power, real, share, single, tanh};
 pub(crate) use tairix_util::space::{Frame, Pose, Vec3};
-
-use crate::noise::cell;
-
-/// A count as a real number: every count a scene holds lies far below where
-/// a float stops counting exactly, and a larger one saturates.
-pub(crate) fn real(count: usize) -> f64 {
-    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
-}
 
 /// The cell of a grid a non-negative `value` lies in, counted from nought,
 /// and how far into it: nought for a negative or `NaN` one.
 pub(crate) fn cell_of(value: f64) -> (usize, f64) {
     let (whole, fraction) = cell(value.max(0.0));
     (usize::try_from(whole).unwrap_or(usize::MAX), fraction)
-}
-
-/// `value` in single precision, rounded to the nearest; infinite past its
-/// range.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "single precision is what each of the crate's grids, beams and parts keeps"
-)]
-pub(crate) fn single(value: f64) -> f32 {
-    value as f32
 }
 
 /// The nearest single-precision value at or below `value`.
@@ -59,40 +43,10 @@ pub(crate) fn whole(value: f64) -> usize {
     usize::try_from(mathf::round_i32(value).max(0)).unwrap_or(0)
 }
 
-/// `share`, `0.0..=1.0`, as a byte, rounded to the nearest.
-pub(crate) fn byte(share: f64) -> u8 {
-    u8::try_from(mathf::round_i32(255.0 * share.clamp(0.0, 1.0))).unwrap_or(u8::MAX)
-}
-
-/// `x` to the positive power `p`, nought for `x` at or below nought.
-pub(crate) fn power(x: f64, p: f64) -> f64 {
-    if x <= 0.0 {
-        0.0
-    } else {
-        mathf::exp(p * mathf::ln(x))
-    }
-}
-
 /// `angle`, in radians, brought within half a turn of nought.
 pub(crate) fn wrapped(angle: f64) -> f64 {
     use core::f64::consts::{PI, TAU};
     angle - TAU * mathf::floor((angle + PI) / TAU)
-}
-
-/// The hyperbolic tangent of `x`.
-pub(crate) fn tanh(x: f64) -> f64 {
-    let e = mathf::exp(-2.0 * x.abs());
-    ((1.0 - e) / (1.0 + e)).copysign(x)
-}
-
-/// `done` of `total` as a share in `0.0..=1.0`, whole when there was nothing
-/// to do.
-pub(crate) fn share(done: usize, total: usize) -> f64 {
-    if total == 0 {
-        1.0
-    } else {
-        (real(done) / real(total)).min(1.0)
-    }
 }
 
 /// The most rays traced together: a sampling round's worth, every round a

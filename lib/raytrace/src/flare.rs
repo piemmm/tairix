@@ -4,9 +4,9 @@
 //! whole flare to nothing before the limb's far end, so the limb above meets
 //! it in round.
 
+use tairix_noise::smoothstep;
 use tairix_util::mathf;
 
-use crate::noise::smoothstep;
 use crate::vector::{single, wrapped};
 
 /// The most lobes a flare holds.

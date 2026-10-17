@@ -255,3 +255,136 @@ fn the_ambient_is_the_skys_mean_over_the_hemisphere_weighed_by_its_cosine() {
     let falling = sky(&mathf::cos);
     assert!((falling - 2.0 / 3.0).abs() < 2e-3, "{falling}");
 }
+
+/// A clear sky's zenith, with the sun 60° up over ground of albedo 0.2,
+/// against the direct sunlight on the level ground over π: within what
+/// Karayel, Navvab, Ne'eman and Selkowitz's measured clear-sky zenith
+/// luminance, `(1.376 T − 1.81) tan 60° + 0.38` kcd/m², gives for Linke
+/// turbidities `T` of 2 to 3 over the direct sunlight they leave, 0.07 to
+/// 0.17 of it; and brighter still under twice the haze.
+#[test]
+fn a_clear_zenith_is_as_bright_as_clear_skies_measure() {
+    let ratio = |haze: f64| {
+        let atmosphere = built(Air { haze, ..air(60.0) }, &tairix_parallel::SERIAL);
+        let air = atmosphere.air();
+        let ground = atmosphere
+            .arriving(0.0, air.sun)
+            .map(|arriving| arriving.kept * air.solar * (arriving.dir.y * arriving.stretch))
+            .expect("the sun is up");
+        atmosphere.sky(Vec3::UP).y / (ground.y / PI)
+    };
+    let clear = ratio(1.0);
+    assert!((0.07..0.17).contains(&clear), "{clear}");
+    let hazy = ratio(2.0);
+    assert!(hazy > clear, "{hazy} under twice the haze against {clear}");
+}
+
+/// A march's steps run end to end over the whole span, and the heights the
+/// aerosol's extinction steps at fall only between them: rays rising through
+/// every layer, falling to the ground, and dipping through one and out.
+#[test]
+fn a_marchs_steps_never_straddle_where_the_aerosol_steps() {
+    let rays = [
+        (0.1, 0.05),
+        (0.5, 0.3),
+        (1.5, -0.02),
+        (3.0, -0.4),
+        (9.0, -0.9),
+        (13.0, -0.05),
+    ];
+    for (height, mu) in rays {
+        let r = GROUND + height;
+        let length = path_length(r, mu);
+        let height_at = |t: f64| mathf::sqrt(r * r + t * t + 2.0 * r * mu * t) - GROUND;
+        for (from, to) in [(0.0, length), (0.3 * length, 0.8 * length)] {
+            let mut reached = from;
+            for (middle, step) in stations((r, mu), (from, to), 24) {
+                assert!(
+                    (middle - 0.5 * step - reached).abs() < 1e-9 * length,
+                    "{height} {mu}"
+                );
+                reached = middle + 0.5 * step;
+                for edge in AEROSOL_EDGES {
+                    let side = |piece: u32| {
+                        let t = middle + (f64::from(piece) / 64.0 - 0.5) * step;
+                        height_at(t) > edge
+                    };
+                    let first = side(1);
+                    assert!(
+                        (2..64).all(|piece| side(piece) == first),
+                        "{height} {mu}: a step across {edge} km"
+                    );
+                }
+            }
+            assert!(
+                (reached - to).abs() < 1e-9 * length,
+                "{height} {mu}: {reached} of {to}"
+            );
+        }
+    }
+}
+
+/// The haze's phase function takes all it scatters, no more, and scatters it
+/// with the haze's own asymmetry.
+#[test]
+fn the_hazes_phase_is_whole_and_scatters_with_its_asymmetry() {
+    let pieces = 200_000_u32;
+    let width = 2.0 / f64::from(pieces);
+    let (mut whole, mut mean) = (0.0, 0.0);
+    for piece in 0..pieces {
+        let cos = -1.0 + (f64::from(piece) + 0.5) * width;
+        let share = TAU * mie_phase(cos, MIE_G) * width;
+        whole += share;
+        mean += share * cos;
+    }
+    assert!((whole - 1.0).abs() < 1e-6, "{whole}");
+    assert!((mean - HAZE_ASYMMETRY).abs() < 1e-6, "{mean}");
+}
+
+/// Each layer's aerosol is its measured extinction at 0.55 µm, falls by its
+/// longer exponent down to 0.5 µm and by its shorter one below, and does not
+/// step where the exponents change.
+#[test]
+fn the_haze_falls_with_wavelength_by_its_exponents() {
+    for layer in AEROSOLS {
+        let (short, long) = layer.angstrom;
+        assert!((layer.spectral(AEROSOL_REFERENCE) - 1.0).abs() < 1e-15);
+        let exponent = |wavelength: f64| {
+            let (below, above) = (wavelength * 0.999, wavelength * 1.001);
+            -mathf::ln(layer.spectral(above) / layer.spectral(below)) / mathf::ln(above / below)
+        };
+        assert!((exponent(WAVELENGTHS[0]) - long).abs() < 1e-9, "{layer:?}");
+        assert!((exponent(WAVELENGTHS[2]) - short).abs() < 1e-9, "{layer:?}");
+        let (below, above) = (
+            layer.spectral(ANGSTROM_SWITCH - 1e-12),
+            layer.spectral(ANGSTROM_SWITCH + 1e-12),
+        );
+        assert!(
+            (below - above).abs() < 1e-9,
+            "a step at the switch: {below} {above}"
+        );
+    }
+}
+
+/// A hazier day thickens the mixing layer's aerosol alone, and every layer
+/// scatters its albedo's share of what it takes.
+#[test]
+fn haze_thickens_only_the_mixing_layer() {
+    let (clear, hazy) = (Haze::of(1.0), Haze::of(2.0));
+    for ((layer, clear_extinction, scattering), (_, hazy_extinction, _)) in
+        clear.layers.into_iter().zip(hazy.layers)
+    {
+        let [red, green, blue] = WAVELENGTHS.map(|wavelength| layer.spectral(wavelength));
+        let measured = Vec3::new(red, green, blue) * layer.extinction;
+        assert!((clear_extinction - measured).length() < 1e-15, "{layer:?}");
+        let thickened = if layer.floor <= 0.0 { 2.0 } else { 1.0 };
+        assert!(
+            (hazy_extinction - clear_extinction * thickened).length() < 1e-15,
+            "{layer:?}"
+        );
+        assert!(
+            (scattering - clear_extinction * layer.albedo).length() < 1e-15,
+            "{layer:?}"
+        );
+    }
+}

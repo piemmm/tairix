@@ -56,6 +56,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_mix::SplitMix64;
 use tairix_raster::{box_blur, Pixel, Surface};
 
 /// The full-scale strength of an effect, in permille — the value a slider at
@@ -785,10 +786,10 @@ fn fuzz(surface: &mut Surface, amplitude: u32, phase: Phase) {
         let Some((_, row)) = surface.row_span_mut(y, 0, width) else {
             continue;
         };
-        let mut state = splitmix((u64::from(phase.0) << 32) | u64::from(y));
+        // Reproducible jitter, not a secret: no cryptographic generator.
+        let mut draws = SplitMix64::new((u64::from(phase.0) << 32) | u64::from(y));
         for pixel in row.iter_mut() {
-            state = splitmix(state);
-            let draw = u32::try_from(state >> 40).unwrap_or(0) % span;
+            let draw = u32::try_from(draws.next_u64() >> 40).unwrap_or(0) % span;
             let delta = i32::try_from(draw).unwrap_or(0) - amplitude;
             *pixel = jitter_pixel(*pixel, delta);
         }
@@ -874,18 +875,6 @@ fn sine(step: u32) -> i32 {
         2 => -value(within),
         _ => -value(16 - within),
     }
-}
-
-/// One round of the `SplitMix64` mixing function.
-///
-/// The fuzz needs a cheap, well-distributed, *reproducible* jitter, not
-/// unpredictability: nothing here is a secret, so this is deliberately not
-/// the system's cryptographic generator.
-const fn splitmix(state: u64) -> u64 {
-    let mut z = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
 }
 
 #[cfg(test)]

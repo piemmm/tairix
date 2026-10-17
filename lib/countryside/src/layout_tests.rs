@@ -287,9 +287,10 @@ fn every_track_ends_at_a_gateway_in_its_own_holding_and_no_way_runs_through_a_bu
         // Every half metre of the line, ends and all.
         for pair in way.line.stations.windows(2) {
             let (a, b) = (pair[0].at, pair[1].at);
-            let steps = u32::try_from(mathf::round_i32(
-                mathf::ceil((b - a).length() / 0.5).max(1.0),
-            ))
+            let steps = u32::try_from(mathf::round_i32(mathf::fmax(
+                mathf::ceil((b - a).length() / 0.5),
+                1.0,
+            )))
             .expect("a short line");
             for step in 0..=steps {
                 let at = a.lerp(b, f64::from(step) / f64::from(steps));

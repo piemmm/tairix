@@ -4,11 +4,12 @@
 
 use alloc::vec::Vec;
 
+use tairix_mix::{mix32, unit};
+
 use super::*;
 use crate::cover::{Lodging, Substrate};
 use crate::material::Finish;
 use crate::pigment::Pigment;
-use crate::sample::{mix32, unit};
 
 const BARE_WEAR: Wear = Wear {
     arris: 0.0,

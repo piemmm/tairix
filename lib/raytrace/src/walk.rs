@@ -2,9 +2,9 @@
 //! cell at a time in the order it crosses them, and the cells about it whose
 //! contents could reach it.
 
+use tairix_noise::cell;
 use tairix_util::mathf::{self, fmin};
 
-use crate::noise::cell;
 use crate::vector::Ray;
 
 /// Where a walk across a grid's cells has come: the cell it is in, where

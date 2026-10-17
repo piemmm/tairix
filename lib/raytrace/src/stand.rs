@@ -23,13 +23,13 @@ use core::f64::consts::{PI, TAU};
 
 use tairix_countryside::plane::Convex;
 use tairix_countryside::Point;
+use tairix_mix::{mix32, unit};
+use tairix_noise::{hash2, smoothstep};
 use tairix_util::mathf;
 
 use crate::farmed::Drill;
 use crate::heightfield::Heightfield;
 use crate::land::Grids;
-use crate::noise::{hash2, smoothstep};
-use crate::sample::{mix32, unit};
 use crate::shape::{meet_placed, occluded_by_placed, reciprocal, Aabb, Geometry, Hit};
 use crate::vector::{Frame, Pose, Ray, Vec3};
 use crate::walk::{self, Stepped, Walk};

@@ -13,7 +13,6 @@ use core::ops::{Add, Mul, Sub};
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::band;
 use crate::vector::real;
 
 /// A complex number.
@@ -180,7 +179,7 @@ pub(crate) fn rows(
     if length == 0 || !values.len().is_multiple_of(length) {
         return None;
     }
-    let failed = band::fold(
+    let failed = tairix_parallel::fold_bands(
         runner,
         values,
         (0, per.max(1) * length),
@@ -219,7 +218,7 @@ pub(crate) fn transposed(
         return None;
     }
     let per = per.max(1);
-    band::for_each(runner, to, (0, per * rows), &|band, values| {
+    tairix_parallel::for_each_band(runner, to, (0, per * rows), &|band, values| {
         // A source row at a time, the band's columns side by side in it
         // rather than a whole row apart down each.
         let start = first + band * per;

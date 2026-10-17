@@ -21,6 +21,8 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Denied by the crates that must agree to the bit on every target (clippy.toml).
+disallowed_methods = "allow"
 
 [[bin]]
 name = "xtask"
@@ -174,6 +176,8 @@ tairix-test-tcpserve = { path = "../../tests/integration/tcpserve_program", vers
 # seed, the harness reads it. Both sides use `tairix-fuzzseed` so the
 # seed primitives and the env-var names live in exactly one place.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The one rule for the key of a seed's `n`th stream, each job's seed.
+tairix-mix = { path = "../../lib/mix", version = "=0.0.0" }
 # `image` / `build --target aarch64-rpi` (Stage 8 / plans/PI.md P9) author
 # the flashable platform images through the `tools/mkimage` library, so the
 # image pipeline is ordinary Rust driven by the same xtask entry point as

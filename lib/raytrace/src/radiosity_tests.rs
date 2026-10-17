@@ -299,13 +299,13 @@ fn courtyard() -> Scene {
         moon: None,
     };
     Scene::new(Parts {
-        objects: alloc::vec![
+        objects: crate::scene::objects_of([
             object(
                 Shape::Plane {
                     normal: Vec3::UP,
-                    offset: 0.0
+                    offset: 0.0,
                 },
-                0
+                0,
             ),
             object(
                 Shape::Quad {
@@ -323,7 +323,7 @@ fn courtyard() -> Scene {
                 },
                 1,
             ),
-        ],
+        ]),
         faces: Vec::new(),
         fields: Vec::new(),
         prototypes: Vec::new(),

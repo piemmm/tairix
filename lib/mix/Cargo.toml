@@ -1,0 +1,12 @@
+[package]
+name = "tairix-mix"
+description = "TAIRiX integer finalisers: SplitMix64 and its output function, Wellons's lowbias32, the keying of numbered streams from a seed, and a word's fraction of the unit interval. Unkeyed and not cryptographic: they spread counters, lattice places and seeds, never a secret. no_std, no dependencies, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -17,12 +17,12 @@
 //! where a point lies and where the eye stands, so every ray — the eye's, a
 //! shadow's, a bounce's — meets the one surface.
 
+use tairix_noise::smoothstep;
 use tairix_util::mathf;
 
 use crate::bark::{Bark, OnLimb};
 use crate::flare::Flare;
 use crate::material::{Material, Relief};
-use crate::noise::smoothstep;
 use crate::prototype::{point, round, Tube};
 use crate::shape::{quadratic, Hit};
 use crate::vector::{single, Ray, Vec3};

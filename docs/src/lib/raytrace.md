@@ -32,7 +32,9 @@ takes, a seed shows the same place at either detail.
   with woods about it: a colonnade in three orders, a loggia of arches in
   stone or in brick or a two-tier aqueduct across a valley, a domed rotunda,
   a ruined temple in long grass; a sculpture stands out in a meadow, on dunes
-  or by a mountain lake. Every one is laid stone by stone (below).
+  or by a mountain lake, its grounds' view turned no further than it must to
+  hold the sculpture well within the picture. Every one is laid stone by
+  stone (below).
 - **An aqueduct** spans its valley in an upper tier of arches carrying its
   channel's covered conduit and, where the valley lies deep, great arches
   beneath each two of them. It is laid out on the land as it was sited and
@@ -53,7 +55,17 @@ takes, a seed shows the same place at either detail.
 
 The weather (`compose::weather`) sets the hour and the cloud. The sky is a
 physical atmosphere over a round Earth (Hillaire, EGSR 2020), its sky, sun
-colour and aerial perspective tabulated once per scene; clouds are volumetric
+colour and aerial perspective tabulated once per scene. Its haze is measured
+aerosol: a clear day's is OPAC's continental clean (Hess, Koepke and Schult,
+1998), a mixing layer 0.046 deep to 2 km over the free troposphere's and the
+stratosphere's backgrounds, 0.064 deep in all at 0.55 µm, thinning toward the
+red and thickening toward the blue as its Ångström exponents have it, its
+single-scattering albedo 0.97 and its phase Cornette and Shanks' at OPAC's
+asymmetry; a scene's haze multiplies the mixing layer's. Every march through
+the air breaks where a layer ends, so no sample stands for air of another.
+With the sun 60° up a clear zenith is 0.14 of the direct sunlight on the
+level ground over π, within what measured clear skies give (0.07–0.17 for
+Linke turbidities of 2–3; Karayel et al., 1984); clouds are volumetric
 decks marched as the medium they are (Schneider 2015; Hillaire 2016), dimming
 the sun and the sky they stand in front of. Each cell of a deck's weather map
 bounds the heights its cloud can reach, so a march strides straight through
@@ -143,16 +155,27 @@ through the air and the cloud, and the sky above, cosine-weighted — so water
 by moonlight glows only as much as moonlight lights it, and at sunset with
 sunset's colour.
 
-A deck's clouds stand where its weather lays them (`cloud::form`). A deck's
-footprints cover the share of the sky its cover names, its weather field's
-quantile placing their edge, and each weather column holds its exact distance
-to the nearest place its cover crosses that edge between two columns: on a
-row or a column of the grid, found along the rows and down the columns
-(Felzenszwalb and Huttenlocher's separable transform). Over each footprint an
-envelope rises from a flat base as a dome over that distance, as deep as the
-broad field of cloud about it has grown it: a heap's rises to its depth some
-billows in however deep it stands, so a shallow heap is a low dome and a deep
-one stands steep-walled; a sheet's rises soon after its edge, a plateau.
+A deck's clouds stand where its weather lays them (`cloud::form`). A heaped
+deck — humilis, cumulus, congestus — stands as heaps of its own, each a
+thermal's (`cloud::heaps`): a Poisson field over a lattice fixed to the land,
+gathered by the deck's drifting field into drifts and streets, as many as
+cover its share of the sky; their breadths falling as cumulus fields' do
+(Neggers, Jonker and Siebesma 2003), from a quarter of the deck's scale up to
+the whole of it, each as deep as its breadth gives it within the deck's
+depths, so nearly as tall as broad, on a flat base at its condensation level.
+A heap's envelope rises to its depth at its middle. Each level lists over each
+weather cell the heaps whose cloud can reach it, furthest within first, so a
+read meets each heap exactly however far off it stands, and rows of separate
+heaps reach the horizon: a field thresholded at a fair-weather cover joins its
+footprints into networks many kilometres long, which far off read as flat,
+streaked lenses. A sheet's footprints cover the share of the sky its cover
+names, its weather field's quantile placing their edge, and each weather
+column holds its exact distance to the nearest place its cover crosses that
+edge between two columns: on a row or a column of the grid, found along the
+rows and down the columns (Felzenszwalb and Huttenlocher's separable
+transform). Over each footprint an envelope rises from a flat base over that
+distance, as deep as the broad field of cloud about it has grown it, soon
+after its edge: a plateau.
 A place's depth within the envelope is measured to the chord between the
 envelope straight above or below it and the envelope level with it, so
 turrets stand out from a heap's walls as they rise from its top. Bubbles push
@@ -164,7 +187,12 @@ of droplets diluted into the dry air: narrow at a heap's top and widest low
 down, thinning outward as the cube of how far into it a place lies, so a
 grazing look through it shows the sky, and cut by the wisps — into puffs high
 up, where thermals push the cloud out, and into filaments low down, where it
-mixes away. Water holds extinction rising with the two-thirds power of the
+mixes away. A read through a coarse footprint averages that edge across the
+footprint — the fringe's mean over its wisps, summed through it — so it holds
+the water a sharp read does: an edge merely widened would draw the cloud's
+surface in by the cube's inner weight, some 25 m at a quarter of a billow,
+and a far heap or a look toward the sun would meet less cloud than there is.
+Water holds extinction rising with the two-thirds power of the
 height above its base, as adiabatic liquid water and its droplets' growth
 have it (Stephens 1978), so a heap is thinnest at its base and densest high
 in its body, its columns tens to some hundreds of optical depths deep; ice
@@ -180,15 +208,20 @@ breadth in as many voxels. Photons are followed through the bank's own cloud,
 never the voxels' average of it — the sun's entering the bank's top along its
 beam, the sky's from above — meeting it where it truly stands, drawn against
 each voxel's bound of the extinction and kept as often as the cloud there has
-it (Woodcock et al. 1965); they scatter isotropically through the extinction
-scaled by `1 − g`, the similarity principle (van de Hulst 1980), and off the
-ground as its albedo has it. So a heap traps its light as its own thickness
+it (Woodcock et al. 1965). The sun's beam runs on through δ-Eddington's
+extinction (Joseph, Wiscombe and Weinman 1976), the phase's forward peak, the
+square of its asymmetry, taken as carrying on unscattered, and first scatters
+through the rest of the phase; past that photons scatter isotropically through
+the extinction scaled by `1 − g`, the similarity principle (van de Hulst
+1980), and off the ground as its albedo has it. So a heap traps its light as its own thickness
 has it however coarse the voxels: averaged over voxels broader than itself it
 would be spread thin and let the light go, a far field of cumulus reading
 less than half as bright as it is. A voxel's bound is the most its cloud can
 hold anywhere within it: none where the bands of its weather cells, or the
-envelope at the weather's furthest, deepest and lowest over it with the
-turrets and fringe at their furthest, leave no room for cloud; each band's
+envelope at the weather's furthest, deepest and lowest over it — each heap's
+own, heap by heap — leave no room for cloud with its turrets as far out as
+the billows' texture stands anywhere over the voxel, read from that texture's
+peaks over ever broader blocks, and its fringe at its broadest; each band's
 top is likewise the envelope's own, to the metre. A place lies no further
 within its envelope for a column less far within its footprint, a shallower
 column or a place higher above its base, so both bound every read. Each voxel
@@ -209,33 +242,43 @@ picture too small for a fine cell to span one of its pixels, where the cell's
 level begins, keeps the voxels' light too: a fine cell spans some 7–20 of a
 full-HD screen's pixels, and under one of a picture fifty pixels high.
 A sample's light is its
-single scattering, what of the sun the phase's forward peak carries on
-scattered once more, and the diffuse light's fluence and flux through the
-full phase's asymmetry. Toward the sun a sample looks through its own billows
+single scattering; what of the sun the phase's forward peak carries on past
+it, scattered toward the eye through the phase composed with that peak, as
+Henyey–Greenstein lobes compose by the product of their asymmetries; and the
+diffuse light's fluence and flux through the full phase's asymmetry. Toward the sun a sample looks through its own billows
 in short taps, out to a voxel's breadth of clear air past its cloud, and
 through the rest of the bank by the volumes' depth: its billows shade their
-neighbours, and a cloud shades the clouds behind it. Against a brute-force
-path tracer through the same cloud, seen from below, an unbroken overcast's
-base reads some 15–20% bright, its voxels drawing the light from within it
-down to its base (fine light, were it spent there, reads it within a few
-percent), and a broken deck's base beside a gap some 12% dark.
+neighbours, and a cloud shades the clouds behind it. Against photons followed
+through the same cloud and its whole phase, counted as they cross its floor,
+an unbroken overcast's base reads within 3% at *Simple*, and a broken deck's,
+gaps and walls together, within 9%: about half of that is the voxels'
+resolution beside the gaps, the light reading within 6% where both scatter
+evenly, and half the forward-peaked phase's treatment. A veil reads as the sun
+scattered once through its column.
 
 A ray seen directly strides on to where a bounding read says cloud may stand,
 then steps through it a pixel's footprint or two at a time, further within a
 cloud's body as its depth below the surface and its extinction allow, its
 fringe cut by finer reads of the wisps as far as that footprint resolves
 them, a fringe too finely cut for the footprint reading as the mean the wisps
-leave.
+leave. Once so little of what lies beyond still shows through, it stops,
+taking what lies deeper as sending on the light its last sample does, since a
+thick base's light grows the deeper within it a ray reads.
 
 ## Lands
 
-A land is a landform worn by water through `lib/terrain`
-(`docs/src/lib/terrain.md`): Priority-Flood drainage, stream-power incision
-and hillslope creep over a coarse grid cut its valleys; its rivers, lakes and
-roads are laid where the water and the ground let them run; and a far grid and
-a finer grid about the eye refine it, droplets running over each for the rills
-and fans no coarser pass makes, a turn of the land's tiles at a time across the
-runner. Each vertex carries what the land is like
+A land is built by the land generator, `lib/land` (`docs/src/lib/land.md`):
+a landform worn by water over a coarse lattice fixed to the land, its rivers,
+lakes and roads laid where the water and the ground let them run, then refined
+level by level. The tracer refines level 0 over the whole land as its far grid
+and, once the scene has sited its eye, a square of each finer level about it,
+each square on its parent's vertices and holding within its parent all its
+piece reads; the land's own pieces, never blended, so the same place is the
+same land wherever the eye stands. Only once every level is laid does the
+tracer blend each finer grid into the one about it
+across a band of the parent's cells within its border (`land::Build`), the far
+grid into the horizon's last, and leave the parent's cells beneath it out, so
+a ray meets one land. Each vertex carries what the land is like
 there — wet, worn or built up, how much of a road and of a path, how much
 grows, each a quantity blended on its own — which its
 shading, its sward and its woods read; the coarse grid running on to the
@@ -247,8 +290,8 @@ course crosses; what lies past the banks lies under the ground, unseen. Grass is
 coarser cells the further they lie, merging leaves finer than a pixel and
 fading into the ground's own colour far off.
 
-Snow on a land lies as the wind laid it (`snow`), never as an even mantle.
-How sheltered each place stands is read once from the worn relief at the
+Snow on a land lies as the wind laid it (`tairix_land::snow`), never as an
+even mantle. How sheltered each place stands is read once from the worn relief at the
 coarse grid's samples, a band of rows a core, and carried to every finer
 vertex through the same Catmull–Rom patch the relief is: the steepest slope up
 to the ground within 100 m upwind, the mean of it over the wind's heading and
@@ -283,7 +326,8 @@ a drift buries a wall's foot rather than lifting the wall.
 
 A valley's sides climb as steeply as its rock stands, its floor wandering
 between spurs, and its view is taken from partway up one side with what it
-looks at in sight. A work may dig cuttings into a land (`land::Build::site`):
+looks at in sight. A work may dig cuttings into a land, joined to it before
+its finer levels are refined (`land::Build::site`, `Coarse::join`):
 each a level floor along a course, its sides climbing back to the land as
 steeply as cut earth stands and ending square at the face of whatever it
 leads to. A cutting only takes ground away, and it is held through the
@@ -358,8 +402,8 @@ its walls, fences and far hedges.
 
 ## Crops
 
-Each vertex of a farmed land carries what its field grows (`farmed`): a byte
-naming its use — grazed, mown or cut for hay, orchard, vineyard, woodlot,
+Each vertex of a farmed land carries what its field grows
+(`tairix_land::grown`): a byte naming its use — grazed, mown or cut for hay, orchard, vineyard, woodlot,
 left to grow over, or an arable field's crop at the stage the season has it
 at — and a byte for the way its rows run, along the field's length. Both are
 read at the nearest vertex and never blended, so a field's edge never mixes
@@ -462,21 +506,41 @@ land stands, a bounded step at a time.
   reading every wood is stood by: its patches and gaps first, then the
   ground's slope, wet, growth, roads and heights, then the kind that takes to
   it best and its stand's age.
-- **Thinned tallest first.** The places a tree might stand are sown in rings
-  about the eye — all the way round as far as the trees' shadows reach, then
-  across the view out to the horizon, as far as a tree still spans a pixel or
-  two, as far as the wood's most trees would fill, or as far as the detail's
-  budget of places holds them, never sown coarser, which would thin the wood —
-  and read across the runner a band at a time. Those that would grow are ranked by
-  height, sorted in runs a core apiece and merged tallest first as they are
-  taken, and thinned in that order: a tree stands only where its trunk keeps from every taller
-  one's by their crowns' reaches together, times the wood's closure there, a
-  much shorter tree standing under a taller one's crown more readily than
-  beside a peer's, and a stand draws two in five of its trees overtopped or
-  suppressed. No tree stands in the way of the view close ahead of the eye,
-  nor where a piece claims the ground: a bridge's deck and a row of arches
-  claim the whole strip beneath them, so nothing grows through a deck or in
-  an arcade's bays.
+- **Two layers, each sown on the land.** A wood grows a canopy, the trees its
+  stands rise to, and a subcanopy beneath, trees overtopped by the canopy or
+  suppressed under it, waiting in its shade for a gap; three in eight of the
+  subcanopy are suppressed. Each layer's places are sown one to each cell of a
+  lattice of its own fixed to the land — the canopy's about one to a middling
+  crown's spacing where the wood grows thickest, the subcanopy's closer — each
+  place jittered within its cell and drawn from a key of the cell's own.
+- **Thinned by one rule** (`lib/scatter`). Of two places that crowd each other
+  — nearer than the pair's room, their crowns' reaches together times the
+  wood's closure there, a much shorter tree standing under a taller one's
+  crown more readily than beside a peer's, and never against its trunk — the
+  taller stands, a tie going by its draws. The rule runs four rounds: in each,
+  a place no still-undecided taller place crowds is kept, and every undecided
+  place a kept one crowds yields, which is tallest-first thinning wherever the
+  rounds settle a place, and they settle nearly all; what is still undecided
+  after them yields. A place's fate hangs on the places within seven rooms of
+  it alone, so a stretch of wood stands the same trees from wherever it is
+  seen. A subcanopy place also yields to every canopy tree that crowds it. No
+  tree stands in the way of the view close ahead of the eye, nor where a piece
+  claims the ground: a bridge's deck and a row of arches claim the whole strip
+  beneath them, so nothing grows through a deck or in an arcade's bays. Such
+  places offer no tree, and the trees about them stand as though none had been
+  offered there.
+- **Where it is stood.** The canopy is thinned over the ground all about the
+  eye as far as its trees' shadows reach, and across the view out to the
+  horizon, as far as its tallest still span a pixel or two, rows of its lattice
+  read and ruled on across the runner at once. The nearest it keeps stand one
+  by one — as far as the wood's most trees would fill, or as far as the
+  detail's budget of places holds either layer — and the rest across the view
+  are carried on far off. The subcanopy stands one by one over the same
+  ground, short of its edges by a canopy tree's room so every canopy tree that
+  could crowd one of its trees is among those stood; far off, the canopy hides
+  it. Measured at *Maximum* against tallest-first thinning of one finely sown
+  lattice, a forest stands 93% of its canopy and 110% of its subcanopy, winter
+  86% and 109%, a meadow and a valley about 70–75% of each.
 - **Grown as they stood.** A kind grows four trees at heights from past its
   youngest to its tallest, and a place stands the one nearest the height it
   wants, scaled from three quarters of its own size to a third larger. A tree grown close among
@@ -486,29 +550,26 @@ land stands, a bounded step at a time.
   thick where they broke, every break torn.
 - **Far off** (`far_wood`). At *Maximum* a wood of trees carries on past the
   trees it stands one by one, out to as far as its trees still span a pixel:
-  its trees hashed from the cells of a lattice rather than stood, each cell's
-  one place read by the same reading and kept as often as places sown as
-  closely as the trees stood near, each growing as often as the ground suits
-  it, come to once thinned to their crowns' room — the share of the ground
-  their crowns fill matched to the trees stood near over the ring where they
-  meet, so the wood stands as thickly far off as near. Once its trees'
-  prototypes grow, its lattice is surveyed a few hundred blocks a step: every
-  place's tree read once, a bit a cell kept for those that stand one, and for
-  each block of 16 × 16 cells the lowest ground under it and the highest crown
-  standing over it. Nothing else of it is stored, and it is traced as the
-  tiles of its land a crown stands over, each boxed to those crowns. A ray
-  passes a block it crosses over every crown, walks the rest a cell at a time
-  meeting each tree that stands within reach once, and grows a tree only
-  where it passes beneath the crowns about it and low enough to meet the
-  tallest the place could grow; a tree met is placed again from its cell when
-  it is shaded, so its pattern and its key are its own. Seen from the eye's
-  height in the settings' own views, the trees stood near hide it; it shows
-  from higher up, and costs a few per cent of a scene's preparation and
-  tracing at *Maximum*. A wood of shrubs is low enough to be stood one by one
-  as far as it is seen.
+  the places its canopy's thinning kept across the view there are marked a bit
+  a cell of its lattice, block by block of 16 × 16 cells with the tallest of
+  the block's trees. Being the same places kept by the same rule, the two are
+  one wood, as thick either side of where they meet and no trunk standing in
+  another's room. Once its trees' prototypes grow, a survey bounds, a few
+  hundred blocks a step, the lowest ground under each block and the highest
+  crown standing over it: its tallest tree rooted at its highest ground. Nothing else of it is stored, and it is
+  traced as the tiles of its land a crown stands over, each boxed to those
+  crowns. A ray passes a block it crosses over every crown, walks the rest a
+  cell at a time meeting each marked cell's tree within reach once, read again
+  from its place alone, and grows it only where it passes beneath the crowns
+  about it and low enough to meet the tallest the place could grow; a tree met
+  is placed again from its cell when it is shaded, so its pattern and its key
+  are its own. Seen from the eye's height in the settings' own views, the
+  trees stood near hide it; it shows from higher up. A wood of shrubs is low
+  enough to be stood one by one as far as it is seen.
 - **Beneath.** Shrubs, ferns and young trees are sown in the shade the canopy
-  casts: next to none under a closed canopy, most in its gaps and along its
-  edges, fewer again out in the open, where grass takes the ground.
+  casts, on a lattice of their own and by the same rule: next to none under a
+  closed canopy, most in its gaps and along its edges, fewer again out in the
+  open, where grass takes the ground.
 - **Dead.** Fallen trunks — thrown with their roots or snapped at their feet,
   their limbs broken to stubs, in weathered bark taken by moss — lie about the
   eye, three times as thickly where the canopy has opened and those lying the
@@ -609,8 +670,8 @@ left out rather than the scene refused.
 
 A land keeps its rivers, each mark carrying how far its water has run from
 the divide, where it lies in its run of pools and riffles, how it bends and
-how steeply its brim falls. Their channels (`channel`) are drawn from that
-alone, so the land's grids, its water and a stream's flow read the same one.
+how steeply its brim falls. Their channels (`tairix_land::channel`) are drawn
+from that alone, so the land's grids, its water and a stream's flow read the same one.
 A course is counted in units of pool and riffle some six widths apart,
 shorter as it steepens toward steps; at low water each pool stands ponded
 behind the crest below it and the water falls fast down the riffle after,
@@ -1066,18 +1127,18 @@ hull faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns
 and 8 woods, each carried on far off at `Maximum` as at most 576 tiles of its
 land, and a path at most nine bounces.
 
-A scene prepares in up to 160 s on a desktop-class machine across 8 threads
-and holds up to 2 GB at its peak at `Maximum`, far less at `Simple`
-(`plans/RAYTRACE.md`); a heaped sky's cloud light at `Maximum` may take
-longer. Measured at 1920×1080 on a 24-thread desktop preparing across 8
-threads, over 29 landscapes at `Simple` and the twelve heaviest found at
-`Maximum`, a landscape prepares at `Maximum` in at most 343 s, most of each
-its radiosity records — a farmland's the slowest, past the budget — and up to
-half of a lagoon's its caustics; under a heaped sky its cloud light adds the
-most, a scene taking 88–130 s under cumulus, humilis or stratocumulus and up
-to 333 s under congestus over a stream. It holds at most 1275 MiB at its
-peak, a farmland's under stratocumulus. At `Simple` a landscape prepares in
-at most 34 s, holding at most 702 MiB.
+A scene holds up to 2 GB at its peak at `Maximum`, far less at `Simple`, and
+aims to prepare in up to 160 s on a desktop-class machine across 8 threads: a
+guideline, not a limit, which detail that buys realism may pass, as a heaped
+sky's cloud light does (`plans/RAYTRACE.md`). Measured at 1920×1080 on a
+24-thread desktop preparing across 8 threads, every setting at seed 1
+prepares at `Simple` in at most 71 s and at `Maximum` in at most 208 s,
+Alpine's the slowest at both, holding 506 MiB and 903 MiB at its peak. Most
+of a landscape's time at `Maximum` is its radiosity records, a farmland's the
+costliest, and up to half of a lagoon's its caustics. A heaped sky's cloud
+light costs the most: Coast, seed 2, prepares in 15 s at `Simple` and 73 s at
+`Maximum` under a mackerel sky, 47 s and 141 s under fair-weather cumulus, and
+231 s and 580 s under towering cumulus, holding 581 MiB and 1345 MiB.
 Laying a scene's caustics takes up to 0.25 s at `Simple` and
 0.95 s at `Maximum`, and holds up to about 75 MB and 330 MB. Traced on one of its cores,
 built for the x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the
@@ -1087,19 +1148,21 @@ colonnade 7; the local adaptation's correction costs a sample about one per
 cent more, and beneath or over water the caustics about 2.5 µs.
 
 Every unit of preparation is a fixed amount of work a core — a band of a
-grid's rows or of a shade's, a turn of a land's droplet tiles, a band of the
-objects' boxes or a slice of a hierarchy, a run of a far wood's ring read or
-a few hundred of its blocks surveyed, a ring's places drawn or a run of
-their ranking, a few rows of the water's edge's lattice, a bed's stones read,
-thinned or set out a few thousand at a time, a stream's flow solved a few
-thousand of its points a core, a few rows of a
-radiosity record's hemisphere, a handful of
-the meter's samples, a hundred or so of the caustics' survey points, a couple
-of thousand of their beams or a few thousand of their pyramids' nodes — and a
-wood's places are kept in runs that never move as
-more are added, so `Draft::prepare` answers within about a frame however large
-the scene: measured, no unit takes more than about 10 ms at either detail, but
-for the one that begins a large scene's hierarchy, finding every object's box
-at once, which can take about 20 ms at `Maximum`. Under the
+grid's rows or of a shade's, a thousand of a land's vertices filled or
+settled, a quarter of one of its droplet blocks filled, a batch of its
+droplet tiles' windows gathered or a few hundred droplets of each run, a
+band of the objects' boxes or a slice of a hierarchy's
+items, a batch of a wood's lattice read and ruled on or of its trees stood, a
+farm's crop field, a few hundred of a far wood's blocks surveyed, a few rows
+of the water's edge's lattice, a bed's stones read, thinned or set out a few
+thousand at a time, a stream's flow solved a few thousand of its points a
+core, a few rows of a radiosity record's hemisphere, a handful of the
+meter's samples, a hundred or so of the caustics' survey points, a couple of
+thousand of their beams or a few thousand of their pyramids' nodes, a few
+bands of a cloud level's heaps drawn or rows of its cells listing them, a few
+dozen of its light's photons a core — and a scene's objects and a bed's
+stones are kept in chunks and runs that never move as more are added, so
+`Draft::prepare` answers within about a frame however large the scene:
+measured, no unit takes more than about 10 ms at either detail. Under the
 screensaver's `idle` setting the preparation runs on one core and takes some
 eight times as long.

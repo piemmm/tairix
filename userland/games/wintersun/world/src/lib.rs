@@ -28,9 +28,11 @@
 //!   a fixed sample count rather than a step in world units, so a realm
 //!   four chunks across and one four thousand chunks across pay the same
 //!   for it.
-//! * **The chunk** ([`chunk::ChunkBuild`]) — fine detail, on demand, from
-//!   a bounded halo. It reads the realm field, adds everything below the
-//!   coarse step, and depends on nothing outside a fixed ring of cells.
+//! * **The chunk** ([`chunk::ChunkBuild`]) — fine detail, on demand. Its
+//!   ground is the realm's land ([`land::RealmLand`]): the realm field
+//!   refined and worn by the land generator the desktop's ray tracer shares,
+//!   each piece exactly as the realm worn whole. Everything else below the
+//!   coarse step it adds from a fixed ring of cells.
 //!
 //! The pipeline the plan sets out runs across both: uplift, relief,
 //! hydrology, climate and the placement of settlements and roads at realm
@@ -54,8 +56,9 @@
 //! * Arithmetic is IEEE-754 `f64` restricted to the exactly-specified
 //!   operations plus `lib/util::mathf`, TAIRiX's own libm — never a
 //!   platform one, which would differ per target.
-//! * Everything stored is a **quantised integer**, so the stored value is a
-//!   bit pattern, not a rounding.
+//! * Everything a chunk stores is a **quantised integer**, so the stored
+//!   value is a bit pattern, not a rounding; the land's levels beneath it are
+//!   single-precision values computed in one fixed order.
 //! * Every sort, priority queue and traversal has a total order with an
 //!   index tiebreak, so no two equal keys can resolve differently.
 //!
@@ -65,25 +68,28 @@
 //! # Memory
 //!
 //! Resident cost is the working set, never the world's extent. The realm
-//! field is a fixed grid; chunks live in a [`cache::ChunkCache`] budgeted
-//! from the memory the machine reported and reclaimed through the system's
-//! pressure bands. A generated chunk is never written to disk — recomputing
-//! it is cheaper than reading it back, and only the changes players make
-//! are worth storing.
+//! field and its land's coarsest level are fixed grids; chunks live in a
+//! [`cache::ChunkCache`], and the worn ground they are solved from in a
+//! [`cache::GroundCache`], each budgeted from the memory the machine
+//! reported and reclaimed through the system's pressure bands. A generated
+//! chunk is never written to disk: it is a pure function of the realm's
+//! parameters, so only the changes players make are worth storing.
 //!
 //! # Example
 //!
 //! Solving a realm and walking a chunk out of it:
 //!
 //! ```
+//! use tairix_parallel::SERIAL;
 //! use tairix_wintersun_world::chunk::ChunkBuild;
-//! use tairix_wintersun_world::params::RealmParams;
+//! use tairix_wintersun_world::digest::reference_params;
+//! use tairix_wintersun_world::land::{RealmLand, Unkept};
 //! use tairix_wintersun_world::realm::RealmField;
 //! use tairix_wintersun_net::value::ChunkCoord;
 //!
 //! # fn main() -> Result<(), tairix_wintersun_world::error::WorldError> {
-//! let field = RealmField::generate(RealmParams::default_realm(0x5EED))?;
-//! let chunk = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })?.finish(&field)?;
+//! let land = RealmLand::new(RealmField::generate(reference_params())?, &SERIAL)?;
+//! let chunk = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })?.finish(&land, &mut Unkept, &SERIAL)?;
 //!
 //! // Weights are normalised by construction, at every cell.
 //! assert_eq!(chunk.biome(0, 0).total(), 255);
@@ -94,6 +100,8 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+// Bit for bit on every target: no float max or min, which may pick either zero.
+#![deny(clippy::disallowed_methods)]
 #![deny(missing_docs)]
 
 extern crate alloc;
@@ -109,6 +117,7 @@ pub mod geology;
 pub mod geom;
 pub mod ground;
 pub mod hydrology;
+pub mod land;
 pub mod noise;
 pub mod params;
 pub mod realm;

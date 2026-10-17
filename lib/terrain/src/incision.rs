@@ -123,7 +123,7 @@ pub fn incise_implicit(
         let area = f64::from(network.discharge[index]) * law.cell_area;
         let distance = law.spacing * network.flow[index].length();
         let factor =
-            law.k_dt * erodibility(index, here) * power(area, law.m) * onset(area, law.head)
+            law.k_dt * erodibility(index, here) * mathf::power(area, law.m) * onset(area, law.head)
                 / distance;
         if factor > 0.0 {
             height[index] = (here + factor * below) / (1.0 + factor);
@@ -139,15 +139,6 @@ fn onset(area: f64, head: f64) -> f64 {
         return 1.0;
     }
     mathf::smoothstep((area - head) / (2.0 * head))
-}
-
-/// `base` to the power `exponent`, for a positive base.
-fn power(base: f64, exponent: f64) -> f64 {
-    if base <= 0.0 {
-        0.0
-    } else {
-        mathf::exp(exponent * mathf::ln(base))
-    }
 }
 
 #[cfg(test)]

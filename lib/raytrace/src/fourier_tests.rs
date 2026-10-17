@@ -4,10 +4,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_mix::{mix32, unit};
 use tairix_parallel::Threaded;
 
 use super::*;
-use crate::sample::{mix32, unit};
 
 fn values(length: usize, salt: u32) -> Vec<Complex> {
     (0..length)

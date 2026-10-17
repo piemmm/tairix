@@ -2,8 +2,9 @@
 
 use alloc::vec::Vec;
 
+use tairix_mix::{mix32, unit};
+
 use super::{Builder, Bvh, Walk, MAX_DEPTH};
-use crate::sample::{mix32, unit};
 use crate::shape::{reciprocal, Aabb, Geometry, Shape};
 use crate::vector::{Ray, Vec3};
 
@@ -158,6 +159,42 @@ fn a_ray_through_many_objects_tests_few_of_them() {
         mean < 400.0 * 0.12,
         "a ray tested {mean} of 400 objects on average"
     );
+}
+
+/// A hierarchy comes out the same however small its steps, and no step
+/// visits more of a subtree's items than its budget: one of a single item
+/// leaves even the root's box ungathered.
+#[test]
+fn a_hierarchy_built_in_small_steps_is_the_one_built_whole() {
+    let bounds = boxes(&spheres(3000, 40.0, 11));
+    let mut first = Builder::new(&bounds).expect("room to build");
+    assert!(!first.step(1));
+    assert!(first.nodes.is_empty(), "a step of one item laid a node");
+    let built_by = |budget: usize| {
+        let mut builder = Builder::new(&bounds).expect("room to build");
+        let mut steps = 1usize;
+        while !builder.step(budget) {
+            steps += 1;
+        }
+        (builder.finish(), steps)
+    };
+    let (whole, once) = built_by(usize::MAX);
+    assert_eq!(once, 1);
+    for budget in [1, 7, 64, 4096] {
+        let (stepped, steps) = built_by(budget);
+        assert_eq!(stepped.order, whole.order, "{budget}");
+        assert_eq!(stepped.nodes.len(), whole.nodes.len(), "{budget}");
+        for (one, other) in stepped.nodes.iter().zip(&whole.nodes) {
+            assert_eq!(
+                (one.low, one.high, one.start, one.count),
+                (other.low, other.high, other.start, other.count),
+                "{budget}"
+            );
+        }
+        // Every item is visited at least twice: gathered into the root's box
+        // and listed in its leaf.
+        assert!(steps >= 2 * bounds.len() / budget, "{budget}: {steps}");
+    }
 }
 
 #[test]

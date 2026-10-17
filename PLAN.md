@@ -254,6 +254,10 @@ allocation-free `lib/inline` beside the heap-backed `lib/collections`,
 `lib/memguard` (the one guard-region sentinel and canary window, shared by the
 slab guard, the kthread stack guard and every port's boot-stack guard),
 `lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
+`lib/mix` (the one SplitMix64 and lowbias32 integer finalisers, which seeded
+draws, load slots and the land generator's and ray tracer's lattices key by),
+`lib/noise` (the one gradient noise, octave-summed, ridged and cellular, which
+the land generator and the ray tracer draw from),
 `lib/buildcfg` (the one build-script definition of the `freestanding` cfg a
 program crate compiles under on a bare-metal target; `std`, as it runs only
 in build scripts),
@@ -271,19 +275,19 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
-| `fallible` | `lib/audio`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view`, Paint |
+| `fallible` | `lib/audio`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view`, Paint, WinterSun |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/colour`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, WinterSun, the desktop session's screensavers |
+| `mathf` | `lib/audio`, `lib/colour`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/land`, `lib/noise`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, `netmap`, WinterSun, the desktop session's screensavers |
 | `output` | the command apps' engines (`cat`, `ls`, `ss`, `tail`, … — every one that writes through an injected stream), `lib/procinfo`'s line sink, and `lib/rt`'s standard streams |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `seconds` | `ping`, `traceroute` |
-| `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
+| `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field, WinterSun's cached chunks and ground |
 | `size` | `du`, `df` |
-| `space` | `lib/raytrace`, the desktop session's retro games screensaver |
+| `space` | `lib/noise`, `lib/raytrace`, the desktop session's retro games screensaver |
 
 ## Stage 2 — Kernel core (architecture-neutral)
 
@@ -508,10 +512,14 @@ and its hex notation), `lib/theme`, `lib/geometry` (the one logical-to-physical
 `lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), `lib/syntax`
 (document formats, lexers and settings validation, run only in the parser
 sandbox; `plans/TEXTEDIT.md`), `lib/raytrace` (the ray-traced
-screensaver's scenes and tracer, whose lands `lib/terrain` shapes — the grid
-drainage, erosion and least-cost routing WinterSun's world shares — and whose
+screensaver's scenes and tracer, whose lands `lib/land` generates — the
+renderer-neutral land generator WinterSun's world builds its realm's land with
+too (`plans/RAYTRACE.md` RT40) — over `lib/terrain`'s grid drainage, erosion and
+least-cost routing, which WinterSun's world shares too, and whose
 farmland `lib/countryside` lays out: the holdings, ways, fields, boundaries,
-farmsteads and village plots WinterSun's settlements are to share), and
+farmsteads and village plots WinterSun's settlements are to share; its woods,
+the countryside's villages and WinterSun's scatter are all spaced by
+`lib/scatter`'s one keyed priority rule), and
 `lib/ribbon` (the ribbon of light behind the minimal-clock screensaver and the
 login screen). The service enrolment store is `lib/enrolment`,
 shared by `init` and the editor's validation of it.

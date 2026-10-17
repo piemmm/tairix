@@ -5,14 +5,15 @@
 //! pebbles in the hollows near the eye. Eight rocks of the land's own stone
 //! a scene, each stone turned and sized its own way.
 
+use tairix_noise::{fbm2, noise2, smoothstep};
 use tairix_util::mathf;
 
 use super::landscape::{rock_of, Vantage};
 use super::stones::Stones;
 use super::{Dice, Stage};
-use crate::land::{Land, Lie};
-use crate::noise::{fbm2, noise2, smoothstep};
+use crate::land::Land;
 use crate::vector::Vec3;
+use tairix_land::attributes::Lie;
 
 /// What a setting strews: the most boulders and how large they come, how far
 /// off and how far either side of the view.

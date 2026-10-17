@@ -1,19 +1,18 @@
 //! Host tests of where a landscape's eye stands on its land.
 
+use tairix_land::relief::{Landform, Terrain};
 use tairix_parallel::Threaded;
 use tairix_rng::NonCryptoRng;
 
 use super::*;
+use crate::camera::Camera;
 use crate::compose::{Composed, Stage};
+#[cfg(feature = "scene-tests")]
+use crate::compose::{Composition, Job, Progress, Setting};
 use crate::detail::Detail;
 use crate::heightfield::Heightfield;
-use crate::land::{Build, Fields, Plan, Wear};
-use crate::terrain::{Landform, Terrain};
-#[cfg(feature = "scene-tests")]
-use crate::{
-    compose::{Composition, Job, Progress, Setting},
-    shape::{Aabb, Shape},
-};
+use crate::land::{Build, Fields, Plan};
+use tairix_land::plan::Wear;
 
 /// Every landscape's eye stands above the land and clear of the water, with
 /// somewhere to look.
@@ -253,47 +252,51 @@ fn unworn(
     sea: Option<f64>,
 ) -> (Vec<Heightfield>, Build) {
     let reach = 1200.0;
-    let plan = Plan {
-        relief: Terrain {
-            form,
-            datum,
-            centre: (0.0, 0.0),
-            radius: reach,
-            rim: None,
-            tilt: (0.0, 0.0),
-            clearing,
-        },
-        reach,
-        sea,
-        wear: Wear {
-            passes: 1,
-            incision: 0.0,
-            creep: 0.0,
-            repose: 0.9,
-            infill: 0.0,
-            strata: None,
-        },
-        rivers: None,
-        road: None,
-        farming: None,
-        roughness: 0.0,
-        ridges: 0.0,
+    let mut levels = [None; LEVELS];
+    levels[0] = Some(Level {
+        ratio: 4,
         droplets: 0.0,
-        cells: (32, 128),
+    });
+    let plan = Plan {
+        land: LandPlan {
+            relief: Terrain {
+                form,
+                datum,
+                centre: (0.0, 0.0),
+                radius: reach,
+                rim: None,
+                tilt: (0.0, 0.0),
+                clearing,
+            },
+            reach,
+            sea,
+            wear: Wear {
+                passes: 1,
+                incision: 0.0,
+                creep: 0.0,
+                repose: 0.9,
+                infill: 0.0,
+                strata: None,
+            },
+            rivers: None,
+            road: None,
+            farming: None,
+            roughness: 0.0,
+            ridges: 0.0,
+            cells: 32,
+            levels,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: 3,
+        },
         nests: [None, None],
         near_water: None,
         horizon: None,
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: 3,
     };
-    let origin = (-reach, -reach);
-    let mut fields = alloc::vec![
-        Heightfield::new(plan.cells.1, origin, plan.far_step(), false).expect("a grid"),
-        Heightfield::new(1, origin, 1.0, false).expect("a grid"),
-    ];
+    let placeholder = || Heightfield::new(1, (0.0, 0.0), 1.0, false).expect("a grid");
+    let mut fields = alloc::vec![placeholder(), placeholder()];
     let grids = Fields {
         far: 0,
         nests: [None, None],
@@ -395,6 +398,65 @@ fn an_eye_stands_on_the_lowest_ground_in_sight() {
     }
 }
 
+/// A sculpture the grounds' view would leave out of the picture — below it,
+/// or off to the side of a narrow one — is brought within the share of the
+/// frame allowed by the least turn, and one already within it leaves the
+/// view as the grounds set it.
+#[test]
+fn a_sculpture_out_of_its_grounds_view_is_framed_and_one_within_it_left_be() {
+    let eye = Vec3::new(4.0, 108.0, -3.0);
+    let fov = 50.0_f64.to_radians();
+    let level = || View::Placed {
+        eye,
+        target: eye + direction(0.3, 0.0, 0.06) * 100.0,
+        fov,
+        aperture: 0.0,
+    };
+    let seen = |view: &View, aspect: f64, middle: Vec3| {
+        let View::Placed {
+            eye, target, fov, ..
+        } = *view
+        else {
+            panic!("a placed view");
+        };
+        Camera::looking(eye, target, fov, aspect, (0.0, 1.0))
+            .project(middle)
+            .expect("ahead of the eye")
+    };
+    let below = eye + direction(0.3, 0.0, 0.0) * 40.0 - Vec3::UP * 60.0;
+    let aside = eye + direction(1.1, 0.0, 0.0) * 80.0;
+    for (middle, aspect) in [
+        (below, 16.0 / 9.0),
+        (aside, 0.75),
+        (below + aside - eye, 1.0),
+    ] {
+        let before = seen(&level(), aspect, middle);
+        assert!(
+            before.0.abs() > 1.0 || before.1.abs() > 1.0,
+            "{before:?} was in view"
+        );
+        let framed = framing(level(), middle, aspect);
+        let (across, up) = seen(&framed, aspect, middle);
+        assert!(
+            across.abs() <= FRAMED_WITHIN + 1e-9 && up.abs() <= FRAMED_WITHIN + 1e-9,
+            "({across}, {up}) for {middle:?} at {aspect}"
+        );
+        // The least turn: the middle stands on the edge of what is allowed.
+        assert!(
+            (across.abs().max(up.abs()) - FRAMED_WITHIN).abs() < 1e-6,
+            "({across}, {up}) turned further than it must be"
+        );
+    }
+    let within = eye + direction(0.4, 0.0, 0.0) * 120.0;
+    let View::Placed { target, .. } = framing(level(), within, 16.0 / 9.0) else {
+        panic!("a placed view");
+    };
+    let View::Placed { target: was, .. } = level() else {
+        panic!("a placed view");
+    };
+    assert_eq!((target.x, target.y, target.z), (was.x, was.y, was.z));
+}
+
 /// A sculpture stands on dry ground, in the frame, and nothing set out after
 /// it — trees, shrubs, stones, the grounds' own pieces — stands within the
 /// ground it claims.
@@ -443,13 +505,15 @@ fn a_sculpture_stands_on_dry_ground_clear_of_every_other_piece() {
             Shape::Sphere { .. } => Some(2),
             _ => None,
         };
-        let first = kind(&stage.objects[from].shape).expect("a sculpture first");
-        let pieces = stage.objects[from..]
-            .iter()
+        let set_out = stage.objects.get(from).expect("a piece set out");
+        let first = kind(&set_out.shape).expect("a sculpture first");
+        let pieces = stage
+            .objects
+            .iter_from(from)
             .take_while(|object| kind(&object.shape) == Some(first))
             .count();
         let mut footprint = Aabb::EMPTY;
-        for object in &stage.objects[from..from + pieces] {
+        for object in stage.objects.iter_from(from).take(pieces) {
             let bounds = object.shape.bounds(geometry).expect("bounded");
             footprint = footprint.union(bounds);
             let at = bounds.centre();
@@ -597,4 +661,55 @@ fn a_deserts_pyramids_stand_clear_of_its_road() {
         roads > 0,
         "no desert's road ran where its pyramids are drawn"
     );
+}
+
+/// The far grid divides the coarse lattice's cells whole, and each finer
+/// level's step is its parent's divided by the whole number nearest that
+/// step over a `NEST_CELLS`th of its square's breadth, never by less than
+/// one.
+#[test]
+fn each_finer_level_steps_nearest_its_squares_share() {
+    let reach = 6000.0;
+    let finer = nests((700.0, 80.0), (0.08, 0.12));
+    let built = levels(reach, (256, 1024), 0.05, finer);
+    assert_eq!(built.cells, 256);
+    let far = built.land[0].expect("a far level");
+    assert_eq!((far.ratio, far.droplets), (4, 0.05));
+    let mut step = 2.0 * reach / 1024.0;
+    for ((nest, level), nested) in finer.iter().zip(&built.land[1..]).zip(built.nests) {
+        let (nest, level) = (nest.expect("a nest"), level.expect("a finer level"));
+        assert_eq!((nested, level.droplets), (Some(nest.reach), nest.droplets));
+        let share = step / (2.0 * nest.reach / NEST_CELLS);
+        let off = |ratio: u32| (share - f64::from(ratio)).abs();
+        let nearest = (1..=64).min_by(|&a, &b| off(a).total_cmp(&off(b)));
+        assert_eq!(Some(level.ratio), nearest, "{nest:?}");
+        step /= f64::from(level.ratio);
+    }
+
+    // A square wanting a step coarser than its parent's keeps the parent's.
+    let coarse = levels(
+        reach,
+        (256, 1024),
+        0.05,
+        nests((9000.0, 80.0), (0.08, 0.12)),
+    );
+    assert_eq!(coarse.land[1].map(|level| level.ratio), Some(1));
+}
+
+/// A far grid that does not divide the coarse lattice whole lays no levels,
+/// and a level the scheme leaves out ends the ladder there.
+#[test]
+fn a_ladder_without_a_whole_far_grid_or_a_finer_level_ends_there() {
+    let finer = nests((700.0, 80.0), (0.08, 0.12));
+    for cells in [(256, 1000), (0, 1024), (512, 256)] {
+        let built = levels(6000.0, cells, 0.05, finer);
+        assert!(built.land.iter().all(Option::is_none), "{cells:?}");
+        assert!(built.nests.iter().all(Option::is_none), "{cells:?}");
+    }
+    let mut gapped = finer;
+    gapped[0] = None;
+    let built = levels(6000.0, (256, 1024), 0.05, gapped);
+    assert!(built.land[0].is_some());
+    assert!(built.land[1..].iter().all(Option::is_none));
+    assert!(built.nests.iter().all(Option::is_none));
 }

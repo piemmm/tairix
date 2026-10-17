@@ -33,7 +33,7 @@ fn directions() -> impl Iterator<Item = Vec3> {
     let spread = (0..200u32).map(|i| {
         let t = f64::from(i) / 200.0;
         let z = 1.0 - 2.0 * t;
-        let r = mathf::sqrt((1.0 - z * z).max(0.0));
+        let r = mathf::sqrt(crate::mathf::fmax(1.0 - z * z, 0.0));
         let a = 2.399_963 * f64::from(i);
         Vec3::new(r * mathf::cos(a), r * mathf::sin(a), z)
     });

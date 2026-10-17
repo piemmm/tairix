@@ -4,23 +4,25 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, TAU};
 
+use tairix_land::course::Mark;
+use tairix_land::plan::{Plan as LandPlan, Rivers, Wear};
+use tairix_land::relief::{Landform, Terrain};
+use tairix_land::ways::{CUT_SLOPE, DEEPEST_CUT};
+use tairix_land::Season;
 use tairix_util::mathf;
 
 use super::courses::{
     brick_courses, Annulus, Bond, Clay, Column, Dressing, Mason, Opening, Order, Quarry, Ring,
     Stonework, Wall, Weathering,
 };
-use super::landscape::{self, Backdrop, Lawning, Scheme, Vantage, GOLDEN, GREEN};
+use super::landscape::{self, levels, Backdrop, Lawning, Scheme, Vantage, GOLDEN, GREEN};
 use super::plants::{self, Character, Grassland, Grove, Kind, Stand};
 use super::weather::{self, Climate, Cover, Hour};
 use super::{direction, rgb, Composed, Dice, Landing, Look, Stage, View, COPPER, GOLD};
-use crate::course::Mark;
-use crate::land::{Land, Plan, Rivers, Survey, Wear, CUT_SLOPE, DEEPEST_CUT};
+use crate::land::{Land, Plan, Survey};
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
 use crate::solid::Form;
-use crate::terrain::{Landform, Terrain};
-use crate::tree::Season;
 use crate::vector::{Frame, Pose, Vec3};
 use crate::wood::ANYWHERE;
 
@@ -873,40 +875,48 @@ fn aqueduct(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         tilt: (0.0, 0.0),
         clearing: None,
     };
-    let plan = Plan {
-        relief,
+    let levels = levels(
         reach,
-        sea: None,
-        wear: Wear {
-            passes: 12,
-            incision: 4.0e-4,
-            creep: 0.08,
-            repose: 0.9,
-            infill: 0.3,
-            strata: None,
+        (256, 1024),
+        0.05,
+        landscape::nests((AQUEDUCT_NEST, 80.0), (0.08, 0.12)),
+    );
+    let plan = Plan {
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                passes: 12,
+                incision: 4.0e-4,
+                creep: 0.08,
+                repose: 0.9,
+                infill: 0.3,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 5.0e5,
+                width: 5.0,
+                meander: 1.1,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.1,
+            }),
+            road: None,
+            farming: None,
+            roughness: 1.0,
+            ridges: 0.35,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 5.0e5,
-            width: 5.0,
-            meander: 1.1,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.1,
-        }),
-        road: None,
-        farming: None,
-        roughness: 1.0,
-        ridges: 0.35,
-        droplets: 0.05,
-        cells: (256, 1024),
-        nests: landscape::nests((AQUEDUCT_NEST, 80.0), (0.08, 0.12)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(landscape::horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let material = landscape::ground(stage, dice, &GREEN, (-1e3, 0.55 * height + 400.0, 0.7), 3.0)?;
     let water = landscape::river(stage, dice)?;

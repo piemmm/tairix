@@ -21,7 +21,7 @@ fn sowing(season: Season, shoots: f64) -> Sowing {
 fn only_standing_maize_gives_way_to_its_plants() {
     for season in SEASONS {
         let sowing = sowing(season, 1100.0);
-        for grown in farmed::growths(season) {
+        for grown in grown::growths(season) {
             let index = usize::from(sowing.by_growth[usize::from(grown.code())]);
             let Some(Some((kind, _))) = index
                 .checked_sub(WILD_KINDS)
@@ -46,7 +46,7 @@ fn only_standing_maize_gives_way_to_its_plants() {
 fn every_growth_a_season_holds_grows_in_the_sward() {
     for season in SEASONS {
         let sowing = sowing(season, 1100.0);
-        for grown in farmed::growths(season) {
+        for grown in grown::growths(season) {
             let code = usize::from(grown.code());
             let index = usize::from(sowing.by_growth[code]);
             if look(grown).is_some() {

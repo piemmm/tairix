@@ -225,10 +225,11 @@ sequence the dependency explicitly — never by hoping for an order.
 
 ## The scene tier runs in `ci-long`, not `ci`
 
-The ray tracer's long tests that compose or prepare a whole scene, and the
-screensaver's that prepare or trace one, cost more with every detail the
-scenes gain. They build only with their package's `scene-tests` feature, so
-neither the workspace pass nor `ci` runs them. `ci-long` does, its concurrent
+The ray tracer's long tests that compose or prepare a whole scene, the
+screensaver's that prepare or trace one, and `WinterSun`'s that survey whole
+realms cost more with every detail the scenes and the land gain. They build
+only with their package's `scene-tests` feature, so neither the workspace pass
+nor `ci` runs them. `ci-long` does, its concurrent
 replicas one at a time since one run fills the machine, and so does:
 
 ```sh
@@ -238,8 +239,9 @@ cargo test -p tairix-raytrace --features scene-tests  # one package's tier
 
 The tier's packages are whichever declare the feature. `ci` still lints them
 with it on, so the tier keeps compiling. A whole-scene test taking more than a
-few seconds carries `#[cfg(feature = "scene-tests")]`, as do the helpers only
-it uses; a quick one, and a test of one piece built by hand, stays in `ci`.
+few seconds carries `#[cfg(feature = "scene-tests")]`, as does a survey of a
+whole realm and the helpers only it uses; a quick one, and a test of one piece
+built by hand, stays in `ci`.
 
 ## A test owns the ids it keys process-global state on
 

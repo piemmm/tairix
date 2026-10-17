@@ -2,13 +2,13 @@
 //! stars beyond it, or about a studio the walls of its room; and the cloud.
 //! The sun's own disc is a light, sampled as one, and not part of the sky.
 
+use tairix_noise::smoothstep;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::atmosphere::{Arriving, Atmosphere, Bend, Lit, Scattered};
 use crate::cloud::{sunlight_places, Cloudbank, Lighting, SUNLIGHT_LEVELS, SUN_COSINES};
 use crate::light::Light;
-use crate::noise::smoothstep;
 use crate::stars::Starfield;
 use crate::vector::Vec3;
 

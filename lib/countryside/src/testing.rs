@@ -40,12 +40,12 @@ impl Waters for Hills {
     fn height(&self, at: Point) -> f64 {
         let across = Self::from_river(at);
         let level = Self::river_level(at);
-        let valley = (across / 600.0).min(1.0);
+        let valley = mathf::fmin(across / 600.0, 1.0);
         let bank = level + 1.5 + (Self::rolling(at) - level - 1.5) * valley * valley;
         if across < RIVER {
             level - DEPTH
         } else {
-            bank.max(level + 0.3)
+            mathf::fmax(bank, level + 0.3)
         }
     }
 

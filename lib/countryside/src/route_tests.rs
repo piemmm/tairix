@@ -223,7 +223,7 @@ fn a_route_keeps_its_breadth_clear_of_sheds_smaller_than_its_lattice() {
             &Flat,
         );
         for pair in line.stations.windows(2) {
-            let half = 0.5 * pair[0].width.max(pair[1].width);
+            let half = 0.5 * mathf::fmax(pair[0].width, pair[1].width);
             for shed in &sheds {
                 let apart = shed.segment_distance((pair[0].at, pair[1].at));
                 assert!(

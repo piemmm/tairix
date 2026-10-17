@@ -1,5 +1,5 @@
-//! Bounded `f64` maths for `no_std` geometry, and the single-precision
-//! smoothstep its `f32` callers need.
+//! Bounded `f64` maths for `no_std` geometry, and the rounding to single
+//! precision and the single-precision smoothstep its `f32` callers need.
 //!
 //! `floor`, `sqrt`, `sin` and friends live in `std`, where they call the
 //! platform libm, so a `no_std` crate cannot reach them. One first-party copy
@@ -81,7 +81,7 @@ pub fn round(x: f64) -> f64 {
 /// where `f64::max`'s `NaN` handling takes several instructions.
 #[inline]
 #[must_use]
-pub fn fmax(a: f64, b: f64) -> f64 {
+pub const fn fmax(a: f64, b: f64) -> f64 {
     if a > b {
         a
     } else {
@@ -93,7 +93,7 @@ pub fn fmax(a: f64, b: f64) -> f64 {
 /// where `f64::min`'s `NaN` handling takes several instructions.
 #[inline]
 #[must_use]
-pub fn fmin(a: f64, b: f64) -> f64 {
+pub const fn fmin(a: f64, b: f64) -> f64 {
     if a < b {
         a
     } else {
@@ -112,7 +112,7 @@ pub fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
 /// without a crease.
 #[must_use]
 pub const fn smoothstep(t: f64) -> f64 {
-    let t = if t > 0.0 { t.min(1.0) } else { 0.0 };
+    let t = if t > 0.0 { fmin(t, 1.0) } else { 0.0 };
     t * t * (3.0 - 2.0 * t)
 }
 
@@ -120,8 +120,35 @@ pub const fn smoothstep(t: f64) -> f64 {
 /// in `f32`.
 #[must_use]
 pub const fn smoothstepf(t: f32) -> f32 {
-    let t = if t > 0.0 { t.min(1.0) } else { 0.0 };
+    let t = if t > 1.0 {
+        1.0
+    } else if t > 0.0 {
+        t
+    } else {
+        0.0
+    };
     t * t * (3.0 - 2.0 * t)
+}
+
+/// `x` rounded to the nearest single-precision value, ties to even, and
+/// infinite past single precision's range.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "rounding to single precision is the conversion asked for, and \
+              IEEE 754 defines it exactly"
+)]
+#[must_use]
+pub const fn single(x: f64) -> f32 {
+    x as f32
+}
+
+/// The blend of a cell's corners `[c00, c10, c01, c11]` at `(across, down)`
+/// within it, the first corner at `(0, 0)` and the last at `(1, 1)`.
+#[must_use]
+pub fn bilinear([c00, c10, c01, c11]: [f64; 4], (across, down): (f64, f64)) -> f64 {
+    let top = c00 + (c10 - c00) * across;
+    let bottom = c01 + (c11 - c01) * across;
+    top + (bottom - top) * down
 }
 
 /// [`round`], returned as an `i32`.
@@ -704,6 +731,47 @@ pub fn ln(x: f64) -> f64 {
     } else {
         scale * LN_2_HI - ((ratio * (f - series) - scale * LN_2_LO) - f)
     }
+}
+
+/// `x` to the positive power `p`, and nought for `x` at or below nought.
+#[must_use]
+pub fn power(x: f64, p: f64) -> f64 {
+    if x <= 0.0 {
+        0.0
+    } else {
+        exp(p * ln(x))
+    }
+}
+
+/// The hyperbolic tangent of `x`.
+#[must_use]
+pub fn tanh(x: f64) -> f64 {
+    let e = exp(-2.0 * x.abs());
+    ((1.0 - e) / (1.0 + e)).copysign(x)
+}
+
+/// A count as a real number: exact below 2³², saturating at `u32::MAX` past
+/// it, which no count of a grid's vertices or a scene's parts approaches.
+#[must_use]
+pub fn real(count: usize) -> f64 {
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// `done` of `total` as a share in `0.0..=1.0`, whole when there was nothing
+/// to do.
+#[must_use]
+pub fn share(done: usize, total: usize) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        fmin(real(done) / real(total), 1.0)
+    }
+}
+
+/// `share`, held to `0.0..=1.0`, as the nearest byte.
+#[must_use]
+pub fn byte(share: f64) -> u8 {
+    u8::try_from(round_i32(255.0 * share.clamp(0.0, 1.0))).unwrap_or(u8::MAX)
 }
 
 /// A double's high 32 bits: its sign, exponent and leading fraction.

@@ -5,42 +5,61 @@ use crate::blend::WEIGHT_TOTAL;
 use crate::digest;
 use crate::geom::{chunk_origin, signed, CellCoord, Elevation, CHUNK_CELLS};
 use crate::ground::Ground;
+use crate::land::{Keeping, RealmLand, Store, Unkept};
 use crate::params::{RealmParams, RealmSpec};
 use crate::realm::RealmField;
+use tairix_parallel::SERIAL;
 use tairix_wintersun_net::value::ChunkCoord;
 
-fn field(seed: u64) -> RealmField {
-    let params = RealmParams::new(RealmSpec {
-        seed,
-        extent_chunks: 32,
-        coarse_samples: 64,
-        ..RealmParams::default_realm(seed).spec()
-    })
-    .expect("legal");
-    RealmField::generate(params).expect("solves")
+/// The land of `params`.
+fn land_of(params: RealmParams) -> RealmLand {
+    let field = RealmField::generate(params).expect("solves");
+    RealmLand::new(field, &SERIAL).expect("its land")
 }
 
-fn built(field: &RealmField, coord: ChunkCoord) -> Chunk {
+fn land(seed: u64) -> RealmLand {
+    land_of(
+        RealmParams::new(RealmSpec {
+            seed,
+            extent_chunks: 32,
+            coarse_samples: 64,
+            ..RealmParams::default_realm(seed).spec()
+        })
+        .expect("legal"),
+    )
+}
+
+fn built(land: &RealmLand, coord: ChunkCoord) -> Chunk {
+    built_from(land, coord, &mut Unkept)
+}
+
+/// The chunk at `coord`, its ground worn from what `store` keeps.
+fn built_from(land: &RealmLand, coord: ChunkCoord, store: &mut dyn Store) -> Chunk {
     ChunkBuild::new(coord)
         .expect("fits")
-        .finish(field)
+        .finish(land, store, &SERIAL)
         .expect("builds")
 }
 
 /// A build with every phase before scatter run, so its working grid is
-/// complete.
-fn through_biome(field: &RealmField, coord: ChunkCoord) -> ChunkBuild {
+/// complete, its ground worn from what `store` keeps.
+fn through_biome(land: &RealmLand, coord: ChunkCoord, store: &mut dyn Store) -> ChunkBuild {
     let mut build = ChunkBuild::new(coord).expect("fits");
     while build.phase() != Phase::Scatter {
-        build.step(field).expect("steps");
+        build.step(land, store, &SERIAL).expect("steps");
     }
     build
 }
 
+/// A store keeping every block a test's chunks share.
+fn shared() -> Keeping {
+    Keeping::within(usize::MAX)
+}
+
 #[test]
 fn a_chunk_too_far_out_for_its_cells_is_refused() {
-    // Past the bound a working cell could not be named by a position; at it, a
-    // whole chunk still generates, far outside the realm as it is.
+    // Past the bound a working cell could not be named by a position; at it,
+    // a chunk is named but lies off the realm's land, which is refused.
     use super::MAX_CHUNK_COORD;
     use crate::error::WorldError;
     let bound = i32::try_from(MAX_CHUNK_COORD).expect("fits an i32");
@@ -60,7 +79,7 @@ fn a_chunk_too_far_out_for_its_cells_is_refused() {
             Err(WorldError::OutOfRange)
         ));
     }
-    let field = field(3);
+    let land = land(3);
     for coord in [
         ChunkCoord { x: bound, y: bound },
         ChunkCoord {
@@ -72,7 +91,19 @@ fn a_chunk_too_far_out_for_its_cells_is_refused() {
         let far = build.work_cell(WORK_CELLS - 1, WORK_CELLS - 1);
         let near = build.work_cell(0, 0);
         assert!(far.centre().is_some() && near.centre().is_some());
-        built(&field, coord);
+        assert!(matches!(
+            build.finish(&land, &mut Unkept, &SERIAL),
+            Err(WorldError::OutOfRange)
+        ));
+    }
+    // The realm's own edge chunks lie on it, their rings and all.
+    let edge = land.field().params().min_chunk();
+    let max = land.field().params().max_chunk() - 1;
+    for coord in [
+        ChunkCoord { x: edge, y: edge },
+        ChunkCoord { x: max, y: max },
+    ] {
+        built(&land, coord);
     }
 }
 
@@ -88,7 +119,7 @@ fn the_phase_sequence_terminates_at_done() {
 
 #[test]
 fn a_build_walks_every_phase_in_order() {
-    let field = field(0xC0DE);
+    let land = land(0xC0DE);
     let mut build = ChunkBuild::new(ChunkCoord { x: 0, y: 0 }).expect("fits");
     let expected = [
         Phase::Water,
@@ -100,14 +131,20 @@ fn a_build_walks_every_phase_in_order() {
     ];
     assert_eq!(build.phase(), Phase::Relief);
     for want in expected {
-        assert_eq!(build.step(&field).expect("steps"), want);
+        assert_eq!(
+            build.step(&land, &mut Unkept, &SERIAL).expect("steps"),
+            want
+        );
     }
-    assert_eq!(build.step(&field).expect("steps"), Phase::Done);
+    assert_eq!(
+        build.step(&land, &mut Unkept, &SERIAL).expect("steps"),
+        Phase::Done
+    );
 }
 
 #[test]
 fn a_partial_build_is_readable_at_every_phase() {
-    let field = field(0xC0DE);
+    let land = land(0xC0DE);
     let mut build = ChunkBuild::new(ChunkCoord { x: 1, y: 1 }).expect("fits");
     loop {
         // Nothing here panics or reads uninitialised state: a client draws
@@ -117,7 +154,7 @@ fn a_partial_build_is_readable_at_every_phase() {
         let _ = partial.elevation(0, 0);
         assert_eq!(partial.ground(31, 31).total(), WEIGHT_TOTAL);
         assert_eq!(partial.biome(31, 31).total(), WEIGHT_TOTAL);
-        if build.step(&field).expect("steps") == Phase::Done {
+        if build.step(&land, &mut Unkept, &SERIAL).expect("steps") == Phase::Done {
             break;
         }
     }
@@ -125,40 +162,45 @@ fn a_partial_build_is_readable_at_every_phase() {
 
 #[test]
 fn interrupting_a_build_changes_nothing() {
-    let field = field(0xC0DE);
+    let land = land(0xC0DE);
     let coord = ChunkCoord { x: -2, y: 3 };
 
-    let straight_through = built(&field, coord);
+    let straight_through = built(&land, coord);
 
     // Stop after every phase, do unrelated work, and resume.
     let mut piecewise = ChunkBuild::new(coord).expect("fits");
+    let mut elsewhere = shared();
     while piecewise.phase() != Phase::Done {
-        piecewise.step(&field).expect("steps");
-        let _ = built(&field, ChunkCoord { x: 9, y: 9 });
+        piecewise.step(&land, &mut Unkept, &SERIAL).expect("steps");
+        let _ = built_from(&land, ChunkCoord { x: 9, y: 9 }, &mut elsewhere);
     }
-    let resumed = piecewise.finish(&field).expect("finishes");
+    let resumed = piecewise
+        .finish(&land, &mut Unkept, &SERIAL)
+        .expect("finishes");
 
     assert_eq!(digest::chunk(&straight_through), digest::chunk(&resumed));
 }
 
 #[test]
 fn a_chunk_is_the_same_alone_as_among_its_neighbours() {
-    let field = field(0xB0A7);
+    let land = land(0xB0A7);
     let coord = ChunkCoord { x: 4, y: -5 };
-    let alone = digest::chunk(&built(&field, coord));
+    let alone = digest::chunk(&built(&land, coord));
 
+    // Its neighbours built first, its ground then worn from what they kept.
+    let mut kept = shared();
     for dy in -1..=1 {
         for dx in -1..=1 {
-            let _ = built(
-                &field,
-                ChunkCoord {
+            if (dx, dy) != (0, 0) {
+                let neighbour = ChunkCoord {
                     x: coord.x + dx,
                     y: coord.y + dy,
-                },
-            );
+                };
+                let _ = built_from(&land, neighbour, &mut kept);
+            }
         }
     }
-    assert_eq!(alone, digest::chunk(&built(&field, coord)));
+    assert_eq!(alone, digest::chunk(&built_from(&land, coord, &mut kept)));
 }
 
 #[test]
@@ -239,7 +281,9 @@ fn a_cell_reads_the_same_from_either_side_of_a_seam() {
     // chunk's own, so its footing must read what the neighbour's build reads.
     // Pairs a road crosses between are compared, where the cleared flag can
     // differ.
-    let field = field(0x5EA3);
+    let land = land(0x5EA3);
+    let field = land.field();
+    let mut worn = shared();
     let mut compared = 0_u32;
     let mut cleared = 0_u32;
     for road in field.roads() {
@@ -254,14 +298,14 @@ fn a_cell_reads_the_same_from_either_side_of_a_seam() {
         if !field.params().holds_chunk(east.x, east.y) {
             continue;
         }
-        let west_build = through_biome(&field, coord);
-        let east_build = through_biome(&field, east);
+        let west_build = through_biome(&land, coord, &mut worn);
+        let east_build = through_biome(&land, east, &mut worn);
         let seam = chunk_origin(east).x;
         for cy in 0..CHUNK_CELLS {
             for depth in 0..SCATTER_REACH {
                 let cell = CellCoord::new(seam + signed(depth), chunk_origin(coord).y + signed(cy));
-                let from_west = west_build.footing(&field, cell);
-                let from_east = east_build.footing(&field, cell);
+                let from_west = west_build.footing(field, cell);
+                let from_east = east_build.footing(field, cell);
                 assert_eq!(
                     from_west.biomes, from_east.biomes,
                     "biomes differ at {cell:?}"
@@ -303,21 +347,23 @@ fn a_seam_reads_the_same_at_every_coarse_step() {
             ..RealmParams::default_realm(0).spec()
         })
         .expect("legal");
-        let field = RealmField::generate(params).expect("solves");
+        let land = land_of(params);
+        let field = land.field();
         let half = params.half_extent_chunks();
+        let mut worn = shared();
         let mut wet = 0_u32;
         for y in -half..half {
             for x in -half..half - 1 {
                 let (western, eastern) = (ChunkCoord { x, y }, ChunkCoord { x: x + 1, y });
-                let west_build = through_biome(&field, western);
-                let east_build = through_biome(&field, eastern);
+                let west_build = through_biome(&land, western, &mut worn);
+                let east_build = through_biome(&land, eastern, &mut worn);
                 let seam = chunk_origin(eastern).x;
                 for cy in 0..CHUNK_CELLS {
                     for depth in -signed(SCATTER_REACH)..signed(SCATTER_REACH) {
                         let cell =
                             CellCoord::new(seam + depth, chunk_origin(western).y + signed(cy));
-                        let from_west = west_build.footing(&field, cell);
-                        let from_east = east_build.footing(&field, cell);
+                        let from_west = west_build.footing(field, cell);
+                        let from_east = east_build.footing(field, cell);
                         assert_eq!(
                             (from_west.biomes, from_west.submerged, from_west.cleared),
                             (from_east.biomes, from_east.submerged, from_east.cleared),
@@ -362,9 +408,11 @@ fn the_sea_is_the_sea_right_up_to_its_shore() {
     // interpolating the two lifts the water surface above sea level across
     // the band beside the land. That band is still the sea, standing at sea
     // level: it is neither a lake nor a slope of water.
-    let field = field(0x5EA5);
+    let land = land(0x5EA5);
+    let field = land.field();
     let params = field.params();
     let side = signed(params.coarse_samples());
+    let mut worn = shared();
     let mut sea_cells = 0_u32;
     let mut coasts = 0;
     'search: for sy in 1..side - 1 {
@@ -374,7 +422,7 @@ fn the_sea_is_the_sea_right_up_to_its_shore() {
             if here.is_water() || !east.elevation.is_submerged() {
                 continue;
             }
-            let chunk = built(&field, params.sample_cell(sx, sy).chunk());
+            let chunk = built_from(&land, params.sample_cell(sx, sy).chunk(), &mut worn);
             for cy in 0..CHUNK_CELLS {
                 for cx in 0..CHUNK_CELLS {
                     let surface = chunk.surface(cx, cy);
@@ -414,12 +462,13 @@ fn the_halo_is_as_wide_as_the_band_it_has_to_resolve() {
     // inside the halo's reach, and a cell past it reads exactly as one far
     // from any water.
     assert_eq!(WORK_CELLS, CHUNK_CELLS + 2 * SHORE_CELLS);
-    let field = field(0xB0A7);
-    let build = through_biome(&field, ChunkCoord { x: 0, y: 0 });
+    let land = land(0xB0A7);
+    let field = land.field();
+    let build = through_biome(&land, ChunkCoord { x: 0, y: 0 }, &mut Unkept);
     for cy in 0..CHUNK_CELLS {
         for cx in 0..CHUNK_CELLS {
             let (wx, wy) = (cx + SHORE_CELLS, cy + SHORE_CELLS);
-            let Some(mut reading) = build.reading(&field, wx, wy) else {
+            let Some(mut reading) = build.reading(field, wx, wy) else {
                 continue;
             };
             if reading.conditions.shore.0 < SHORE_REACH {
@@ -440,12 +489,14 @@ fn the_halo_is_as_wide_as_the_band_it_has_to_resolve() {
 fn ground_the_coarse_field_holds_no_water_on_stays_dry() {
     use tairix_util::mathf;
 
-    let field = field(0xD2E5);
+    let land = land(0xD2E5);
+    let field = land.field();
+    let mut worn = shared();
     let mut checked = 0_u32;
     for x in -3..3 {
         for y in -3..3 {
             let coord = ChunkCoord { x, y };
-            let chunk = built(&field, coord);
+            let chunk = built_from(&land, coord, &mut worn);
             let origin = chunk_origin(coord);
             for cy in 0..CHUNK_CELLS {
                 for cx in 0..CHUNK_CELLS {
@@ -476,8 +527,8 @@ fn ground_the_coarse_field_holds_no_water_on_stays_dry() {
 
 #[test]
 fn every_cell_is_coherent() {
-    let field = field(0xB0A7);
-    let chunk = built(&field, ChunkCoord { x: 0, y: 0 });
+    let land = land(0xB0A7);
+    let chunk = built(&land, ChunkCoord { x: 0, y: 0 });
     for cy in 0..CHUNK_CELLS {
         for cx in 0..CHUNK_CELLS {
             assert_eq!(chunk.biome(cx, cy).total(), WEIGHT_TOTAL);
@@ -500,8 +551,8 @@ fn every_cell_is_coherent() {
 
 #[test]
 fn a_cell_index_wraps_onto_the_chunk() {
-    let field = field(1);
-    let chunk = built(&field, ChunkCoord { x: 0, y: 0 });
+    let land = land(1);
+    let chunk = built(&land, ChunkCoord { x: 0, y: 0 });
     assert_eq!(
         chunk.elevation(0, 0),
         chunk.elevation(CHUNK_CELLS, CHUNK_CELLS)
@@ -546,8 +597,8 @@ fn the_surface_flags_are_independent() {
 
 #[test]
 fn a_chunk_reports_the_bytes_it_holds() {
-    let field = field(1);
-    let chunk = built(&field, ChunkCoord { x: 0, y: 0 });
+    let land = land(1);
+    let chunk = built(&land, ChunkCoord { x: 0, y: 0 });
     let area = (CHUNK_CELLS as usize).pow(2);
     assert!(
         chunk.payload_bytes() >= area * 24,
@@ -557,8 +608,8 @@ fn a_chunk_reports_the_bytes_it_holds() {
 
 #[test]
 fn scrubbing_leaves_nothing_readable() {
-    let field = field(1);
-    let mut chunk = built(&field, ChunkCoord { x: 0, y: 0 });
+    let land = land(1);
+    let mut chunk = built(&land, ChunkCoord { x: 0, y: 0 });
     chunk.scrub();
     assert!(chunk.scatter().is_empty());
     for cy in 0..CHUNK_CELLS {

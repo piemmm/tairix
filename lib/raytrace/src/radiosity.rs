@@ -21,12 +21,12 @@
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
+use tairix_mix::mix32;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::bvh::{Builder, Bvh};
 use crate::detail::Records;
-use crate::sample::mix32;
 use crate::scene::Scene;
 use crate::shape::Aabb;
 use crate::tone::Encoder;
@@ -325,6 +325,10 @@ impl Radiosity {
 }
 
 /// How far the records' laying down has come.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the records hold one stage, and a box could not fail gracefully"
+)]
 #[derive(Debug)]
 enum Stage {
     /// Looking over the grid's sites, from the `n`th in its scrambled order,
@@ -338,7 +342,7 @@ enum Stage {
     Indexing(Builder),
 }
 
-/// Records' worth of their hierarchy built in one step.
+/// How many records a step of their hierarchy visits.
 const INDEX_UNIT: usize = 16_384;
 
 /// The records of a scene being laid down, a grid of the picture at a time.

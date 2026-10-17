@@ -34,7 +34,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_raster::Affine;
-use tairix_util::mathf::sqrt;
+use tairix_util::mathf::{real, sqrt};
 
 use crate::error::SvgError;
 use crate::font::{
@@ -782,8 +782,7 @@ fn apply_length_spans(spans: &[LengthSpan], advances: &mut [f64], stretch: &mut 
             }
             // Bounded by the resolved text length, well inside what a
             // double states exactly.
-            let per_gap =
-                (span.target - natural) / f64::from(u32::try_from(gaps).unwrap_or(u32::MAX));
+            let per_gap = (span.target - natural) / real(gaps);
             if !per_gap.is_finite() {
                 continue;
             }

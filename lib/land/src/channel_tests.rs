@@ -140,8 +140,8 @@ fn pools_lie_deeper_than_crests_and_the_bed_keeps_its_depth() {
     for along in places(40.0, 760.0, 0.25) {
         let at = section(&courses, along, &form);
         let depth = at.water - at.deepest;
-        shallowest = shallowest.min(depth);
-        deepest = deepest.max(depth);
+        shallowest = mathf::fmin(shallowest, depth);
+        deepest = mathf::fmax(deepest, depth);
         below += at.brim - at.deepest;
         count += 1.0;
     }
@@ -179,7 +179,7 @@ fn a_ledge_gathers_its_reachs_fall_into_one_drop_of_bare_rock() {
     assert!(riffle < 0.8 * unit, "a riffle drops {riffle}");
     let lip = (0..20)
         .map(|tenth| section(&courses, at + 0.1 * f64::from(tenth), &stepped))
-        .fold(0.0f64, |most, at| most.max(at.ledge));
+        .fold(0.0f64, |most, at| mathf::fmax(most, at.ledge));
     assert!(lip > 0.9, "the ledge's rock {lip}");
     let bare = banked(&courses, at + 0.3, &stepped);
     assert!(bare.laid(0.0) < -0.5, "{}", bare.laid(0.0));
@@ -188,7 +188,7 @@ fn a_ledge_gathers_its_reachs_fall_into_one_drop_of_bare_rock() {
             let below = section(&courses, at + 0.25 * f64::from(step), &stepped);
             below.water - below.deepest
         })
-        .fold(0.0f64, f64::max);
+        .fold(0.0f64, mathf::fmax);
     let crest = section(&courses, at - 0.2, &stepped);
     assert!(
         plunge > 2.0 * (crest.water - crest.deepest),
@@ -231,7 +231,7 @@ fn in_a_bend_the_deep_water_swings_out_and_a_sandy_bar_rises_inside() {
             banked.banks[0].face < banked.banks[1].face,
             "{unit}: {banked:?}"
         );
-        sanded = sanded.max(banked.laid(0.75 * at.half));
+        sanded = mathf::fmax(sanded, banked.laid(0.75 * at.half));
         assert!(
             banked.laid(-0.95 * at.half) <= ALLUVIUM + 1e-12,
             "{unit}: the cut bank's foot is earth, not sand"
@@ -323,7 +323,7 @@ fn no_bank_has_a_say_past_the_farthest() {
                         brim: 0.0,
                         width,
                         depth: 0.2 * width,
-                        phase: along / (SPACING * width.max(LEAST_WIDTH)),
+                        phase: along / (SPACING * mathf::fmax(width, LEAST_WIDTH)),
                         turn: turn / width,
                         fall: 0.01,
                     };

@@ -15,11 +15,11 @@ use tairix_countryside::field::FieldId;
 use tairix_countryside::layout::{Layout, Parcel};
 use tairix_countryside::usage::{Bale, Crop};
 use tairix_countryside::Point;
+use tairix_land::grown::{Grown, Stage as Growth};
 use tairix_util::mathf;
 
 use super::super::{rgb, Dice, Stage};
 use super::{across_view, field_key, Built};
-use crate::farmed::{Grown, Stage as Growth};
 use crate::heightfield::Heightfield;
 use crate::land::Land;
 use crate::material::{Finish, Material, Relief};

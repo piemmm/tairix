@@ -36,6 +36,7 @@ use tairix_wintersun_figure::reference;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
+use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -49,32 +50,51 @@ impl tairix_log::Sink for Quiet {
 static SINK: Quiet = Quiet;
 static PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
-fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
-    let params = RealmParams::new(RealmSpec {
-        extent_chunks: 8,
-        coarse_samples: 32,
-        plates: 8,
-        ..RealmParams::default_realm(0x8A11_0C0D).spec()
-    })
-    .expect("the spec is in range");
-    let field = RealmField::generate(params).expect("the realm generates");
-    let camera = Camera::new(
-        WorldPoint { x: 0, y: 0 },
-        Zoom::FURTHEST,
-        realm_bounds(params),
-    );
-    let held: Vec<Chunk> = visible_chunks(camera.visible(view))
-        .filter(|c| params.holds_chunk(c.x, c.y))
-        .map(|coord| {
-            ChunkBuild::new(coord)
-                .expect("a chunk fits")
-                .finish(&field)
-                .expect("a chunk generates")
+/// The test realm's land, a camera on it, and every chunk a view through the
+/// camera needs: solved once, for each runner to draw.
+struct Ground {
+    land: RealmLand,
+    camera: Camera,
+    held: Vec<Chunk>,
+}
+
+impl Ground {
+    fn solve(view: &Viewport) -> Self {
+        let params = RealmParams::new(RealmSpec {
+            extent_chunks: 8,
+            coarse_samples: 32,
+            plates: 8,
+            ..RealmParams::default_realm(0x8A11_0C0D).spec()
         })
-        .collect();
+        .expect("the spec is in range");
+        let land = RealmField::generate(params)
+            .and_then(|field| RealmLand::new(field, &tairix_parallel::SERIAL))
+            .expect("the realm generates");
+        let camera = Camera::new(
+            WorldPoint { x: 0, y: 0 },
+            Zoom::FURTHEST,
+            realm_bounds(params),
+        );
+        let mut worn = Keeping::within(usize::MAX);
+        let held = visible_chunks(camera.visible(view))
+            .filter(|c| params.holds_chunk(c.x, c.y))
+            .map(|coord| {
+                ChunkBuild::new(coord)
+                    .expect("a chunk fits")
+                    .finish(&land, &mut worn, &tairix_parallel::SERIAL)
+                    .expect("a chunk generates")
+            })
+            .collect();
+        Self { land, camera, held }
+    }
+}
+
+fn draw(runner: &dyn JobRunner, view: &Viewport, ground: &Ground) -> Vec<Pixel> {
+    let Ground { land, camera, held } = ground;
+    let (params, camera) = (land.field().params(), *camera);
     let borrowed: Vec<&Chunk> = held.iter().collect();
     let chunks = ChunkWindow::new(&borrowed).expect("generated in coordinate order");
-    let roads = RoadDecals::from_realm(&field).expect("the roads fit");
+    let roads = RoadDecals::from_realm(land.field()).expect("the roads fit");
     let decals = roads.decals().expect("the decals fit");
     let warp = Warp::new(params.seed());
     let fray = Fray::new(params.seed());
@@ -142,13 +162,14 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
 #[test]
 fn the_number_of_bands_does_not_change_the_picture() {
     let view = Viewport::new(160, 120, RenderScale::ONE).expect("a real window");
-    let once = draw(&tairix_parallel::SERIAL, &view);
+    let ground = Ground::solve(&view);
+    let once = draw(&tairix_parallel::SERIAL, &view, &ground);
     assert!(
         once.iter().all(|p| p.a == 255),
         "the one-band frame left holes"
     );
     for width in [2usize, 3, 5, 8, 17] {
-        let split = draw(&Reversed::new(width), &view);
+        let split = draw(&Reversed::new(width), &view, &ground);
         assert_eq!(
             split, once,
             "cutting the frame for {width} threads changed the picture"
@@ -159,8 +180,9 @@ fn the_number_of_bands_does_not_change_the_picture() {
 #[test]
 fn a_target_one_row_tall_still_bands() {
     let view = Viewport::new(160, 1, RenderScale::ONE).expect("a real window");
-    let once = draw(&tairix_parallel::SERIAL, &view);
-    let split = draw(&Reversed::new(16), &view);
+    let ground = Ground::solve(&view);
+    let once = draw(&tairix_parallel::SERIAL, &view, &ground);
+    let split = draw(&Reversed::new(16), &view, &ground);
     assert_eq!(split, once, "a single row cut sixteen ways changed");
     assert_eq!(once.len(), 160);
 }

@@ -238,6 +238,15 @@ pub struct Style {
 }
 
 impl Style {
+    /// Whether it weighs its kinds at all: every weight a finite number, none
+    /// below nought.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        [self.hedge, self.wall, self.fence, self.ditch, self.open]
+            .into_iter()
+            .all(|weight| weight.is_finite() && weight >= 0.0)
+    }
+
     /// Each kind's weight where the ground lies as `lie` has it: walls where
     /// stone is at hand, ditches where the ground is wet, fences near woods,
     /// hedges on deep soil.
@@ -261,11 +270,14 @@ impl Style {
     /// `custom` wherever the ground lets it.
     pub(crate) fn kind(&self, lie: Lie, custom: Kind, draws: &mut Draws) -> Kind {
         let weights = self.weighed(lie);
-        let total: f64 = weights.iter().map(|(_, weight)| weight.max(0.0)).sum();
+        let total: f64 = weights
+            .iter()
+            .map(|&(_, weight)| mathf::fmax(weight, 0.0))
+            .sum();
         let customary = weights
             .iter()
             .find(|(kind, _)| *kind == custom)
-            .map_or(0.0, |(_, weight)| weight.max(0.0));
+            .map_or(0.0, |&(_, weight)| mathf::fmax(weight, 0.0));
         if total > 0.0 && draws.chance(0.75 * mathf::sqrt(customary / total)) {
             return custom;
         }
@@ -689,7 +701,7 @@ pub(crate) fn end(
         (customs(field.holding), 0.0),
     );
     let mut draws = key.draws_for(Stage::Gate, boundary.key);
-    let width = (last.width + 0.6).min(length - 0.4);
+    let width = mathf::fmin(last.width + 0.6, length - 0.4);
     if width > 1.0 {
         boundary
             .gaps

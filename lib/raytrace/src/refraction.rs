@@ -148,12 +148,13 @@ impl Refraction {
     /// The ray leaving radius `r` kilometres from the Earth's centre at
     /// zenith cosine `mu`, traced out of the air between radii `ground` and
     /// `top` through `extinction`, per kilometre at a height above the
-    /// ground; `None` where it meets the ground.
+    /// ground, which steps at the heights `edges` names; `None` where it
+    /// meets the ground.
     pub(crate) fn trace(
         &self,
         (r, mu): (f64, f64),
         (ground, top): (f64, f64),
-        extinction: &dyn Fn(f64) -> Vec3,
+        (extinction, edges): (&dyn Fn(f64) -> Vec3, &[f64]),
     ) -> Option<Path> {
         let r = r.clamp(ground, top);
         let sin = mathf::sqrt((1.0 - mu * mu).max(0.0));
@@ -169,7 +170,23 @@ impl Refraction {
         } else {
             self.levelling(invariant, (ground, r))?
         };
-        let leg = |from: f64, to: f64| self.leg(invariant, level, (from, to), ground, extinction);
+        // Broken where the extinction steps, so no node stands for air of
+        // another layer.
+        let leg = |from: f64, to: f64| {
+            let mut start = from;
+            let (mut angle, mut depth) = (0.0, Vec3::ZERO);
+            let breaks = edges
+                .iter()
+                .map(|edge| ground + edge)
+                .filter(|&at| at > from && at < to);
+            for end in breaks.chain([to]) {
+                let (swept, crossed) = self.leg(invariant, level, (start, end), ground, extinction);
+                angle += swept;
+                depth += crossed;
+                start = end;
+            }
+            (angle, depth)
+        };
         let (start, mut swept, mut depth) = if mu >= 0.0 {
             (r, 0.0, Vec3::ZERO)
         } else {

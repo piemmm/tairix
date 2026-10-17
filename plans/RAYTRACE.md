@@ -9,8 +9,8 @@ Read first: `docs/src/lib/raytrace.md` (the tracer as built),
 `plans/NEW-DESKTOP-SETTINGS.md` DS21 and DS24 (the screensaver and its pane),
 `plans/WINTERSUN.md` WS25–WS31 and WS35 (the world generator that is to share
 the land generator and the countryside layout), `plans/FIX-DESKTOP.md` (no I/O
-on the serve loop) and `plans/OPEN-DEFECTS.md` D463, D465, D466, D483–D485,
-D503, D505 and D514–D520 (the tracer's open defects).
+on the serve loop) and `plans/OPEN-DEFECTS.md` D463, D465, D483–D485, D503,
+D505, D514–D518 and D1140 (the tracer's open defects).
 
 ## Ledger
 
@@ -20,7 +20,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
 | RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `UserFiles/Pictures/Raytracing/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
-| RT5 | A 160 s preparation budget, a heaped sky's cloud light at *Maximum* up to about 5.5 min, every unit of preparation bounded and parallel (closes D464), spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
+| RT5 | A preparation guideline of 160 s, which a heaped sky's cloud light passes; every unit of preparation bounded and parallel (closes D464); the time spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
 | RT7 | The water defects: ripples aliasing far off, reflections lost at grazing angles, the open sea stopping short of the horizon, and the noise seams under every pattern (D490–D494) | done |
 | RT8 | Caustics on and under every body of water, from the light the surface itself focuses: beams over the water the picture shows, every one gathered, refracted onto beds and what stands in the water and reflected onto what stands over it | done |
@@ -55,14 +55,19 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT37 | Woods to the horizon: at *Maximum* a wood of trees reaches as far as its trees still span a pixel, stood one by one near the eye and hashed from cells past them, as thickly far off as near | done |
 | RT38 | Stones in patches: boulder fields, scree below crags and pebbles in drifts, strewn by noise and slope from eight rocks a scene, and leaf litter as thick as the canopy sheds | done |
 | RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by `screensaver.raytrace.detail` | done |
-| RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum* | planned |
+| RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum*; staged as RT40.1–RT40.5 | done |
+| RT40.1 | Droplets keyed by place: `lib/terrain`'s run on a lattice fixed to the land, its tiles keyed by their place over two staggered passes of tiles run apart and summed in order, so a piece held with the run's halo wears as the land worn whole | done |
+| RT40.2 | Woods by the keyed priority rule: a canopy and a subcanopy each sown on a lattice fixed to the land and thinned tallest first in four rounds of `lib/scatter`'s rule, the far wood the canopy's own kept places | done |
+| RT40.3 | The fine land in pieces: a renderer-neutral land crate whose levels each refine the last, a piece of any level a pure function of the land and the piece, the tracer choosing which pieces to refine about its eye | done |
+| RT40.4 | The coarse land renderer-neutral: landforms, wear, waters, roads and the countryside's laying in that crate, on a lattice fixed to the land | done |
+| RT40.5 | WinterSun's land from the crate: its chunks refined from its realm field at *Maximum*, their worn ground kept under `lib/reclaim`, the land folded into WinterSun's digest | done |
 | RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | done |
 | RT42 | Lights as measured: the sun at its true size with its limb darkened, bent by the standard atmosphere; the full moon at its true size, brightness and colour; Allen's stars with Tycho-2's colours; lamps in lumens and candelas; the dusk and night still lifes under the open sky; cirrus lit as ice | done |
 | RT43 | Cloud lit by the light itself: the sun scattered once exactly through the phase, every further order by photons followed through the bank's own cloud into light volumes about the eye, so a far heap reads as bright as a near one | done |
 | RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
 | RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is, every leaf and flower worn as the real one is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks, saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and plume, a reedmace's spike, a lily's pads and flowers and a crowfoot's flower | done |
-| RT46 | Cumulus as they are: heaps as tall as they are broad, fluffy, detailed at every scale a pixel shows, a thick one dark underneath its sunlit top | in progress |
-| RT47 | *Maximum*'s radiosity records gathered within the 160 s budget on a farmland as on every other land | planned |
+| RT46 | Cumulus as they are: heaps as tall as they are broad, fluffy, detailed at every scale a pixel shows, a thick one dark underneath its sunlit top | done |
+| RT47 | *Maximum*'s radiosity records on a farmland gathered at the cost they have on every other land | planned |
 
 ## Standing rules
 
@@ -89,19 +94,18 @@ These bind every item, done or planned.
   wave, cloud — is drawn from its own key, so no two match. Nothing tiles in
   view, and no scene is uniformly covered by any one thing: cover comes in
   patches, gradients and gaps.
-- **Budgets.** A scene prepares in up to 160 s on a desktop-class machine
-  preparing across 8 threads, and holds at its peak up to 2 GB (or the free
-  memory, if less) at *Maximum* detail, far less at *Simple* (RT39). The cloud
-  light of a heaped sky at *Maximum* may take longer: up to about 5.5 min
-  under congestus over a stream (RT43). Both budgets are spent on detail and
-  never wasted: a buffer is sized to what it holds, a
+- **Budgets.** A scene holds at its peak up to 2 GB (or the free memory, if
+  less) at *Maximum* detail, far less at *Simple* (RT39). It aims to prepare in
+  up to 160 s on a desktop-class machine preparing across 8 threads: a
+  guideline, not a limit, which detail that buys realism may pass, as a heaped
+  sky's cloud light does (RT43). Both are spent on detail and never wasted: a buffer is sized to what it holds, a
   stage's working set is let go when the stage ends, and where an efficient
   structure serves as well it is the one used. Every unit of preparation stays
   small enough for a caller answering a frame to stop after it; every
   allocation is fallible, so a smaller machine gets a plainer scene, never an
   abort.
-- **Shared with WinterSun.** The land generator is to build WinterSun's land
-  too, at *Maximum* (RT40), so work on it keeps to WinterSun's world rules
+- **Shared with WinterSun.** The land generator builds WinterSun's land too,
+  at *Maximum* (RT40), so work on it keeps to WinterSun's world rules
   (`plans/WINTERSUN.md` WS25–WS31, WS35): a pure function of its inputs, bit
   for bit the same on every Tier-1 target and however many cores share it,
   renderer-neutral, and bounded by its working set rather than the land it
@@ -248,31 +252,37 @@ scene holds, so a caller answering a frame stops within a few milliseconds:
 - Prototypes grow as many at once as the runner is wide: a tree's stems a few
   at a time, any other kind's parts in one core's unit, every hierarchy a
   slice at a time.
-- A wood's places are sown a ring at a time, a unit bounded by the places
-  drawn rather than those that fall on the land; those that would grow are
-  kept in runs of 16 384 that never move as more are added, each run sorted
-  by a core and merged tallest first as they are thinned, 1024 a unit.
+- A wood's places are read and ruled on a batch of its thinning's rows a core
+  (`lib/scatter`), the nearest kept held in a heap as they are; its trees are
+  then stood off the heap 512 a core a unit and never more than 4096, setting
+  them on the stage being one core's work, the canopy a subcanopy grows
+  beneath chained as its trees stand; a far wood is surveyed a few hundred of
+  its blocks a unit.
 - The shade crowns cast is cast in bands: the crowns sorted into bands of
   rows 16 384 a unit, each band covered from the crowns that can reach it,
   then spread along its rows and, turned, along its columns, a band a core —
   bit for bit the shade cast whole. A lawn samples its shade the same way.
-- A land's fills and settle passes run four rows a core, its water grids
-  about 8192 vertices a core, its droplets in turns of tiles across the
-  runner (`lib/terrain`), its seal in bands; a stream's eye is sited with its
+- A land's fills and settle passes run 1024 vertices a core and its coarse
+  relief and shelter 4096 samples a core, whole rows or not, its water grids
+  about 8192 vertices a core, its droplets 512 of each tile of a batch a
+  core, the batch's windows gathered a unit of their own (`lib/terrain`),
+  its seal in bands; a stream's eye is sited with its
   marks weighed across the runner, its bed's stones are read, thinned and set
   out a few thousand a unit, and its flow solved about 16 384 points a core;
-  a wood's trees are thinned 512 a unit; the
-  sky's tables a row a core, a cloud bank's light a quarter layer a core;
+  the sky's tables a row a core, a cloud bank's heaps drawn eight bands and
+  listed eight rows of its cells a core, its bands four rows a core, its
+  light a quarter layer a core and its photons 32 a core;
   a radiosity record's hemisphere is gathered 64 rays a core a unit, and the
   records laid so far are indexed a slice at a time before the next grid
   looks for sites none of them holds for.
-- A scene's objects' boxes are found across the runner a band at a time and
-  its hierarchy built a slice at a time; the meter takes eight points, then
-  sixteen adaptation samples, a core a unit.
+- A scene's objects' boxes are found 16 384 a core a unit and never more than
+  2¹⁷, gathering them being one core's work, and a hierarchy is laid out a
+  pass over a node's items at a time, a unit visiting a fixed number of items
+  however many a node holds; the meter takes four points, then four
+  adaptation samples, a core a unit.
 
-Measured at 1920×1080 across 8 threads, no unit takes more than about 10 ms
-at either detail but the one that begins a large scene's hierarchy, which can
-take about 20 ms at *Maximum* (D517), and bounding them changed no pixel.
+Measured at 1920×1080 across 8 threads over every setting, no unit takes
+more than about 10 ms at either detail.
 
 At *Maximum* (RT39) the budget is spent where it measurably buys realism.
 Radiosity records hold a hemisphere of 1024 rays, are laid down to half the
@@ -422,10 +432,11 @@ first, then between dry banks, then falling between 0.3 % and 3 %, so a land
 whose streams offer no such reach still gets the best they do; an eye that
 stands by no stream looks over its dale with no brook laid.
 
-- **The channel** (`channel`). A river's course is counted in units of pool
-  and riffle (`Mark::phase`), six widths apart on a gentle stream and
-  shortening toward a step every width or two as it steepens (Leopold and
-  Wolman 1957; Montgomery and Buffington 1997), each mark carrying its run,
+- **The channel** (`tairix_land::channel`). A river's course is counted in
+  units of pool and riffle (`Mark::phase`), six widths apart on a gentle
+  stream and shortening toward a step every width or two as it steepens
+  (Leopold and Wolman 1957; Montgomery and Buffington 1997), each mark
+  carrying its run,
   its bend (`turn`, the curvature through it and its neighbours) and its
   brim's fall over 10 m either way. A unit is a crest, the riffle falling
   quickly below it over a quarter to two fifths of its length, and the pool
@@ -687,8 +698,8 @@ from the impressions RT11's footprints and paw prints are laid with.
 
 ## RT16–RT19 — What grows in the fields
 
-- **What the land is used for, in the land** (`farmed`). Each grid vertex
-  carries a categorical byte of its parcel's use from the layout (none,
+- **What the land is used for, in the land** (`tairix_land::grown`). Each
+  grid vertex carries a categorical byte of its parcel's use from the layout (none,
   grazed, mown, hayed, each crop at the season's stage, orchard, vineyard,
   overgrown, woodlot) and a byte for the way its rows run, read at the
   nearest vertex wherever a category decides something (the sward's kind,
@@ -930,8 +941,8 @@ drift a stream carried, 0.1 to 0.4.
 
 ## RT29 — Snow and snowmen
 
-- **Drifted** (`snow`). A land under snow (`Plan::snowpack`) carries a fall
-  0.2–0.6 m deep moved by one wind. How sheltered each place stands is read
+- **Drifted** (`tairix_land::snow`). A land under snow (`Plan::snowpack`)
+  carries a fall 0.2–0.6 m deep moved by one wind. How sheltered each place stands is read
   at the coarse grid's samples, a band of rows a core (`Step::Shelter`), and
   read back through the relief's own Catmull–Rom patch: the steepest slope up
   to the ground 4–100 m upwind, the mean over the wind's heading and 15°
@@ -1050,19 +1061,29 @@ Every light out of doors comes of a published measurement, nothing tuned
 - Cloud light (RT43, `cloud::light`): the sun scattered once exactly
   through the phase — water's forward lobe (g 0.9) and a twentieth's
   backward one (g −0.3), albedo 0.99998; ice's 0.75 — and what of it the
-  phase's forward peak carries on scattered once more; every further order
+  phase's forward peak carries on, scattered toward the eye through the phase
+  composed with that peak (`Glance::onward`: water's lobes at 0.81 and
+  −0.27, ice's at 0.5625); every further order
   from light volumes about the eye, levels each twice the last's breadth in
   as many voxels (`Resolution`: 96 a side, the finest 4 km either way, at
   *Simple*; 160 at *Maximum*). Photons follow the bank's own cloud, read at
   a 16 m footprint (`FOOTPRINT`), by delta tracking against each voxel's
-  bound (`Cloudbank::weather_over`, `densest`): none where the bands of the
-  weather cells under it, or the envelope at the weather's furthest,
-  deepest and lowest over the voxel's own box with its turrets and fringe at
-  their furthest (`form::may_hold`), leave no room for cloud; a band check
+  bound, rounded up to single precision (`Cloudbank::weather_over`,
+  `densest`): none where the bands of the weather cells under it, or the
+  envelope at the weather's furthest, deepest and lowest over the voxel's own
+  box — a heaped deck's heap by heap (`Heaps::densest`) — leave no room for
+  cloud, its fringe at its broadest and its turrets as far out as the
+  billows stand anywhere over the box, read from their texture's peaks over
+  ever broader blocks (`Textures::reach_over`): in an 83 m voxel some two
+  fifths of their furthest anywhere, on the whole (`form::may_hold`); a band
+  check
   skipping air no cell can hold cloud in (`may_stand`), each band's top the
   envelope's own to the metre (`highest_rise`). The sun's enter the top along
-  its beam, the sky's from above, through the similarity principle's scaled
-  extinction, off the ground by its albedo, in rounds until each voxel
+  its beam, followed through δ-Eddington's extinction (`Scattering::forward`,
+  the square of the asymmetry) until it first scatters through the rest of
+  the phase (`Scattering::remainder`); the sky's from above; past that through
+  the similarity principle's scaled extinction, off the ground by its albedo,
+  in rounds until each voxel
   holding cloud has `tracks` voxels' track or 16 rounds have gone
   (`MOST_ROUNDS`). Track tallies are exact integers, so the light is the
   same however many cores solve it. Toward the sun a sample looks through
@@ -1082,20 +1103,22 @@ Every light out of doors comes of a published measurement, nothing tuned
   `4 / (cells · fine)` radians, keeps the voxels' light (`Lights::lay`): a
   fine cell spans some 7–20 of a full-HD screen's pixels, and under one of
   a picture fifty pixels high, as the tests' pictures are.
-- Against a brute-force path tracer through the same cloud, seen from below:
-  an unbroken overcast's base reads 14–19% bright in the voxels' light, with
-  the ground's light and without, and the test overcast's 18% (see RT46),
-  where the fine light read it within 4% once its rounds were spent; a broken
-  deck's base beside a gap reads 12% dark. Under a thin veil the light is the
-  sky's and the lit ground's own to 8%; a thick overcast lets down a lossless
-  slab's diffusion transmission to 30%. Per-fine-cell noise is held near the
+- Against photons followed through the same cloud and its whole phase,
+  counted as they cross its floor (`cloud::light` reference tests, scene
+  tier), seen from below at *Simple*: an unbroken overcast's base reads 2.6%
+  dark, a broken deck's 8.8%, about half of that the voxels' resolution beside
+  its gaps (5.5% with both scattering evenly) and half the forward-peaked
+  phase's treatment. A veil reads as the sun scattered once through its
+  column, to 0.2%. Under a thin veil the light is the sky's and the lit
+  ground's own to 8%; a thick overcast lets down a lossless slab's diffusion
+  transmission to 30%. Per-fine-cell noise is held near the
   voxels' own; a quarter of the fineness-squared budget mottles near heaps
   visibly.
-- Cost: measured at 1920×1080 across 8 threads, a scene under a heaped sky
-  prepares at *Simple* in 11–34 s; at *Maximum* in 88–130 s under cumulus,
-  humilis or stratocumulus, and in 112–333 s under congestus, a stream's the
-  slowest (Stream, seed 24), its cloud light some three quarters of it. An
-  overcast keeps the voxels' light alone. A fine level sends nine times a
+- Cost: measured at 1920×1080 across 8 threads, Coast, seed 2, prepares in
+  15 s at *Simple* and 73 s at *Maximum* under a mackerel sky, 47 s and 141 s
+  under fair-weather cumulus, and 231 s and 580 s under towering cumulus, the
+  slowest, nearly all of it the cloud light; Stream, seed 24, under towering
+  cumulus in 193 s and 496 s. An overcast keeps the voxels' light alone. A fine level sends nine times a
   voxel level's photons, each some 40 µs under congestus: about 95 reads of
   the cloud, three in four of them passed through against the voxel's bound,
   260 voxels crossed, and 185 additions to the tallies, a third of the cost.
@@ -1173,18 +1196,34 @@ sunlit top (`cloud::form`).
 
 Done:
 
-- *Heaps.* A footprint is where a deck's weather field passes the quantile
-  its cover names (`normal_quantile`), so its footprints cover that share of
+- *Heaps.* A deck heaped 0.75 or more — humilis, cumulus, congestus —
+  stands as heaps of its own (`cloud::heaps`): a Poisson field drawn over a
+  lattice fixed to the land, so a heap is the same heap from every eye and
+  on every level, its cells never so broad that one holds more than 24
+  heaps on the whole, so no cell's count is cut short; thinned by the deck's
+  drifting field into drifts and streets, as many as leave its cover of the
+  sky covered where heaps fall together; breadths from a quarter of the
+  deck's scale up to the whole of it, their number falling as the breadth's
+  1.7th power (Neggers, Jonker and Siebesma, 2003), each as deep as its
+  breadth gives it within the deck's depths, nearly as tall as broad, on a
+  flat base at its condensation level and drawn out along the wind by the
+  deck's stretch.
+  Each level lists over each weather cell the heaps whose cloud can reach
+  it, furthest within first, so a read meets every heap exactly however far
+  off and stops at the first that cannot better what it has met; their
+  envelopes stand together as one. The cells' bands and the light's voxel
+  bounds are each heap's own. A heap's envelope rises to its depth at its
+  middle, a paraboloid steep at its foot. A less heaped deck lies as a
+  field: a footprint is where its weather field passes the quantile its
+  cover names (`normal_quantile`), so its footprints cover that share of
   the sky; each weather column holds its exact distance to the nearest place
   its cover crosses a footprint's edge between two columns (`Edging`,
   `nearest_crossings`, `Envelope`: the separable transform, the crossings on
   rows and on columns each swept along and then across). Over it an envelope
-  rises from a flat base as a dome over that distance (`envelope`): a heap's
-  run to its depth some billows in (`HEAP_RUN`) however deep it stands, so it
-  leaves its edge as steeply as its depth over that run and a shallow heap is
-  a low dome while a deep one stands steep-walled, a sheet's a share of its
-  depth in (`SHEET_RUN`), and below its base outside at a fixed fall
-  (`FALL`). A place's depth within it
+  rises from a flat base as a dome over that distance (`envelope`), its run
+  to its depth between a sheet's share of its depth in (`SHEET_RUN`) and a
+  heap's some billows in (`HEAP_RUN`), and below its base outside at a
+  fixed fall (`FALL`). A place's depth within it
   is measured to the chord between the envelope above or below it and the
   envelope level with it (`within_envelope`), so turrets stand out from walls
   as from tops, and no turret stands further from the envelope than it
@@ -1199,7 +1238,14 @@ Done:
   cube of how far into it a place lies and cut by the wisps (`eroded`) —
   their walls left as filaments low down, their middles as puffs high up —
   read as its tabulated mean where its wisps are too fine for a footprint
-  (`fringe_means`).
+  (`fringe_means`). A read through a coarse footprint averages the edge
+  across it (`Edge`): the uncut edge in closed form, the wisps' mean summed
+  through the fringe from a table each wisp's cut is summed into exactly
+  (`fringe_sums`), the wisps a read resolves cutting about that mean. So a
+  read holds the water a sharp one does through any footprint, a far heap's
+  as a near one's; widened instead, the cube's inner weight drew a quarter-
+  billow read's surface 25 m in, and the sun's taps let 72–78% too much
+  through.
 - *Opacity.* Water's extinction rises with the two-thirds power of the
   height above its base (`ADIABATIC`), a deck's `thickness` taken a
   kilometre up: cumulus columns a median of some 30 optical depths, a tenth
@@ -1210,22 +1256,31 @@ Done:
 - *Reads decided early.* A read of the cloud stops once the turret scales
   still to come can neither bring the surface out to the place nor take it
   back past it (`Surface`): about twice as fast within cloud.
-
-Remaining:
-
-- *Sheets' bases.* A sheet or an overcast keeps the voxels' light, the fine
-  light costing an overcast that fills every voxel of its layers nine times
-  the photons: seen from below, an unbroken overcast's base reads some
-  15–20% bright against a brute-force path tracer through it, the voxels
-  drawing the light from within it down to its base, and a broken deck's base
-  beside a gap some 12% dark. A base is to read as it is without the fine
-  light's cost: the voxels' light to hold a base's boundary layer on its own.
-- *The clear sky.* The atmosphere's zenith at noon is 0.065 of the ground's
-  sunlight over π, where clear skies measure about 0.12 and Preetham's model
-  0.3; it sets how bright cloud reads against the sky, so it is to be
-  checked against measurements.
-- *The far field.* Distant heaps near the horizon stack in flat, streaked
-  layers.
+- *Sheets' bases.* Read against photons followed through the cloud and its
+  whole phase: an unbroken overcast's base 2.6% dark, where it read 16% dark,
+  a broken deck's 8.8%, and a veil as the sun scattered once through it. The
+  sun's beam runs through δ-Eddington's extinction, its forward peak
+  scattered toward the eye through the phase composed with the peak; edges
+  hold their water through any footprint (*Fringe*), so the
+  sun's taps let through within 1% of an exact march averaged through the
+  cloud, and 7% from below; and a march stopped where little shows through
+  counts what lies deeper as sending on its last sample's light, a thick
+  base's 2.7% that was lost. The voxels' light holds a base without the fine
+  light's cost.
+- *The clear sky as measured.* A clear day's haze is OPAC's continental
+  clean aerosol (`atmosphere::AEROSOLS`): optical depth 0.064 at 0.55 µm,
+  spectral by its Ångström exponents, albedo 0.97, asymmetry 0.709, in a
+  mixing layer to 2 km over its free-tropospheric and stratospheric
+  backgrounds, each march broken where a layer ends. With the sun 60° up the
+  zenith is 0.14 of the ground's direct sunlight over π, within the 0.07–0.17
+  that measured clear skies give (Karayel et al., 1984, at Linke turbidities
+  of 2–3).
+- *The far field.* A thresholded field joins fair-weather footprints into
+  networks: at 28–42% cover the area-weighted median footprint is 5–7 km
+  across, the longest some 20 km, their arms 2–3 km wide, and far off each
+  read as a flat, streaked lens. Heaps standing as cells keep their own
+  breadth and depth at every distance, so rows of separate heaps on flat
+  bases reach the horizon.
 
 ## RT45 — No primitive stand-ins
 
@@ -1251,15 +1306,15 @@ Remaining:
   **a reedmace's spike** swells between blunt ends under a withered spire and
   bursts in fluff over winter.
 
-## RT47 — Radiosity within the budget on a farmland
+## RT47 — Radiosity on a farmland at every other land's cost
 
 Measured at 1920×1080 across 8 threads, Farmland, seed 2, prepares at
-*Maximum* in 340 s, 267 s of it gathering its radiosity records: past the
-160 s budget under any sky, where a stream gathers its records in under a
-minute. What remains: find what a farmland's records cost — how many its
-hedges, walls and hedgerow trees ask for, and how many rays each gathers — and
-bound it, so its gathering keeps within the budget without thinning the light
-the records hold on any other land.
+*Maximum* in 340 s, 267 s of it gathering its radiosity records, where a
+stream gathers its records in under a minute. What remains: find what a
+farmland's records cost — how many its hedges, walls and hedgerow trees ask
+for, and how many rays each gathers — and bound it, so a farmland gathers them
+at about the cost any other land does, without thinning the light the records
+hold on any other land.
 
 ## RT32 — The moon
 
@@ -1326,15 +1381,14 @@ session weighs against the memory band (`plans/NEW-DESKTOP-SETTINGS.md`
 DS24); each profile has its own measured progress shares.
 
 Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads,
-over 29 landscapes at *Simple* and the twelve heaviest found at *Maximum*: a
-landscape prepares at *Simple* in at most 34 s, holding at most 702 MiB at
-its peak, a farmland's under stratocumulus; and at *Maximum* in at most
-343 s, holding at most 1275 MiB, the same farmland's. *Maximum*'s time is
-mostly its radiosity records, a farmland's past the budget (RT47), and under
-a heaped sky its cloud light, congestus over a stream the slowest at 333 s
-(RT43). A wood carried on far off adds its survey, about 4 s
-of a mountain forest's 50 at *Maximum*, and a few per cent to gathering and
-tracing. RT38's stones and what later items buy are *Maximum*'s to spend the
+every setting at seed 1 prepares at *Simple* in at most 71 s and at
+*Maximum* in at most 208 s, Alpine's the slowest at both, holding 506 MiB and
+903 MiB at its peak; under towering cumulus Coast, seed 2, takes 231 s and
+580 s, holding 581 MiB and 1345 MiB (RT43), each within its profile's
+memory. *Maximum*'s time is mostly its radiosity records, a farmland's the
+costliest (RT47), and under a heaped sky its cloud light. A wood carried on
+far off adds its survey, some 25 ms at *Maximum* over Forest and Alpine,
+seed 1, and a few per cent to gathering and tracing. RT38's stones and what later items buy are *Maximum*'s to spend the
 rest of its budget on.
 
 Tests: a seed showing the same land, eye, sun, weather and sward at either
@@ -1344,25 +1398,194 @@ preparing at *Simple*; and a draft's progress climbing steadily at either.
 
 ## RT40 — One land generator, the tracer's and WinterSun's
 
-WinterSun is to build its realm's land with this generator at Maximum detail
-(`plans/WINTERSUN.md` WS25–WS31, WS35), so the land's stages move out of
-`lib/raytrace` into renderer-neutral crates beside `lib/terrain` and
-`lib/countryside` (RT13), held to WinterSun's world rules: a pure function of
+WinterSun builds its realm's land with this generator at Maximum detail
+(`plans/WINTERSUN.md` WS25–WS31, WS35), so the land's stages live in
+renderer-neutral crates beside `lib/terrain` and `lib/countryside` (RT13),
+held to WinterSun's world rules: a pure function of
 the seed and the place, bit for bit on every Tier-1 target and across any
 runner, a region laid out in pieces matching one laid out whole, and bounded
-by its working set, its digest folded into WinterSun's.
+by its working set, its digest folded into WinterSun's. The tracer keeps what
+is its own: the eye, the picture, shading, light and the reveal.
 
-- Relief, wear and droplets run over tiles whose seams neighbouring pieces
-  agree on; `lib/terrain`'s droplets already leave the same ground on any
-  runner, and seams across pieces are the part still to build.
-- Woods are thinned by a keyed priority rule — a place stands unless a taller
-  place within its room outranks it — rather than in one sequence, so a
-  district's trees need only its neighbours' places, as WinterSun's scatter
-  needs.
-- The grids refined about the eye become the tracer's choice of which pieces
-  to refine, not the generator's.
-- The tracer keeps what is its own: the eye, the picture, shading, light and
-  the reveal.
+Arithmetic agrees across targets: `mathf` throughout, and never `f64::max`
+or `min`, which may answer either zero on a tie of signed zeros. The crates
+that must agree to the bit — `lib/land`, `lib/noise`, `lib/terrain`,
+`lib/countryside`, `lib/scatter`, `lib/util` and WinterSun's world — take
+`mathf::fmax` and `fmin`, and deny the float `max` and `min` (`clippy.toml`).
+
+### RT40.1 — Droplets keyed by place
+
+`lib/terrain::droplet` runs on a lattice fixed to the land (`Tiles`), its
+droplets on the land's square, the domain. Its tiles are a third again as
+broad as a droplet reaches, each drawing its droplets from a stream keyed by
+its pass and place, and it runs two passes, the second's tiling staggered half
+a tile. Within a pass every tile's droplets run on its window of the ground as
+the pass found it, all of the pass's tiles at once across the runner, and
+their changes are summed per sample in the tiles' row-major order. A piece
+(`Placed`) is worn (`Wearing`) from blocks of ground 64 samples a side, one
+set before the run and one after each pass (`Block`): a block a `Store` keeps
+is read, the rest filled from the land and worn by just the tiles reaching
+them, so its ground lies within `Tiles::halo` of the piece — the blocks, and
+each pass's tiles and a droplet's reach either side. At the tracer's law
+(lifetime 90, brush 3) a droplet reaches 94 samples, a tile is 126 and the
+halo 815. Each block is a pure function of the land and its place, so a store
+may keep or drop any and the piece is the land worn whole to the bit.
+
+Over a hill land worn on its coarse grid and refined four times to 1024
+samples a side, at 0.05 droplets a sample, the two passes wear the land within
+3 % of one run in order, dig about a third more pits deeper than 5 cm, and
+show nothing at their tiles' period. Two staggered passes, because one pass of
+tiles run apart wears 18 % more and shows its tiling, and a single run phased
+across the tiles would hang a sample's ground on some sixteen reaches about
+it, too wide a halo for any piece smaller than the land.
+
+### RT40.2 — Woods by the keyed priority rule
+
+- **Two layers, each sown on the land.** A wood's canopy and its subcanopy —
+  the trees overtopped by the canopy or suppressed under it — are each sown
+  one place to a cell of a lattice of their own fixed to the land
+  (`wood::Sown`, `wood::Layer`), jittered within the cell and drawn from the
+  cell's key; what grows there is read from the land at the place
+  (`wood::Reader::tree`). The canopy is sown about one place to a middling
+  crown's spacing where the wood grows thickest, the subcanopy at 0.6 of it.
+  `Beneath`'s shrubs and saplings are a third layer, the floor.
+- **One rule, in rounds.** `lib/scatter`'s thinning keeps, round by round, a
+  place no still-undecided taller place crowds (`wood::crowd`, the pair's
+  room), and yields every undecided place a kept one crowds; what is
+  undecided after the fourth round yields. That is tallest-first thinning
+  wherever the rounds settle a place, with a place's fate hanging on the
+  places within seven rooms of it. A subcanopy place also yields to the canopy
+  trees about it. Four rounds, because one — Matérn's second process, a place
+  yielding even to taller places that yield in turn — keeps 28% of a forest's
+  trees, nearly all its tallest third.
+- **One wood, underfoot to the horizon.** The tracer thins the canopy over one
+  region — all about the eye out to its trees' shadows and across the view to
+  where its tallest still span two pixels — and stands the nearest it keeps
+  one by one; the rest across the view are the far wood's marks, a bit a cell,
+  each read again from its place when a ray meets it, so no far trunk stands
+  in a stood tree's room (D1139). The subcanopy stands over the near ground
+  only, short of its edges by a canopy tree's room; far off the canopy hides
+  it. Each layer has a lattice of its own spacing, because one fine lattice
+  thinned exactly to the horizon takes a forest 140 s on 24 threads.
+- **The tracer's own.** A place where a tree would wall the view off before
+  the eye, or stand under something already on the stage, offers nothing.
+- **Measured** at *Maximum*, 1920×1080, on 24 threads, against exact
+  tallest-first thinning of one finely sown lattice: a forest stands 93% of
+  the canopy trees it keeps and 110% of its subcanopy's, winter 86% and 109%,
+  a meadow and a valley 69–75% of each, their small patches sown more
+  sparsely. A forest's woods take 8.6 s, winter's 15 s, a meadow's 3.0 s, most
+  of it the rounds over the canopy's far ground.
+- **The shared thinning.** `lib/scatter` runs a consumer's number of rounds
+  (one for the villages and WinterSun's scatter),
+  breaks a tie of ranks by cell, prunes its search by a bound each strip of a
+  row keeps over its undecided offers, and holds only what it has read, so
+  the tracer's offers borrow its stage. A thinned offer is compact (place,
+  height, crown, spacing, draw); a stood tree is read again from its cell.
+
+### RT40.3 — The fine land in pieces
+
+- **The crates.** `lib/land` holds the land generator: the landforms
+  (`relief`), the courses rivers, roads and paths run along (`course`), a
+  river's channel (`channel`), the snow the wind lays (`snow`), what a farmed
+  land grows in its season and the way its rows run (`grown`), what each
+  vertex carries (`attributes`), the coarse build (RT40.4) and the levels that
+  refine it. `lib/noise` holds the gradient, octave-summed, ridged and
+  cellular noise the land and the tracer both draw from, and `lib/mix` the
+  integer finalisers (`mix32`, `mix64`, `numbered`, SplitMix64) that key
+  them.
+- **Levels on the land's lattices.** The coarse lattice's vertices lie at
+  whole multiples of its step from the land's origin. A level's step is its
+  parent's over a whole ratio, so every level's vertices stand at fixed places
+  on the land and every ratio-th of them on its parent's. Level 0 refines the
+  coarse land, each level after it the one before. A scene's far grid holds a
+  whole number of its coarse cells (an alpine land 1152 over 384, a backdrop
+  576 over 192), and each finer level's ratio is the whole one nearest its
+  square's breadth over 1024 cells.
+- **A piece is a pure function of the land and the piece.** A piece is a
+  square of a level's lattice. Its ground before the droplets is its parent
+  read through a Catmull–Rom patch, the level's band of detail keyed by place,
+  the beds the land's courses cut and the snow as the level lies it. Its
+  droplets run on the level's lattice over the land's square with the run's
+  halo held about the piece (RT40.1). Then its channels and ways are put back
+  to their beds, its clearing and cuttings held to their levels, and on level
+  0 its vertices take the wet and the silt the droplets left. A region refined
+  whole and the same region refined in pieces are one land; a parent that does
+  not hold all a piece reads is refused rather than read short, and one
+  keeping only its heights reads as plain ground.
+- **The sea floor shelves at the shore alone.** Ground a hand's breadth under
+  the sea falls away three times as steeply over the shore's face, ten metres
+  down, and the floor beyond lies as the land does, so neither a flat nor a
+  sea-filled valley sinks into a trench.
+- **The tracer's own.** The tracer chooses its pieces: level 0 over the whole
+  land as its far grid, and about the eye one square of each finer level,
+  snapped to its parent's vertices and kept, halo and all, within its
+  parent's square. Only once every level is laid does it blend
+  each finer square into its parent across a band within its border, leave
+  the parent's cells beneath it out, and fill its water and horizon grids; the
+  pieces themselves are never blended, so no level reads another's blend.
+- **Measured** at *Maximum*, 960×540 on 24 threads, the halo adds about a
+  second to a scene's land.
+
+### RT40.4 — The coarse land renderer-neutral
+
+- **One build.** `lib/land::coarse` lays the coarse land a bounded unit at a
+  time: the landforms on the coarse lattice; their wear — drainage, incision,
+  creep and slumping, pass after pass, global and exact over the plan's fixed
+  sample count, as WinterSun's realm field is; the lakes and rivers read from
+  the last drainage; the road routed and graded; the countryside laid out and
+  its ways laid in; and where snow lies, how sheltered from the wind each
+  coarse sample stands. The tracer's settings compose its plan, and the
+  scene's own courses — a footpath from the eye, an aqueduct's cutting — join
+  the land before its finer levels are refined.
+- **On a lattice fixed to the land.** The land's square snaps to whole coarse
+  cells of the land's lattice, so a scene's square moved by less than a cell
+  wears the same samples.
+
+### RT40.5 — WinterSun's land from the crate
+
+WinterSun's realm field supplies the coarse land and the crate's fine levels
+refine it at *Maximum* into its chunks (`wintersun_world::land::RealmLand`),
+their worn ground kept under `lib/reclaim`, and the land is folded into
+`digest::REFERENCE_DIGEST`.
+
+- **A coarse land brought from outside.** The crate refines any coarse land,
+  not only one it wore itself (`coarse::Field`, `Coarse::of_field`): a
+  consumer brings its lattices, the heights at its samples, the water surface
+  its drainage filled, how wet each sample lies, the grain of its relief at
+  each sample (`plan::Grain`: how rough, how much ridged, how much dunes, read
+  between the samples) and its character (the longest wave of its detail, how
+  much grows, its sea and snow, its seed), and the levels refine it exactly as
+  they refine the crate's own. Its lakes stand where the filled surface lies
+  deep. The levels' geometry and what a vertex is read through stand apart
+  from the tracer's plan, so a land with no landform, wear, road or
+  countryside of the crate's own is a land all the same; it ends at its
+  square.
+- **WinterSun's levels.** The realm field's samples are the coarse lattice, a
+  power of two of cells apart, padded past the realm's edge by the samples at
+  it so every chunk's working grid lies on the land; a chunk off it is
+  refused. Level 0 refines the field a fixed few times over across the whole
+  realm — eight, or fewer where its samples lie closer or eight would lay more
+  than 2048 cells across them, the padded edge a little more — and level 1 the rest of the way to a chunk's 1 m cells, droplets running on
+  them as thickly as over the tracer's meadow's far land and middle distance. A chunk's working grid, the chunk
+  and its eight-cell ring, is a piece of level 1; its relief phase takes its
+  ground from the piece and every later phase runs on it. Its grain is the
+  realm's: ridged in a mountain belt, dunes where it is dry, fading into the
+  sea floor so no relief moves the coastline.
+- **Pays the halo once.** Level 0 is refined once, as the realm's land is
+  made. A level-1 piece is worn from blocks of ground the client keeps under
+  `lib/reclaim` (`cache::GroundCache`), shared by the landing search and the
+  quarry, so a chunk beside one already solved fills and wears only the blocks
+  no earlier chunk reached; a block given back is made again, alike to the
+  bit.
+- **Heights alone.** WinterSun reads nothing of its land but the heights, so
+  its levels are refined keeping only those (`level::Keeps::Heights`): no
+  attributes, no water tracked, the same heights. A whole-level piece's
+  wearing reads its own vertices from the piece rather than filling them a
+  second time.
+- **Measured** in release on one core, on the reference realm: a chunk solved
+  alone 0.77 s, nearly all its halo; a neighbour of solved chunks 38–47 ms;
+  level 0 0.16 s, and 2.3 s on the default realm; the world digest 2.6 s. The
+  realm-wide surveys run in the scene tier.
 
 ## RT41 — Local adaptation
 

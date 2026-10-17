@@ -585,7 +585,8 @@ struct TestOptions {
     /// Run the wasm32 browser-headless vertical (`--wasm`).
     run_wasm: bool,
     /// Run the scene tier as well (`--scenes`): the long host tests of whole
-    /// ray-traced scenes, compiled only under [`SCENE_TESTS_FEATURE`].
+    /// ray-traced scenes and realms, compiled only under
+    /// [`SCENE_TESTS_FEATURE`].
     run_scenes: bool,
     /// Restrict the QEMU matrix to enrolments whose package name contains
     /// this substring (`--only`, requires `--qemu`) — the debugging filter
@@ -1875,7 +1876,7 @@ pub(crate) const KERNEL_DIAGNOSTICS_FEATURES: &str = "watchdog-diagnostics";
 pub(crate) const KERNEL_PACKAGE: &str = "tairix-kernel";
 
 /// The feature compiling a package's long host tests of whole ray-traced
-/// scenes, whose cost grows with every detail the scenes gain.
+/// scenes or whole realms, whose cost grows with every detail they gain.
 pub(crate) const SCENE_TESTS_FEATURE: &str = "scene-tests";
 
 /// The extra `cargo` arguments that turn [`KERNEL_DIAGNOSTICS_FEATURES`] on

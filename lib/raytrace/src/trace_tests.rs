@@ -82,7 +82,7 @@ impl Setup {
 
     fn scene(self) -> Scene {
         Scene::new(Parts {
-            objects: self.objects,
+            objects: crate::scene::objects_of(self.objects),
             faces: Vec::new(),
             fields: Vec::new(),
             prototypes: Vec::new(),
@@ -416,7 +416,10 @@ fn a_pattern_turns_with_its_object() {
     let (surface, _) = tracer.surface(
         &ray,
         &hit,
-        (&scene.objects[index], &scene.materials[0]),
+        (
+            scene.objects.get(index).expect("an object"),
+            &scene.materials[0],
+        ),
         (0.0, super::Cone::PINHOLE),
     );
     let spot = Tracer::spot(&surface, &hit);
@@ -1094,7 +1097,7 @@ fn under_water_the_sun_reaches_a_highlight_only_by_its_reflection() {
     let (surface, _) = tracer.surface(
         &ray,
         &hit,
-        (&scene.objects[bed], &metal),
+        (scene.objects.get(bed).expect("an object"), &metal),
         (0.0, super::Cone::PINHOLE),
     );
     let lobes = super::Lobes {
@@ -1341,7 +1344,7 @@ fn damp_ground_shines_low_down_and_gives_back_no_more_than_it_takes() {
         let (surface, _) = tracer.surface(
             &ray,
             &hit,
-            (&scene.objects[floor], &earth),
+            (scene.objects.get(floor).expect("an object"), &earth),
             (0.0, super::Cone::PINHOLE),
         );
         let count = 256u32;

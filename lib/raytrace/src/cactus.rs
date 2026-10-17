@@ -23,13 +23,13 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, TAU};
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{hash2, noise3, smoothstep};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::detail::Spines;
-use crate::noise::{hash2, noise3, smoothstep};
 use crate::prototype::{Building, Part, Prototype, Tube};
-use crate::sample::{mix32, unit};
 use crate::vector::{real, single, wrapped, Vec3};
 
 /// How a stem's ribs are laid: how many run round it, and the seed their

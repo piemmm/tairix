@@ -207,7 +207,7 @@ pub(crate) fn lay_out(
     } else {
         0.0
     };
-    let barn_length = draws.range(16.0, 26.0).min(width + 4.0);
+    let barn_length = mathf::fmin(draws.range(16.0, 26.0), width + 4.0);
     // A barn standing askew swings its corners toward the yard: it stands
     // back by as much.
     let swing = 0.5 * barn_length * mathf::sin(barn_lean).abs();
@@ -265,7 +265,7 @@ fn outbuildings(
         buildings.push(Footprint {
             middle: middle + side * (0.5 * width + 0.5 * byre_depth + gap),
             along: across,
-            length: draws.range(10.0, 16.0).min(depth + 2.0),
+            length: mathf::fmin(draws.range(10.0, 16.0), depth + 2.0),
             depth: byre_depth,
             front: -side,
             standing: Standing::Lesser,
@@ -276,7 +276,7 @@ fn outbuildings(
         buildings.push(Footprint {
             middle: middle - side * (0.5 * width + 0.5 * shed_depth + gap),
             along: across,
-            length: draws.range(8.0, 12.0).min(depth),
+            length: mathf::fmin(draws.range(8.0, 12.0), depth),
             depth: shed_depth,
             front: side,
             standing: Standing::Shed,

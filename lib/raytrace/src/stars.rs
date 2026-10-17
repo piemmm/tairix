@@ -20,12 +20,13 @@
 
 use core::f64::consts::PI;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::smoothstep;
 use tairix_util::mathf;
 
 use crate::atmosphere::WAVELENGTHS;
 use crate::body::{fainter, sunlight, FADING, SUN_MAGNITUDE};
-use crate::noise::smoothstep;
-use crate::sample::{mix32, unit};
+use crate::sample::poisson;
 use crate::vector::{cell_of, Vec3};
 
 /// How many stars over the whole sky are brighter than each visual
@@ -130,7 +131,7 @@ fn stars(tier: &Tier, face: u32, (column, row): (u32, u32)) -> impl Iterator<Ite
     let key = mix32(
         face.wrapping_mul(0x9e37_79b9) ^ tier.salt ^ mix32(column ^ mix32(row ^ 0x632b_e5ab)),
     );
-    let count = poisson(tier.density * solid((x0, x1), (y0, y1)), unit(key));
+    let count = poisson(tier.density * solid((x0, x1), (y0, y1)), unit(key), MOST);
     (0..count).map(move |star| {
         let key = mix32(key ^ (star + 1).wrapping_mul(0x85eb_ca6b));
         Star {
@@ -423,19 +424,6 @@ fn temperature(index: f64) -> f64 {
 fn planck(wavelength: f64, kelvin: f64) -> f64 {
     let fifth = wavelength * wavelength * wavelength * wavelength * wavelength;
     1.0 / (fifth * (mathf::exp(RADIATION / (wavelength * kelvin)) - 1.0))
-}
-
-/// How many stars a cell whose mean is `mean` holds, drawn at `u`.
-fn poisson(mean: f64, u: f64) -> u32 {
-    let mut chance = mathf::exp(-mean);
-    let mut below = chance;
-    let mut count = 0;
-    while u >= below && count < MOST {
-        count += 1;
-        chance *= mean / f64::from(count);
-        below += chance;
-    }
-    count
 }
 
 /// The axis `face` looks along and which way, and the two its coordinates

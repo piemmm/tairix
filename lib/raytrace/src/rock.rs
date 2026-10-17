@@ -14,10 +14,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_noise::noise3;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::{fallible, mathf};
 
-use crate::noise::noise3;
 use crate::prototype::{normals_of, Building, Facet, Part, Prototype};
 use crate::vector::{singles, Vec3};
 

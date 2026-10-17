@@ -657,6 +657,29 @@ fn resolve_target_dir(workspace_root: &Path, cargo_target_dir: Option<OsString>)
 mod tests {
     use super::*;
 
+    /// xtask keeps its own lint tables only to leave `missing_docs` out, so
+    /// its clippy lints are the workspace's, line for line: a default the
+    /// workspace changes cannot leave xtask failing behind it.
+    #[test]
+    fn clippy_lints_are_the_workspaces() {
+        let table = |manifest: &'static str, header: &str| -> Vec<&'static str> {
+            let start = manifest.find(header).expect("the table") + header.len();
+            let body = &manifest[start..];
+            body[..body.find("\n[").unwrap_or(body.len())]
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .collect()
+        };
+        assert_eq!(
+            table(include_str!("../Cargo.toml"), "\n[lints.clippy]\n"),
+            table(
+                include_str!("../../../Cargo.toml"),
+                "\n[workspace.lints.clippy]\n"
+            ),
+        );
+    }
+
     #[test]
     fn target_dir_defaults_to_workspace_target_when_unset() {
         let root = Path::new("/ws");

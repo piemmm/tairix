@@ -50,7 +50,7 @@ fn land_mean(
         .flat_map(|row| samples[row as usize * width..(row as usize + 1) * width].iter())
         .filter(|s| !s.is_water())
         .fold((0.0, 0.0), |(sum, count), s| (sum + of(s), count + 1.0));
-    sum / f64::max(count, 1.0)
+    sum / mathf::fmax(count, 1.0)
 }
 
 #[allow(
@@ -91,8 +91,8 @@ fn the_belts_are_wet_at_the_equator_dry_in_the_subtropics_and_wet_again_poleward
     assert!(storm_track > pole);
     let driest = (0..=90)
         .map(|d| belt_rain(f64::from(d)))
-        .fold(f64::MAX, f64::min);
-    assert_eq!(driest, subtropics.min(driest));
+        .fold(f64::MAX, mathf::fmin);
+    assert_eq!(driest, mathf::fmin(subtropics, driest));
     assert!(belt_rain(-5.0) == belt_rain(0.0) && belt_rain(200.0) == pole);
 }
 
@@ -230,7 +230,7 @@ fn the_north_of_a_realm_spanning_the_planet_is_colder_than_its_equator() {
                 }
             }
         }
-        total / f64::max(count, 1.0)
+        total / mathf::fmax(count, 1.0)
     };
     assert!(mean(0..side / 8) + 20.0 < mean(side - side / 8..side));
 }
@@ -247,7 +247,7 @@ fn seasons_swing_most_toward_the_pole_and_deep_inland() {
     let widest = |set: &[CoarseSample]| {
         set.iter()
             .map(|s| s.range.celsius())
-            .fold(f64::MIN, f64::max)
+            .fold(f64::MIN, mathf::fmax)
     };
     assert!(widest(polar) > widest(equatorial) + 15.0);
     // At one latitude, the interior's seasons are further apart than the

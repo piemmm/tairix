@@ -3,10 +3,10 @@
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
+use tairix_mix::{mix32, unit};
 use tairix_util::mathf;
 
 use super::*;
-use crate::sample::{mix32, unit};
 
 /// A stream of uniform draws.
 fn draws(seed: u32) -> impl FnMut() -> f64 {

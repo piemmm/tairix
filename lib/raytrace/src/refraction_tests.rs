@@ -17,7 +17,11 @@ fn green() -> Refraction {
 fn lift(refraction: &Refraction, height: f64, elevation: f64) -> f64 {
     let zenith = (90.0 - elevation).to_radians();
     let path = refraction
-        .trace((GROUND + height, mathf::cos(zenith)), (GROUND, TOP), &clear)
+        .trace(
+            (GROUND + height, mathf::cos(zenith)),
+            (GROUND, TOP),
+            (&clear, &[]),
+        )
         .expect("the ray leaves the air");
     (path.zenith - zenith).to_degrees() * 60.0
 }
@@ -83,7 +87,7 @@ fn just_above_the_horizon_a_sources_true_zenith_turns_a_fifth_again_as_fast() {
     let air = green();
     let true_zenith = |elevation: f64| {
         let zenith = (90.0 - elevation).to_radians();
-        air.trace((GROUND, mathf::cos(zenith)), (GROUND, TOP), &clear)
+        air.trace((GROUND, mathf::cos(zenith)), (GROUND, TOP), (&clear, &[]))
             .expect("the ray leaves the air")
             .zenith
     };
@@ -127,8 +131,12 @@ fn a_ray_heading_down_turns_above_the_ground_or_meets_it() {
     assert!(below > lift(&air, height, 0.0), "{below}′");
     let zenith = (90.0 + 2.0_f64).to_radians();
     assert!(
-        air.trace((GROUND + height, mathf::cos(zenith)), (GROUND, TOP), &clear)
-            .is_none(),
+        air.trace(
+            (GROUND + height, mathf::cos(zenith)),
+            (GROUND, TOP),
+            (&clear, &[])
+        )
+        .is_none(),
         "two degrees down meets the sea"
     );
 }
@@ -140,7 +148,9 @@ fn without_bending_a_ray_runs_straight_and_crosses_its_chord() {
     for (height, elevation) in [(0.0, 0.0), (0.0, 3.0), (1.5, 30.0), (4.0, -1.5_f64)] {
         let zenith = (90.0 - elevation).to_radians();
         let (r, mu) = (GROUND + height, mathf::cos(zenith));
-        let path = air.trace((r, mu), (GROUND, TOP), &even).expect("clear");
+        let path = air
+            .trace((r, mu), (GROUND, TOP), (&even, &[]))
+            .expect("clear");
         assert!(
             (path.zenith - zenith).abs() < 1e-9,
             "{height} {elevation}: {}",
@@ -152,6 +162,54 @@ fn without_bending_a_ray_runs_straight_and_crosses_its_chord() {
             "{height} {elevation}: {} against {}",
             path.depth.x,
             0.01 * chord
+        );
+    }
+}
+
+/// Broken where its extinction steps, a ray's optical depth is exact however
+/// many layers it crosses and however often: rays rising through two, and
+/// one dipping through the lower layer's ceiling and out again.
+#[test]
+fn a_rays_depth_is_exact_across_the_steps_it_is_told_of() {
+    let air = Refraction::new(0.0);
+    let (low, high) = (0.01, 0.001);
+    let stepped = |height: f64| {
+        Vec3::splat(if height < 2.0 {
+            low
+        } else if height < 12.0 {
+            high
+        } else {
+            0.0
+        })
+    };
+    for (height, elevation) in [
+        (0.0, 0.5),
+        (0.0, 3.0),
+        (1.5, 30.0),
+        (0.0, 90.0),
+        (4.0, -1.5_f64),
+    ] {
+        let zenith = (90.0 - elevation).to_radians();
+        let (r, mu) = (GROUND + height, mathf::cos(zenith));
+        let within = |radius: f64| {
+            let disc = r * r * (mu * mu - 1.0) + radius * radius;
+            if radius >= r {
+                -r * mu + mathf::sqrt(disc)
+            } else if mu < 0.0 && disc > 0.0 {
+                2.0 * mathf::sqrt(disc)
+            } else {
+                0.0
+            }
+        };
+        let (lower, upper) = (within(GROUND + 2.0), within(GROUND + 12.0));
+        let exact = low * lower + high * (upper - lower);
+        let path = air
+            .trace((r, mu), (GROUND, TOP), (&stepped, &[2.0, 12.0]))
+            .expect("clear");
+        assert!(
+            (path.depth.x / exact - 1.0).abs() < 1e-6,
+            "{height} {elevation}: {} against {exact}",
+            path.depth.x
         );
     }
 }

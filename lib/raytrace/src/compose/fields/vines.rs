@@ -13,24 +13,25 @@
 
 use core::f64::consts::{PI, TAU};
 
-use tairix_countryside::layout::Layout;
+use tairix_countryside::layout::Parcel;
 use tairix_countryside::usage::Use;
 use tairix_countryside::Point;
+use tairix_land::grown::Grown;
+use tairix_land::Season;
+use tairix_mix::mix32;
 use tairix_util::mathf;
 
 use super::super::{rgb, Dice, Stage};
 use super::field_key;
 use super::growing::Growing;
-use crate::farmed::{Drill, Grown};
+use crate::farmed::Drill;
 use crate::land::Land;
 use crate::leaf::Outline;
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::{Foliage, Pigment};
 use crate::prototype::{Assembly, Blade, Building, Part, Tube};
-use crate::sample::mix32;
 use crate::shape::Shape;
 use crate::stand::{Plant, Planting, Sowing, Stand, PLANTS};
-use crate::tree::Season;
 use crate::vector::{cell_of, share, single, singles, Frame, Pose, Vec3};
 
 /// How many vines of a season are built for its stands to draw from.
@@ -461,7 +462,8 @@ fn wires(
 
 /// What a vineyard's stands draw from in a season: its vines and its post,
 /// and the materials they and its wires are made in.
-struct Made {
+#[derive(Debug)]
+pub(super) struct Made {
     vines: [Plant; PLANTS],
     post: Plant,
     materials: Materials,
@@ -503,78 +505,76 @@ impl Made {
     }
 }
 
-/// Stand `layout`'s vineyards lying within `reach` of the eye at `eye` on
-/// `land` in `season`, their vines built as first wanted from `seed`, and
-/// string their trellises' wires; `None` when the stage will not hold them.
+/// Stand `parcel` if it is a vineyard lying within `reach` of the eye at
+/// `eye` on `land` in `season`, its vines built as first wanted from `seed`
+/// into `made`, and string its trellises' wires: whether it stood; `None`
+/// when the stage will not hold it.
 pub(super) fn stand(
     stage: &mut Stage,
-    (land, layout): (&Land, &Layout),
+    (land, parcel): (&Land, &Parcel),
     (eye, season): (Point, Season),
     (reach, seed): (f64, u64),
-) -> Option<()> {
-    let leafing = leafing(season);
-    let mut made: Option<Made> = None;
-    for parcel in layout.parcels() {
-        let field = &parcel.field;
-        if parcel.usage.used != Use::Vineyard || field.cell.distance(eye) > reach {
-            continue;
-        }
-        let (code, rows) = land
-            .grids
-            .grows(&stage.fields, field.middle.x, field.middle.y);
-        if Grown::of(code) != Grown::Vineyard {
-            continue;
-        }
-        if made.is_none() {
-            made = Some(Made::new(stage, leafing, seed)?);
-        }
-        let Made {
-            vines,
-            post,
-            materials,
-        } = made.as_ref()?;
-        let drill = Drill::of(ROWS, (code, rows));
-        let sowing = Sowing {
-            grows: (code, rows),
-            drill,
-            apart: APART,
-            planting: TRELLISED,
-            plants: *vines,
-            kinds: VARIANTS,
-            sizes: (0.92, 1.06),
-            posts: Some((POSTED, *post)),
-            eye: (eye.x, eye.y),
-            thinning: (THINNING * reach, reach),
-            seed: Dice::keyed(seed ^ field_key(field.id), 1).seed(),
-        };
-        let Some(stood) = Stand::new((land.grids, &stage.fields), &field.cell, &sowing) else {
-            continue;
-        };
-        let posts = stood.posts(&stage.fields)?;
-        let (wire, wood) = (materials.wire, usize::from(materials.wood));
-        let side = drill.place((1.0, 0.0));
-        let mut strung = Assembly::with_room(posts.len() * STRANDS.len() * SAG_PIECES, 0)?;
-        let key = Dice::keyed(seed ^ field_key(field.id), 2).seed();
-        wires(
-            &mut strung,
-            &posts,
-            (Vec3::new(side.0, 0.0, side.1), f64::from(POSTED) * APART),
-            (wire, key),
-        )?;
-        stage.stand(stood, wood)?;
-        if strung.parts() > 0 {
-            let prototype = stage.assemble(strung.finish()?)?;
-            let still = Pose::new(Vec3::ZERO, Frame::WORLD);
-            let instance = Shape::Instance {
-                prototype,
-                pose: still,
-                scale: 1.0,
-                key: 0,
-            };
-            stage.add(instance, usize::from(wire), still, false)?;
-        }
+    made: &mut Option<Made>,
+) -> Option<bool> {
+    let field = &parcel.field;
+    if parcel.usage.used != Use::Vineyard || field.cell.distance(eye) > reach {
+        return Some(false);
     }
-    Some(())
+    let (code, rows) = land
+        .grids
+        .grows(&stage.fields, field.middle.x, field.middle.y);
+    if Grown::of(code) != Grown::Vineyard {
+        return Some(false);
+    }
+    if made.is_none() {
+        *made = Some(Made::new(stage, leafing(season), seed)?);
+    }
+    let Made {
+        vines,
+        post,
+        materials,
+    } = made.as_ref()?;
+    let drill = Drill::of(ROWS, (code, rows));
+    let sowing = Sowing {
+        grows: (code, rows),
+        drill,
+        apart: APART,
+        planting: TRELLISED,
+        plants: *vines,
+        kinds: VARIANTS,
+        sizes: (0.92, 1.06),
+        posts: Some((POSTED, *post)),
+        eye: (eye.x, eye.y),
+        thinning: (THINNING * reach, reach),
+        seed: Dice::keyed(seed ^ field_key(field.id), 1).seed(),
+    };
+    let Some(stood) = Stand::new((land.grids, &stage.fields), &field.cell, &sowing) else {
+        return Some(false);
+    };
+    let posts = stood.posts(&stage.fields)?;
+    let (wire, wood) = (materials.wire, usize::from(materials.wood));
+    let side = drill.place((1.0, 0.0));
+    let mut strung = Assembly::with_room(posts.len() * STRANDS.len() * SAG_PIECES, 0)?;
+    let key = Dice::keyed(seed ^ field_key(field.id), 2).seed();
+    wires(
+        &mut strung,
+        &posts,
+        (Vec3::new(side.0, 0.0, side.1), f64::from(POSTED) * APART),
+        (wire, key),
+    )?;
+    stage.stand(stood, wood)?;
+    if strung.parts() > 0 {
+        let prototype = stage.assemble(strung.finish()?)?;
+        let still = Pose::new(Vec3::ZERO, Frame::WORLD);
+        let instance = Shape::Instance {
+            prototype,
+            pose: still,
+            scale: 1.0,
+            key: 0,
+        };
+        stage.add(instance, usize::from(wire), still, false)?;
+    }
+    Some(true)
 }
 
 #[cfg(test)]

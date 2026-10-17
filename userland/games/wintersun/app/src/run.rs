@@ -54,7 +54,7 @@ mod program {
     use tairix_controls::Keystroke;
     use tairix_geometry::Region;
     use tairix_log::{Event, Sink};
-    use tairix_parallel::{JobRunner, Pool};
+    use tairix_parallel::{JobRunner, Pool, SERIAL};
     use tairix_raster::surface::Surface;
     use tairix_rt::io::{StdInfo, Write};
     use tairix_rt::work::{Worker, WorkerGuard};
@@ -102,7 +102,9 @@ mod program {
     use tairix_wintersun_rules::stat::Stats;
     use tairix_wintersun_rules::terrain::ChunkTerrain;
     use tairix_wintersun_rules::zone::Zone;
+    use tairix_wintersun_world::cache::GroundCache;
     use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
+    use tairix_wintersun_world::land::RealmLand;
     use tairix_wintersun_world::params::RealmParams;
     use tairix_wintersun_world::realm::RealmField;
 
@@ -197,8 +199,8 @@ mod program {
                     Ok(Parked::Interrupted)
                 }
                 // The band moved, so the material tiles the frame holds
-                // are given back before the next one asks for more. The
-                // cache is the loop's, so the loop does it.
+                // and the worn ground are given back before the next frame
+                // or chunk asks for more. The loop does it.
                 Wake::PressureChanged => {
                     self.signals.pressure_moved.set(true);
                     Ok(Parked::Interrupted)
@@ -267,24 +269,28 @@ mod program {
 
     /// The chunk generator, run off the frame loop.
     ///
-    /// Solving a chunk is a frame or more of relief, water and biome work on
-    /// a slow machine, so the loop *asks* and collects what has arrived. A
+    /// Solving a chunk is many frames of relief, water and biome work, so
+    /// the loop *asks* and collects what has arrived. A
     /// view whose ground has not come back yet draws it as ground the client
     /// does not hold, which is what it is.
     struct Quarry {
         desk: tairix_rt::sync::Mutex<ChunkDesk<Quarried>>,
         signal: tairix_rt::sync::Condvar,
         wake: tairix_rt::sync::WorkerWake,
-        field: RealmField,
+        land: RealmLand,
+        /// The blocks the realm's fine ground is worn in, kept between
+        /// chunks: taken only by whichever thread is solving.
+        ground: tairix_rt::sync::Mutex<GroundCache>,
     }
 
     impl Quarry {
-        fn new(field: RealmField) -> Self {
+        fn new(land: RealmLand, ground: GroundCache) -> Self {
             Self {
                 desk: tairix_rt::sync::Mutex::new(ChunkDesk::new()),
                 signal: tairix_rt::sync::Condvar::new(),
                 wake: tairix_rt::sync::WorkerWake::create(),
-                field,
+                land,
+                ground: tairix_rt::sync::Mutex::new(ground),
             }
         }
 
@@ -298,7 +304,7 @@ mod program {
         /// frame if it is still wanted.
         fn request(&self, coord: ChunkCoord, armed: bool) -> Option<Quarried> {
             if !armed {
-                return Some(Self::solve(&self.field, coord));
+                return Some(self.solve(coord));
             }
             if self.desk.lock().ask(coord) {
                 self.signal.notify_one();
@@ -316,11 +322,23 @@ mod program {
             self.signal.notify_all();
         }
 
-        fn solve(field: &RealmField, coord: ChunkCoord) -> Quarried {
-            ChunkBuild::new(coord)
-                .ok()
-                .and_then(|build| build.finish(field).ok())
-                .map_or(Quarried::Refused(coord), Quarried::Ready)
+        /// Give back the worn ground the pressure band no longer allows.
+        /// Never waits: a thread solving holds the ground, and gives back
+        /// what the band no longer allows once its solve is done.
+        fn give_back(&self) {
+            if let Some(mut ground) = self.ground.try_lock() {
+                ground.enforce_pressure();
+            }
+        }
+
+        fn solve(&self, coord: ChunkCoord) -> Quarried {
+            let mut ground = self.ground.lock();
+            let solved = ChunkBuild::new(coord)
+                .and_then(|build| build.finish(&self.land, &mut *ground, &SERIAL))
+                .map_or(Quarried::Refused(coord), Quarried::Ready);
+            // A band that moved while this held the ground found it held.
+            ground.enforce_pressure();
+            solved
         }
 
         fn serve(&self) {
@@ -337,7 +355,7 @@ mod program {
                         desk = self.signal.wait(desk);
                     }
                 };
-                let answer = Self::solve(&self.field, job);
+                let answer = self.solve(job);
                 if self.desk.lock().deliver(answer) {
                     self.wake.nudge();
                 }
@@ -1244,18 +1262,34 @@ mod program {
         clips: &Clips<'_>,
     ) -> i32 {
         let params = field.params();
-        let mut zone = Zone::new(TickRate::default_rate());
-        let (player, actor, landing) = match land_player(&field, clips, &mut zone) {
-            Ok(landed) => landed,
-            Err((code, reason)) => return app::fail(APP_NAME, code, reason),
+        let pool = Pool::for_cpus(online_cpus());
+        let Ok(land) = RealmLand::new(field, &pool) else {
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_REALM,
+                "the realm's land could not be refined",
+            );
         };
+        let backing = cache_backing_bytes();
+        let mut ground = GroundCache::new(
+            ("wintersun", params),
+            backing,
+            tairix_rt::pressure::gauge(),
+            &Journal,
+        );
+        let mut zone = Zone::new(TickRate::default_rate());
+        let (player, actor, landing) =
+            match land_player((&land, &mut ground), clips, &mut zone, &pool) {
+                Ok(landed) => landed,
+                Err((code, reason)) => return app::fail(APP_NAME, code, reason),
+            };
         let start = landing.at;
 
-        let Ok(mut world) = World::new(params, &field) else {
+        let Ok(mut world) = World::new(params, land.field()) else {
             return app::fail(APP_NAME, EXIT_NO_REALM, "the realm's roads did not fit");
         };
         world.take(Quarried::Ready(landing.chunk));
-        let quarry = Arc::new(Quarry::new(field));
+        let quarry = Arc::new(Quarry::new(land, ground));
         let armed = start_quarry(&quarry, binding.set());
 
         let mut cast = Cast::new();
@@ -1288,12 +1322,7 @@ mod program {
             controls: Controls::new(),
             governor: Governor::new(),
             renderer: Renderer::new(),
-            cache: MaterialCache::new(
-                "wintersun",
-                cache_backing_bytes(),
-                tairix_rt::pressure::gauge(),
-                &Journal,
-            ),
+            cache: MaterialCache::new("wintersun", backing, tairix_rt::pressure::gauge(), &Journal),
             scaled: Reduced::default(),
             times: FrameTimes::new(),
             cast,
@@ -1308,7 +1337,6 @@ mod program {
             settings_refusing: false,
         };
 
-        let pool = Pool::for_cpus(online_cpus());
         let signals = Signals::default();
         let events = WindowEvents::new(Park {
             mailbox: EventMailbox::new(binding.endpoint(), server),
@@ -1395,24 +1423,26 @@ mod program {
     ///
     /// The exit code and reason for whatever could not be made or placed.
     fn land_player<'a>(
-        field: &RealmField,
+        (land, worn): (&RealmLand, &mut GroundCache),
         clips: &'a Clips<'a>,
         zone: &mut Zone,
+        runner: &dyn JobRunner,
     ) -> Result<(EntityId, Actor<'a>, Landfall), (i32, &'static str)> {
         let identity = player_identity()
             .ok_or((EXIT_NO_FIGURE, "the player's figure could not be described"))?;
         let actor = Actor::new(&identity, clips, Facing(0))
             .map_err(|_| (EXIT_NO_FIGURE, "the player's figure could not be built"))?;
-        let landing = landfall(field, actor.footprint()).map_err(|err| match err {
-            ClientError::NoGround => (
-                EXIT_NO_REALM,
-                "the realm has no ground near its centre to stand on",
-            ),
-            _ => (
-                EXIT_NO_REALM,
-                "the realm's starting ground could not be solved",
-            ),
-        })?;
+        let landing =
+            landfall((land, worn), actor.footprint(), runner).map_err(|err| match err {
+                ClientError::NoGround => (
+                    EXIT_NO_REALM,
+                    "the realm has no ground near its centre to stand on",
+                ),
+                _ => (
+                    EXIT_NO_REALM,
+                    "the realm's starting ground could not be solved",
+                ),
+            })?;
         let stats = Stats::new(40, 40, 40, 20, 20)
             .map_err(|_| (EXIT_NO_REALM, "the player's stats are out of range"))?;
         let spec = SpawnSpec::new(PLAYER_KIND, landing.at, stats, 0, actor.footprint())
@@ -1538,6 +1568,7 @@ mod program {
             let waited = events.wait(session.window.client());
             if signals.pressure_moved.replace(false) {
                 session.cache.enforce_pressure();
+                quarry.give_back();
             }
             adopt_desktop(session, &signals.desktop_moved);
             while let Some(answer) = quarry.collect() {
@@ -1621,7 +1652,8 @@ mod program {
     /// The reference scene in the game's window, held still until the player
     /// leaves.
     fn reference_scene(mut window: AppWindow, look: Look, endpoint: u64, set: u64) -> i32 {
-        let Ok(mut world) = reference::World::generate() else {
+        let pool = Pool::for_cpus(online_cpus());
+        let Ok(mut world) = reference::World::generate(&pool) else {
             return app::fail(
                 APP_NAME,
                 EXIT_NO_REALM,
@@ -1682,7 +1714,6 @@ mod program {
             publisher: None,
             signals: &signals,
         });
-        let pool = Pool::for_cpus(online_cpus());
         reference_loop(&mut session, &mut world, &clips, &pool, events, &signals)
     }
 

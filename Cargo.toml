@@ -51,7 +51,6 @@ members = [
     "lib/bootload",
     "lib/browse",
     "lib/buildcfg",
-    "lib/kalloc",
     "lib/caps",
     "lib/clock",
     "lib/cmdres",
@@ -103,14 +102,18 @@ members = [
     "lib/player",
     "lib/inline",
     "lib/input",
+    "lib/kalloc",
     "lib/keymap",
+    "lib/land",
     "lib/linkclient",
     "lib/log",
     "lib/memguard",
+    "lib/mix",
     "lib/multiboot2",
     "lib/net",
     "lib/netchan",
     "lib/netconfig",
+    "lib/noise",
     "lib/pagezero",
     "lib/parallel",
     "lib/partition",
@@ -129,6 +132,7 @@ members = [
     "lib/rng",
     "lib/rt",
     "lib/sandbox",
+    "lib/scatter",
     "lib/seat",
     "lib/ssh",
     "lib/supervisor",
@@ -652,6 +656,8 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Denied by the crates that must agree to the bit on every target (clippy.toml).
+disallowed_methods = "allow"
 
 [profile.release]
 opt-level = 3
@@ -723,6 +729,16 @@ opt-level = 3
 # floods, incision and hundreds of thousands of droplets, whose cost at
 # `opt-level = 1` would measure the profile rather than the terrain.
 [profile.dev.package.tairix-terrain]
+opt-level = 3
+
+# Every texture, landform and cloud the screensaver draws sums octaves of this
+# noise, millions of times a picture.
+[profile.dev.package.tairix-noise]
+opt-level = 3
+
+# The screensaver's lands are generated here, millions of vertices each
+# refined, carved and worn before a pixel is traced.
+[profile.dev.package.tairix-land]
 opt-level = 3
 
 # The screensaver's countryside routes every lane, track and path across the

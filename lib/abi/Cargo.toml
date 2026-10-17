@@ -19,6 +19,8 @@ test-util = []
 workspace = true
 
 [dependencies]
+# SplitMix64, which a load bias is drawn from its seed with.
+tairix-mix = { path = "../mix", version = "=0.0.0" }
 
 # The interleaving oracle for the PCM ring's release/acquire pair, pulled in
 # only when a consumer opts in with `RUSTFLAGS="--cfg loom"` (which is what

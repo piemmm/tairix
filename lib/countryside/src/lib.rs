@@ -36,6 +36,8 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+// Bit for bit on every target: no float max or min, which may pick either zero.
+#![deny(clippy::disallowed_methods)]
 
 extern crate alloc;
 

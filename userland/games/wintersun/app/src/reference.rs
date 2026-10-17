@@ -23,6 +23,7 @@ use tairix_wintersun_figure::reference as figures;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{ChunkBuild, ChunkWindow};
+use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -38,6 +39,10 @@ use crate::view::{Reduced, Viewport};
 
 /// The seed the reference realm is generated from.
 pub const SEED: u64 = 0x5749_4E54_4552_4652;
+
+/// The most bytes of worn ground the reference scene keeps between the
+/// chunks its views need, which lie side by side and share most of it.
+const WORN_BYTES: usize = 24 * 1024 * 1024;
 
 /// Memory the reference scene's material cache is sized from.
 ///
@@ -72,40 +77,44 @@ impl<'v> Shot<'v> {
     }
 }
 
-/// The reference realm, generated once, the ground art every view of it
-/// shares, and the ground the last view needed.
+/// The reference realm and its land, generated once, the ground art every
+/// view of it shares, the ground the last view needed, and the worn ground
+/// its chunks were solved from.
 #[derive(Debug)]
 pub struct World {
-    field: RealmField,
+    land: RealmLand,
     roads: RoadDecals,
     warp: Warp,
     fray: Fray,
     ground: HeldGround,
+    worn: Keeping,
 }
 
 impl World {
-    /// Generate the reference realm.
+    /// Generate the reference realm, its land refined across `runner`.
     ///
     /// # Errors
     ///
-    /// [`ClientError::World`] if the realm does not generate, and whatever
-    /// its roads refuse.
-    pub fn generate() -> Result<Self, ClientError> {
+    /// [`ClientError::World`] if the realm or its land does not generate,
+    /// and whatever its roads refuse.
+    pub fn generate(runner: &dyn JobRunner) -> Result<Self, ClientError> {
         let params = params()?;
         let field = RealmField::generate(params).map_err(|_| ClientError::World)?;
+        let roads = RoadDecals::from_realm(&field)?;
         Ok(Self {
-            roads: RoadDecals::from_realm(&field)?,
+            land: RealmLand::new(field, runner).map_err(|_| ClientError::World)?,
+            roads,
             warp: Warp::new(params.seed()),
             fray: Fray::new(params.seed()),
-            field,
             ground: HeldGround::new(),
+            worn: Keeping::within(WORN_BYTES),
         })
     }
 
     /// The realm's parameters.
     #[must_use]
     pub fn params(&self) -> RealmParams {
-        self.field.params()
+        self.land.field().params()
     }
 
     /// Draw the scene as `shot` sees it into `target`, which must be the
@@ -130,7 +139,7 @@ impl World {
     ) -> Result<(), ClientError> {
         let params = self.params();
         let camera = Camera::new(WorldPoint { x: 0, y: 0 }, shot.zoom, realm_bounds(params));
-        self.hold_ground(camera.visible(shot.view))?;
+        self.hold_ground(camera.visible(shot.view), runner)?;
         let borrowed = self.ground.borrow()?;
         let chunks = ChunkWindow::new(&borrowed).map_err(|_| ClientError::World)?;
         let decals = self.roads.decals()?;
@@ -184,16 +193,18 @@ impl World {
     }
 
     /// Hold every chunk `visible` needs, solving only those not already held
-    /// and giving back the ones it no longer needs, so no ground is drawn as
-    /// missing and none is solved twice.
-    fn hold_ground(&mut self, visible: Bounds) -> Result<(), ClientError> {
+    /// across `runner` and giving back the ones it no longer needs, so no
+    /// ground is drawn as missing and none is solved twice.
+    fn hold_ground(&mut self, visible: Bounds, runner: &dyn JobRunner) -> Result<(), ClientError> {
         self.ground.release_distant(visible);
         for coord in terrain::visible_chunks(visible) {
-            if !self.field.params().holds_chunk(coord.x, coord.y) || self.ground.holds(coord) {
+            if !self.params().holds_chunk(coord.x, coord.y) || self.ground.holds(coord) {
                 continue;
             }
             let build = ChunkBuild::new(coord).map_err(|_| ClientError::World)?;
-            let chunk = build.finish(&self.field).map_err(|_| ClientError::World)?;
+            let chunk = build
+                .finish(&self.land, &mut self.worn, runner)
+                .map_err(|_| ClientError::World)?;
             self.ground.adopt(chunk)?;
         }
         Ok(())

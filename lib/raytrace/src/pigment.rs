@@ -6,19 +6,20 @@
 
 use core::f64::consts::TAU;
 
+use tairix_land::attributes::QUANTITIES;
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use tairix_util::mathf;
 
 use crate::bark::Bark;
 use crate::cover::Cover;
 use crate::grass::{grass_kind, vigour, FLOWER, GRASS_KINDS, HEAD, LITTER, WEED};
 use crate::ground::{Ground, Rock};
-use crate::heightfield::{Grows, QUANTITIES};
+use crate::heightfield::Grows;
 use crate::lily::Lily;
 use crate::maize::Maize;
 use crate::masonry::Masonry;
 use crate::mud::Mud;
-use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
-use crate::sample::{mix32, unit};
 use crate::snowman::Rolled;
 use crate::straw::Straw;
 use crate::timber::Timber;

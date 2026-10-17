@@ -351,15 +351,7 @@ impl DecodeLimits {
     }
 }
 
-/// `value` rounded to the single precision samples are kept in; constants
-/// are worked in double so each rounds once.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "rounding to single precision is the conversion asked for"
-)]
-pub(crate) fn single(value: f64) -> f32 {
-    value as f32
-}
+pub(crate) use tairix_util::mathf::single;
 
 /// What a probe keeps: nothing past what the header states.
 const PROBE_LIMITS: DecodeLimits = DecodeLimits::new(u8::MAX, 0, 0);

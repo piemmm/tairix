@@ -16,12 +16,13 @@
 //! cut into cells a unit across, each coloured as a unit, which settle to
 //! the mean of them wherever a cell is finer than a pixel.
 
+use tairix_land::attributes::QUANTITIES;
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cells3, noise3, smoothstep};
 use tairix_util::mathf;
 
-use crate::heightfield::{Grows, QUANTITIES};
-use crate::noise::{cells3, noise3, smoothstep};
+use crate::heightfield::Grows;
 use crate::pigment::{lying, speckle, Spot, SNOW};
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// What a unit of masonry is.

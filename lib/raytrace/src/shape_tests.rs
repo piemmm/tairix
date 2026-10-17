@@ -258,8 +258,8 @@ fn a_torus_agrees_with_its_marched_equation_for_rays_of_every_kind() {
     let mut hits = 0;
     let mut state = 0x9e37_79b9_u32;
     let mut draw = || {
-        state = crate::sample::mix32(state.wrapping_add(0x6d2b_79f5));
-        crate::sample::unit(state) * 2.0 - 1.0
+        state = tairix_mix::mix32(state.wrapping_add(0x6d2b_79f5));
+        tairix_mix::unit(state) * 2.0 - 1.0
     };
     for _ in 0..600 {
         let origin = Vec3::new(draw() * 4.0, draw() * 2.0, draw() * 4.0);
@@ -357,8 +357,8 @@ fn every_bounded_shape_lies_within_its_box() {
     ];
     let mut state = 17u32;
     let mut draw = || {
-        state = crate::sample::mix32(state.wrapping_add(0x6d2b_79f5));
-        crate::sample::unit(state) * 2.0 - 1.0
+        state = tairix_mix::mix32(state.wrapping_add(0x6d2b_79f5));
+        tairix_mix::unit(state) * 2.0 - 1.0
     };
     for shape in &shapes {
         let bounds = shape

@@ -288,19 +288,19 @@ impl FilterBank {
         let cutoff = CUTOFF * lower / f64::from(ratio.input());
         let i0_beta = bessel_i0(KAISER_BETA);
         for row in 0..rows {
-            let fraction = f64::from(u32::try_from(row).unwrap_or(u32::MAX)) / f64::from(phases);
+            let fraction = mathf::real(row) / f64::from(phases);
             let mut sum = 0.0;
             for tap in 0..taps {
                 let offset = fraction + as_real(taps) / 2.0 - 1.0 - as_real(tap);
                 let value = kernel(offset, taps, cutoff, i0_beta);
-                coefficients[row * taps + tap] = as_f32(value);
+                coefficients[row * taps + tap] = mathf::single(value);
                 sum += value;
             }
             // Normalise each row to unit gain at DC. The windowed kernel's own
             // sum is within a part in ten thousand of one, and the residue
             // would otherwise show up as a level that wobbles with the phase.
             if sum > 0.0 {
-                let scale = as_f32(1.0 / sum);
+                let scale = mathf::single(1.0 / sum);
                 for tap in &mut coefficients[row * taps..row * taps + taps] {
                     *tap *= scale;
                 }
@@ -356,17 +356,6 @@ impl FilterBank {
             .get(start..start + self.taps)
             .unwrap_or(&[])
     }
-}
-
-/// `value` as a coefficient.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "a filter coefficient is a small number near unity, and the pivot \
-              the taps are applied in is f32 anyway, so carrying the design \
-              precision past this point would buy nothing"
-)]
-fn as_f32(value: f64) -> f32 {
-    value as f32
 }
 
 /// One stream's resampling state, driven over a shared [`FilterBank`].
@@ -568,7 +557,7 @@ impl Resampler {
         let phase = u32::try_from(scaled / denominator).unwrap_or(0);
         // Zero whenever the bank has a row per denominator step, which is what
         // makes the exact case exact: there is nothing between rows to blend.
-        let blend = as_f32(
+        let blend = mathf::single(
             f64::from(u32::try_from(scaled % denominator).unwrap_or(0)) / f64::from(ratio.output()),
         );
         self.blend_taps(bank, phase, blend);

@@ -259,14 +259,19 @@ impl Bvh {
     }
 }
 
-/// A hierarchy being built: the items not yet laid out, and the subtrees
-/// still to split, laid out depth first as they are taken.
+/// A hierarchy being built: the items not yet laid out, the subtrees still
+/// to split, laid out depth first as they are taken, and the one being laid
+/// out where it has come to.
 #[derive(Debug)]
 pub(crate) struct Builder {
     items: Vec<Item>,
     nodes: Vec<Node>,
     order: Vec<u32>,
     pending: Vec<Task>,
+    laying: Option<Laying>,
+    /// The bins a node's items are sorted into along each axis, reserved
+    /// once for every node it lays out.
+    bins: Vec<[(Aabb, usize); BINS]>,
 }
 
 /// A subtree still to lay out: its items, how deep it lies, and the node it
@@ -277,6 +282,47 @@ struct Task {
     end: usize,
     depth: usize,
     second_of: Option<usize>,
+}
+
+/// A subtree being laid out a pass over its items at a time, so a step
+/// visits no more of them than its budget however many the subtree holds,
+/// and the next of its items the pass takes.
+#[derive(Copy, Clone, Debug)]
+struct Laying {
+    task: Task,
+    next: usize,
+    pass: Pass,
+}
+
+/// A pass over a subtree's items: its box and their middles gathered; then
+/// the items binned along each axis their middles spread over, for its node;
+/// then parted about the plane chosen, or listed as a leaf.
+#[derive(Copy, Clone, Debug)]
+enum Pass {
+    Gathering {
+        bounds: Aabb,
+        centres: Aabb,
+    },
+    Binning {
+        node: usize,
+        area: f64,
+        axes: [Option<Spread>; 3],
+    },
+    Parting {
+        node: usize,
+        axis: usize,
+        plane: f64,
+        cut: usize,
+    },
+    Listing,
+}
+
+/// Where items' middles begin along an axis, and how many bins span a unit
+/// of it.
+#[derive(Copy, Clone, Debug)]
+struct Spread {
+    low: f64,
+    scale: f64,
 }
 
 impl Builder {
@@ -298,15 +344,19 @@ impl Builder {
             nodes: Vec::new(),
             order: Vec::new(),
             pending: Vec::new(),
+            laying: None,
+            bins: Vec::new(),
             items,
         };
         let count = builder.items.len();
         if !(fallible::reserve(&mut builder.nodes, 2 * count)
             && fallible::reserve(&mut builder.order, count)
-            && fallible::reserve(&mut builder.pending, 2 * MAX_DEPTH + 2))
+            && fallible::reserve(&mut builder.pending, 2 * MAX_DEPTH + 2)
+            && fallible::reserve(&mut builder.bins, 3))
         {
             return None;
         }
+        builder.bins.resize(3, [(Aabb::EMPTY, 0); BINS]);
         if count > 0 {
             builder.pending.push(Task {
                 start: 0,
@@ -318,18 +368,28 @@ impl Builder {
         Some(builder)
     }
 
-    /// Lay out subtrees until about `budget` items have been sorted between
-    /// children; whether the hierarchy is whole.
+    /// Lay out subtrees until about `budget` of their items have been
+    /// visited; whether the hierarchy is whole.
     pub(crate) fn step(&mut self, budget: usize) -> bool {
-        let mut spent = 0usize;
-        while let Some(task) = self.pending.pop() {
-            spent = spent.saturating_add(task.end - task.start);
-            self.lay_out(task);
-            if spent >= budget {
+        let mut left = budget.max(1);
+        while left > 0 {
+            let Some(laying) = self.laying.take().or_else(|| {
+                self.pending.pop().map(|task| Laying {
+                    task,
+                    next: 0,
+                    pass: Pass::Gathering {
+                        bounds: Aabb::EMPTY,
+                        centres: Aabb::EMPTY,
+                    },
+                })
+            }) else {
                 break;
-            }
+            };
+            let visited;
+            (self.laying, visited) = self.lay(laying, left);
+            left = left.saturating_sub(visited.max(1));
         }
-        self.pending.is_empty()
+        self.laying.is_none() && self.pending.is_empty()
     }
 
     /// The share of the items laid out in leaves so far.
@@ -345,40 +405,164 @@ impl Builder {
         }
     }
 
-    /// Lay out `task`'s node, and queue its children, the first to be taken
-    /// next so each subtree lies just after its parent.
-    fn lay_out(&mut self, task: Task) {
-        let Some(items) = self.items.get_mut(task.start..task.end) else {
-            return;
-        };
-        let bounds = items
-            .iter()
-            .fold(Aabb::EMPTY, |bounds, item| bounds.union(item.bounds));
-        let at = self.nodes.len();
-        self.nodes.push(Node::new(bounds));
-        if let Some(parent) = task.second_of.and_then(|parent| self.nodes.get_mut(parent)) {
-            parent.start = u32::try_from(at).unwrap_or(u32::MAX);
-        }
-        let cut = if task.depth + 1 >= MAX_DEPTH {
-            None
-        } else {
-            best_cut(items, bounds)
-        };
-        let Some(cut) = cut else {
-            let start = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
-            self.order.extend(items.iter().map(|item| item.object));
-            if let Some(node) = self.nodes.get_mut(at) {
-                node.start = start;
-                node.count = u32::try_from(task.end - task.start).unwrap_or(u32::MAX);
+    /// Take `laying`'s passes on over at most `allowance` of its items: the
+    /// laying where it stops, `None` once its subtree is laid out, and how
+    /// many items were visited.
+    fn lay(&mut self, mut laying: Laying, allowance: usize) -> (Option<Laying>, usize) {
+        let Task { start, end, .. } = laying.task;
+        let count = end - start;
+        let mut visited = 0;
+        loop {
+            let Some(items) = self.items.get_mut(start..end) else {
+                return (None, visited);
+            };
+            let from = laying.next;
+            let to = from + (count - from).min(allowance - visited);
+            let taken = items.get(from..to).unwrap_or_default();
+            match &mut laying.pass {
+                Pass::Gathering { bounds, centres } => {
+                    for item in taken {
+                        *bounds = bounds.union(item.bounds);
+                        *centres = centres.including(item.centre);
+                    }
+                }
+                Pass::Binning { axes, .. } => {
+                    for item in taken {
+                        for (axis, (spread, bins)) in
+                            axes.iter().zip(self.bins.iter_mut()).enumerate()
+                        {
+                            if let Some(spread) = spread {
+                                let bin = &mut bins[bin_of(item.centre.along(axis), *spread)];
+                                bin.0 = bin.0.union(item.bounds);
+                                bin.1 += 1;
+                            }
+                        }
+                    }
+                }
+                Pass::Parting {
+                    axis, plane, cut, ..
+                } => {
+                    for index in from..to {
+                        if items
+                            .get(index)
+                            .is_some_and(|item| item.centre.along(*axis) < *plane)
+                        {
+                            items.swap(*cut, index);
+                            *cut += 1;
+                        }
+                    }
+                }
+                Pass::Listing => self.order.extend(taken.iter().map(|item| item.object)),
             }
-            return;
-        };
+            visited += to - from;
+            laying.next = to;
+            if to < count {
+                return (Some(laying), visited);
+            }
+            let Some(pass) = self.next_pass(&laying) else {
+                return (None, visited);
+            };
+            laying = Laying {
+                next: 0,
+                pass,
+                ..laying
+            };
+            if visited >= allowance {
+                return (Some(laying), visited);
+            }
+        }
+    }
+
+    /// The pass after `laying`'s finished one, its node laid as the pass it
+    /// finished decides; `None` once the subtree is laid out, its children
+    /// queued if it was split.
+    fn next_pass(&mut self, laying: &Laying) -> Option<Pass> {
+        let task = laying.task;
+        let count = task.end - task.start;
+        match laying.pass {
+            Pass::Gathering { bounds, centres } => {
+                let node = self.nodes.len();
+                self.nodes.push(Node::new(bounds));
+                if let Some(parent) = task.second_of.and_then(|parent| self.nodes.get_mut(parent)) {
+                    parent.start = u32::try_from(node).unwrap_or(u32::MAX);
+                }
+                if task.depth + 1 >= MAX_DEPTH || count <= 1 {
+                    return Some(self.leaf(node, task));
+                }
+                let axes = [0, 1, 2].map(|axis| {
+                    let (low, high) = (centres.min.along(axis), centres.max.along(axis));
+                    (!(high.is_nan() || low.is_nan()) && high > low).then(|| Spread {
+                        low,
+                        scale: real(BINS) / (high - low),
+                    })
+                });
+                if axes.iter().all(Option::is_none) {
+                    return self.unparted(node, task);
+                }
+                self.bins.fill([(Aabb::EMPTY, 0); BINS]);
+                Some(Pass::Binning {
+                    node,
+                    area: bounds.half_area().max(f64::MIN_POSITIVE),
+                    axes,
+                })
+            }
+            Pass::Binning { node, area, axes } => {
+                let Some((cost, axis, plane)) = cheapest(&axes, &self.bins, area) else {
+                    return self.unparted(node, task);
+                };
+                if count <= MAX_LEAF && cost >= real(count) {
+                    return Some(self.leaf(node, task));
+                }
+                Some(Pass::Parting {
+                    node,
+                    axis,
+                    plane,
+                    cut: 0,
+                })
+            }
+            Pass::Parting { node, cut, .. } => {
+                let cut = if cut == 0 || cut == count {
+                    count / 2
+                } else {
+                    cut
+                };
+                self.split(node, task, cut);
+                None
+            }
+            Pass::Listing => None,
+        }
+    }
+
+    /// Node `node`, which no plane parts `task`'s items for: every centre in
+    /// one place, so a crowded node is halved as it lies.
+    fn unparted(&mut self, node: usize, task: Task) -> Option<Pass> {
+        let count = task.end - task.start;
+        if count > MAX_LEAF {
+            self.split(node, task, count / 2);
+            return None;
+        }
+        Some(self.leaf(node, task))
+    }
+
+    /// Node `node` as the leaf of `task`'s items, listed next in the order.
+    fn leaf(&mut self, node: usize, task: Task) -> Pass {
+        let start = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
+        if let Some(node) = self.nodes.get_mut(node) {
+            node.start = start;
+            node.count = u32::try_from(task.end - task.start).unwrap_or(u32::MAX);
+        }
+        Pass::Listing
+    }
+
+    /// Node `node` split `cut` items into `task`'s, its children queued, the
+    /// first to be taken next so each subtree lies just after its parent.
+    fn split(&mut self, node: usize, task: Task, cut: usize) {
         let middle = task.start + cut;
         self.pending.push(Task {
             start: middle,
             end: task.end,
             depth: task.depth + 1,
-            second_of: Some(at),
+            second_of: Some(node),
         });
         self.pending.push(Task {
             start: task.start,
@@ -392,30 +576,20 @@ impl Builder {
 /// How many bins the objects of a node are sorted into along each axis.
 const BINS: usize = 16;
 
-/// Where to cut `items` in two, having partitioned them about the chosen
-/// plane, or `None` when keeping them in one leaf costs no more than any cut.
-fn best_cut(items: &mut [Item], bounds: Aabb) -> Option<usize> {
-    let count = items.len();
-    if count <= 1 {
-        return None;
-    }
-    let centres = items
-        .iter()
-        .fold(Aabb::EMPTY, |bounds, item| bounds.including(item.centre));
-    let area = bounds.half_area().max(f64::MIN_POSITIVE);
+/// The cheapest plane to cut a node's items along, as the surface area
+/// heuristic weighs the bins they fill along each axis `axes` spread over,
+/// the node's box `area` broad: its cost, its axis, and where it lies; `None`
+/// where no plane leaves items either side.
+fn cheapest(
+    axes: &[Option<Spread>; 3],
+    bins: &[[(Aabb, usize); BINS]],
+    area: f64,
+) -> Option<(f64, usize, f64)> {
     let mut best: Option<(f64, usize, f64)> = None;
-    for axis in 0..3 {
-        let (low, high) = (centres.min.along(axis), centres.max.along(axis));
-        if high.is_nan() || low.is_nan() || high <= low {
+    for (axis, (spread, bins)) in axes.iter().zip(bins).enumerate() {
+        let Some(spread) = spread else {
             continue;
-        }
-        let scale = real(BINS) / (high - low);
-        let mut bins = [(Aabb::EMPTY, 0usize); BINS];
-        for item in items.iter() {
-            let bin = &mut bins[bin_of(item.centre.along(axis), low, scale)];
-            bin.0 = bin.0.union(item.bounds);
-            bin.1 += 1;
-        }
+        };
         // What lies above each boundary between bins, swept from the top.
         let mut above = [(0.0, 0usize); BINS];
         let mut sweep = (Aabb::EMPTY, 0usize);
@@ -433,44 +607,19 @@ fn best_cut(items: &mut [Item], bounds: Aabb) -> Option<usize> {
             let cost = TRAVERSAL_COST
                 + (below.0.half_area() * real(below.1) + right_area * real(right)) / area;
             if best.is_none_or(|(held, _, _)| cost < held) {
-                best = Some((cost, axis, low + real(bin + 1) / scale));
+                best = Some((cost, axis, spread.low + real(bin + 1) / spread.scale));
             }
         }
     }
-    let Some((cost, axis, plane)) = best else {
-        // Every centre in one place: no plane parts them, so a crowded node
-        // is halved as it lies.
-        return (count > MAX_LEAF).then_some(count / 2);
-    };
-    if count <= MAX_LEAF && cost >= real(count) {
-        return None;
-    }
-    let cut = partition(items, |item| item.centre.along(axis) < plane);
-    Some(if cut == 0 || cut == count {
-        count / 2
-    } else {
-        cut
-    })
+    best
 }
 
-/// Which of the bins `scale` to a unit from `low` the value `at` falls in.
-fn bin_of(at: f64, low: f64, scale: f64) -> usize {
-    let place = mathf::floor((at - low) * scale).clamp(0.0, real(BINS - 1));
+/// Which of the bins `spread` lays out the value `at` falls in.
+fn bin_of(at: f64, spread: Spread) -> usize {
+    let place = mathf::floor((at - spread.low) * spread.scale).clamp(0.0, real(BINS - 1));
     usize::try_from(mathf::round_i32(place))
         .unwrap_or(0)
         .min(BINS - 1)
-}
-
-/// Move every item `below` holds for to the front, answering how many.
-fn partition(items: &mut [Item], below: impl Fn(&Item) -> bool) -> usize {
-    let mut cut = 0;
-    for index in 0..items.len() {
-        if items.get(index).is_some_and(&below) {
-            items.swap(cut, index);
-            cut += 1;
-        }
-    }
-    cut
 }
 
 #[cfg(test)]

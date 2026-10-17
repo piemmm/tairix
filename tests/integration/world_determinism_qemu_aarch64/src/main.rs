@@ -40,6 +40,7 @@ mod kernel {
     const TEST_START: EventId = EventId(4420);
     const TEST_PASS: EventId = EventId(4421);
     const TEST_FAIL: EventId = EventId(4422);
+    const TEST_PROGRESS: EventId = EventId(4423);
 
     /// Failure finisher code: the realm could not be solved at all.
     const FAIL_GENERATE: NonZeroU16 = fail_point!(1);
@@ -112,9 +113,18 @@ mod kernel {
             "world determinism: generating the reference realm",
         );
 
-        let Ok(produced) = digest::world(digest::reference_params()) else {
-            note(TEST_FAIL, "world determinism: the realm did not solve");
-            qemu_exit::exit_failure(FAIL_GENERATE);
+        // Each stage said as it is folded, so the runner reads a guest working
+        // through the fold rather than a hung one.
+        let mut folding = digest::Folding::new(digest::reference_params());
+        let produced = loop {
+            match folding.step() {
+                Ok(Some(produced)) => break produced,
+                Ok(None) => note(TEST_PROGRESS, "world determinism: a stage folded"),
+                Err(_) => {
+                    note(TEST_FAIL, "world determinism: the realm did not solve");
+                    qemu_exit::exit_failure(FAIL_GENERATE);
+                }
+            }
         };
 
         if produced == REFERENCE_DIGEST {

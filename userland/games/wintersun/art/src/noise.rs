@@ -23,7 +23,7 @@
 //! the caller states, and [`Tiled`] is the handle that carries it — a
 //! sampler that could not wrap would produce tiles that cannot tile.
 
-use tairix_hash::FastHash;
+use tairix_wintersun_world::seed::lattice_word;
 
 /// What a lattice value belongs to.
 ///
@@ -101,12 +101,7 @@ impl Tiled {
     /// The raw word this field assigns to the lattice point `(x, y)`.
     #[must_use]
     pub fn lattice(&self, field: Field, x: i32, y: i32) -> u64 {
-        let (x, y) = (x & self.mask, y & self.mask);
-        let mut message = [0u8; 16];
-        message[0..8].copy_from_slice(&(field as u64).to_le_bytes());
-        message[8..12].copy_from_slice(&x.to_le_bytes());
-        message[12..16].copy_from_slice(&y.to_le_bytes());
-        FastHash::hash_bytes(self.key, &message)
+        lattice_word(self.key, field as u64, (x & self.mask, y & self.mask))
     }
 
     /// The lattice value at `(x, y)`, as a `0..=65535` fraction.

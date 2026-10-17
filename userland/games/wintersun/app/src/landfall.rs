@@ -13,11 +13,13 @@
 use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 
+use tairix_parallel::JobRunner;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
 use tairix_wintersun_rules::motion::{footprint, footprint_clear};
 use tairix_wintersun_rules::terrain::{ChunkTerrain, Terrain};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild};
 use tairix_wintersun_world::geom::{chunk_origin, signed, CellCoord, CHUNK_AREA, CHUNK_CELLS};
+use tairix_wintersun_world::land::{RealmLand, Store};
 use tairix_wintersun_world::realm::{try_filled, RealmField};
 
 use crate::error::ClientError;
@@ -49,8 +51,10 @@ pub struct Landfall {
     pub room: usize,
 }
 
-/// The dry ground nearest the realm's centre, inside a walkable stretch of
-/// at least [`ROOM_CELLS`], that a body of `radius` stands on.
+/// The dry ground nearest the centre of `land`'s realm, inside a walkable
+/// stretch of at least [`ROOM_CELLS`], that a body of `radius` stands on,
+/// each chunk tried solved across `runner` from what `store` keeps of the
+/// ground.
 ///
 /// Chunks are tried nearest the centre first. Where none of the [`TRIES`]
 /// holds that much room, the start is the one with the most room found, so a
@@ -61,11 +65,15 @@ pub struct Landfall {
 /// [`ClientError::NoGround`] when no chunk tried holds a dry place a body
 /// stands on, [`ClientError::World`] when a chunk cannot be solved, and
 /// [`ClientError::OutOfMemory`] when the search's working set does not fit.
-pub fn landfall(field: &RealmField, radius: u16) -> Result<Landfall, ClientError> {
+pub fn landfall(
+    (land, store): (&RealmLand, &mut dyn Store),
+    radius: u16,
+    runner: &dyn JobRunner,
+) -> Result<Landfall, ClientError> {
     let mut roomiest: Option<Landfall> = None;
-    for coord in nearest_land(field)? {
+    for coord in nearest_land(land.field())? {
         let chunk = ChunkBuild::new(coord)
-            .and_then(|build| build.finish(field))
+            .and_then(|build| build.finish(land, store, runner))
             .map_err(|_| ClientError::World)?;
         let Some((at, room)) = start_in(&chunk, radius)? else {
             continue;

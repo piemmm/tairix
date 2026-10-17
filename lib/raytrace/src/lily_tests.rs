@@ -1,8 +1,10 @@
 //! Host tests of a water lily's parts: each pad and petal cut to an outline
 //! of its own, worn as its age says, and coloured to agree with the cut.
 
+use tairix_land::attributes::QUANTITIES;
+
 use super::*;
-use crate::heightfield::{Grows, QUANTITIES};
+use crate::heightfield::Grows;
 
 /// Keys enough to see a lily's pads and petals vary.
 fn keys(count: u32) -> impl Iterator<Item = u32> {

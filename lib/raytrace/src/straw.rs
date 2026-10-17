@@ -13,12 +13,12 @@
 
 use core::f64::consts::TAU;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, noise3, smoothstep, NOISE_SLOPE};
 use tairix_util::mathf;
 
 use crate::ground::{coverage, fade};
-use crate::noise::{cell, noise3, smoothstep, NOISE_SLOPE};
 use crate::pigment::Spot;
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// Straw or hay bound one way: its stalks' two shades, the twine or net

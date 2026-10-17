@@ -1,9 +1,11 @@
 //! A land for the composition's host tests: one grid 400 m across, its
 //! height and what lies on it as a test asks, laid in a ground of its own.
 
+use tairix_land::attributes::Attributes;
+
 use super::Stage;
 use crate::ground::{Ground, Palette};
-use crate::heightfield::{Attributes, Heightfield};
+use crate::heightfield::Heightfield;
 use crate::land::Land;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;

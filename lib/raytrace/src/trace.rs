@@ -24,26 +24,27 @@
 use alloc::vec::Vec;
 use core::f64::consts::PI;
 
+use tairix_land::attributes::PLAIN;
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cells3, noise3, smoothstep};
 use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
 use tairix_util::{fallible, mathf};
 
 use crate::adapt::{self, Adaptation, Sample};
 use crate::atmosphere::Lit;
-use crate::band;
 use crate::detail::Records;
 use crate::grass::Canopy;
 use crate::ground::Moisture;
-use crate::heightfield::{Grows, Patch, PLAIN};
+use crate::heightfield::{Grows, Patch};
 use crate::light::Light;
 use crate::material::{
     fresnel, refract, schlick, schlick_scalar, thin_film, widened, Bump, Finish, Foam, Material,
     Microfacet, Tilt, CARRIED_FOAM, COAT_F0, SPREAD,
 };
-use crate::noise::{cells3, noise3, smoothstep};
 use crate::pigment::{Pigment, Spot};
 use crate::radiosity::{self, Cell, Radiosity, Site};
-use crate::sample::{cosine_hemisphere, disc, filter_offset, mix32, unit, Sampler};
+use crate::sample::{cosine_hemisphere, disc, filter_offset, Sampler};
 use crate::scene::{Glare, Object, Scene, Sight};
 use crate::shape::{Hit, Shape};
 use crate::sky::Seeing;
@@ -1990,8 +1991,10 @@ const METER_ROWS: u32 = 32;
 /// fiftieth, for a sun's disc, or the black inside a hollow, says nothing of
 /// how bright the scene is.
 const METER_TRIM: usize = 50;
-/// Film points one core measures in a unit of work.
-const METER_UNIT: u32 = 8;
+/// Film points one core measures in a unit of work: few, since a point's
+/// one path through the costliest of a scene's materials can take a
+/// millisecond, and the points of a unit lie together on the film.
+const METER_UNIT: u32 = 4;
 /// Rays toward the sun its glare is judged by.
 const GLARE_RAYS: u32 = 16;
 
@@ -2011,8 +2014,9 @@ const MOST_PULL: f64 = 4.0;
 const ADAPT_POINTS: usize = 9216;
 const ADAPT_PIXELS: u64 = 16;
 const ADAPT_SAMPLES: usize = 4;
-/// Adaptation samples one core measures in a unit of work.
-const ADAPT_UNIT: usize = 16;
+/// Adaptation samples one core measures in a unit of work, few for the
+/// reason `METER_UNIT` is.
+const ADAPT_UNIT: usize = 4;
 
 /// The measurement a scene's exposure is set from — its luminance at points
 /// spread over the picture — and then the local adaptation it is corrected
@@ -2088,7 +2092,7 @@ impl Meter {
             .min(self.samples.len());
         let tracer = Tracer::new(scene, &self.encoder, self.size, 0);
         if let Some(slots) = self.samples.get_mut(first..end) {
-            band::for_each(runner, slots, (0, ADAPT_UNIT), &|piece, out| {
+            tairix_parallel::for_each_band(runner, slots, (0, ADAPT_UNIT), &|piece, out| {
                 let start = first.saturating_add(piece.saturating_mul(ADAPT_UNIT));
                 for (index, slot) in (start..).zip(out.iter_mut()) {
                     *slot = tracer.adapting(index, points, key);
@@ -2118,7 +2122,7 @@ impl Meter {
             self.next = total;
             return;
         };
-        band::for_each(runner, slots, (0, METER_UNIT as usize), &|piece, out| {
+        tairix_parallel::for_each_band(runner, slots, (0, METER_UNIT as usize), &|piece, out| {
             let start = u32::try_from(piece).map_or(u32::MAX, |piece| {
                 first.saturating_add(piece.saturating_mul(METER_UNIT))
             });

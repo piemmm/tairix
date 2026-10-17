@@ -9,16 +9,16 @@ use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
 use tairix_countryside::Point;
+use tairix_land::grown::Grown;
+use tairix_mix::unit;
 use tairix_util::mathf;
 
 use super::super::{rgb, Dice, Stage};
-use crate::farmed::Grown;
 use crate::grazing::{self, Pat};
 use crate::land::Land;
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
 use crate::prototype::{Assembly, Building};
-use crate::sample::unit;
 use crate::shape::Shape;
 use crate::vector::{power, share, Frame, Pose, Vec3};
 

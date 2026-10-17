@@ -8,6 +8,7 @@ use tairix_wintersun_figure::reference as figures;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild};
+use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -46,29 +47,28 @@ fn realm() -> RealmParams {
 
 /// Everything a frame of the test realm is drawn from.
 struct Ground {
-    field: RealmField,
+    land: RealmLand,
     held: alloc::vec::Vec<Chunk>,
     camera: Camera,
 }
 
 impl Ground {
     fn new(view: &Viewport, zoom: Zoom) -> Self {
-        let field = RealmField::generate(realm()).expect("the realm generates");
+        let land = RealmField::generate(realm())
+            .and_then(|field| RealmLand::new(field, &tairix_parallel::SERIAL))
+            .expect("the realm generates");
         let camera = Camera::new(WorldPoint { x: 0, y: 0 }, zoom, realm_bounds(realm()));
+        let mut worn = Keeping::within(usize::MAX);
         let held = crate::terrain::visible_chunks(camera.visible(view))
-            .filter(|c| field.params().holds_chunk(c.x, c.y))
+            .filter(|c| realm().holds_chunk(c.x, c.y))
             .map(|coord| {
                 ChunkBuild::new(coord)
                     .expect("a chunk fits")
-                    .finish(&field)
+                    .finish(&land, &mut worn, &tairix_parallel::SERIAL)
                     .expect("a chunk generates")
             })
             .collect();
-        Self {
-            field,
-            held,
-            camera,
-        }
+        Self { land, held, camera }
     }
 
     /// Draw one frame into `target`.
@@ -83,10 +83,11 @@ impl Ground {
     ) -> Result<FrameTimes, ClientError> {
         let borrowed: alloc::vec::Vec<&Chunk> = self.held.iter().collect();
         let chunks = ChunkWindow::new(&borrowed).expect("generated in order");
-        let roads = crate::terrain::RoadDecals::from_realm(&self.field).expect("the roads fit");
+        let roads =
+            crate::terrain::RoadDecals::from_realm(self.land.field()).expect("the roads fit");
         let decals = roads.decals().expect("the decals fit");
-        let warp = Warp::new(self.field.params().seed());
-        let fray = Fray::new(self.field.params().seed());
+        let warp = Warp::new(realm().seed());
+        let fray = Fray::new(realm().seed());
         PRESSURE.report(tairix_reclaim::PressureBand::Normal);
         let mut cache =
             MaterialCache::new("wintersun-frame-test", 32 * 1024 * 1024, &PRESSURE, &SINK);

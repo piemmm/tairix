@@ -10,13 +10,13 @@
 
 use alloc::vec::Vec;
 
+use tairix_collections::ChunkVec;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::adapt::Adaptation;
-use crate::band;
 use crate::body::sunlight;
-use crate::bvh::{Builder, Bvh, Cursor, Walk};
+use crate::bvh::{Builder, Bvh, Cursor, Item, Walk};
 use crate::camera::Camera;
 use crate::caustic::{Caustics, Focusing};
 use crate::compose::{Composition, Setting};
@@ -35,7 +35,7 @@ use crate::shape::{Aabb, Face, Geometry, Hit, Shape};
 use crate::sky::{Dome, Seeing, Sky};
 use crate::stand::Stand;
 use crate::trace::Meter;
-use crate::vector::{Members, Pose, Ray, Vec3};
+use crate::vector::{share, Members, Pose, Ray, Vec3};
 
 /// How near a ray may meet a surface: nearer is the surface it left.
 pub(crate) const NEAR: f64 = 1e-7;
@@ -66,6 +66,13 @@ impl Sight {
         }
     }
 }
+
+/// A scene's objects, in chunks so that adding one never copies the
+/// hundreds of thousands a scene may hold.
+pub(crate) type Objects = ChunkVec<Object, OBJECT_CHUNK>;
+
+/// How many objects a chunk of a scene's holds: a megabyte or so.
+const OBJECT_CHUNK: usize = 1 << 12;
 
 /// One object.
 #[derive(Clone, Debug)]
@@ -132,7 +139,7 @@ pub(crate) struct Glare {
 /// Everything a scene is, before its hierarchy is built.
 #[derive(Debug)]
 pub(crate) struct Parts {
-    pub(crate) objects: Vec<Object>,
+    pub(crate) objects: Objects,
     pub(crate) faces: Vec<Face>,
     pub(crate) fields: Vec<Heightfield>,
     pub(crate) prototypes: Vec<Prototype>,
@@ -276,14 +283,14 @@ impl Draft {
                 if composition.advance(runner, spent)? {
                     let parts = composition.finish()?;
                     let exposure = parts.exposure;
-                    State::Building(Scene::building(parts, runner)?, exposure)
+                    State::Building(Scene::building(parts)?, exposure)
                 } else {
                     State::Composing(composition)
                 }
             }
             State::Building(mut building, exposure) => loop {
-                if building.step() {
-                    let scene = building.finish();
+                if building.step(runner)? {
+                    let scene = building.finish()?;
                     let focus = &self.detail.densities().focus;
                     let focusing = Focusing::new(&scene, self.size, focus)?;
                     self.watered = focusing.watered();
@@ -363,7 +370,7 @@ enum Shadow {
 /// A scene ready to trace.
 #[derive(Debug)]
 pub struct Scene {
-    pub(crate) objects: Vec<Object>,
+    pub(crate) objects: Objects,
     pub(crate) faces: Vec<Face>,
     pub(crate) fields: Vec<Heightfield>,
     pub(crate) prototypes: Vec<Prototype>,
@@ -404,18 +411,46 @@ pub struct Scene {
     swards: Vec<usize>,
 }
 
-/// A scene whose hierarchy is being built, a bounded share at a time.
+/// A scene whose hierarchy is being built, a bounded share at a time: its
+/// objects' boxes found, then the hierarchy laid over them.
 #[derive(Debug)]
 pub(crate) struct Building {
     parts: Parts,
-    builder: Builder,
+    raising: Raising,
     unbounded: Vec<usize>,
     swards: Vec<usize>,
     waters: Vec<usize>,
 }
 
-/// Objects' worth of a scene's hierarchy built in one step.
+/// Where a scene's hierarchy has come to: its objects' boxes found as far as
+/// `next`, each object with a box an item to build over; then the build.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a building holds one, and a box could not fail gracefully"
+)]
+#[derive(Debug)]
+enum Raising {
+    Bounding {
+        next: usize,
+        items: Vec<Item>,
+        boxes: Vec<(u32, Aabb)>,
+    },
+    Building(Builder),
+}
+
+/// How many of a scene's objects a core finds the boxes of in a step, and
+/// the most a step finds whatever the cores: gathering them is one core's
+/// work.
+const BOUND_UNIT: usize = 16_384;
+const BOUND_MOST: usize = 1 << 17;
+
+/// How many of a scene's objects a step of its hierarchy visits.
 const BUILD_UNIT: usize = 16_384;
+
+/// The share of the work of building a scene's hierarchy its objects' boxes
+/// take: found across the runner, they are a small part of a build one core
+/// lays out.
+const BOUNDING_SHARE: f64 = 0.05;
 
 /// Samples of each sun's disc, and of the sky above, the light falling on a
 /// scene's level is measured by.
@@ -474,24 +509,102 @@ const PROGRESS_WHOLE: u16 = 1000;
 impl Building {
     /// The share of the hierarchy built.
     pub(crate) fn done(&self) -> f64 {
-        self.builder.done()
+        match &self.raising {
+            Raising::Bounding { next, .. } => {
+                BOUNDING_SHARE * share(*next, self.parts.objects.len())
+            }
+            Raising::Building(builder) => BOUNDING_SHARE + (1.0 - BOUNDING_SHARE) * builder.done(),
+        }
     }
 
-    /// Build a step more of the hierarchy; whether it is whole.
-    pub(crate) fn step(&mut self) -> bool {
-        self.builder.step(BUILD_UNIT)
+    /// Find a band more of the objects' boxes across `runner`, or, once all
+    /// are found, build a step more of the hierarchy over them; whether it is
+    /// whole, or `None` when the heap will not hold it.
+    pub(crate) fn step(&mut self, runner: &dyn JobRunner) -> Option<bool> {
+        let (next, items, boxes) = match &mut self.raising {
+            Raising::Building(builder) => return Some(builder.step(BUILD_UNIT)),
+            Raising::Bounding { next, items, boxes } => (next, items, boxes),
+        };
+        let parts = &self.parts;
+        let taken = (BOUND_UNIT * runner.width().max(1))
+            .min(BOUND_MOST)
+            .min(parts.objects.len().saturating_sub(*next));
+        boxes.clear();
+        if !fallible::reserve(boxes, taken) {
+            return None;
+        }
+        boxes.resize(taken, (0, Aabb::EMPTY));
+        // A limb's cut lies within its tube, so its box is the tube's whether
+        // or not it is cut.
+        let geometry = Geometry {
+            faces: &parts.faces,
+            fields: &parts.fields,
+            prototypes: &parts.prototypes,
+            lawns: &parts.lawns,
+            far_woods: &parts.far_woods,
+            stands: &parts.stands,
+            materials: &parts.materials,
+            view: None,
+        };
+        let first = *next;
+        // An object whose box is not finite is tested by every ray rather
+        // than trusted to the slab test, which a non-finite box defeats.
+        tairix_parallel::for_each_band(runner, boxes, (0, BOUND_UNIT), &|band, out| {
+            let from = band * BOUND_UNIT;
+            for ((index, slot), object) in (first + from..)
+                .zip(out.iter_mut())
+                .zip(parts.objects.iter_from(first + from))
+            {
+                let bounds = object.shape.bounds(geometry).filter(Aabb::is_finite);
+                *slot = (
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    bounds.unwrap_or(Aabb::EMPTY),
+                );
+            }
+        });
+        let water = |object: &Object| {
+            parts
+                .materials
+                .get(object.material)
+                .and_then(Material::water)
+                .is_some()
+        };
+        for (&(index, bounds), object) in boxes.iter().zip(parts.objects.iter_from(first)) {
+            if bounds.is_finite() {
+                items.push(Item::new(index, bounds));
+            } else if fallible::reserve(&mut self.unbounded, 1) {
+                self.unbounded.push(index as usize);
+            } else {
+                return None;
+            }
+            if water(object) {
+                if !fallible::reserve(&mut self.waters, 1) {
+                    return None;
+                }
+                self.waters.push(index as usize);
+            }
+        }
+        *next += taken;
+        if *next >= parts.objects.len() {
+            let items = core::mem::take(items);
+            self.raising = Raising::Building(Builder::over(items)?);
+        }
+        Some(false)
     }
 
-    /// The scene, once its hierarchy is whole.
-    pub(crate) fn finish(self) -> Scene {
+    /// The scene, once its hierarchy is whole; `None` before.
+    pub(crate) fn finish(self) -> Option<Scene> {
         let Self {
             parts,
-            builder,
+            raising,
             unbounded,
             swards,
             waters,
         } = self;
-        Scene {
+        let Raising::Building(builder) = raising else {
+            return None;
+        };
+        Some(Scene {
             objects: parts.objects,
             faces: parts.faces,
             fields: parts.fields,
@@ -521,7 +634,7 @@ impl Building {
             bvh: builder.finish(),
             unbounded,
             swards,
-        }
+        })
     }
 }
 
@@ -530,76 +643,36 @@ impl Scene {
     /// scene out; `None` when the heap will not hold it.
     #[cfg(test)]
     pub(crate) fn new(parts: Parts) -> Option<Self> {
-        let mut building = Self::building(parts, &tairix_parallel::SERIAL)?;
-        while !building.step() {}
-        Some(building.finish())
+        let mut building = Self::building(parts)?;
+        while !building.step(&tairix_parallel::SERIAL)? {}
+        building.finish()
     }
 
-    /// The scene of `parts`, its objects' boxes found across `runner` and its
-    /// hierarchy to build step by step; `None` when the heap will not hold
-    /// it.
-    pub(crate) fn building(parts: Parts, runner: &dyn JobRunner) -> Option<Building> {
+    /// The scene of `parts`, its objects' boxes to find and its hierarchy to
+    /// build step by step; `None` when the heap will not hold it.
+    pub(crate) fn building(parts: Parts) -> Option<Building> {
         let count = parts.objects.len();
         u32::try_from(count).ok()?;
-        let mut bounded = fallible::filled(count, (0u32, Aabb::EMPTY))?;
-        let mut unbounded = Vec::new();
-        // A limb's cut lies within its tube, so its box is the tube's whether
-        // or not it is cut.
-        let geometry = Geometry {
-            faces: &parts.faces,
-            fields: &parts.fields,
-            prototypes: &parts.prototypes,
-            lawns: &parts.lawns,
-            far_woods: &parts.far_woods,
-            stands: &parts.stands,
-            materials: &parts.materials,
-            view: None,
-        };
-        // An object whose box is not finite is tested by every ray rather
-        // than trusted to the slab test, which a non-finite box defeats: it
-        // keeps the empty box here until it is set apart.
-        band::for_each(runner, &mut bounded, (0, BUILD_UNIT), &|piece, out| {
-            let first = piece * BUILD_UNIT;
-            for ((index, slot), object) in (first..)
-                .zip(out.iter_mut())
-                .zip(parts.objects.iter().skip(first))
-            {
-                let bounds = object.shape.bounds(geometry).filter(Aabb::is_finite);
-                *slot = (
-                    u32::try_from(index).unwrap_or(u32::MAX),
-                    bounds.unwrap_or(Aabb::EMPTY),
-                );
-            }
-        });
-        let endless = bounded.iter().filter(|(_, bounds)| !bounds.is_finite());
-        if !fallible::reserve(&mut unbounded, endless.clone().count()) {
+        let mut items = Vec::new();
+        if !fallible::reserve(&mut items, count) {
             return None;
         }
-        unbounded.extend(endless.map(|&(index, _)| index as usize));
-        bounded.retain(|(_, bounds)| bounds.is_finite());
         let grassed = parts
             .lawns
             .iter()
             .enumerate()
             .filter(|(_, lawn)| matches!(lawn.cover, Cover::Grass(_)));
         let swards = fallible::collected(parts.lawns.len(), grassed.map(|(index, _)| index))?;
-        let water = |object: &Object| {
-            parts
-                .materials
-                .get(object.material)
-                .and_then(Material::water)
-                .is_some()
-        };
-        let watered = (0..)
-            .zip(&parts.objects)
-            .filter(|(_, object)| water(object));
-        let waters = fallible::collected(watered.clone().count(), watered.map(|(index, _)| index))?;
         Some(Building {
-            builder: Builder::new(&bounded)?,
             parts,
-            unbounded,
+            raising: Raising::Bounding {
+                next: 0,
+                items,
+                boxes: Vec::new(),
+            },
+            unbounded: Vec::new(),
             swards,
-            waters,
+            waters: Vec::new(),
         })
     }
 
@@ -837,6 +910,16 @@ impl Scene {
             .intersect(ray, NEAR, reach, self.geometry())
             .map_or(Shadow::Missed, Shadow::Clear)
     }
+}
+
+/// `objects` held as a scene holds its own, as a test sets a scene out.
+#[cfg(test)]
+pub(crate) fn objects_of(objects: impl IntoIterator<Item = Object>) -> Objects {
+    let mut held = Objects::new();
+    for object in objects {
+        held.try_push(object).expect("room for a test's objects");
+    }
+    held
 }
 
 #[cfg(test)]

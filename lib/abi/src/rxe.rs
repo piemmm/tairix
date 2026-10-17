@@ -22,6 +22,8 @@
 //! every segment up front and stores the result in a fixed-capacity array
 //! ([`LOAD_MAX_SEGMENTS`]).
 
+use tairix_mix::SplitMix64;
+
 use crate::le::{read_u16, read_u32, read_u64};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::ABI_VERSION_CURRENT;
@@ -711,8 +713,9 @@ impl LoadImage {
 /// caller is responsible for ensuring a non-degenerate window when KASLR
 /// is required.
 ///
-/// The mixing is `splitmix64`, deterministic in `seed` so a boot can
-/// reproduce the layout from its recorded seed ("per-boot entropy seed").
+/// The mixing is `SplitMix64`'s first word from `seed`, deterministic so a boot
+/// can reproduce the layout from its recorded seed. Not cryptographic: the
+/// entropy is the seed's, drawn from the platform RNG.
 #[must_use]
 pub fn kaslr_bias(seed: u64, window_pages: u64) -> u64 {
     let max_slot = u64::MAX / RXE_PAGE_SIZE;
@@ -720,18 +723,8 @@ pub fn kaslr_bias(seed: u64, window_pages: u64) -> u64 {
     if window == 0 {
         return 0;
     }
-    let slot = splitmix64(seed) % window;
+    let slot = SplitMix64::new(seed).next_u64() % window;
     slot * RXE_PAGE_SIZE
-}
-
-/// `splitmix64` finaliser — a well-known, fast, full-period mixing of a
-/// 64-bit seed. Not cryptographic; the cryptographic entropy is the caller's
-/// `seed` (drawn from the platform RNG).
-const fn splitmix64(seed: u64) -> u64 {
-    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
 }
 
 /// Constant-time inequality over two equal-length byte arrays.

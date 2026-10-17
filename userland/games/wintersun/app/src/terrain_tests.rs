@@ -2,7 +2,9 @@
 //! and a road reaches the weight field.
 
 use super::*;
+use tairix_parallel::SERIAL;
 use tairix_wintersun_world::chunk::ChunkBuild;
+use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -16,22 +18,29 @@ fn realm() -> RealmParams {
     .expect("the spec is in range")
 }
 
-fn field() -> RealmField {
-    RealmField::generate(realm()).expect("the realm generates")
+fn land_of(params: RealmParams) -> RealmLand {
+    RealmField::generate(params)
+        .and_then(|field| RealmLand::new(field, &SERIAL))
+        .expect("the realm generates")
 }
 
-fn chunks(
-    field: &RealmField,
-    visible: Bounds,
-) -> alloc::vec::Vec<tairix_wintersun_world::chunk::Chunk> {
+/// The ground a test's chunks are worn from: every block they share kept.
+fn worn() -> Keeping {
+    Keeping::within(usize::MAX)
+}
+
+/// The chunk at `coord`, worn from what `worn` keeps.
+fn chunk(land: &RealmLand, worn: &mut Keeping, coord: ChunkCoord) -> Chunk {
+    ChunkBuild::new(coord)
+        .expect("a chunk fits")
+        .finish(land, worn, &SERIAL)
+        .expect("a chunk generates")
+}
+
+fn chunks(land: &RealmLand, worn: &mut Keeping, visible: Bounds) -> alloc::vec::Vec<Chunk> {
     visible_chunks(visible)
-        .filter(|c| field.params().holds_chunk(c.x, c.y))
-        .map(|coord| {
-            ChunkBuild::new(coord)
-                .expect("a chunk fits")
-                .finish(field)
-                .expect("a chunk generates")
-        })
+        .filter(|c| land.field().params().holds_chunk(c.x, c.y))
+        .map(|coord| chunk(land, worn, coord))
         .collect()
 }
 
@@ -58,9 +67,10 @@ fn visible_chunks_are_produced_in_window_order() {
 
 #[test]
 fn the_visible_chunks_cover_every_lattice_sample_the_pass_reads() {
-    let field = field();
+    let land = land_of(realm());
+    let mut worn = worn();
     let visible = bounds(-3_000, -3_000, 3_000, 3_000);
-    let held = chunks(&field, visible);
+    let held = chunks(&land, &mut worn, visible);
     let borrowed: alloc::vec::Vec<_> = held.iter().collect();
     let window = ChunkWindow::new(&borrowed).expect("generated in order");
     let mut grid = TerrainGrid::new();
@@ -75,9 +85,10 @@ fn the_visible_chunks_cover_every_lattice_sample_the_pass_reads() {
 
 #[test]
 fn a_lattice_covers_one_sample_past_each_edge() {
-    let field = field();
+    let land = land_of(realm());
+    let mut worn = worn();
     let visible = bounds(0, 0, 0, 0);
-    let held = chunks(&field, visible);
+    let held = chunks(&land, &mut worn, visible);
     let borrowed: alloc::vec::Vec<_> = held.iter().collect();
     let window = ChunkWindow::new(&borrowed).expect("generated in order");
     let mut grid = TerrainGrid::new();
@@ -133,8 +144,9 @@ fn a_road_reaches_the_weight_field() {
     // The reference realm, because a realm as small as the others here places
     // no settlements to route a road between.
     let params = crate::reference::params().expect("the reference realm is in range");
-    let field = RealmField::generate(params).expect("the realm generates");
-    let roads = RoadDecals::from_realm(&field).expect("the roads fit");
+    let land = land_of(params);
+    let field = land.field();
+    let roads = RoadDecals::from_realm(field).expect("the roads fit");
     assert!(!roads.is_empty(), "the reference realm routes a road");
     let decals = roads.decals().expect("the decals fit");
     let fray = Fray::new(field.params().seed());
@@ -150,7 +162,7 @@ fn a_road_reaches_the_weight_field() {
         on_road.x + 2_000,
         on_road.y + 2_000,
     );
-    let held = chunks(&field, visible);
+    let held = chunks(&land, &mut worn(), visible);
     let borrowed: alloc::vec::Vec<_> = held.iter().collect();
     let window = ChunkWindow::new(&borrowed).expect("generated in order");
 
@@ -235,9 +247,10 @@ fn the_ground_worth_holding_is_the_view_and_a_chunk_around_it() {
 /// no longer needs while keeping what it still draws.
 #[test]
 fn held_ground_is_ordered_deduplicated_and_trimmed_to_the_view() {
-    let field = field();
+    let land = land_of(realm());
+    let mut worn = worn();
     let near = bounds(-2_000, -2_000, 2_000, 2_000);
-    let mut arrived = chunks(&field, near);
+    let mut arrived = chunks(&land, &mut worn, near);
     assert!(arrived.len() > 2, "the view spans several chunks");
     let coords: alloc::vec::Vec<_> = arrived.iter().map(Chunk::coord).collect();
     arrived.reverse();
@@ -246,10 +259,7 @@ fn held_ground_is_ordered_deduplicated_and_trimmed_to_the_view() {
     for chunk in arrived {
         ground.adopt(chunk).expect("room to hold it");
     }
-    let again = ChunkBuild::new(coords[0])
-        .expect("a chunk fits")
-        .finish(&field)
-        .expect("a chunk generates");
+    let again = chunk(&land, &mut worn, coords[0]);
     ground.adopt(again).expect("room to hold it");
     let held: alloc::vec::Vec<_> = ground
         .borrow()
@@ -263,7 +273,7 @@ fn held_ground_is_ordered_deduplicated_and_trimmed_to_the_view() {
     let far = bounds(900_000, 900_000, 902_000, 902_000);
     ground.release_distant(far);
     assert!(coords.iter().all(|coord| !ground.holds(*coord)));
-    for chunk in chunks(&field, near) {
+    for chunk in chunks(&land, &mut worn, near) {
         ground.adopt(chunk).expect("room to hold it");
     }
     ground.release_distant(near);

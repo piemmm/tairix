@@ -147,8 +147,9 @@ pub(crate) struct Woods {
     /// A rocky desert's saguaros, and its scrub.
     pub(crate) cacti: u32,
     pub(crate) scrub: u32,
-    /// The most places a wood's trees are sown over, read and ranked at
-    /// once: some 80 bytes each.
+    /// The most places a wood's trees are sown over to stand one by one,
+    /// which sets how far about the eye they reach; a wood carried on past
+    /// them is thinned out to where its trees still span a pixel.
     pub(crate) places: u32,
     /// Whether a wood carries on past the trees it stands one by one, out to
     /// as far as its trees still span a pixel, hashed from cells.

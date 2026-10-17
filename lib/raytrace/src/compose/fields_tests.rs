@@ -264,3 +264,33 @@ fn snow_banks_against_a_farmlands_walls_and_hedges() {
         "only {banked} barriers bank snow against a face"
     );
 }
+
+/// A farmland stands its maize fields and vineyards a field a unit, however
+/// many lie about the eye.
+#[cfg(feature = "scene-tests")]
+#[test]
+fn a_farmland_stands_its_crops_a_field_a_unit() {
+    use crate::compose::{Composition, Progress, Setting};
+    use crate::detail::Detail;
+    let runner = tairix_parallel::Threaded::new(4);
+    let mut most = 0;
+    for seed in 1..5 {
+        let mut composition =
+            Composition::new(Setting::Farmland, seed, (1280, 720), Detail::Simple)
+                .expect("composes");
+        while composition.seen.is_none() {
+            let before = composition.stage.stands.len();
+            let job = composition
+                .jobs
+                .pop_front()
+                .expect("work remains until it is seen");
+            if let Progress::Again(unfinished) = composition.run(job, &runner).expect("runs") {
+                composition.jobs.push_front(unfinished);
+            }
+            let stood = composition.stage.stands.len() - before;
+            assert!(stood <= 1, "{seed}: a unit stood {stood} fields");
+        }
+        most = most.max(composition.stage.stands.len());
+    }
+    assert!(most >= 2, "no farmland stood two fields to tell apart");
+}

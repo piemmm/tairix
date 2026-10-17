@@ -79,6 +79,73 @@ fn nothing_is_found_beyond_the_reach_or_outside_the_index() {
     assert!(Courses::none().nearest(0.0, 0.0).is_none());
 }
 
+/// The index finds the nearest point of any course within its reach, and
+/// half a course's breadth more, as a search of every segment of every
+/// course finds it, and none where none lies that near.
+#[test]
+fn the_index_finds_what_a_search_of_every_segment_finds() {
+    let reaching = 30.0 + 0.5 * mark(0.0, 0.0, 0.0).width;
+    let wiggly: Vec<Vec<Mark>> = (0..6u32)
+        .map(|course| {
+            (0..24u32)
+                .map(|at| {
+                    let wander = 30.0 * mathf::sin(0.4 * f64::from(at) + f64::from(course));
+                    let x = -280.0 + 90.0 * f64::from(course) + wander;
+                    mark(x, -300.0 + 25.0 * f64::from(at), 0.0)
+                })
+                .collect()
+        })
+        .collect();
+    let courses = Courses::new(&wiggly, ((-320.0, -320.0), 640.0), reach(30.0)).expect("courses");
+    let searched = |x: f64, z: f64| {
+        (0..courses.len())
+            .flat_map(|course| courses.course(course).windows(2))
+            .map(|pair| {
+                let (a, b) = (pair[0], pair[1]);
+                let (dx, dz) = (b.x - a.x, b.z - a.z);
+                let t = (((x - a.x) * dx + (z - a.z) * dz) / (dx * dx + dz * dz)).clamp(0.0, 1.0);
+                mathf::hypot(x - (a.x + t * dx), z - (a.z + t * dz))
+            })
+            .filter(|&distance| distance <= reaching)
+            .min_by(f64::total_cmp)
+    };
+    let (mut found, mut missed) = (0u32, 0u32);
+    for draw in 0..4000u32 {
+        let place = |salt: u32| -300.0 + 600.0 * tairix_mix::unit(tairix_mix::mix32(draw ^ salt));
+        let (x, z) = (place(0x3a1), place(0x97c));
+        let nearest = courses.nearest(x, z).map(|nearest| nearest.distance);
+        match (nearest, searched(x, z)) {
+            (Some(by_index), Some(by_search)) => {
+                assert!(
+                    (by_index - by_search).abs() < 1e-9,
+                    "({x}, {z}): {by_index} against {by_search}"
+                );
+                found += 1;
+            }
+            (None, None) => missed += 1,
+            other => panic!("({x}, {z}): {other:?}"),
+        }
+    }
+    assert!(
+        found > 500 && missed > 500,
+        "{found} found, {missed} beyond reach"
+    );
+}
+
+/// A course past the last, however far past, has no marks, place or way,
+/// and asking for one never overflows.
+#[test]
+fn a_course_past_the_last_has_nothing() {
+    let courses =
+        Courses::new(&[straight()], ((-200.0, -200.0), 400.0), reach(20.0)).expect("courses");
+    for index in [1, usize::MAX] {
+        assert!(courses.course(index).is_empty(), "{index}");
+        assert!(courses.at(index, 10.0).is_none(), "{index}");
+        assert!(courses.way(index, 10.0).is_none(), "{index}");
+    }
+    assert!(!courses.course(0).is_empty());
+}
+
 #[test]
 fn of_two_courses_the_nearer_is_found() {
     let across = vec![mark(-60.0, 60.0, 3.0), mark(60.0, 60.0, 3.0)];

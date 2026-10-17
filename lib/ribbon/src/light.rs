@@ -29,7 +29,7 @@ use core::ops::{Range, RangeInclusive};
 use tairix_geometry::{Rect, Region};
 use tairix_raster::{DitherRow, Pixel, Surface};
 use tairix_util::fallible;
-use tairix_util::mathf::{self, Phasor};
+use tairix_util::mathf::{self, single, Phasor};
 
 /// The degree of every strand's path.
 const DEGREE: u32 = 7;
@@ -549,9 +549,9 @@ impl Fall {
     fn new(length: f64, light: f64, cut: f64) -> Self {
         let length = mathf::fmax(length, 1.0);
         Self {
-            length: narrow(length),
-            reach: narrow(length * falloff_reach(light, cut)),
-            step: narrow(mathf::exp(-f64::from(PIXELS_PER_SAMPLE) / length)),
+            length: single(length),
+            reach: single(length * falloff_reach(light, cut)),
+            step: single(mathf::exp(-f64::from(PIXELS_PER_SAMPLE) / length)),
         }
     }
 }
@@ -1031,7 +1031,7 @@ impl Light {
         let (hold, half) = (SHADOW_HOLD * aspect, SHADOW_FADE * aspect * 0.5);
         let mut shadow = ABSCISSAE.map(|across| {
             let apart = mathf::fmax(mathf::fmax(from - across, across - to), 0.0);
-            1.0 - f64::from(edge(narrow(apart - hold - half), narrow(half)))
+            1.0 - f64::from(edge(single(apart - hold - half), single(half)))
         });
         self.answer(&shadow, columns.clone());
         // Where the shadow is too narrow for a push to lift a column clear of
@@ -1054,7 +1054,7 @@ impl Light {
             }
             self.answer(&shadow, columns.clone());
         }
-        let dip = f64::from(edge_dip(narrow(tall * TOP_BLEND)));
+        let dip = f64::from(edge_dip(single(tall * TOP_BLEND)));
         let below = f64::from(bottom) + f64::from(PIXELS_PER_SAMPLE) + CLEAR_SLACK;
         // Each control point is held clear of the light reaching up from the
         // columns about it; what the curve between them still needs, a push
@@ -1145,7 +1145,7 @@ impl Light {
     fn trace(&mut self) {
         for (column, placed) in self.columns.iter().zip(&mut self.placed) {
             for (at, path) in placed.at.iter_mut().zip(&self.paths) {
-                *at = narrow(dot(&column.basis, path));
+                *at = single(dot(&column.basis, path));
             }
         }
     }
@@ -1157,8 +1157,8 @@ impl Light {
         for (column, placed) in self.columns.iter().zip(&mut self.placed) {
             for (index, (strand, running)) in STRANDS.iter().zip(&mut sweep).enumerate() {
                 let flare = strand.flare * point(running.value());
-                placed.light[index] = narrow(f64::from(column.light[index]) * QUIET_LIGHT + flare);
-                placed.curtain[index] = narrow(
+                placed.light[index] = single(f64::from(column.light[index]) * QUIET_LIGHT + flare);
+                placed.curtain[index] = single(
                     f64::from(column.curtain[index]) * QUIET_LIGHT + flare * CURTAIN_FLARE_SHARE,
                 );
                 running.advance();
@@ -1170,7 +1170,7 @@ impl Light {
     /// along whichever paths are highest.
     fn shape(&mut self) {
         let tall = f64::from(self.size.1);
-        let blend = narrow(tall * TOP_BLEND);
+        let blend = single(tall * TOP_BLEND);
         let last = self.placed.len().saturating_sub(1);
         for index in 0..self.placed.len() {
             let (before, after, run) = neighbours(index, last);
@@ -1181,7 +1181,7 @@ impl Light {
                 .zip(next)
                 .map(|(was, next)| f64::from(next - was) / run);
             for ((glow, strand), slope) in placed.glow.iter_mut().zip(&STRANDS).zip(slopes) {
-                *glow = narrow(strand.glow * tall * widening(slope));
+                *glow = single(strand.glow * tall * widening(slope));
             }
             placed.top = placed
                 .at
@@ -1241,7 +1241,7 @@ fn needed_pushes(
     tall: f64,
 ) -> [f64; STRAND_COUNT] {
     let last = placed.len().saturating_sub(1);
-    let dip = f64::from(edge_dip(narrow(tall * TOP_BLEND)));
+    let dip = f64::from(edge_dip(single(tall * TOP_BLEND)));
     let ease = PUSH_EASE * tall;
     let mut needs = [-ease; STRAND_COUNT];
     for index in clearance.columns.clone() {
@@ -1260,7 +1260,7 @@ fn needed_pushes(
             *need = mathf::fmax(*need, (clearance.below + rim * widening(slope) - at) / give);
         }
     }
-    needs.map(|need| f64::from(-smooth_min(narrow(-need), 0.0, narrow(ease))))
+    needs.map(|need| f64::from(-smooth_min(single(-need), 0.0, single(ease))))
 }
 
 /// How far above the ribbon's highest level path the light of `column` is
@@ -1294,7 +1294,7 @@ fn flat_rim(column: &Column, dip: f64) -> f64 {
 /// path in dips at most a quarter of `blend`.
 fn edge_dip(blend: f32) -> f32 {
     let folds = u32::try_from(STRAND_COUNT.saturating_sub(1)).unwrap_or(u32::MAX);
-    blend * 0.25 * narrow(f64::from(folds))
+    blend * 0.25 * single(f64::from(folds))
 }
 
 /// The most any strand's wandering carries it above the ribbon's course, and
@@ -1391,8 +1391,8 @@ fn column_at(u: f64, tall: f64) -> Column {
     let halo = stations(HALO, u);
     let fall = stations(HALO_FALL, u) * tall;
     let mut column = Column {
-        basis: bernstein(along(u)).map(narrow),
-        halo: narrow(halo),
+        basis: bernstein(along(u)).map(single),
+        halo: single(halo),
         halo_fall: (
             Fall::new(fall, halo, OUTER_CUT),
             Fall::new(tall * INWARD_FALL, halo, TERM_CUT),
@@ -1402,10 +1402,10 @@ fn column_at(u: f64, tall: f64) -> Column {
     };
     for (index, strand) in STRANDS.iter().enumerate() {
         let light = stations(strand.light, u);
-        column.light[index] = narrow(light);
-        column.reach[index] = narrow(strand_reach(light * QUIET_LIGHT + strand.flare));
+        column.light[index] = single(light);
+        column.reach[index] = single(strand_reach(light * QUIET_LIGHT + strand.flare));
         let curtain = stations(strand.curtain, u);
-        column.curtain[index] = narrow(curtain);
+        column.curtain[index] = single(curtain);
         let brightest = curtain * QUIET_LIGHT + strand.flare * CURTAIN_FLARE_SHARE;
         column.drape[index] = Fall::new(stations(strand.drape, u) * tall, brightest, TERM_CUT);
     }
@@ -1419,7 +1419,7 @@ fn light_bounds(column: &Column, placed: &Placed) -> (f32, f32) {
     for index in 0..STRAND_COUNT {
         let (at, glow) = (placed.at[index], placed.glow[index]);
         let spread = glow * column.reach[index];
-        high = high.min(at - spread.max(curtain_ease(glow * narrow(CORE))));
+        high = high.min(at - spread.max(curtain_ease(glow * single(CORE))));
         low = low.max(at + spread).max(at + column.drape[index].reach);
     }
     (high, low)
@@ -1439,7 +1439,7 @@ fn beneath(lit: (u32, u32), rows: &Range<u32>) -> (u32, u32) {
 /// neighbours included, on a screen `height` rows high.
 fn reached(column: &Column, placed: &Placed, height: u32) -> (u32, u32) {
     let (high, low) = light_bounds(column, placed);
-    let margin = narrow(f64::from(PIXELS_PER_SAMPLE));
+    let margin = single(f64::from(PIXELS_PER_SAMPLE));
     (
         row_at(high - margin, height),
         row_at(low + margin, height).saturating_add(1).min(height),
@@ -1456,7 +1456,7 @@ fn gather(column: &Column, placed: &Placed, shape: &Shape, rows: Range<u32>, sum
     for index in 0..STRAND_COUNT {
         curtain(
             (placed.curtain[index], column.drape[index]),
-            (placed.at[index], placed.glow[index] * narrow(CORE)),
+            (placed.at[index], placed.glow[index] * single(CORE)),
             rows,
             sums,
         );
@@ -1510,7 +1510,7 @@ impl Rows {
 
     /// The centre of sample row `row`, in pixels.
     fn centre(row: i64) -> f32 {
-        narrow(whole_f64(row) * f64::from(PIXELS_PER_SAMPLE) + 0.5)
+        single(whole_f64(row) * f64::from(PIXELS_PER_SAMPLE) + 0.5)
     }
 
     /// The part of the sample rows `range` this run holds.
@@ -1533,7 +1533,7 @@ impl Rows {
 
 /// The centres of consecutive sample rows from `row` on.
 fn centres(row: i64) -> impl Iterator<Item = f32> {
-    let spacing = narrow(f64::from(PIXELS_PER_SAMPLE));
+    let spacing = single(f64::from(PIXELS_PER_SAMPLE));
     successors(Some(Rows::centre(row)), move |centre| {
         Some(centre + spacing)
     })
@@ -1727,7 +1727,7 @@ fn tone_entry(index: usize) -> u64 {
         return 0;
     }
     let knee = usize::from(KNEE) * usize::from(FINE);
-    let middle = |steps: usize| f64::from(u32::try_from(steps).unwrap_or(u32::MAX)) + 0.5;
+    let middle = |steps: usize| mathf::real(steps) + 0.5;
     let exposure = if index < knee {
         middle(index) / f64::from(FINE)
     } else {
@@ -1747,9 +1747,9 @@ fn tone_entry(index: usize) -> u64 {
 /// The strand cross-section `step` profile steps from its path: a bright
 /// core within a wider glow.
 fn profile_at(step: usize) -> f32 {
-    let distance = f64::from(u32::try_from(step).unwrap_or(u32::MAX)) / f64::from(PROFILE_STEPS);
+    let distance = mathf::real(step) / f64::from(PROFILE_STEPS);
     let core = distance / CORE;
-    narrow(mathf::exp(-core * core) + GLOW_SHARE * mathf::exp(-distance * distance))
+    single(mathf::exp(-core * core) + GLOW_SHARE * mathf::exp(-distance * distance))
 }
 
 /// How far a strand as bright as `light` is drawn, in glow radii: where its
@@ -1782,9 +1782,9 @@ impl Falloff {
         let length = f64::from(fall.length);
         let x = f64::from(distance) / length;
         Self {
-            x: narrow(x),
-            dx: narrow(f64::from(PIXELS_PER_SAMPLE) / length),
-            decay: narrow(mathf::exp(-x)),
+            x: single(x),
+            dx: single(f64::from(PIXELS_PER_SAMPLE) / length),
+            decay: single(mathf::exp(-x)),
             step: fall.step,
         }
     }
@@ -1953,16 +1953,6 @@ fn row_at(at: f32, height: u32) -> u32 {
 )]
 fn table_index(position: f32) -> usize {
     position as usize
-}
-
-/// A length in pixels, or a light, at the precision a column keeps.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "screen lengths and exposures are small, and a pixel needs no \
-              more than f32's precision"
-)]
-fn narrow(value: f64) -> f32 {
-    value as f32
 }
 
 #[cfg(test)]

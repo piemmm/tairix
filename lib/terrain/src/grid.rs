@@ -19,10 +19,11 @@ impl Grid {
         self.side
     }
 
-    /// How many samples the grid holds.
+    /// How many samples the grid holds; `usize::MAX` where a word does not
+    /// count them, so no buffer fits it and room for one is refused.
     #[must_use]
     pub const fn area(self) -> usize {
-        (self.side as usize) * (self.side as usize)
+        (self.side as usize).saturating_mul(self.side as usize)
     }
 
     /// The row-major index of the in-range sample `(x, y)`.

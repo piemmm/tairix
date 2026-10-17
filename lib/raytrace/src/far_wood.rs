@@ -1,19 +1,16 @@
-//! A wood carried on far off: its trees hashed from the cells of a lattice
-//! over the land rather than stood one by one, so a wood reaches as far as
-//! its trees still span a pixel for no more than the walk a ray takes across
-//! it.
+//! A wood carried on far off: the trees its wood's thinning keeps across the
+//! view beyond those stood one by one, traced from the cells of the lattice
+//! they stand in rather than one by one, so a wood reaches as far as its
+//! trees still span a pixel for no more than the walk a ray takes across it.
 //!
-//! Each cell holds one place a tree might stand, jittered within it; the
-//! wood's reading decides whether a tree grows there and what it is, as it
-//! decides for the trees stood about the eye, and a place keeps its tree with
-//! the odds the room its crown asks for leaves it, so the wood stands as
-//! thickly far off as thinning leaves it near. Its survey reads each place's
-//! tree once, keeping a bit a cell for those that stand one and how high the
-//! crowns over each block of cells rise. A ray walks the cells it crosses
-//! while it is low enough to reach a crown and meets each tree whose crown
-//! could reach them once, as it comes within reach: no crown reaches further
-//! than the walk looks about the cell it is in, so a hit before the ray
-//! leaves that cell is the nearest.
+//! The thinning marks each cell that keeps a tree out here, a bit a cell,
+//! block by block, with how tall the tallest of a block's trees stands; once
+//! the trees' prototypes grow, the survey bounds how high the crowns over
+//! each block rise. A ray walks the cells it crosses while it
+//! is low enough to reach a crown and meets each marked cell's tree, read
+//! again from its place alone, once, as it comes within reach: no crown
+//! reaches further than the walk looks about the cell it is in, so a hit
+//! before the ray leaves that cell is the nearest.
 
 use alloc::vec::Vec;
 use core::ops::{ControlFlow, RangeInclusive};
@@ -21,31 +18,13 @@ use core::ops::{ControlFlow, RangeInclusive};
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::band;
 use crate::heightfield::Heightfield;
 use crate::land::Grids;
-use crate::noise::hash3;
 use crate::prototype::Prototype;
-use crate::sample::{mix32, unit};
 use crate::shape::{meet_placed, occluded_by_placed, reciprocal, Aabb, Geometry, Hit};
-use crate::vector::{above, below, real, share, wrapped, Pose, Ray, Vec3};
+use crate::vector::{above, below, share, wrapped, Pose, Ray, Vec3};
 use crate::walk::{self, Stepped, Walk};
-use crate::wood::{Habit, Reader, Sprout, Tree, PACKED};
-
-/// How far short of where it begins a wood far off is matched to the trees
-/// stood one by one before it, as a share of that distance, and how many of
-/// the cells there it reads, one in so many each way.
-const MATCHED: f64 = 0.6;
-const SAMPLED: u32 = 2;
-
-/// How many of those places one step of matching reads, and how many a core
-/// takes at once.
-const MATCH_UNIT: usize = 1 << 14;
-const MATCH_BAND: usize = 1 << 8;
-
-/// How many times the share of the ground a wood's crowns fill is halved
-/// toward the one that matches: far finer than the ring's sampling tells.
-const BISECTED: u32 = 16;
+use crate::wood::{Habit, Offer, Reader, Sown, Tree};
 
 /// The most cells a ray walks across one tile: past any a tile holds along a
 /// ray, so only a walk gone wrong ever meets it.
@@ -55,14 +34,11 @@ const MOST_CELLS: u32 = 1 << 16;
 /// object of its own so a ray passing far from one never walks it.
 pub(crate) const TILES: u32 = 24;
 
-/// How many cells a side a block of a wood's survey holds, and the words of
-/// a bit a cell that mark which of them keep a tree.
+/// How many cells a side a block of a wood's marks and survey holds, and the
+/// words of a bit a cell that mark which of them keep a tree.
 const BLOCK: u32 = 16;
 const WORDS: usize = (BLOCK * BLOCK / u64::BITS) as usize;
 type Marks = [u64; WORDS];
-
-/// Where a block's marks lie among its survey's when no tree stands in it.
-const UNMARKED: u32 = u32::MAX;
 
 /// How many blocks one step of a survey reads, and how many a core takes at
 /// once.
@@ -74,111 +50,171 @@ const SURVEY_BAND: usize = 1 << 3;
 pub(crate) struct FarWood {
     reader: Reader,
     grids: Grids,
-    /// Where it is seen from, the way the eye looks, and how far either side
-    /// of the view it stands, in radians; that way as a unit step across the
-    /// ground, and the cosine of how far either side.
+    /// The lattice its places are sown on, the land's cell its own first
+    /// cell is, and where that cell's corner lies.
+    sown: Sown,
+    first: (i64, i64),
+    origin: (f64, f64),
+    /// Where it is seen from, the way the eye looks, how far either side of
+    /// the view it stands, in radians, and how far off it ends.
     eye: (f64, f64),
     heading: f64,
     across: f64,
-    facing: (f64, f64),
-    widest: f64,
-    /// How far off it begins, where the trees stood one by one end, and how
-    /// far off it ends.
-    from: f64,
     to: f64,
     /// The square the land's grids trace, beyond which no ground lies.
     traced: ((f64, f64), f64),
-    /// The lattice's first corner and its cell, how many cells about its
-    /// own a tree's crown may reach, and the seed its places are drawn under.
-    origin: (f64, f64),
-    cell: f64,
+    /// How many cells about its own a tree's crown may reach.
     spread: u32,
-    seed: u32,
-    /// How closely the trees stood one by one before it were sown, and how
-    /// much of the ground its crowns fill where they crowd, as thickly as
-    /// theirs.
-    sown: f64,
-    filled: f64,
     /// How far its widest crown reaches, how tall its tallest tree stands
     /// over the ground, and the most any tree's top rises over the height it
     /// was asked to grow to.
     reach: f64,
     tallest: f64,
     rise: f64,
+    /// The cells its wood's thinning keeps a tree in.
+    marking: Marking,
     /// Its survey, once taken.
     survey: Option<Survey>,
 }
 
-/// A wood's lattice surveyed [`BLOCK`] cells a side at a time over the
-/// ground its ring across the view covers: the first block's column and row,
-/// how many blocks a side the survey spans, each block's record, and the
-/// marks of those a tree stands in.
+/// The cells of a wood's lattice its thinning keeps a tree in, [`BLOCK`]
+/// cells a side at a time over the ground its stretch across the view covers:
+/// the first block's column and row, how many blocks a side the marking
+/// spans, each block's marks, and how tall the tallest of its trees stands,
+/// `-∞` where none does.
+#[derive(Clone, Debug)]
+struct Marking {
+    first: (u32, u32),
+    across: (u32, u32),
+    marks: Vec<Marks>,
+    tallest: Vec<f32>,
+}
+
+impl Marking {
+    /// No cell marked over the blocks `across` a side from `first`; `None`
+    /// when the heap will not hold them.
+    fn new((first, across): ((u32, u32), (u32, u32))) -> Option<Self> {
+        let blocks = usize::try_from(u64::from(across.0) * u64::from(across.1)).ok()?;
+        Some(Self {
+            first,
+            across,
+            marks: fallible::filled(blocks, [0; WORDS])?,
+            tallest: fallible::filled(blocks, f32::NEG_INFINITY)?,
+        })
+    }
+
+    /// Where block `block`'s records lie, if it lies within the marking.
+    fn index(&self, block: (u32, u32)) -> Option<usize> {
+        let (x, z) = (
+            block.0.checked_sub(self.first.0)?,
+            block.1.checked_sub(self.first.1)?,
+        );
+        if x >= self.across.0 || z >= self.across.1 {
+            return None;
+        }
+        usize::try_from(u64::from(z) * u64::from(self.across.0) + u64::from(x)).ok()
+    }
+
+    /// Which word of its block's marks holds cell `cell`'s bit, and the bit.
+    fn bit((column, row): (u32, u32)) -> (usize, u64) {
+        let bit = (row % BLOCK) * BLOCK + column % BLOCK;
+        (
+            usize::try_from(bit / u64::BITS).unwrap_or(WORDS),
+            1 << (bit % u64::BITS),
+        )
+    }
+
+    /// Mark cell `cell` as keeping a tree `height` tall; `None` for a cell
+    /// off the marking.
+    fn mark(&mut self, cell: (u32, u32), height: f32) -> Option<()> {
+        let index = self.index(block_of(cell))?;
+        let (word, bit) = Self::bit(cell);
+        *self.marks.get_mut(index)?.get_mut(word)? |= bit;
+        let tallest = self.tallest.get_mut(index)?;
+        *tallest = tallest.max(height);
+        Some(())
+    }
+
+    /// Whether cell `cell` keeps a tree.
+    fn marked(&self, cell: (u32, u32)) -> bool {
+        let (word, bit) = Self::bit(cell);
+        self.index(block_of(cell))
+            .and_then(|index| self.marks.get(index))
+            .and_then(|marks| marks.get(word))
+            .is_some_and(|word| word & bit != 0)
+    }
+
+    /// How tall the tallest tree in block `block` stands; `None` where none
+    /// does.
+    fn tallest(&self, block: (u32, u32)) -> Option<f32> {
+        let tallest = *self.tallest.get(self.index(block)?)?;
+        tallest.is_finite().then_some(tallest)
+    }
+
+    /// The cells it marks, block by block.
+    #[cfg(test)]
+    fn cells(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let width = self.across.0.max(1);
+        self.marks
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, marks)| {
+                let index = u32::try_from(index).unwrap_or(u32::MAX);
+                let block = (self.first.0 + index % width, self.first.1 + index / width);
+                (0..BLOCK * BLOCK).filter_map(move |bit| {
+                    let word = marks.get(usize::try_from(bit / u64::BITS).ok()?)?;
+                    (word & (1 << (bit % u64::BITS)) != 0)
+                        .then_some((block.0 * BLOCK + bit % BLOCK, block.1 * BLOCK + bit / BLOCK))
+                })
+            })
+    }
+}
+
+/// A wood's ground surveyed [`BLOCK`] cells a side at a time over its
+/// stretch across the view and as far again as a crown reaches: the first
+/// block's column and row, how many blocks a side the survey spans, and each
+/// block's record.
 #[derive(Clone, Debug)]
 struct Survey {
     first: (u32, u32),
     across: (u32, u32),
     blocks: Vec<Block>,
-    marks: Vec<Marks>,
 }
 
 /// A block of a wood's survey: the lowest its ground lies and the highest any
-/// crown reaching over it stands, `-∞` where none does, each rounded outward;
-/// and where its marks lie among the survey's, [`UNMARKED`] where no tree
-/// stands in it.
+/// crown reaching over it stands, `-∞` where none does, each rounded outward.
 #[derive(Copy, Clone, Debug)]
 struct Block {
     low: f32,
     high: f32,
-    marks: u32,
-}
-
-/// A block as its own cells alone read: the lowest its ground lies, the
-/// highest a tree standing in it rises, and a bit a cell, row by row, set
-/// where one stands.
-#[derive(Copy, Clone, Debug)]
-struct Own {
-    low: f32,
-    high: f32,
-    marks: Marks,
 }
 
 /// A block not yet read.
-const UNREAD: Own = Own {
+const UNREAD: Block = Block {
     low: f32::NEG_INFINITY,
     high: f32::NEG_INFINITY,
-    marks: [0; WORDS],
 };
 
-/// The block of a wood's survey cell `cell` lies in.
+/// The block of a wood's lattice cell `cell` lies in.
 const fn block_of((column, row): (u32, u32)) -> (u32, u32) {
     (column / BLOCK, row / BLOCK)
 }
 
 impl Survey {
     /// The survey of the blocks `across` a side from `first`, each as `own`
-    /// reads its own cells, its crowns reaching over the blocks `reach`
-    /// about it, found across `runner`; `None` when the heap will not hold
-    /// it.
+    /// reads its own ground and trees, its crowns reaching over the blocks
+    /// `reach` about it, found across `runner`; `None` when the heap will not
+    /// hold it.
     fn reaching(
         (first, across): ((u32, u32), (u32, u32)),
-        own: &[Own],
+        own: &[Block],
         (reach, runner): (u32, &dyn JobRunner),
     ) -> Option<Self> {
         let width = usize::try_from(across.0).ok()?;
         let height = usize::try_from(across.1).ok()?;
         let reach = usize::try_from(reach).ok()?;
-        let unmarked: Marks = [0; WORDS];
-        let mut marks = Vec::new();
-        marks
-            .try_reserve_exact(own.iter().filter(|block| block.marks != unmarked).count())
-            .ok()?;
-        let empty = Block {
-            low: f32::NEG_INFINITY,
-            high: f32::NEG_INFINITY,
-            marks: UNMARKED,
-        };
-        let mut blocks = fallible::filled(own.len(), empty)?;
-        band::for_each(runner, &mut blocks, (0, width.max(1)), &|z, row| {
+        let mut blocks = fallible::filled(own.len(), UNREAD)?;
+        tairix_parallel::for_each_band(runner, &mut blocks, (0, width.max(1)), &|z, row| {
             let rows = z.saturating_sub(reach)..=(z + reach).min(height.saturating_sub(1));
             for (x, slot) in row.iter_mut().enumerate() {
                 let columns = x.saturating_sub(reach)..=(x + reach).min(width.saturating_sub(1));
@@ -193,19 +229,10 @@ impl Survey {
                     .map_or(f32::NEG_INFINITY, |block| block.low);
             }
         });
-        for (block, read) in blocks.iter_mut().zip(own) {
-            if read.marks != unmarked {
-                block.marks = u32::try_from(marks.len())
-                    .ok()
-                    .filter(|&at| at != UNMARKED)?;
-                marks.push(read.marks);
-            }
-        }
         Some(Self {
             first,
             across,
             blocks,
-            marks,
         })
     }
 
@@ -224,16 +251,6 @@ impl Survey {
             .ok()
             .and_then(|index| self.blocks.get(index).copied());
         (block, record)
-    }
-
-    /// Whether a tree stands in cell `cell`, and if one does, the highest any
-    /// crown about it stands.
-    fn standing(&self, cell: (u32, u32)) -> Option<f64> {
-        let block = self.of(cell).1?;
-        let marks = self.marks.get(usize::try_from(block.marks).ok()?)?;
-        let bit = (cell.1 % BLOCK) * BLOCK + cell.0 % BLOCK;
-        let word = marks.get(usize::try_from(bit / u64::BITS).ok()?)?;
-        ((word >> (bit % u64::BITS)) & 1 == 1).then_some(f64::from(block.high))
     }
 
     /// The highest any crown reaching over the blocks from `low` to `high`,
@@ -274,7 +291,7 @@ pub(crate) struct Surveying {
     across: (u32, u32),
     width: usize,
     blocks: usize,
-    own: Vec<Own>,
+    own: Vec<Block>,
 }
 
 impl Surveying {
@@ -285,13 +302,12 @@ impl Surveying {
     }
 
     /// Read the next run of its blocks across `runner`, on the land in
-    /// `fields` with the wood's trees grown from `prototypes`, or once every
-    /// block is read gather them into the survey: the survey to carry on
-    /// with, or the wood surveyed; `None` when the heap will not hold its
-    /// survey.
+    /// `fields`, or once every block is read gather them into the survey:
+    /// the survey to carry on with, or the wood surveyed; `None` when the
+    /// heap will not hold its survey.
     pub(crate) fn step(
         mut self,
-        (fields, prototypes): (&[Heightfield], &[Prototype]),
+        fields: &[Heightfield],
         runner: &dyn JobRunner,
     ) -> Option<ControlFlow<FarWood, Self>> {
         if self.own.len() < self.blocks {
@@ -301,14 +317,14 @@ impl Surveying {
             self.own.resize(end, UNREAD);
             let (first, width, wood) = (self.first, self.width.max(1), &self.wood);
             let blocks = self.own.get_mut(start..end)?;
-            band::for_each(runner, blocks, (0, SURVEY_BAND), &|number, band| {
+            tairix_parallel::for_each_band(runner, blocks, (0, SURVEY_BAND), &|number, band| {
                 for (offset, slot) in band.iter_mut().enumerate() {
                     let index = start + number * SURVEY_BAND + offset;
                     let at = |at: usize, first: u32| {
                         first.saturating_add(u32::try_from(at).unwrap_or(u32::MAX))
                     };
                     let block = (at(index % width, first.0), at(index / width, first.1));
-                    *slot = wood.own(block, (fields, prototypes));
+                    *slot = wood.own(block, fields);
                 }
             });
             return Some(ControlFlow::Continue(self));
@@ -340,109 +356,6 @@ enum Crossing {
     Within,
 }
 
-/// A wood far off being matched to the trees stood one by one before it, a
-/// run of the places over the ring short of where it begins at a time: the
-/// wood, that ring as a wood of its own, how many trees stood in it, the
-/// first of its places read and how many columns and rows of them there are,
-/// the next to read, one run's reading, and how well the ground suits each
-/// tree read so far and the room its crown asks.
-#[derive(Debug)]
-pub(crate) struct Matching {
-    wood: FarWood,
-    ring: FarWood,
-    stood: usize,
-    first: (u32, u32),
-    span: (usize, usize),
-    next: usize,
-    read: Vec<(f64, f64)>,
-    grown: Vec<(f64, f64)>,
-}
-
-impl Matching {
-    /// How far the matching has come, `0.0..=1.0`: its places read, and then
-    /// the share of the ground its crowns fill matched to what they grow.
-    pub(crate) fn done(&self) -> f64 {
-        share(self.next, self.span.0 * self.span.1 + 1)
-    }
-
-    /// Read the next run of the ring's places across `runner`, on the land in
-    /// `fields`, or once every place is read match the wood to what they
-    /// grow: the matching to carry on with, or the wood matched; `None` when
-    /// the heap will not hold what they grow.
-    pub(crate) fn step(
-        mut self,
-        fields: &[Heightfield],
-        runner: &dyn JobRunner,
-    ) -> Option<ControlFlow<FarWood, Self>> {
-        let places = self.span.0 * self.span.1;
-        if self.next >= places {
-            return Some(ControlFlow::Break(self.matched(runner)));
-        }
-        let (start, end) = (self.next, (self.next + MATCH_UNIT).min(places));
-        let (ring, sampling) = (&self.ring, (self.first, self.span.0));
-        let read = self.read.get_mut(..end - start)?;
-        band::for_each(runner, read, (0, MATCH_BAND), &|number, band| {
-            for (offset, slot) in band.iter_mut().enumerate() {
-                *slot = ring.read(
-                    ring.sample(sampling, start + number * MATCH_BAND + offset),
-                    fields,
-                );
-            }
-        });
-        let grown = |&&(suits, _): &&(f64, f64)| suits > 0.0;
-        let read = self.read.get(..end - start)?;
-        self.grown
-            .try_reserve(read.iter().filter(grown).count())
-            .ok()?;
-        self.grown.extend(read.iter().filter(grown));
-        self.next = end;
-        Some(ControlFlow::Continue(self))
-    }
-
-    /// The wood, its crowns filling as much of the ground over the ring as
-    /// would stand as many trees there as stood, summed across `runner`: as
-    /// it was where none stood there, or none grows.
-    fn matched(self, runner: &dyn JobRunner) -> FarWood {
-        let Self {
-            wood,
-            ring,
-            stood,
-            mut grown,
-            ..
-        } = self;
-        if stood == 0 || grown.is_empty() {
-            return wood;
-        }
-        // Each place read stands for so many of the ring's.
-        let wanted = real(stood) / f64::from(SAMPLED * SAMPLED);
-        let (mut least, mut most) = (0.0, 4.0);
-        for _ in 0..BISECTED {
-            let middle = f64::midpoint(least, most);
-            let standing = band::fold(
-                runner,
-                &mut grown,
-                (0, MATCH_BAND),
-                0.0,
-                &|_, band| {
-                    band.iter()
-                        .map(|&(suits, room)| ring.kept(suits, room, middle).min(1.0))
-                        .sum()
-                },
-                &|sum, more| sum + more,
-            );
-            if standing < wanted {
-                least = middle;
-            } else {
-                most = middle;
-            }
-        }
-        FarWood {
-            filled: f64::midpoint(least, most),
-            ..wood
-        }
-    }
-}
-
 /// How many cells about its own a crown reaching `reach` may reach, on a
 /// lattice of `cell`.
 fn spread(reach: f64, cell: f64) -> Option<u32> {
@@ -470,7 +383,7 @@ impl Tile {
     }
 }
 
-/// Where a wood far off stands, and the lattice it is hashed over.
+/// Where a wood far off stands.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Stretch {
     /// Where it is seen from and the way the eye looks.
@@ -478,58 +391,62 @@ pub(crate) struct Stretch {
     pub(crate) heading: f64,
     /// How far either side of the view it stands, in radians.
     pub(crate) across: f64,
-    /// How far off it begins and ends.
-    pub(crate) from: f64,
+    /// How far off it ends.
     pub(crate) to: f64,
-    /// The cell of its lattice, and how closely the trees stood one by one
-    /// before it were sown.
-    pub(crate) cell: f64,
-    pub(crate) sown: f64,
 }
 
 impl FarWood {
-    /// `reader`'s trees over `stretch` of the land `grids` trace in
-    /// `fields`, its places drawn under `seed`; `None` if it holds no kind or
-    /// no ground.
+    /// The trees `reader` grows on the lattice `sown` over `stretch` of the
+    /// land `grids` trace in `fields`, none marked yet; `None` if it holds no
+    /// kind or no ground, or the heap will not hold its marks.
     pub(crate) fn new(
-        (reader, seed): (Reader, u32),
+        (reader, sown): (Reader, Sown),
         (grids, fields): (Grids, &[Heightfield]),
         stretch: Stretch,
     ) -> Option<Self> {
-        let tallest = reader.kinds().map(Habit::tallest).fold(0.0, f64::max);
+        let tallest = reader.kinds().map(Habit::tallest).fold(0.0, mathf::fmax);
         let reach = reader
             .kinds()
             .map(|habit| habit.crown * habit.tallest())
-            .fold(0.0, f64::max);
-        let cell = stretch.cell;
+            .fold(0.0, mathf::fmax);
         let usable = |length: f64| length.is_finite() && length > 0.0;
-        if tallest <= 0.0 || !usable(cell) || !usable(stretch.sown) || stretch.to <= stretch.from {
+        if tallest <= 0.0 || !usable(sown.side) || !usable(stretch.to) {
             return None;
         }
         let traced = grids.traced(fields);
         let ((cx, cz), half) = traced;
-        Some(Self {
+        let first = sown.cell((cx - half, cz - half))?;
+        let corner = |cell: i64| Some(f64::from(i32::try_from(cell).ok()?) * sown.side);
+        let mut wood = Self {
             reader,
             grids,
+            sown,
+            first,
+            origin: (corner(first.0)?, corner(first.1)?),
             eye: stretch.eye,
             heading: stretch.heading,
             across: stretch.across,
-            facing: (mathf::sin(stretch.heading), mathf::cos(stretch.heading)),
-            widest: mathf::cos(stretch.across),
-            from: stretch.from,
             to: stretch.to,
             traced,
-            origin: (cx - half, cz - half),
-            cell,
-            spread: spread(reach, cell)?,
-            seed,
-            sown: stretch.sown,
-            filled: PACKED,
+            spread: spread(reach, sown.side)?,
             reach,
             tallest,
             rise: 1.0,
+            marking: Marking::new(((0, 0), (0, 0)))?,
             survey: None,
-        })
+        };
+        // A cell over, so no place jittered to the edge of its cell is lost.
+        wood.marking = Marking::new(wood.blocks(wood.extent(sown.side)))?;
+        Some(wood)
+    }
+
+    /// Mark the place `offer` at the land's cell `cell` as keeping its tree
+    /// out here; `None` for a cell off its marking, which no place across its
+    /// stretch lies in.
+    pub(crate) fn mark(&mut self, cell: (i64, i64), offer: &Offer) -> Option<()> {
+        let local = |along: i64, first: i64| u32::try_from(along.checked_sub(first)?).ok();
+        let cell = (local(cell.0, self.first.0)?, local(cell.1, self.first.1)?);
+        self.marking.mark(cell, offer.height)
     }
 
     /// The bark of its first kind: what its tiles are made in, its trees'
@@ -547,9 +464,9 @@ impl FarWood {
     ) -> impl Iterator<Item = Tile> + 'a {
         let ((cx, cz), half) = self.traced;
         let side = 2.0 * half / f64::from(TILES);
-        let span = f64::from(BLOCK) * self.cell;
+        let span = f64::from(BLOCK) * self.sown.side;
         let block =
-            move |at: f64, origin: f64| crate::noise::cell(((at - origin) / span).max(0.0)).0;
+            move |at: f64, origin: f64| tairix_noise::cell(((at - origin) / span).max(0.0)).0;
         (0..TILES * TILES).filter_map(move |index| {
             let (column, row) = (index % TILES, index / TILES);
             let from = (
@@ -557,7 +474,7 @@ impl FarWood {
                 cz - half + f64::from(row) * side,
             );
             let to = (from.0 + side, from.1 + side);
-            // A crown standing in the ring may reach past its edge.
+            // A crown standing at its edge may reach past it.
             if !self.reaches((from, to), self.reach) {
                 return None;
             }
@@ -598,31 +515,18 @@ impl FarWood {
                 self.tallest = self.tallest.max(bounds.max.y * habit.scaled.1);
             }
         }
-        self.spread = spread(self.reach, self.cell)?;
+        self.spread = spread(self.reach, self.sown.side)?;
         Some(())
     }
 
     /// Its survey begun once its trees are measured as their prototypes in
-    /// `prototypes` grew: its lattice to be read a block at a time for the
-    /// lowest the ground lies under each, the highest any crown reaching over
-    /// it stands, and which of its cells keep a tree. Every place's tree is
-    /// read once there, so a ray reads only those it may meet. `None` when
-    /// the heap will not hold it.
+    /// `prototypes` grew: its ground to be read a block at a time for the
+    /// lowest it lies under each and the highest any crown reaching over it
+    /// stands. `None` when the heap will not hold it.
     pub(crate) fn surveying(mut self, prototypes: &[Prototype]) -> Option<Surveying> {
         self.measure(prototypes)?;
-        let span = f64::from(BLOCK) * self.cell;
-        let (low, high) = self.extent();
-        let index = |at: f64, origin: f64| crate::noise::cell(((at - origin) / span).max(0.0)).0;
-        let first = (index(low.0, self.origin.0), index(low.1, self.origin.1));
-        let last = (index(high.0, self.origin.0), index(high.1, self.origin.1));
-        let across = if low.0 <= high.0 && low.1 <= high.1 {
-            (
-                last.0.checked_sub(first.0)? + 1,
-                last.1.checked_sub(first.1)? + 1,
-            )
-        } else {
-            (0, 0)
-        };
+        // Over every cell marked, however little its crowns reach.
+        let (first, across) = self.blocks(self.extent(self.reach + self.sown.side));
         let width = usize::try_from(across.0).ok()?;
         let blocks = width.checked_mul(usize::try_from(across.1).ok()?)?;
         let mut own = Vec::new();
@@ -637,123 +541,92 @@ impl FarWood {
         })
     }
 
-    /// The corners of the ground its crowns may stand over: its ring across
-    /// the view and as far again as a crown reaches, within the traced square.
-    /// Empty where the two do not meet.
-    fn extent(&self) -> ((f64, f64), (f64, f64)) {
+    /// The first block of its lattice the ground from `low` to `high` lies in,
+    /// and how many blocks a side it spans: none where it is empty.
+    fn blocks(&self, (low, high): ((f64, f64), (f64, f64))) -> ((u32, u32), (u32, u32)) {
+        let span = f64::from(BLOCK) * self.sown.side;
+        let index = |at: f64, origin: f64| tairix_noise::cell(((at - origin) / span).max(0.0)).0;
+        let first = (index(low.0, self.origin.0), index(low.1, self.origin.1));
+        if low.0 > high.0 || low.1 > high.1 {
+            return (first, (0, 0));
+        }
+        let last = (index(high.0, self.origin.0), index(high.1, self.origin.1));
+        (
+            first,
+            (
+                last.0.saturating_sub(first.0) + 1,
+                last.1.saturating_sub(first.1) + 1,
+            ),
+        )
+    }
+
+    /// The corners of the ground its stretch across the view covers, grown
+    /// `pad` every way, within the traced square: empty where the two do not
+    /// meet.
+    fn extent(&self, pad: f64) -> ((f64, f64), (f64, f64)) {
         let (ex, ez) = self.eye;
-        let (mut low, mut high) = (
-            (f64::INFINITY, f64::INFINITY),
-            (f64::NEG_INFINITY, f64::NEG_INFINITY),
-        );
-        let mut take = |angle: f64, distance: f64| {
+        let (mut low, mut high) = (self.eye, self.eye);
+        let mut take = |angle: f64| {
             let (x, z) = (
-                ex + distance * mathf::sin(angle),
-                ez + distance * mathf::cos(angle),
+                ex + self.to * mathf::sin(angle),
+                ez + self.to * mathf::cos(angle),
             );
-            low = (low.0.min(x), low.1.min(z));
-            high = (high.0.max(x), high.1.max(z));
+            low = (mathf::fmin(low.0, x), mathf::fmin(low.1, z));
+            high = (mathf::fmax(high.0, x), mathf::fmax(high.1, z));
         };
-        // The ring's corners, and its far edge's furthest along either axis
-        // wherever that lies across the view: its near edge never reaches
-        // further than its far one the same way.
+        // The eye, its far edge's ends, and that edge's furthest along either
+        // axis wherever that lies across the view.
         for side in [-1.0, 1.0] {
-            for distance in [self.from, self.to] {
-                take(self.heading + side * self.across, distance);
-            }
+            take(self.heading + side * self.across);
         }
         for quarter in 0..4u8 {
             let angle = f64::from(quarter) * core::f64::consts::FRAC_PI_2;
             if wrapped(angle - self.heading).abs() <= self.across {
-                take(angle, self.to);
+                take(angle);
             }
         }
         let ((cx, cz), half) = self.traced;
         (
             (
-                (low.0 - self.reach).max(cx - half),
-                (low.1 - self.reach).max(cz - half),
+                mathf::fmax(low.0 - pad, cx - half),
+                mathf::fmax(low.1 - pad, cz - half),
             ),
             (
-                (high.0 + self.reach).min(cx + half),
-                (high.1 + self.reach).min(cz + half),
+                mathf::fmin(high.0 + pad, cx + half),
+                mathf::fmin(high.1 + pad, cz + half),
             ),
         )
     }
 
-    /// Block `(x, z)` as its own cells read, on the land in `fields` with its
-    /// trees grown from `prototypes`: the lowest its ground lies, the highest
-    /// a tree standing in it rises, and which of its cells keep one, read
-    /// only where its ground could root a tree at all.
-    fn own(&self, (x, z): (u32, u32), (fields, prototypes): (&[Heightfield], &[Prototype])) -> Own {
-        let span = f64::from(BLOCK) * self.cell;
+    /// Block `(x, z)` as its own ground and trees read on the land in
+    /// `fields`: the lowest its ground lies, and the highest any tree marked
+    /// in it could rise — its tallest, rooted no higher than the block's
+    /// highest ground, by the most a top rises over the height it was asked
+    /// to grow to.
+    fn own(&self, (x, z): (u32, u32), fields: &[Heightfield]) -> Block {
+        let span = f64::from(BLOCK) * self.sown.side;
         let from = (
             self.origin.0 + f64::from(x) * span,
             self.origin.1 + f64::from(z) * span,
         );
-        let square = (from, (from.0 + span, from.1 + span));
-        let (low, high) = self.grids.extremes(fields, square);
-        let low = if low.is_finite() {
-            low
-        } else {
-            f64::NEG_INFINITY
-        };
-        let mut own = Own {
-            low: below(low),
-            high: f32::NEG_INFINITY,
-            marks: [0; WORDS],
-        };
-        if !self.roots(square, (low, high), fields) {
-            return own;
+        let (low, ground) = self
+            .grids
+            .extremes(fields, (from, (from.0 + span, from.1 + span)));
+        let high = self
+            .marking
+            .tallest((x, z))
+            .filter(|_| ground.is_finite())
+            .map_or(f32::NEG_INFINITY, |tallest| {
+                above(ground + self.rise * f64::from(tallest))
+            });
+        Block {
+            low: if low.is_finite() {
+                below(low)
+            } else {
+                f32::NEG_INFINITY
+            },
+            high,
         }
-        let mut highest = f64::NEG_INFINITY;
-        for bit in 0..BLOCK * BLOCK {
-            let cell = (
-                x.saturating_mul(BLOCK).saturating_add(bit % BLOCK),
-                z.saturating_mul(BLOCK).saturating_add(bit / BLOCK),
-            );
-            let Some(tree) = self.tree_of(self.place(cell), fields) else {
-                continue;
-            };
-            let Some(grown) = self
-                .grown_from(&tree)
-                .and_then(|(prototype, _)| prototypes.get(prototype as usize))
-            else {
-                continue;
-            };
-            let Some(word) = usize::try_from(bit / u64::BITS)
-                .ok()
-                .and_then(|word| own.marks.get_mut(word))
-            else {
-                continue;
-            };
-            *word |= 1 << (bit % u64::BITS);
-            highest = highest.max(tree.base + grown.bounds().max.y * tree.scale);
-        }
-        own.high = above(highest);
-        own
-    }
-
-    /// Whether any tree of the wood could root in the square `square`, whose
-    /// ground lies between `low` and `high`: in the ring across the view,
-    /// between the heights it keeps to, where something grows or the wood
-    /// roots bare.
-    fn roots(
-        &self,
-        square: ((f64, f64), (f64, f64)),
-        (low, high): (f64, f64),
-        fields: &[Heightfield],
-    ) -> bool {
-        if !self.reaches(square, 0.0) || !high.is_finite() {
-            return false;
-        }
-        let rooting = &self.reader.rooting;
-        if rooting.above.is_some_and(|(least, _)| high <= least)
-            || rooting.below.is_some_and(|(_, most)| low >= most)
-        {
-            return false;
-        }
-        rooting.bare > 0.0 || self.grids.greenest(fields, square) > 0.0
     }
 
     /// How `ray`, come `t` along it into cell `cell`, crosses the cell's
@@ -767,7 +640,7 @@ impl FarWood {
         let (low, high) = record.map_or((f64::NEG_INFINITY, f64::NEG_INFINITY), |block| {
             (f64::from(block.low), f64::from(block.high))
         });
-        let span = f64::from(BLOCK) * self.cell;
+        let span = f64::from(BLOCK) * self.sown.side;
         let leaves = |at: u32, origin: f64, (start, dir): (f64, f64)| {
             let from = origin + f64::from(at) * span;
             if dir > 1e-12 {
@@ -795,8 +668,7 @@ impl FarWood {
     }
 
     /// Whether any of the square `from`–`to`, grown `pad` every way, might
-    /// hold its trees: whether it overlaps the ring the wood stands in,
-    /// across the view.
+    /// hold its trees: whether it overlaps its stretch across the view.
     fn reaches(&self, (from, to): ((f64, f64), (f64, f64)), pad: f64) -> bool {
         let (from, to) = ((from.0 - pad, from.1 - pad), (to.0 + pad, to.1 + pad));
         let (ex, ez) = self.eye;
@@ -810,11 +682,7 @@ impl FarWood {
             (from.0, to.1),
             (to.0, to.1),
         ];
-        let furthest = corners
-            .iter()
-            .map(|&(x, z)| mathf::hypot(x - ex, z - ez))
-            .fold(0.0, f64::max);
-        if nearest > self.to || furthest < self.from {
+        if nearest > self.to {
             return false;
         }
         // Across the view: some corner, or the middle, within it, or the
@@ -836,150 +704,21 @@ impl FarWood {
     /// crown about it stands: as its survey has it once taken, and possibly
     /// anywhere, however high, until then.
     fn standing(&self, cell: (u32, u32)) -> Option<f64> {
-        self.survey
-            .as_ref()
-            .map_or(Some(f64::INFINITY), |survey| survey.standing(cell))
-    }
-
-    /// Whether a tree at `at` belongs to this wood: off the near wood, within
-    /// the ring and across the view, on traced ground.
-    fn holds(&self, at: (f64, f64)) -> bool {
-        let (dx, dz) = (at.0 - self.eye.0, at.1 - self.eye.1);
-        let square = dx * dx + dz * dz;
-        let ((cx, cz), half) = self.traced;
-        square >= self.from * self.from
-            && square <= self.to * self.to
-            && (at.0 - cx).abs() < half
-            && (at.1 - cz).abs() < half
-            && self.faces((dx, dz), square)
-    }
-
-    /// Whether the way `(dx, dz)` from the eye, `square` its length squared,
-    /// lies across the view: within its half-width of the way it looks.
-    fn faces(&self, (dx, dz): (f64, f64), square: f64) -> bool {
-        let along = dx * self.facing.0 + dz * self.facing.1;
-        let edge = self.widest * self.widest * square;
-        if self.widest >= 0.0 {
-            along >= 0.0 && along * along >= edge
-        } else {
-            along >= 0.0 || along * along <= edge
-        }
-    }
-
-    /// The place cell `cell` holds, and its draws.
-    fn place(&self, (column, row): (u32, u32)) -> ((f64, f64), u32) {
-        let draw = hash3(column, row, 0xfa2_700d, self.seed);
-        (
-            (
-                self.origin.0 + (f64::from(column) + unit(mix32(draw ^ 0x2c1b_3c6d))) * self.cell,
-                self.origin.1 + (f64::from(row) + unit(mix32(draw ^ 0x297a_2d39))) * self.cell,
-            ),
-            draw,
-        )
-    }
-
-    /// The tree the place `(at, draw)` holds, if one grows there and keeps
-    /// its room, on the land in `fields`.
-    fn tree_of(&self, (at, draw): ((f64, f64), u32), fields: &[Heightfield]) -> Option<Tree> {
-        if !self.holds(at) {
-            return None;
-        }
-        self.grown(&self.reader.sprout((at, draw), None)?, draw, fields)
-    }
-
-    /// The tree `sprout`, drawn as `draw` has it, grows on the land in
-    /// `fields`, if its cell keeps one: as many to a cell as the trees stood
-    /// one by one come to — places sown as closely as theirs, each growing a
-    /// tree as often as the ground suits it, thinned to the room their crowns
-    /// ask, which they fill only where they crowd.
-    fn grown(&self, sprout: &Sprout, draw: u32, fields: &[Heightfield]) -> Option<Tree> {
-        let (tree, suits) = self.reader.grow(sprout, (&self.grids, fields))?;
-        let kept = self.kept(suits, tree.apart * tree.reach, self.filled);
-        (unit(mix32(draw ^ 0x7f4a_7c15)) < kept).then_some(tree)
-    }
-
-    /// How often a cell keeps a tree grown where the ground suits one `suits`
-    /// of the way, its crown asking `room` of its neighbours, the wood's
-    /// crowns filling `filled` of the ground where they crowd.
-    fn kept(&self, suits: f64, room: f64, filled: f64) -> f64 {
-        let crowded = filled / (core::f64::consts::PI * room * room).max(1e-9);
-        let offered = suits / (self.sown * self.sown);
-        self.cell * self.cell * crowded * (1.0 - mathf::exp(-offered / crowded))
-    }
-
-    /// Its matching to the trees stood one by one before it, at `stood`,
-    /// begun: over the ring short of where it begins, its crowns are to fill
-    /// as much of the ground as would stand as many trees there as stood.
-    /// `None` when the heap will not hold a run's reading.
-    pub(crate) fn matching(self, stood: impl Iterator<Item = (f64, f64)>) -> Option<Matching> {
-        let ring = Self {
-            from: MATCHED * self.from,
-            to: self.from,
-            ..self.clone()
-        };
-        let stood = stood.filter(|&at| ring.holds(at)).count();
-        let (first, span) = ring.sampling();
-        let read = fallible::filled(MATCH_UNIT, (0.0, 0.0))?;
-        Some(Matching {
-            wood: self,
-            ring,
-            stood,
-            first,
-            span,
-            next: 0,
-            read,
-            grown: Vec::new(),
+        self.marking.marked(cell).then(|| {
+            self.survey
+                .as_ref()
+                .and_then(|survey| survey.of(cell).1)
+                .map_or(f64::INFINITY, |block| f64::from(block.high))
         })
     }
 
-    /// The first of the places one cell in [`SAMPLED`] each way over the
-    /// ground its crowns may stand over, and how many columns and rows of
-    /// them there are.
-    fn sampling(&self) -> ((u32, u32), (usize, usize)) {
-        let (low, high) = self.extent();
-        let index =
-            |at: f64, origin: f64| crate::noise::cell(((at - origin) / self.cell).max(0.0)).0;
-        let first = (index(low.0, self.origin.0), index(low.1, self.origin.1));
-        let count = |(from, low, high): (u32, f64, f64), origin: f64| {
-            if high < low {
-                return 0;
-            }
-            usize::try_from(index(high, origin).saturating_sub(from) / SAMPLED + 1).unwrap_or(0)
-        };
-        (
-            first,
-            (
-                count((first.0, low.0, high.0), self.origin.0),
-                count((first.1, low.1, high.1), self.origin.1),
-            ),
-        )
-    }
-
-    /// The `index`th of the places [`Self::sampling`] counts from `first`,
-    /// `columns` of them a row.
-    fn sample(&self, (first, columns): ((u32, u32), usize), index: usize) -> ((f64, f64), u32) {
-        let columns = columns.max(1);
-        let along = |at: usize, first: u32| {
-            first
-                .saturating_add(u32::try_from(at).map_or(u32::MAX, |at| at.saturating_mul(SAMPLED)))
-        };
-        self.place((
-            along(index % columns, first.0),
-            along(index / columns, first.1),
+    /// The place cell `cell` of its lattice holds, and its draws: the land's
+    /// own, as its wood's thinning read it.
+    fn place(&self, (column, row): (u32, u32)) -> Option<((f64, f64), u32)> {
+        self.sown.place((
+            self.first.0 + i64::from(column),
+            self.first.1 + i64::from(row),
         ))
-    }
-
-    /// How well the ground at the place `place`, on the land in `fields`,
-    /// suits the tree it grows there and the room its crown asks of its
-    /// neighbours: nought where it grows none of this wood's.
-    fn read(&self, place: ((f64, f64), u32), fields: &[Heightfield]) -> (f64, f64) {
-        if !self.holds(place.0) {
-            return (0.0, 0.0);
-        }
-        self.reader
-            .sprout(place, None)
-            .and_then(|sprout| self.reader.grow(&sprout, (&self.grids, fields)))
-            .map_or((0.0, 0.0), |(tree, suits)| (suits, tree.apart * tree.reach))
     }
 
     /// The prototype `tree`, grown at the place `(at, draw)`, is placed from,
@@ -1003,20 +742,22 @@ impl FarWood {
         ))
     }
 
-    /// The prototype the tree at the place `place` is placed from, as
-    /// [`Self::placing_of`] places it.
+    /// The prototype the tree cell `cell` keeps is placed from, as
+    /// [`Self::placing_of`] places it, its ground read in `fields`.
     fn placed(
         &self,
-        place: ((f64, f64), u32),
+        cell: (u32, u32),
         fields: &[Heightfield],
     ) -> Option<((u32, Pose, f64, u32), usize)> {
-        self.placing_of(&self.tree_of(place, fields)?, place)
+        let place = self.place(cell)?;
+        let tree = self.reader.tree((&self.grids, fields), place, None)?;
+        self.placing_of(&tree, place)
     }
 
     /// Where the tree a hit on cell `cell` met stands, and its key: what its
     /// pattern is fixed in and set apart by.
     pub(crate) fn placing(&self, cell: (u32, u32), fields: &[Heightfield]) -> Option<(Pose, u32)> {
-        self.placed(self.place(cell), fields)
+        self.placed(cell, fields)
             .map(|((_, pose, _, key), _)| (pose, key))
     }
 
@@ -1056,7 +797,7 @@ impl FarWood {
     ) -> Option<Hit> {
         let (enter, leave) = tile.bounds().span(ray, reciprocal(ray.dir), far)?;
         let mut t = self.comes_down(ray, (enter.max(near), leave), geometry.fields)?;
-        let mut walk = Walk::from((self.origin, self.cell), ray, t);
+        let mut walk = Walk::from((self.origin, self.sown.side), ray, t);
         let mut meeting = Meeting {
             wood: self,
             ray,
@@ -1077,7 +818,7 @@ impl FarWood {
                         return meeting.best;
                     }
                     t = out;
-                    walk = Walk::from((self.origin, self.cell), ray, t);
+                    walk = Walk::from((self.origin, self.sown.side), ray, t);
                     // Set down on the block's own wall: on across it.
                     while block_of(walk.cell) == block {
                         let next = walk.exit();
@@ -1161,7 +902,9 @@ impl Meeting<'_> {
             return;
         };
         let fields = self.geometry.fields;
-        let place @ (at, draw) = wood.place(cell);
+        let Some(place @ (at, _)) = wood.place(cell) else {
+            return;
+        };
         let Some((first, last)) = walk::passing(self.ray, at, wood.reach, (self.near, self.reach))
         else {
             return;
@@ -1174,7 +917,7 @@ impl Meeting<'_> {
         let ground = wood.grids.height(fields, at.0, at.1);
         // Over the tallest tree that grows anywhere, then over the tallest
         // this place could grow.
-        if lowest > ground + wood.tallest || !wood.holds(at) {
+        if lowest > ground + wood.tallest {
             return;
         }
         let Some(sprout) = wood.reader.sprout(place, None) else {
@@ -1183,7 +926,7 @@ impl Meeting<'_> {
         if lowest > ground + wood.rise * wood.reader.highest(&sprout) {
             return;
         }
-        let Some(tree) = wood.grown(&sprout, draw, fields) else {
+        let Some(tree) = wood.reader.grown(&sprout, (&wood.grids, fields)) else {
             return;
         };
         let Some((placing, bark)) = wood.placing_of(&tree, place) else {
@@ -1219,42 +962,42 @@ impl Meeting<'_> {
     }
 }
 
-#[cfg(all(test, feature = "scene-tests"))]
+#[cfg(test)]
 impl FarWood {
-    /// How far off it begins.
-    pub(crate) const fn begins(&self) -> f64 {
-        self.from
-    }
-
     /// Whether `at` lies across its view, however far off.
     pub(crate) fn across(&self, at: (f64, f64)) -> bool {
         let (dx, dz) = (at.0 - self.eye.0, at.1 - self.eye.1);
         wrapped(mathf::atan2(dx, dz) - self.heading).abs() <= self.across
     }
 
-    /// How many trees to a square metre it would stand over the ring from
-    /// `from` to `to` across its view on the land in `fields`, its places read
-    /// as matching reads them, and the squares of their heights summed to a
-    /// square metre, which the ground their crowns cover goes as.
-    pub(crate) fn density(&self, (from, to): (f64, f64), fields: &[Heightfield]) -> (f64, f64) {
-        let ring = Self {
-            from,
-            to,
-            ..self.clone()
-        };
-        let (mut within, mut standing, mut covered) = (0u32, 0u32, 0.0);
-        let (first, span) = ring.sampling();
-        for place in (0..span.0 * span.1).map(|index| ring.sample((first, span.0), index)) {
-            if ring.holds(place.0) {
-                within += 1;
-                if let Some(tree) = ring.tree_of(place, fields) {
-                    standing += 1;
-                    covered += tree.height * tree.height;
-                }
-            }
-        }
-        let area = f64::from(within.max(1)) * self.cell * self.cell;
-        (f64::from(standing) / area, covered / area)
+    /// Every tree it keeps, read again from its place on the land in
+    /// `fields`.
+    pub(crate) fn kept<'a>(
+        &'a self,
+        fields: &'a [Heightfield],
+    ) -> impl Iterator<Item = Offer> + 'a {
+        self.marking
+            .cells()
+            .filter_map(move |cell| self.offered(cell, fields))
+    }
+
+    /// What the cell of its lattice holding `at` offers on the land in
+    /// `fields`, as its wood's thinning read it.
+    #[cfg(feature = "scene-tests")]
+    pub(crate) fn offered_at(&self, at: (f64, f64), fields: &[Heightfield]) -> Option<Offer> {
+        let (column, row) = self.sown.cell(at)?;
+        let local = |along: i64, first: i64| u32::try_from(along - first).ok();
+        self.offered(
+            (local(column, self.first.0)?, local(row, self.first.1)?),
+            fields,
+        )
+    }
+
+    /// What cell `cell` of its lattice offers on the land in `fields`.
+    fn offered(&self, cell: (u32, u32), fields: &[Heightfield]) -> Option<Offer> {
+        let place = self.place(cell)?;
+        let tree = self.reader.tree((&self.grids, fields), place, None)?;
+        Some(Offer::of(&tree, place))
     }
 }
 

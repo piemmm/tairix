@@ -144,8 +144,8 @@ impl Mountains {
                         }
                     };
                     let edge_row = row == 0 || row == rows;
-                    let depth = NEAR + index_f64(row) * CELL + stray(&mut rng, edge_row);
-                    let lateral = index_f64(column) * CELL + stray(&mut rng, column == 0);
+                    let depth = NEAR + mathf::real(row) * CELL + stray(&mut rng, edge_row);
+                    let lateral = mathf::real(column) * CELL + stray(&mut rng, column == 0);
                     let rough = 1.0 + (rng.next_f64() * 2.0 - 1.0) * ROUGH;
                     let lift = envelope(lateral / depth / tall * view.focal);
                     let rise = lift * mathf::fmax(ridge(&peaks, lateral, depth), FOOTHILLS) * rough;
@@ -312,7 +312,7 @@ impl Peak {
     /// whose height is `tall` of its lens's focal lengths.
     fn scattered(index: usize, tall: f64, rng: &mut NonCryptoRng) -> Self {
         let (least, most) = PEAK_SPREAD;
-        let share = (index_f64(index) + rng.next_f64()) / index_f64(PEAKS);
+        let share = (mathf::real(index) + rng.next_f64()) / mathf::real(PEAKS);
         let angle = least + (most - least) * share;
         let depth = NEAR + CELL + rng.next_f64() * (FAR - NEAR - 2.0 * CELL);
         let within = |(least, most): (f64, f64), rng: &mut NonCryptoRng| {
@@ -389,11 +389,6 @@ fn facing(corners: [Vertex; 3], side: f64) -> f64 {
 /// How many whole cells `span` cells needs, at the least one.
 fn cells(span: f64) -> usize {
     usize::try_from(mathf::round_i32(mathf::ceil(span / CELL)).max(1)).unwrap_or(1)
-}
-
-/// A small count as a float.
-fn index_f64(count: usize) -> f64 {
-    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 #[cfg(test)]

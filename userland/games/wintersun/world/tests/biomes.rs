@@ -4,12 +4,15 @@
 //! the climatologists put it. These prove the whole generator: that a realm
 //! solved from its parameters actually reaches every biome its latitude span
 //! can hold, and that no one biome swallows the land.
+#![cfg(feature = "scene-tests")]
 
+use tairix_parallel::SERIAL;
 use tairix_wintersun_net::value::{ChunkCoord, Facing};
 use tairix_wintersun_world::biome::{Biome, BIOME_COUNT};
 use tairix_wintersun_world::blend::Kind;
 use tairix_wintersun_world::chunk::ChunkBuild;
 use tairix_wintersun_world::geom::CHUNK_CELLS;
+use tairix_wintersun_world::land::{RealmLand, Unkept};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -20,13 +23,14 @@ const LARGEST_SHARE_PERCENT: u64 = 20;
 /// grid `stride` chunks apart across the realm.
 fn survey(params: RealmParams, stride: usize) -> [u64; BIOME_COUNT] {
     let field = RealmField::generate(params).expect("the realm solves");
+    let land = RealmLand::new(field, &SERIAL).expect("its land");
     let half = params.half_extent_chunks();
     let mut counts = [0_u64; BIOME_COUNT];
     for y in (-half..half).step_by(stride) {
         for x in (-half..half).step_by(stride) {
             let chunk = ChunkBuild::new(ChunkCoord { x, y })
                 .expect("fits")
-                .finish(&field)
+                .finish(&land, &mut Unkept, &SERIAL)
                 .expect("builds");
             for cy in 0..CHUNK_CELLS {
                 for cx in 0..CHUNK_CELLS {

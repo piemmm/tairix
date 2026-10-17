@@ -32,7 +32,7 @@ the seam between two windows.
 | Scale | What it is | Cost |
 |---|---|---|
 | `realm` | The whole world, solved once, coarsely: plates, relief, depression-filled drainage, stream-power erosion, lakes, climate, rock provinces, settlements, roads, landmarks. **Global and exact**, so everything derived from it is seam-free by construction. | A fixed sample count, never a step in world units — so a realm four chunks across and one four thousand chunks across pay the same. |
-| `chunk` | Fine detail on demand: detail relief, channel carve, structure stamp, climate correction, the biome and ground blends, scatter. Reads the realm field plus a fixed ring of cells. | Per chunk, cached and reclaimed. |
+| `chunk` | Fine detail on demand: the land's ground, channel carve, structure stamp, climate correction, the biome and ground blends, scatter. The ground is the realm field refined and worn by `lib/land`, the desktop ray tracer's land generator; the rest reads a fixed ring of cells. | Per chunk, cached and reclaimed, its worn ground shared with its neighbours'. |
 
 ## Modules
 
@@ -40,7 +40,7 @@ the seam between two windows.
 |---|---|
 | `params` | The realm parameter document and its validating constructor. Every field is bounded: a client is handed these by its realm, and a realm is no more trusted than a client. |
 | `seed` | Domain-separated randomness — a keyed hash over coordinates, not a sequence, so no value depends on traversal order. |
-| `noise` | Value noise, fBm, ridged, billow, domain warp. |
+| `noise` | Value noise, fBm, ridged, domain warp. |
 | `voronoi` | The jittered-grid site construction and the exact nearest-site search the plates and the rock provinces share. |
 | `uplift` | Continental plates as a jittered-grid Voronoi, their drift, and the uplift their boundaries produce. |
 | `relief` | Coarse heightfield, and the sea-level cut that honours the requested submerged fraction. |
@@ -52,8 +52,9 @@ the seam between two windows.
 | `biome` | The biome vocabulary and the soft decision tree that classifies a cell's conditions into a biome blend. |
 | `ground` | The ground vocabulary and the palettes a biome blend grows into a ground blend. |
 | `scatter` | Vegetation, rock and resource nodes by biome, on a jittered grid with a priority rule rather than dart-throwing. |
+| `land` | The realm field as `lib/land`'s coarse land, refined through a level across the whole realm and a level at the cells, each piece exactly as the realm worn whole; and a bounded store of worn ground. |
 | `chunk` | The chunk value and the resumable phase machine that builds it. |
-| `cache` | The `lib/reclaim`-governed chunk cache. |
+| `cache` | The `lib/reclaim`-governed chunk cache, and the cache of worn ground a chunk beside one already solved reads. |
 | `digest` | The cross-architecture determinism digest and its reference constant. |
 
 ## What "seed-pure" means, exactly
@@ -70,8 +71,10 @@ many chunks have been asked for, nor in what order, nor on which machine:
   operations plus `lib/util::mathf`**, TAIRiX's own libm. A platform libm
   would compute a transcendental differently per target; there is none here,
   and no `mul_add`, so `a * b + c` stays two operations.
-- **Everything stored is a quantised integer**, so a stored value is a bit
-  pattern rather than a rounding.
+- **Everything a chunk stores is a quantised integer**, so a stored value is
+  a bit pattern rather than a rounding; the land's levels and the worn ground
+  beneath them are single-precision values computed in one fixed order, the
+  same bits on every target.
 - **Every sort, priority queue and traversal has a total order with an index
   tiebreak.** An `f64` comparator has no total order, so the flood's heap, the
   wind sweep and the road search all order integers.
@@ -87,12 +90,14 @@ divergence: it is the only Tier-1 target with a 32-bit `usize`.
 ## Memory
 
 Resident cost is the working set, never the world's extent. The realm field is
-a fixed grid whose size does not follow the realm's size; chunks live in a
-`lib/reclaim` cache budgeted from the memory the machine reported and released
-through the system's pressure bands. A generated chunk is never written to
-disk — recomputing it is cheaper than reading it back, and only the changes
-players make are worth storing, which is what makes a realm O(changes) on disk
-and O(working set) in RAM whatever its extent.
+a fixed grid whose size does not follow the realm's size, and so is the land's
+level 0 across the whole realm, about 2048 cells a side and its padded edge a
+little more; a client's chunks and the worn ground they are solved from live
+in `lib/reclaim` caches budgeted from the memory the machine reported and
+released through the system's pressure bands. A generated chunk is never
+written to disk: it is a pure function of the realm's parameters, so only the
+changes players make are worth storing, which is what makes a realm
+O(changes) on disk and O(working set) in RAM whatever its extent.
 
 Allocation is fallible throughout: a machine too short to hold the field gets
 a typed `WorldError::OutOfMemory`, never an abort.

@@ -1,0 +1,32 @@
+[package]
+name = "tairix-land"
+description = "TAIRiX land generator, renderer-neutral: landforms, the rivers' courses and channels, the snow the wind lays, what a farmed land grows by season, and what each vertex of a land carries. Keyed by place and seam-free, so the desktop's ray tracer and WinterSun's world build one land. no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The runner every stage's rows and pieces are shared across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# Drainage, incision, creep, routing and the droplets the land is worn by.
+tairix-terrain = { path = "../terrain", version = "=0.0.0" }
+# The countryside a farmed land is laid out as: its fields, their uses and
+# the plane its courses are drawn in.
+tairix-countryside = { path = "../countryside", version = "=0.0.0" }
+# The integer finalisers every draw keyed by place is spread with.
+tairix-mix = { path = "../mix", version = "=0.0.0" }
+# The noise the landforms, a channel's wander and the snow are drawn from.
+tairix-noise = { path = "../noise", version = "=0.0.0" }
+# The bounded maths and fallible allocation every stage is written in.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The host test runners, so the tests prove a land is the same however its
+# work is shared.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = ["test-util"] }

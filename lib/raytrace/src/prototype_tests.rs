@@ -269,8 +269,8 @@ fn a_placed_prototype_lies_within_its_box() {
     };
     let mut state = 23u32;
     let mut draw = || {
-        state = crate::sample::mix32(state.wrapping_add(0x6d2b_79f5));
-        crate::sample::unit(state) * 2.0 - 1.0
+        state = tairix_mix::mix32(state.wrapping_add(0x6d2b_79f5));
+        tairix_mix::unit(state) * 2.0 - 1.0
     };
     for (turn, tilt, scale) in [(0.0, 0.0, 1.0), (0.7, 0.4, 2.5), (2.9, -1.1, 0.4)] {
         let placed = Shape::Instance {

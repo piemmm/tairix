@@ -10,11 +10,11 @@
 //! colonies young and old, each one species spreading from where it took
 //! hold.
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cells3, cells3_among, noise3, smoothstep, Cells, NOISE_SLOPE};
 use tairix_util::mathf;
 
-use crate::noise::{cells3, cells3_among, noise3, smoothstep, Cells, NOISE_SLOPE};
 use crate::pigment::{lying, Spot, SNOW};
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// Moss in its shade, and where it catches the light: a dark olive, never

@@ -18,7 +18,7 @@
 //! The seed primitives and the env-var names are shared with the harness side
 //! through [`tairix_fuzzseed`] so they live in exactly one place: this module adds only the orchestrator-specific per-job derivation.
 
-pub use tairix_fuzzseed::{splitmix64, FUZZ_SEED_ENV, PROPTEST_SEED_ENV};
+pub use tairix_fuzzseed::{FUZZ_SEED_ENV, PROPTEST_SEED_ENV};
 
 /// The seed for the `index`-th job of a run.
 ///
@@ -28,7 +28,7 @@ pub use tairix_fuzzseed::{splitmix64, FUZZ_SEED_ENV, PROPTEST_SEED_ENV};
 #[must_use]
 pub fn job_seed(base: Option<u64>, index: usize) -> u64 {
     match base {
-        Some(base) => splitmix64(base ^ splitmix64(u64::try_from(index).unwrap_or(u64::MAX))),
+        Some(base) => tairix_mix::numbered(base, u64::try_from(index).unwrap_or(u64::MAX)),
         None => tairix_fuzzseed::entropy_seed(),
     }
 }

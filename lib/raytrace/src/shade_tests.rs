@@ -184,7 +184,7 @@ fn cast_whole(crowns: &[Crown], (from, to): Rect, cell: f64, spread: f64) -> Vec
 fn scattered_wood() -> Vec<Crown> {
     (0..3000u32)
         .map(|index| {
-            let draw = |salt: u32| crate::sample::unit(crate::sample::mix32(index ^ salt));
+            let draw = |salt: u32| tairix_mix::unit(tairix_mix::mix32(index ^ salt));
             (
                 (-90.0 + 260.0 * draw(0x11), -50.0 + 300.0 * draw(0x22)),
                 0.5 + 9.0 * draw(0x33),

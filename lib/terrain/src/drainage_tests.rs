@@ -12,10 +12,10 @@ fn bowl(side: u32, notch: f64) -> Vec<f64> {
     for y in 0..side {
         for x in 0..side {
             let (dx, dy) = (f64::from(x) - middle, f64::from(y) - middle);
-            let rim = mathf::sqrt(dx * dx + dy * dy).min(middle);
+            let rim = mathf::fmin(mathf::sqrt(dx * dx + dy * dy), middle);
             let mut h = 10.0 + rim * 2.0 - 0.01 * f64::from(x);
             if y == side / 2 && x > side / 2 {
-                h = h.min(notch);
+                h = mathf::fmin(h, notch);
             }
             height.push(h);
         }

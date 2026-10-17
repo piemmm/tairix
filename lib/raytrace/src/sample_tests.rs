@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use super::{
-    cone, cosine_hemisphere, disc, filter_offset, inverse_erf, mix32, unit, Reveal, Sampler,
-    Scatter, Step, FILTER_DEVIATION, FILTER_SHARE, FIRST_PASS_ACROSS, SOBOL_PAIRS,
+    cone, cosine_hemisphere, disc, filter_offset, inverse_erf, mix32, poisson, unit, Reveal,
+    Sampler, Scatter, Step, FILTER_DEVIATION, FILTER_SHARE, FIRST_PASS_ACROSS, SOBOL_PAIRS,
 };
 
 /// Pictures that reach every edge of the grid arithmetic: a single pixel, row
@@ -449,4 +449,23 @@ fn the_hash_finaliser_spreads_neighbouring_inputs() {
         .sum();
     let mean = f64::from(flips) / 1024.0;
     assert!((mean - 16.0).abs() < 1.5, "{mean}");
+}
+
+/// A Poisson draw's counts have its mean, over its whole distribution, and
+/// never pass the most they are drawn with.
+#[test]
+fn poisson_counts_have_their_mean_and_never_pass_their_most() {
+    for mean in [0.3, 4.0, 18.0] {
+        let draws = 100_000u32;
+        let total: u32 = (0..draws)
+            .map(|draw| poisson(mean, (f64::from(draw) + 0.5) / f64::from(draws), 64))
+            .sum();
+        let measured = f64::from(total) / f64::from(draws);
+        assert!(
+            (measured - mean).abs() < 0.01 * mean.max(1.0),
+            "{mean}: {measured}"
+        );
+    }
+    assert_eq!(poisson(40.0, 0.999_999, 8), 8);
+    assert_eq!(poisson(0.0, 0.999_999, 8), 0);
 }

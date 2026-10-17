@@ -6,6 +6,7 @@ use core::hash::Hasher;
 
 use tairix_hash::FastHash;
 use tairix_rng::rand::unit_from;
+use tairix_util::mathf;
 
 /// A layout's key: the one seed every draw is keyed from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -106,13 +107,16 @@ impl Draws {
     /// others' — a weight below nought counting as nought — from the next
     /// draw; `None` where every weight is nought.
     pub(crate) fn pick<T: Copy>(&mut self, weights: &[(T, f64)]) -> Option<T> {
-        let total: f64 = weights.iter().map(|&(_, weight)| weight.max(0.0)).sum();
+        let total: f64 = weights
+            .iter()
+            .map(|&(_, weight)| mathf::fmax(weight, 0.0))
+            .sum();
         let mut drawn = self.unit() * total;
         if !total.is_finite() || total <= 0.0 {
             return None;
         }
         for &(choice, weight) in weights {
-            drawn -= weight.max(0.0);
+            drawn -= mathf::fmax(weight, 0.0);
             if drawn < 0.0 {
                 return Some(choice);
             }

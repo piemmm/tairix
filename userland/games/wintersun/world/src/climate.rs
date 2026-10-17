@@ -281,14 +281,14 @@ fn water_distance(samples: &[CoarseSample], side: u32) -> Result<Vec<u32>, World
 
 /// The latitude of coarse row `sy`, in degrees north.
 fn row_latitude(params: RealmParams, sy: u32) -> f64 {
-    let span = f64::from(params.coarse_samples().saturating_sub(1)).max(1.0);
+    let span = mathf::fmax(f64::from(params.coarse_samples().saturating_sub(1)), 1.0);
     params.latitude_at(f64::from(sy) / span)
 }
 
 /// Latitude, lapse rate, continentality, jitter; and the seasonal range.
 fn thermal(params: RealmParams, key: SeedKey, samples: &mut [CoarseSample], distance: &[u32]) {
     let side = params.coarse_samples();
-    let span = f64::from(side.saturating_sub(1)).max(1.0);
+    let span = mathf::fmax(f64::from(side.saturating_sub(1)), 1.0);
 
     for (index, sample) in samples.iter_mut().enumerate() {
         let (sx, sy) = grid_of(index, side);

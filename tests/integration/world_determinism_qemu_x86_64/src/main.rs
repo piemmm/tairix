@@ -52,9 +52,20 @@ mod kernel {
         let mut com1 = serial::Serial::init(serial::COM1_BASE);
         let _ = writeln!(com1, "[world_determinism] booted on x86_64");
 
-        let Ok(produced) = digest::world(digest::reference_params()) else {
-            let _ = writeln!(com1, "[world_determinism] FAIL: the realm did not solve");
-            qemu_exit::exit_failure();
+        // Each stage said as it is folded, so the runner reads a guest working
+        // through the fold rather than a hung one.
+        let mut folding = digest::Folding::new(digest::reference_params());
+        let produced = loop {
+            match folding.step() {
+                Ok(Some(produced)) => break produced,
+                Ok(None) => {
+                    let _ = writeln!(com1, "[world_determinism] a stage folded");
+                }
+                Err(_) => {
+                    let _ = writeln!(com1, "[world_determinism] FAIL: the realm did not solve");
+                    qemu_exit::exit_failure();
+                }
+            }
         };
 
         // Both values on the failure path, so a mismatch names the

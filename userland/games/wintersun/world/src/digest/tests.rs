@@ -1,7 +1,9 @@
-use super::{chunk, realm, reference_params, world, REFERENCE_DIGEST};
+use super::{chunk, fold_generated, realm, reference_params, world, Folding, REFERENCE_DIGEST};
 use crate::chunk::ChunkBuild;
+use crate::land::{RealmLand, Unkept};
 use crate::params::{RealmParams, RealmSpec};
 use crate::realm::RealmField;
+use tairix_parallel::SERIAL;
 use tairix_wintersun_net::value::ChunkCoord;
 
 #[test]
@@ -26,6 +28,23 @@ fn the_reference_digest_is_what_every_target_must_produce() {
     );
 }
 
+/// Folded a stage at a time, the digest is the realm's, and a folding that
+/// has finished keeps answering it.
+#[test]
+fn a_digest_folded_a_stage_at_a_time_is_the_realms() {
+    let mut folding = Folding::new(reference_params());
+    let mut stages = 1;
+    let digest = loop {
+        match folding.step().expect("folds") {
+            Some(digest) => break digest,
+            None => stages += 1,
+        }
+    };
+    assert_eq!(digest, REFERENCE_DIGEST);
+    assert!(stages > 2, "the realm and its probes are folded apart");
+    assert_eq!(folding.step().expect("folded"), Some(REFERENCE_DIGEST));
+}
+
 #[test]
 fn the_digest_is_stable_across_runs() {
     let params = reference_params();
@@ -43,8 +62,10 @@ fn a_different_seed_gives_a_different_digest() {
     assert_ne!(world(other).expect("solves"), REFERENCE_DIGEST);
 }
 
+/// Each parameter reaches what the realm generates, rather than moving the
+/// digest only by being folded into it.
 #[test]
-fn every_parameter_moves_the_digest() {
+fn every_parameter_moves_what_the_realm_generates() {
     let base = reference_params().spec();
     let variations = [
         RealmSpec {
@@ -55,7 +76,8 @@ fn every_parameter_moves_the_digest() {
             coarse_samples: 128,
             ..base
         },
-        RealmSpec { plates: 10, ..base },
+        // Rounded to a square grid of plates, so one on another grid.
+        RealmSpec { plates: 16, ..base },
         RealmSpec {
             ocean_permille: 421,
             ..base
@@ -77,43 +99,60 @@ fn every_parameter_moves_the_digest() {
             ..base
         },
     ];
+    let reference = generated(&RealmField::generate(reference_params()).expect("solves"));
     for spec in variations {
-        let params = RealmParams::new(spec).expect("legal");
+        let field = RealmField::generate(RealmParams::new(spec).expect("legal")).expect("solves");
         assert_ne!(
-            world(params).expect("solves"),
-            REFERENCE_DIGEST,
-            "a parameter change left the world untouched"
+            generated(&field),
+            reference,
+            "{spec:?} left the realm untouched"
         );
     }
 }
 
 #[test]
 fn the_realm_and_chunk_digests_are_pure() {
-    let field = RealmField::generate(reference_params()).expect("solves");
-    assert_eq!(realm(&field), realm(&field));
+    let land = reference_land();
+    let field = land.field();
+    assert_eq!(realm(field), realm(field));
 
     let coord = ChunkCoord { x: 0, y: 0 };
     let first = ChunkBuild::new(coord)
         .expect("fits")
-        .finish(&field)
+        .finish(&land, &mut Unkept, &SERIAL)
         .expect("builds");
     let second = ChunkBuild::new(coord)
         .expect("fits")
-        .finish(&field)
+        .finish(&land, &mut Unkept, &SERIAL)
         .expect("builds");
     assert_eq!(chunk(&first), chunk(&second));
 }
 
 #[test]
 fn neighbouring_chunks_digest_differently() {
-    let field = RealmField::generate(reference_params()).expect("solves");
+    let land = reference_land();
     let a = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })
         .expect("fits")
-        .finish(&field)
+        .finish(&land, &mut Unkept, &SERIAL)
         .expect("builds");
     let b = ChunkBuild::new(ChunkCoord { x: 1, y: 0 })
         .expect("fits")
-        .finish(&field)
+        .finish(&land, &mut Unkept, &SERIAL)
         .expect("builds");
     assert_ne!(chunk(&a), chunk(&b));
+}
+
+/// The reference realm's land.
+fn reference_land() -> RealmLand {
+    let field = RealmField::generate(reference_params()).expect("solves");
+    RealmLand::new(field, &SERIAL).expect("its land")
+}
+
+/// The digest of what `field` generated, without its parameters.
+fn generated(field: &RealmField) -> u64 {
+    use core::hash::Hasher;
+
+    let mut hasher = tairix_hash::FastHash::new();
+    fold_generated(&mut hasher, field);
+    hasher.finish()
 }

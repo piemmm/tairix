@@ -97,8 +97,8 @@ fn a_walls_faces_are_covered_and_its_opening_open() {
         let mut stage = stage();
         let (structure, _) = arcade(&mut stage, brick);
         for index in 0..400u32 {
-            let x = -2.4 + 4.8 * crate::sample::unit(crate::sample::mix32(index));
-            let y = 0.05 + 3.3 * crate::sample::unit(crate::sample::mix32(index ^ 9));
+            let x = -2.4 + 4.8 * tairix_mix::unit(tairix_mix::mix32(index));
+            let y = 0.05 + 3.3 * tairix_mix::unit(tairix_mix::mix32(index ^ 9));
             let hit = first(&structure, Vec3::new(x, y, 2.0), Vec3::new(0.0, 0.0, -1.0));
             let (outer, middle) = OPENING.extrados();
             let inner = outer - OPENING.ring;

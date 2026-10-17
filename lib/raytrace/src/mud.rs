@@ -13,12 +13,12 @@
 
 use alloc::vec::Vec;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cells2, hash2, noise3, smoothstep};
 use tairix_util::mathf;
 
-use crate::noise::{cells2, hash2, noise3, smoothstep};
 use crate::pigment::Spot;
 use crate::prototype::{Assembly, Building, Mapping};
-use crate::sample::{mix32, unit};
 use crate::vector::{power, single, Vec3};
 
 /// A crust of dried mud: the side of the square tile it is laid in, the

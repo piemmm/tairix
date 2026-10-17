@@ -1,7 +1,9 @@
+use tairix_parallel::SERIAL;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild};
 use tairix_wintersun_world::geom::{CellCoord, Elevation, CELL_SUB_UNITS};
-use tairix_wintersun_world::params::RealmParams;
+use tairix_wintersun_world::land::{Keeping, RealmLand};
+use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
 use super::{
@@ -144,21 +146,30 @@ fn the_synthetic_lattice_repeats_across_the_origin() {
     );
 }
 
-fn window() -> (RealmField, [Chunk; 2]) {
-    let field =
-        RealmField::generate(RealmParams::default_realm(0x51EE)).expect("the default realm solves");
-    let first = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })
-        .and_then(|build| build.finish(&field))
-        .expect("a chunk");
-    let second = ChunkBuild::new(ChunkCoord { x: 1, y: 0 })
-        .and_then(|build| build.finish(&field))
-        .expect("a chunk");
-    (field, [first, second])
+/// Two neighbouring chunks of a small realm.
+fn window() -> [Chunk; 2] {
+    let params = RealmParams::new(RealmSpec {
+        extent_chunks: 8,
+        coarse_samples: 32,
+        plates: 8,
+        ..RealmParams::default_realm(0x51EE).spec()
+    })
+    .expect("the spec is in range");
+    let land = RealmField::generate(params)
+        .and_then(|field| RealmLand::new(field, &SERIAL))
+        .expect("the realm solves");
+    let mut worn = Keeping::within(usize::MAX);
+    let mut chunk = |x| {
+        ChunkBuild::new(ChunkCoord { x, y: 0 })
+            .and_then(|build| build.finish(&land, &mut worn, &SERIAL))
+            .expect("a chunk")
+    };
+    [chunk(0), chunk(1)]
 }
 
 #[test]
 fn a_chunk_window_answers_for_the_chunks_it_holds_and_no_others() {
-    let (_field, chunks) = window();
+    let chunks = window();
     let sorted = [&chunks[0], &chunks[1]];
     let terrain = ChunkTerrain::new(&sorted).expect("sorted");
 
@@ -177,7 +188,7 @@ fn a_chunk_window_answers_for_the_chunks_it_holds_and_no_others() {
 
 #[test]
 fn an_unsorted_or_duplicated_window_is_refused() {
-    let (_field, chunks) = window();
+    let chunks = window();
     let reversed = [&chunks[1], &chunks[0]];
     assert_eq!(
         ChunkTerrain::new(&reversed).err(),

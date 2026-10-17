@@ -34,9 +34,9 @@ fn explicit_incision_cuts_the_valley_but_never_below_downstream_or_the_floor() {
     assert!(height[valley] < before[valley], "the valley is cut");
     for index in 0..grid.area() {
         assert!(height[index] <= before[index]);
-        assert!(height[index] >= law.floor.min(before[index]));
+        assert!(height[index] >= mathf::fmin(law.floor, before[index]));
         if let Some(next) = crate::drainage::downstream(grid, &solved.flow, index) {
-            assert!(height[index] >= before[next].min(height[index]) - 1e-12);
+            assert!(height[index] >= mathf::fmin(before[next], height[index]) - 1e-12);
         }
     }
 }

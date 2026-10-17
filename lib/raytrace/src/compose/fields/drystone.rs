@@ -17,13 +17,13 @@ use alloc::vec::Vec;
 use tairix_countryside::boundary::{self, Boundary};
 use tairix_countryside::plane::{self, Walk};
 use tairix_countryside::Point;
+use tairix_noise::smoothstep;
 use tairix_util::mathf;
 
 use super::{along, divided, leant, spaced, tipped, Laid};
 use crate::compose::courses::Dressing;
 use crate::compose::Dice;
 use crate::heightfield::Heightfield;
-use crate::noise::smoothstep;
 use crate::solid::{Form, ROCK_FACE};
 use crate::vector::{byte, power, Frame, Pose, Vec3};
 

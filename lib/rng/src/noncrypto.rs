@@ -20,32 +20,9 @@
 //! `SplitMix64`, the canonical companion seeder, so a single `u64` fills all
 //! 256 state bits without a zero-state pathology.
 
+use tairix_mix::SplitMix64;
+
 use crate::rand::RandU64;
-
-/// `SplitMix64` (Steele, Lea & Flood) — the canonical seeder.
-///
-/// Used only to expand a `u64` seed into well-mixed words: xoshiro's four
-/// state words here, the cipher key of [`crate::FastRng::seed_from_u64`]
-/// there. Crate-internal and never a generator in its own right — the two
-/// public types are the generators, and one definition of the expansion
-/// keeps them from drifting.
-pub(crate) struct SplitMix64 {
-    state: u64,
-}
-
-impl SplitMix64 {
-    pub(crate) const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    pub(crate) const fn next(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-}
 
 /// A fast, statistically excellent, **predictable** xoshiro256++ generator.
 ///
@@ -75,7 +52,7 @@ impl NonCryptoRng {
     pub const fn seed_from_u64(seed: u64) -> Self {
         let mut sm = SplitMix64::new(seed);
         Self {
-            s: [sm.next(), sm.next(), sm.next(), sm.next()],
+            s: [sm.next_u64(), sm.next_u64(), sm.next_u64(), sm.next_u64()],
         }
     }
 }
@@ -105,20 +82,8 @@ impl core::fmt::Debug for NonCryptoRng {
 
 #[cfg(test)]
 mod tests {
-    use super::{NonCryptoRng, SplitMix64};
+    use super::NonCryptoRng;
     use crate::rand::RandU64;
-
-    #[test]
-    fn splitmix64_matches_reference_vector_for_seed_zero() {
-        // Reference outputs of SplitMix64 seeded with 0 (Vigna's published
-        // companion seeder); pins the seeder exactly.
-        let mut sm = SplitMix64::new(0);
-        assert_eq!(sm.next(), 0xE220_A839_7B1D_CDAF);
-        assert_eq!(sm.next(), 0x6E78_9E6A_A1B9_65F4);
-        assert_eq!(sm.next(), 0x06C4_5D18_8009_454F);
-        assert_eq!(sm.next(), 0xF88B_B8A8_724C_81EC);
-        assert_eq!(sm.next(), 0x1B39_896A_51A8_749B);
-    }
 
     #[test]
     fn deterministic_for_a_given_seed_and_diverges_for_others() {

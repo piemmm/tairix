@@ -13,11 +13,11 @@
 
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, cells2, noise2, smoothstep};
 use tairix_util::mathf;
 
-use crate::noise::{cell, cells2, noise2, smoothstep};
 use crate::pigment::Spot;
-use crate::sample::{mix32, unit};
 use crate::vector::{cell_of, power, Vec3};
 
 /// The bits of a part's key, above its plant's colour, that keep how far

@@ -396,6 +396,48 @@ where
     fold_rounds(runner, &mut round, &mut pieces, start, visit, join)
 }
 
+/// Visit each `per`-long band of `values` with its number, counted from
+/// `first`, spread across `runner`: a grid's rows filled a band at a time, each
+/// band knowing which rows it holds. A `per` of nought reads as one.
+pub fn for_each_band<T: Send>(
+    runner: &dyn JobRunner,
+    values: &mut [T],
+    bands: (usize, usize),
+    visit: &(dyn Fn(usize, &mut [T]) + Sync),
+) {
+    for_each_drawn(runner, numbered(values, bands), &|(number, band)| {
+        visit(number, band);
+    });
+}
+
+/// Visit each band of `values` as [`for_each_band`] does, and join what each
+/// answers onto `start` in the order of the bands, whichever core visited
+/// which.
+pub fn fold_bands<T: Send, R: Copy + Send>(
+    runner: &dyn JobRunner,
+    values: &mut [T],
+    bands: (usize, usize),
+    start: R,
+    visit: &(dyn Fn(usize, &mut [T]) -> R + Sync),
+    join: &(dyn Fn(R, R) -> R + Sync),
+) -> R {
+    fold_drawn(
+        runner,
+        numbered(values, bands),
+        start,
+        &|(number, band)| visit(number, band),
+        join,
+    )
+}
+
+/// `values` cut into `per`-long bands numbered from `first`.
+fn numbered<T>(
+    values: &mut [T],
+    (first, per): (usize, usize),
+) -> impl Iterator<Item = (usize, &mut [T])> {
+    (first..).zip(values.chunks_mut(per.max(1)))
+}
+
 /// A piece waiting to be visited, and what its visit answered.
 type Slot<T, R> = (Option<T>, Option<R>);
 
@@ -845,5 +887,63 @@ mod tests {
     #[test]
     fn an_absurd_width_still_yields_a_usable_split() {
         assert_eq!(bands(&Reversed::new(usize::MAX), 10, 1), 10);
+    }
+
+    #[test]
+    fn every_band_is_filled_once_with_its_own_number() {
+        let runners: [&dyn JobRunner; 3] = [&SERIAL, &Reversed::new(4), &Threaded::new(4)];
+        for runner in runners {
+            let mut values = [0usize; 23];
+            for_each_band(runner, &mut values, (7, 5), &|number, band| {
+                for value in band {
+                    *value += number;
+                }
+            });
+            for (index, value) in values.iter().enumerate() {
+                assert_eq!(*value, 7 + index / 5, "{index}");
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_to_fill_visits_nothing_and_a_zero_width_band_is_one_wide() {
+        for_each_band(&SERIAL, &mut [0u8; 0], (0, 4), &|_, _| {
+            unreachable!("no bands")
+        });
+        let mut values = [0usize; 3];
+        for_each_band(&Reversed::new(2), &mut values, (1, 0), &|number, band| {
+            assert_eq!(band.len(), 1);
+            band[0] = number;
+        });
+        assert_eq!(values, [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_fold_joins_every_bands_answer_in_band_order() {
+        let runners: [&dyn JobRunner; 3] = [&SERIAL, &Reversed::new(4), &Threaded::new(4)];
+        for runner in runners {
+            let mut values = [1u64; 23];
+            // A join that does not commute shows any answer taken out of order.
+            let joined = fold_bands(
+                runner,
+                &mut values,
+                (3, 5),
+                7u64,
+                &|number, band| {
+                    for value in band.iter_mut() {
+                        *value = 2;
+                    }
+                    (number as u64) * 100 + band.len() as u64
+                },
+                &|joined, answer| joined.wrapping_mul(1_000_003).wrapping_add(answer),
+            );
+            let expected = [305, 405, 505, 605, 703]
+                .into_iter()
+                .fold(7u64, |joined, answer| {
+                    joined.wrapping_mul(1_000_003).wrapping_add(answer)
+                });
+            assert_eq!(joined, expected);
+            assert!(values.iter().all(|&value| value == 2));
+        }
     }
 }

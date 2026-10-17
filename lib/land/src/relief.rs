@@ -1,63 +1,125 @@
-//! Landforms and seas: the height functions a grid is filled from, and that
-//! a scene's pieces are set on before any grid exists.
+//! Landforms: the height functions a land is drawn from before any water
+//! wears it, and the relief a land lays them out as.
 
-use core::f64::consts::TAU;
-
+use tairix_noise::{fbm2, noise2, ridged2, smoothstep};
 use tairix_util::mathf;
-
-use crate::noise::{fbm2, noise2, ridged2, smoothstep};
-use crate::sample::{mix32, unit};
 
 /// A shape of land.
 #[derive(Clone, Debug)]
-pub(crate) enum Landform {
-    /// Rolling hills `height` high, their swells `scale` apart.
-    Hills { scale: f64, height: f64, seed: u32 },
-    /// Ridged mountains `height` high, `scale` from ridge to ridge, rising
-    /// from a valley floor `floor` wide about the origin.
+pub enum Landform {
+    /// Rolling hills.
+    Hills {
+        /// How far apart their swells lie.
+        scale: f64,
+        /// How high they rise.
+        height: f64,
+        /// The seed they are drawn under.
+        seed: u32,
+    },
+    /// Ridged mountains rising from a valley floor about the origin.
     Mountains {
+        /// How far it is from ridge to ridge.
         scale: f64,
+        /// How high they rise.
         height: f64,
+        /// How broad the floor is.
         floor: f64,
+        /// The seed they are drawn under.
         seed: u32,
     },
-    /// Dunes `height` high and `scale` apart, their ridges across the wind
-    /// blowing toward `heading`: a long windward slope, a steep slip face.
+    /// Dunes, their ridges across the wind: a long windward slope, a steep
+    /// slip face.
     Dunes {
+        /// How far apart their ridges lie.
         scale: f64,
+        /// How high they rise.
         height: f64,
+        /// The compass heading the wind blows toward.
         heading: f64,
+        /// The seed they are drawn under.
         seed: u32,
     },
-    /// Land rising `height` from the sea within `radius` of `centre`, and
-    /// falling away beneath it beyond.
+    /// Land rising from the sea, falling away beneath it beyond.
     Island {
+        /// Its middle.
         centre: (f64, f64),
+        /// How far from its middle it rises.
         radius: f64,
+        /// How high it rises.
         height: f64,
+        /// The seed it is drawn under.
         seed: u32,
     },
-    /// Flat-topped mesas `height` high, in `steps` terraces, with canyons
-    /// cut between them.
+    /// Flat-topped mesas in terraces, with canyons cut between them.
     Mesas {
+        /// How far apart they stand.
         scale: f64,
+        /// How high they rise.
         height: f64,
+        /// How many terraces they rise in.
         steps: f64,
+        /// The seed they are drawn under.
         seed: u32,
     },
-    /// A river valley running toward `heading`, its floor `floor` wide,
-    /// between hills `height` high.
+    /// A river valley between hills.
     Valley {
+        /// The compass heading it runs toward.
         heading: f64,
+        /// How broad its floor is.
         floor: f64,
+        /// How high the hills about it rise.
         height: f64,
+        /// The seed it is drawn under.
         seed: u32,
     },
 }
 
 impl Landform {
+    /// Whether it is a landform at all: every length a positive finite
+    /// number, every height and heading finite.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        let length = |value: f64| value.is_finite() && value > 0.0;
+        match *self {
+            Self::Hills { scale, height, .. } => length(scale) && height.is_finite(),
+            Self::Mountains {
+                scale,
+                height,
+                floor,
+                ..
+            } => length(scale) && height.is_finite() && floor.is_finite() && floor >= 0.0,
+            Self::Dunes {
+                scale,
+                height,
+                heading,
+                ..
+            } => length(scale) && height.is_finite() && heading.is_finite(),
+            Self::Island {
+                centre,
+                radius,
+                height,
+                ..
+            } => {
+                centre.0.is_finite() && centre.1.is_finite() && length(radius) && height.is_finite()
+            }
+            Self::Mesas {
+                scale,
+                height,
+                steps,
+                ..
+            } => length(scale) && height.is_finite() && length(steps),
+            Self::Valley {
+                heading,
+                floor,
+                height,
+                ..
+            } => heading.is_finite() && length(floor) && height.is_finite(),
+        }
+    }
+
     /// The seed the landform is drawn under.
-    pub(crate) const fn seed(&self) -> u32 {
+    #[must_use]
+    pub const fn seed(&self) -> u32 {
         match *self {
             Self::Hills { seed, .. }
             | Self::Mountains { seed, .. }
@@ -69,7 +131,8 @@ impl Landform {
     }
 
     /// A height the land never falls below.
-    pub(crate) fn lowest(&self) -> f64 {
+    #[must_use]
+    pub fn lowest(&self) -> f64 {
         match *self {
             Self::Hills { .. } | Self::Mountains { .. } => 0.0,
             Self::Dunes { height, .. } => -0.1 * height,
@@ -80,7 +143,8 @@ impl Landform {
     }
 
     /// The land's height at `(x, z)`.
-    pub(crate) fn height(&self, x: f64, z: f64) -> f64 {
+    #[must_use]
+    pub fn height(&self, x: f64, z: f64) -> f64 {
         match *self {
             Self::Hills {
                 scale,
@@ -184,12 +248,12 @@ fn valley((x, z): (f64, f64), (heading, floor, height): (f64, f64, f64), seed: u
     // side valleys stand out from its walls by turns.
     let course = across - 0.6 * floor * noise2(along / (4.0 * floor), 0.5, seed);
     let spurs = 0.4 * floor * noise2(along / (1.7 * floor), 3.5, seed ^ 0x51);
-    let out = (course.abs() - spurs).max(0.0);
+    let out = mathf::fmax(course.abs() - spurs, 0.0);
     // Each side climbs from the floor to the upland over the run its height
     // needs at the slope soil keeps to, so even at its steepest it stands.
-    let run = (height / SIDE_SLOPE).max(1.5 * floor);
+    let run = mathf::fmax(height / SIDE_SLOPE, 1.5 * floor);
     let sides = smoothstep(0.5 * floor, 0.5 * floor + run, out);
-    let broad = run.max(3.0 * floor);
+    let broad = mathf::fmax(run, 3.0 * floor);
     let hills = 0.5 + 0.5 * fbm2(x / broad, z / broad, seed ^ 9, (7, 0.5, 2.0));
     height * (0.03 + sides * (0.35 + 0.65 * hills)) - 0.04 * height * (1.0 - sides)
 }
@@ -203,28 +267,56 @@ const SIDE_SLOPE: f64 = 0.55;
 /// running on past the disc or settling toward its edge to a level `rim` —
 /// itself on the slope — where whatever lies beyond takes over.
 #[derive(Clone, Debug)]
-pub(crate) struct Terrain {
-    pub(crate) form: Landform,
+pub struct Terrain {
+    /// The landform drawn.
+    pub form: Landform,
     /// The landform's height taken as nought: its own height where a scene's
     /// pieces stand, so the land about them lies as it would.
-    pub(crate) datum: f64,
-    pub(crate) centre: (f64, f64),
-    pub(crate) radius: f64,
-    pub(crate) rim: Option<f64>,
+    pub datum: f64,
+    /// The disc's middle.
+    pub centre: (f64, f64),
+    /// How far the disc reaches from its middle.
+    pub radius: f64,
+    /// The level the land settles to toward the disc's edge, if it does
+    /// rather than running on past it.
+    pub rim: Option<f64>,
     /// How the land falls across the disc, in metres per metre along x and
     /// z: the slope its rivers run down to leave it, levelling off beyond.
-    pub(crate) tilt: (f64, f64),
+    pub tilt: (f64, f64),
     /// The clearing's level and radius, if it has one.
-    pub(crate) clearing: Option<(f64, f64)>,
+    pub clearing: Option<(f64, f64)>,
 }
 
 impl Terrain {
+    /// Whether it is a relief at all: its landform one, its datum, middle,
+    /// rim and tilt finite, its radius a positive finite length, and its
+    /// clearing a finite level and radius where it has one.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        let finite = |values: &[f64]| values.iter().all(|value| value.is_finite());
+        self.form.fits()
+            && finite(&[
+                self.datum,
+                self.centre.0,
+                self.centre.1,
+                self.tilt.0,
+                self.tilt.1,
+            ])
+            && self.radius.is_finite()
+            && self.radius > 0.0
+            && self.rim.is_none_or(f64::is_finite)
+            && self.clearing.is_none_or(|(level, radius)| {
+                level.is_finite() && radius.is_finite() && radius >= 0.0
+            })
+    }
+
     /// The land's height at `(x, z)`.
-    pub(crate) fn height(&self, x: f64, z: f64) -> f64 {
+    #[must_use]
+    pub fn height(&self, x: f64, z: f64) -> f64 {
         let (dx, dz) = (x - self.centre.0, z - self.centre.1);
         let distance = mathf::hypot(dx, dz);
         let fall = self.fall(dx, dz);
-        let height = self.level((dx, dz), self.form.height(x, z) - self.datum + fall);
+        let height = self.level((x, z), self.form.height(x, z) - self.datum + fall);
         match self.rim {
             Some(rim) => {
                 height
@@ -255,52 +347,79 @@ impl Terrain {
         slope * self.radius * eased.copysign(along)
     }
 
-    /// How much of the land's own relief shows at `(x, z)`: none within
-    /// the clearing, where the land lies level, all of it well beyond.
-    pub(crate) fn keep(&self, x: f64, z: f64) -> f64 {
-        self.kept((x - self.centre.0, z - self.centre.1))
+    /// The clearing the land is levelled in, if it has one.
+    #[must_use]
+    pub fn clearing(&self) -> Option<Clearing> {
+        self.clearing.map(|(level, radius)| Clearing {
+            centre: self.centre,
+            level,
+            radius,
+            seed: self.form.seed() ^ 0xc1ea,
+        })
     }
 
-    /// `height` at `(x, z)`, pinned to the clearing's level within the
-    /// clearing, where nothing may stand it off level.
-    pub(crate) fn pin(&self, x: f64, z: f64, height: f64) -> f64 {
-        match self.clearing {
-            Some((level, _)) if self.keep(x, z) <= 0.0 => level,
-            _ => height,
-        }
+    fn level(&self, (x, z): (f64, f64), height: f64) -> f64 {
+        self.clearing().map_or(height, |clearing| {
+            clearing.level + (height - clearing.level) * clearing.keep(x, z)
+        })
     }
 
-    /// How much of the land's own relief shows `(dx, dz)` from the middle.
-    /// The clearing's edge wanders in and out round it, as ground levelled
-    /// by hand or filled by water does, rather than running a true circle.
-    fn kept(&self, (dx, dz): (f64, f64)) -> f64 {
-        let Some((_, radius)) = self.clearing else {
-            return 1.0;
-        };
+    /// A height the land never falls below.
+    #[must_use]
+    pub fn lowest(&self) -> f64 {
+        let clearing = self.clearing.map_or(f64::INFINITY, |(level, _)| level);
+        let fall = mathf::hypot(self.tilt.0, self.tilt.1) * self.radius;
+        mathf::fmin(
+            mathf::fmin(
+                self.form.lowest() - self.datum - fall,
+                self.rim.map_or(f64::INFINITY, |rim| rim - fall),
+            ),
+            clearing,
+        )
+    }
+}
+
+/// A level clearing in a land, where a scene's pieces stand: its middle, its
+/// level and its radius, its edge wandering under its seed.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Clearing {
+    /// Its middle.
+    pub centre: (f64, f64),
+    /// The level it lies at.
+    pub level: f64,
+    /// How far from its middle it reaches, before its edge wanders.
+    pub radius: f64,
+    /// The seed its edge wanders under.
+    pub seed: u32,
+}
+
+impl Clearing {
+    /// How much of the land's own relief shows at `(x, z)`: none within the
+    /// clearing, where the land lies level, all of it well beyond. Its edge
+    /// wanders in and out round it, as ground levelled by hand or filled by
+    /// water does, rather than running a true circle.
+    #[must_use]
+    pub fn keep(&self, x: f64, z: f64) -> f64 {
+        let (dx, dz) = (x - self.centre.0, z - self.centre.1);
         let distance = mathf::hypot(dx, dz);
         let (cos, sin) = if distance > 0.0 {
             (dx / distance, dz / distance)
         } else {
             (1.0, 0.0)
         };
-        let reach = radius * (1.0 + 0.22 * noise2(2.5 * cos, 2.5 * sin, self.form.seed() ^ 0xc1ea));
+        let reach = self.radius * (1.0 + 0.22 * noise2(2.5 * cos, 2.5 * sin, self.seed));
         smoothstep(reach, 2.5 * reach, distance)
     }
 
-    fn level(&self, offset: (f64, f64), height: f64) -> f64 {
-        match self.clearing {
-            Some((level, _)) => level + (height - level) * self.kept(offset),
-            None => height,
+    /// `height` at `(x, z)`, pinned to the clearing's level within it, where
+    /// nothing may stand it off level.
+    #[must_use]
+    pub fn pin(&self, x: f64, z: f64, height: f64) -> f64 {
+        if self.keep(x, z) <= 0.0 {
+            self.level
+        } else {
+            height
         }
-    }
-
-    /// A height the land never falls below.
-    pub(crate) fn lowest(&self) -> f64 {
-        let clearing = self.clearing.map_or(f64::INFINITY, |(level, _)| level);
-        let fall = mathf::hypot(self.tilt.0, self.tilt.1) * self.radius;
-        (self.form.lowest() - self.datum - fall)
-            .min(self.rim.map_or(f64::INFINITY, |rim| rim - fall))
-            .min(clearing)
     }
 }
 
@@ -317,100 +436,6 @@ fn warp(u: f64, v: f64, seed: u32, strength: f64) -> (f64, f64) {
     )
 }
 
-/// How many swells a sea sums.
-const WAVES: usize = 18;
-
-/// One swell of a sea.
-#[derive(Copy, Clone, Debug)]
-struct Wave {
-    kx: f64,
-    kz: f64,
-    amplitude: f64,
-    phase: f64,
-    /// How peaked its crests are: `1` a sine, `2` narrower crests over
-    /// broader troughs.
-    peak: u32,
-}
-
-/// A sea: swells running before a wind, repeating every `period` each way
-/// so its grid can tile the open water.
-#[derive(Clone, Debug)]
-pub(crate) struct Sea {
-    waves: [Wave; WAVES],
-}
-
-impl Sea {
-    /// A sea under `seed` whose largest swells are `swell` long and shortest
-    /// `shortest`, `height` its significant wave height — four times the
-    /// swells' standard deviation, about the height of the highest third
-    /// from trough to crest — running toward `heading`, `spread` radians
-    /// either side of it, and repeating every `period`.
-    pub(crate) fn new(
-        period: f64,
-        (swell, shortest, height): (f64, f64, f64),
-        (heading, spread): (f64, f64),
-        seed: u32,
-    ) -> Self {
-        let mut waves = [Wave {
-            kx: 0.0,
-            kz: 0.0,
-            amplitude: 0.0,
-            phase: 0.0,
-            peak: 1,
-        }; WAVES];
-        let mut key = seed;
-        let falls = mathf::ln((shortest / swell).clamp(1e-3, 1.0)) / crate::vector::real(WAVES - 1);
-        for (index, wave) in waves.iter_mut().enumerate() {
-            key = mix32(key ^ 0x9e37_79b9);
-            let order = f64::from(u32::try_from(index).unwrap_or(0));
-            // Wavelengths fall away geometrically to the shortest, and
-            // shorter swells scatter wider about the wind.
-            let length = swell * mathf::exp(order * falls);
-            let angle = heading + (unit(key) - 0.5) * 2.0 * spread * (0.6 + 0.08 * order);
-            // Snapped to whole wavelengths of the period, so the grid tiles.
-            let whole = |part: f64| mathf::round(period * part / length);
-            let (m, n) = (whole(mathf::cos(angle)), whole(mathf::sin(angle)));
-            let (m, n) = if m == 0.0 && n == 0.0 {
-                (1.0, 0.0)
-            } else {
-                (m, n)
-            };
-            let steep = if index < 3 { 0.11 } else { 0.07 };
-            *wave = Wave {
-                kx: TAU * m / period,
-                kz: TAU * n / period,
-                amplitude: (steep * length)
-                    * (0.55 + 0.45 * unit(mix32(key)))
-                    * mathf::exp(-order * 0.12),
-                phase: TAU * unit(mix32(key ^ 1)),
-                peak: if index < 6 { 2 } else { 1 },
-            };
-        }
-        // Summed, the swells stand far higher than any one; scaled so their
-        // spread is the sea's, each keeps its share of it.
-        let variance: f64 = waves
-            .iter()
-            .map(|wave| 0.5 * wave.amplitude * wave.amplitude)
-            .sum();
-        let scale = 0.25 * height / mathf::sqrt(variance).max(1e-12);
-        for wave in &mut waves {
-            wave.amplitude *= scale;
-        }
-        Self { waves }
-    }
-
-    /// The water's height at `(x, z)`.
-    pub(crate) fn height(&self, x: f64, z: f64) -> f64 {
-        let mut total = 0.0;
-        for wave in &self.waves {
-            let rise = 0.5 + 0.5 * mathf::sin(wave.kx * x + wave.kz * z + wave.phase);
-            let crest = if wave.peak == 1 { rise } else { rise * rise };
-            total += wave.amplitude * (2.0 * crest - 1.0);
-        }
-        total
-    }
-}
-
 #[cfg(test)]
-#[path = "terrain_tests.rs"]
+#[path = "relief_tests.rs"]
 mod tests;

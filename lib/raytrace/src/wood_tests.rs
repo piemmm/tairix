@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use super::*;
 
 fn woodland(cover: f64) -> Woodland {
@@ -258,4 +260,150 @@ fn no_tree_wanted_at_most_so_tall_stands_taller_than_its_kinds_highest() {
         }
         assert!(highest <= habit.tallest() + 1e-9);
     }
+}
+
+/// A tree `height` tall at `x` along a line, its crown reaching `reach`, as
+/// far apart as `apart` of two crowns' reaches where it grows.
+fn offered(x: f64, height: f64, reach: f64, apart: f64) -> Offer {
+    let tree = Tree {
+        kind: 0,
+        variant: 0,
+        scale: 1.0,
+        height,
+        reach,
+        apart,
+        base: 0.0,
+    };
+    Offer::of(&tree, ((x, 0.0), 0))
+}
+
+#[test]
+fn a_crown_keeps_its_peers_off_but_a_much_shorter_tree_may_stand_beneath_it() {
+    let tall = offered(0.0, 20.0, 6.0, 0.6);
+    let peers = 0.6 * 12.0;
+    let peer = |x: f64| offered(x, 19.0, 6.0, 0.6);
+    assert!(
+        crowd(&tall, &peer(peers - 0.1)),
+        "peers keep {peers} m apart"
+    );
+    assert!(!crowd(&tall, &peer(peers + 0.1)));
+    assert_eq!(
+        crowd(&peer(peers - 0.1), &tall),
+        crowd(&tall, &peer(peers - 0.1)),
+        "whichever is asked first"
+    );
+    // The more open of the two sets the room.
+    let open = offered(peers + 0.1, 19.0, 6.0, 0.8);
+    assert!(crowd(&tall, &open) && crowd(&open, &tall));
+    let young = |x: f64| offered(x, 5.0, 1.5, 0.6);
+    let trunks = trunk(20.0) + trunk(5.0) + 0.5;
+    assert!(0.6 * 7.5 * LAYERED < trunks, "its crown asks less");
+    assert!(
+        !crowd(&tall, &young(trunks + 0.01)),
+        "a sapling under the crown's edge"
+    );
+    assert!(
+        crowd(&tall, &young(trunks - 0.01)),
+        "but never against the trunk"
+    );
+    assert!(crowd(&tall, &peer(trunks + 0.01)), "where no peer stands");
+}
+
+#[test]
+fn no_two_trees_crowd_each_other_further_apart_than_the_woods_widest_room() {
+    let habit = |crown: f64, tallest: f64| Habit {
+        affinity: Affinity::EVEN,
+        prototypes: [0; VARIANTS],
+        heights: [tallest; VARIANTS],
+        bark: 0,
+        crown,
+        scaled: (0.75, 1.0),
+    };
+    let mut kinds = [None; KINDS];
+    kinds[0] = Some(habit(0.2, 30.0));
+    kinds[1] = Some(habit(0.35, 12.0));
+    let reader = Reader {
+        woodland: woodland(0.9),
+        rooting: ANYWHERE,
+        kinds,
+        seeds: (1, 2),
+        layer: Layer::Canopy,
+    };
+    let widest = reader.widest_room();
+    // The widest pair the wood holds: two of its broadest crowns where it is
+    // most open, at its edge.
+    let apart = 1.0 * (1.0 + EDGE_OPENING);
+    let pair = |x: f64| offered(x, 30.0, 0.2 * 30.0, apart);
+    assert!(crowd(&pair(0.0), &pair(widest - 0.01)));
+    assert!(!crowd(&pair(0.0), &pair(widest + 0.01)));
+    // A lattice's reach holds every pair nearer than the widest room.
+    let sown = Sown { side: 1.3, seed: 9 };
+    let reach = i64::from(sown.reach(widest).expect("a reach"));
+    for (column, row) in [(0, 0), (-3, 7), (40, -2)] {
+        let (at, _) = sown.place((column, row)).expect("a place");
+        for other in [(column + reach + 1, row), (column, row - reach - 1)] {
+            let (there, _) = sown.place(other).expect("a place");
+            let apart = mathf::hypot(there.0 - at.0, there.1 - at.1);
+            assert!(apart >= widest, "{apart} within {widest}");
+        }
+    }
+}
+
+#[test]
+fn a_lattice_places_one_place_in_each_cell_of_the_land_from_the_cell_alone() {
+    let sown = Sown {
+        side: 1.7,
+        seed: 31,
+    };
+    for column in -40..40 {
+        for row in [-1_000_000, -3, 0, 5, 999_999] {
+            let (at, draw) = sown.place((column, row)).expect("a place");
+            assert_eq!(sown.cell(at), Some((column, row)), "{at:?}");
+            assert_eq!(sown.place((column, row)), Some((at, draw)));
+        }
+    }
+    // Drawn apart under another seed, at the same cells.
+    let other = Sown { seed: 32, ..sown };
+    assert_ne!(sown.place((3, 4)), other.place((3, 4)));
+    // Past any land, no cell.
+    assert_eq!(sown.place((i64::MAX, 0)), None);
+    assert_eq!(sown.cell((1e300, 0.0)), None);
+}
+
+#[test]
+fn a_spread_holds_every_pair_that_crowds_within_its_room() {
+    let draw = |index: u32, salt: u32| unit(mix32(index.wrapping_mul(0x9e37_79b9) ^ salt));
+    let tree = |index: u32| {
+        offered(
+            12.0 * draw(index, 1),
+            2.0 + 28.0 * draw(index, 2),
+            0.5 + 7.0 * draw(index, 3),
+            0.4 + 1.2 * draw(index, 4),
+        )
+    };
+    let (mut crowded, mut spared) = (0, 0);
+    for one in 0..120 {
+        // A spread joined over a run of trees bounds every one of them.
+        let run: Vec<Offer> = (0..8).map(|index| tree(one * 8 + index + 1000)).collect();
+        let spread = run
+            .iter()
+            .map(Spread::of)
+            .reduce(Spread::join)
+            .expect("a run");
+        let offer = tree(one);
+        for other in &run {
+            let apart = (offer.at.0 - other.at.0).abs();
+            if crowd(&offer, other) {
+                crowded += 1;
+                assert!(apart < spread.room(&offer), "{offer:?} and {other:?}");
+                assert!(apart < Spread::of(other).room(&offer));
+            } else {
+                spared += 1;
+            }
+        }
+    }
+    assert!(
+        crowded > 50 && spared > 50,
+        "{crowded} crowded, {spared} spared"
+    );
 }

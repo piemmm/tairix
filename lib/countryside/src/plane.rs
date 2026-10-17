@@ -144,8 +144,14 @@ impl Rect {
     #[must_use]
     pub fn including(self, point: Point) -> Self {
         Self {
-            low: Point::new(self.low.x.min(point.x), self.low.y.min(point.y)),
-            high: Point::new(self.high.x.max(point.x), self.high.y.max(point.y)),
+            low: Point::new(
+                mathf::fmin(self.low.x, point.x),
+                mathf::fmin(self.low.y, point.y),
+            ),
+            high: Point::new(
+                mathf::fmax(self.high.x, point.x),
+                mathf::fmax(self.high.y, point.y),
+            ),
         }
     }
 
@@ -428,7 +434,7 @@ impl Convex {
         mathf::sqrt(
             self.edges()
                 .map(|(a, b)| onto_segment(p, a, b).1)
-                .fold(f64::INFINITY, f64::min),
+                .fold(f64::INFINITY, mathf::fmin),
         )
     }
 
@@ -443,7 +449,7 @@ impl Convex {
                 let length = edge.length();
                 (length > 1e-12).then(|| edge.cross(p - a) / length)
             })
-            .fold(f64::INFINITY, f64::min);
+            .fold(f64::INFINITY, mathf::fmin);
         if self.corners.len() < 3 || !nearest.is_finite() {
             return f64::NEG_INFINITY;
         }
@@ -462,10 +468,13 @@ impl Convex {
             if crossing((a, b), (p, q)).is_some() {
                 return 0.0;
             }
-            least = least
-                .min(onto_segment(p, a, b).1)
-                .min(onto_segment(a, p, q).1)
-                .min(onto_segment(b, p, q).1);
+            least = mathf::fmin(
+                mathf::fmin(
+                    mathf::fmin(least, onto_segment(p, a, b).1),
+                    onto_segment(a, p, q).1,
+                ),
+                onto_segment(b, p, q).1,
+            );
         }
         mathf::sqrt(least)
     }

@@ -5,14 +5,15 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_land::grown::{Grown, Stage};
+use tairix_mix::{mix32, next_key, unit};
+use tairix_noise::{cell, fbm2, noise2, noise3, smoothstep};
 use tairix_util::mathf::{self, Phasor};
 
 use crate::bark::{Bark, OnLimb};
-use crate::farmed::{self, Drill, Grown, Stage, FURROW};
+use crate::farmed::{self, Drill, FURROW};
 use crate::heightfield::{Grows, Mix};
-use crate::noise::{cell, fbm2, noise2, noise3, smoothstep};
 use crate::pigment::Pigment;
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// How many waves a wind-ruffled surface sums: enough, spread over their band
@@ -78,7 +79,7 @@ impl Waves {
         waves.try_reserve_exact(WAVES).ok()?;
         let mut key = seed;
         for index in 0..WAVES {
-            key = mix32(key ^ 0x9e37_79b9);
+            key = next_key(key);
             // Wave `index` in the `index`th of equal bands of log length,
             // somewhere within it, so the lengths fill the band unevenly.
             let band = (crate::vector::real(index) + unit(key)) / crate::vector::real(WAVES);

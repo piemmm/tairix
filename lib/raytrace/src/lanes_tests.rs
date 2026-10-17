@@ -1,5 +1,6 @@
+use tairix_mix::{mix32, unit};
+
 use super::*;
-use crate::sample::{mix32, unit};
 use crate::shape::{reciprocal, Aabb};
 use crate::vector::Ray;
 

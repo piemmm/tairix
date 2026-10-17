@@ -22,17 +22,20 @@
 //!
 //! # Why it is resumable
 //!
-//! A client must never block a frame on generation. The build is a
-//! sequence of bounded phases, each advanced by one [`ChunkBuild::step`],
-//! and the partially-built chunk is readable throughout — so a chunk that
-//! is not yet finished draws as the coarse relief the earlier phase
-//! already answered rather than as nothing. Stopping between any two
-//! phases and resuming later produces the same chunk as running them
-//! back to back, because no phase reads anything a later one writes.
+//! A client never blocks a frame on generation: it solves chunks on a
+//! worker of its own. The build is a sequence of phases, each advanced by
+//! one [`ChunkBuild::step`] — the relief's refining the chunk's ground whole
+//! from the realm's land — and the partially-built chunk is readable
+//! throughout, so a chunk that is not yet finished draws as the coarse
+//! relief the earlier phase already answered rather than as nothing.
+//! Stopping between any two phases and resuming later produces the same
+//! chunk as running them back to back, because no phase reads anything a
+//! later one writes.
 
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
+use tairix_parallel::JobRunner;
 use tairix_util::mathf;
 use tairix_util::secret::wipe_with;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
@@ -48,10 +51,11 @@ use crate::geom::{
 };
 use crate::ground::{self, Ground, GroundSite};
 use crate::hydrology::{self, FlowDir};
+use crate::land::{Placed, RealmLand, Store};
 use crate::noise;
 use crate::realm::{Coarse, RealmField};
 use crate::scatter::{self, Footing, ScatterKind, Scattered, SCATTER_STEP};
-use crate::seed::{SeedKey, Stage};
+use crate::seed::Stage;
 
 /// Cells the halo reaches beyond the chunk on every side.
 pub const SHORE_CELLS: u32 = 8;
@@ -69,24 +73,6 @@ const WORK_CELLS: u32 = CHUNK_CELLS + 2 * SHORE_CELLS;
 
 /// Cells in the working grid.
 const WORK_AREA: usize = (WORK_CELLS as usize) * (WORK_CELLS as usize);
-
-/// World units between cycles of the fine detail field.
-///
-/// Absolute, not realm-relative: a hillside's texture is the same size in
-/// a small realm and a large one, because it is texture and not structure.
-const DETAIL_UNITS: f64 = 380.0;
-
-/// Peak fine detail, in world units, on open ground.
-const DETAIL_AMPLITUDE: f64 = 22.0;
-
-/// Extra detail amplitude at the heart of a mountain belt.
-const BELT_AMPLITUDE: f64 = 46.0;
-
-/// World units between cycles of the dune field.
-const DUNE_UNITS: f64 = 90.0;
-
-/// Peak dune amplitude, in world units.
-const DUNE_AMPLITUDE: f64 = 7.0;
 
 /// Widest a channel's bed gets, in cells.
 const CHANNEL_MAX_HALF_WIDTH: f64 = 7.0;
@@ -499,11 +485,19 @@ impl ChunkBuild {
     /// # Errors
     ///
     /// [`WorldError::OutOfMemory`] if a phase's working memory does not
-    /// fit. The build keeps whatever it had, so a caller may retry when
-    /// the machine has recovered.
-    pub fn step(&mut self, field: &RealmField) -> Result<Phase, WorldError> {
+    /// fit, the build keeping whatever it had so a caller may retry when
+    /// the machine has recovered; [`WorldError::OutOfRange`] for a chunk off
+    /// the realm's land, and [`WorldError::Mismatch`] for land that does not
+    /// hold what the chunk reads.
+    pub fn step(
+        &mut self,
+        land: &RealmLand,
+        store: &mut dyn Store,
+        runner: &dyn JobRunner,
+    ) -> Result<Phase, WorldError> {
+        let field = land.field();
         match self.phase {
-            Phase::Relief => self.relief(field),
+            Phase::Relief => self.relief(land, store, runner)?,
             Phase::Water => self.water(field)?,
             Phase::Structures => self.structures(field),
             Phase::Climate => self.climate(field),
@@ -520,9 +514,14 @@ impl ChunkBuild {
     /// # Errors
     ///
     /// Whatever [`Self::step`] refuses.
-    pub fn finish(mut self, field: &RealmField) -> Result<Chunk, WorldError> {
+    pub fn finish(
+        mut self,
+        land: &RealmLand,
+        store: &mut dyn Store,
+        runner: &dyn JobRunner,
+    ) -> Result<Chunk, WorldError> {
         while self.phase != Phase::Done {
-            self.step(field)?;
+            self.step(land, store, runner)?;
         }
         Ok(self.chunk)
     }
@@ -551,38 +550,39 @@ impl ChunkBuild {
         (wx < WORK_CELLS && wy < WORK_CELLS).then_some((wx, wy))
     }
 
-    /// Fine relief over the working grid.
-    fn relief(&mut self, field: &RealmField) {
-        let key = field.key();
+    /// Fine relief over the working grid: the realm's land as its levels
+    /// refine it to the cells, worn from what `store` keeps of it.
+    fn relief(
+        &mut self,
+        land: &RealmLand,
+        store: &mut dyn Store,
+        runner: &dyn JobRunner,
+    ) -> Result<(), WorldError> {
+        let corner = self.work_cell(0, 0);
+        let region = Placed::square((i64::from(corner.x), i64::from(corner.y)), WORK_CELLS);
+        let heights = land.ground(region, store, runner)?;
         for wy in 0..WORK_CELLS {
             for wx in 0..WORK_CELLS {
-                let cell = self.work_cell(wx, wy);
-                let (gx, gy) = field.grid_position(cell);
-                let coarse = field.coarse_at(gx, gy);
-                let broad = coarse.elevation_units();
-
-                // Detail fades out below the waterline: a sea floor the
-                // player never sees does not need texture, and letting it
-                // poke above sea level would move the coastline the realm
-                // asked for.
-                let submerged_fade = mathf::clamp(broad / 12.0, 0.0, 1.0);
-                let height = if submerged_fade > 0.0 {
-                    broad
-                        + detail(key, cell, coarse.belt(), coarse.precipitation()) * submerged_fade
-                } else {
-                    broad
-                };
-
                 let index = Self::work_index(wx, wy);
-                self.work_ground[index] = height;
-                self.work_level[index] = height;
+                let height = f64::from(*heights.get(index).ok_or(WorldError::Mismatch)?);
+                *self
+                    .work_ground
+                    .get_mut(index)
+                    .ok_or(WorldError::Mismatch)? = height;
+                *self.work_level.get_mut(index).ok_or(WorldError::Mismatch)? = height;
                 if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
                     let slot = cell_index(cx, cy);
-                    self.chunk.elevation[slot] = Elevation::from_units(height);
-                    self.chunk.water[slot] = self.chunk.elevation[slot];
+                    let elevation = Elevation::from_units(height);
+                    *self
+                        .chunk
+                        .elevation
+                        .get_mut(slot)
+                        .ok_or(WorldError::Mismatch)? = elevation;
+                    *self.chunk.water.get_mut(slot).ok_or(WorldError::Mismatch)? = elevation;
                 }
             }
         }
+        Ok(())
     }
 
     /// Carve channels, fill lakes and sea, and measure the shore.
@@ -1109,8 +1109,8 @@ fn ground_site(field: &RealmField, reading: &Reading) -> GroundSite {
 /// wetness index's ratio mapped into `0.0..1.0`, which orders cells the way
 /// its logarithm does.
 fn wetness(catchment: f64, gradient: f64) -> f64 {
-    let catchment = catchment.max(0.0);
-    let shed = WETNESS_SCALE * gradient.max(1.0e-3);
+    let catchment = mathf::fmax(catchment, 0.0);
+    let shed = WETNESS_SCALE * mathf::fmax(gradient, 1.0e-3);
     catchment / (catchment + shed)
 }
 
@@ -1123,44 +1123,6 @@ fn patch(field: &RealmField, cell: CellCoord) -> f64 {
         f64::from(cell.y) / PATCH_CELLS,
     );
     mathf::clamp(0.5 + 0.8 * value, 0.0, 1.0)
-}
-
-/// The relief below the coarse step at `cell`, in world units, where the
-/// mountain-belt strength is `belt` and the annual rain `rain` millimetres.
-///
-/// Ridged inside a belt, ordinary fractal outside it, mixed across the
-/// transition — which is what makes a range read as ridges and a plain as
-/// ground. Dunes only where it is dry: a billow on a wet plain would read as
-/// noise, not as sand.
-fn detail(key: SeedKey, cell: CellCoord, belt: f64, rain: f64) -> f64 {
-    let (nx, ny) = (
-        f64::from(cell.x) / DETAIL_UNITS,
-        f64::from(cell.y) / DETAIL_UNITS,
-    );
-    let ridge = mathf::smoothstep(belt);
-    let fractal = noise::fbm(key, Stage::Detail, nx, ny);
-    let rough = if ridge > 0.0 {
-        lerp(
-            fractal,
-            noise::ridged(key, Stage::Ridge, nx, ny) * 2.0 - 1.0,
-            ridge,
-        )
-    } else {
-        fractal
-    };
-    let arid = 1.0 - rise(rain, 250.0, 300.0);
-    let dune = if arid > 0.0 {
-        noise::billow(
-            key,
-            Stage::Dune,
-            f64::from(cell.x) / DUNE_UNITS,
-            f64::from(cell.y) / DUNE_UNITS,
-        ) * DUNE_AMPLITUDE
-            * arid
-    } else {
-        0.0
-    };
-    rough * lerp(DETAIL_AMPLITUDE, BELT_AMPLITUDE, ridge) + dune
 }
 
 /// Whether anything within `reach` of the segment `a`–`b` falls inside the

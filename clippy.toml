@@ -7,7 +7,14 @@ cognitive-complexity-threshold = 20
 too-many-arguments-threshold = 7
 type-complexity-threshold = 250
 avoid-breaking-exported-api = true
-disallowed-methods = []
+# Only crates whose output must agree to the bit on every target deny these
+# (`#![deny(clippy::disallowed_methods)]`); the lint is allowed elsewhere.
+disallowed-methods = [
+    { path = "f64::max", reason = "returns either zero on a signed-zero tie; take tairix_util::mathf::fmax" },
+    { path = "f64::min", reason = "returns either zero on a signed-zero tie; take tairix_util::mathf::fmin" },
+    { path = "f32::max", reason = "returns either zero on a signed-zero tie; compare explicitly" },
+    { path = "f32::min", reason = "returns either zero on a signed-zero tie; compare explicitly" },
+]
 disallowed-types = []
 
 # Project-specific names that legitimately appear in docs without backticks.

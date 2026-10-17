@@ -102,6 +102,8 @@
 // only behind this gate until they are stabilised as inherent `f64` methods.
 #![feature(core_float_math)]
 #![forbid(unsafe_op_in_unsafe_fn)]
+// Bit for bit on every target: no float max or min, which may pick either zero.
+#![deny(clippy::disallowed_methods)]
 #![deny(missing_docs)]
 
 extern crate alloc;

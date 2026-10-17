@@ -1319,7 +1319,7 @@ impl Focusing {
         let Some(slots) = beams.get_mut(vertices) else {
             return;
         };
-        crate::band::for_each(runner, slots, (0, FILL_UNIT), &|band, out| {
+        tairix_parallel::for_each_band(runner, slots, (0, FILL_UNIT), &|band, out| {
             let mut vertex = start + band * FILL_UNIT;
             let mut index = layers
                 .partition_point(|layer| layer.beams <= vertex)

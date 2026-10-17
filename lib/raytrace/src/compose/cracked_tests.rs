@@ -4,10 +4,11 @@
 
 use alloc::vec::Vec;
 
+use tairix_land::attributes::Attributes;
+
 use super::*;
 use crate::compose::testland::{grounded, land};
 use crate::detail::Detail;
-use crate::heightfield::Attributes;
 
 /// Silt a flood laid and left, bare of growth; and the same grassed over.
 const SILT: Attributes = [60, 230, 0, 0, 25, 0, 0, 0];
@@ -76,7 +77,7 @@ fn mud_dries_only_on_level_bare_silt() {
     let swell = core::f64::consts::TAU / 12.0;
     let bowed = |x: f64, z: f64| 0.15 * mathf::sin(swell * x) * mathf::sin(swell * z);
     assert!(cracked(&bowed, SILT).0.len() < cracked(&|_, _| 0.0, SILT).0.len() / 4);
-    let dry = crate::land::Lie {
+    let dry = tairix_land::attributes::Lie {
         height: 0.0,
         upright: 1.0,
         wet: 0.5,
@@ -90,11 +91,11 @@ fn mud_dries_only_on_level_bare_silt() {
     };
     assert!(wash(&dry) && bank(&dry));
     assert!(
-        !bank(&crate::land::Lie { wet: 0.95, ..dry }),
+        !bank(&tairix_land::attributes::Lie { wet: 0.95, ..dry }),
         "still sodden"
     );
     assert!(
-        !wash(&crate::land::Lie {
+        !wash(&tairix_land::attributes::Lie {
             sediment: -0.3,
             ..dry
         }),

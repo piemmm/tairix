@@ -21,6 +21,8 @@ tairix-hash = { path = "../hash", version = "=0.0.0" }
 tairix-rng = { path = "../rng", version = "=0.0.0" }
 # The integer-cost A* every way is routed over the ground by.
 tairix-terrain = { path = "../terrain", version = "=0.0.0" }
+# The one keyed priority rule its villages are spaced by.
+tairix-scatter = { path = "../scatter", version = "=0.0.0" }
 # The runner a layout's routes and holdings are shared across.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
 

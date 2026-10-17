@@ -361,7 +361,8 @@ unpredictable takes `FastRng`.
 
 ## `NonCryptoRng`: predictable on purpose
 
-`NonCryptoRng` is xoshiro256++ (Blackman & Vigna), seeded via SplitMix64. It
+`NonCryptoRng` is xoshiro256++ (Blackman & Vigna), seeded via `lib/mix`'s
+SplitMix64 (`docs/src/lib/mix.md`). It
 is an ordinary PRNG, not a security primitive (§2.12), so rolling it ourselves
 is allowed and adds no dependency. It is named for its predictability rather
 than its speed so that it reads as obviously wrong beside a key or a nonce
@@ -428,7 +429,6 @@ Maurer's universal statistical test — over `FastRng` and `CsRng`.
   1024-bit output.
 * `hmac_sha256_parts`: equality against the single-shot HMAC over the
   joined parts, for several splits.
-* SplitMix64: the published reference outputs for seed `0`.
 * `RandU64::next_below`: range and rejection-zone checks for Lemire's
   method, plus a deterministic uniformity histogram.
 * `RandU64::next_f64`: exact values for scripted words, and a uniformity

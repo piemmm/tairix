@@ -282,7 +282,7 @@ fn a_tone_inside_the_passband_survives_and_one_above_nyquist_does_not() {
     let input: Vec<f32> = (0..8_192)
         .map(|n: u32| {
             let phase = core::f64::consts::TAU * 0.1 * f64::from(n);
-            as_f32(mathf::sin(phase)) * 0.5
+            mathf::single(mathf::sin(phase)) * 0.5
         })
         .collect();
     let mut output = vec![0.0f32; 8_192];
@@ -304,7 +304,7 @@ fn a_tone_inside_the_passband_survives_and_one_above_nyquist_does_not() {
     let above: Vec<f32> = (0..8_192)
         .map(|n: u32| {
             let phase = core::f64::consts::TAU * 0.35 * f64::from(n);
-            as_f32(mathf::sin(phase)) * 0.5
+            mathf::single(mathf::sin(phase)) * 0.5
         })
         .collect();
     let mut folded = vec![0.0f32; 8_192];
@@ -325,17 +325,7 @@ fn rms(block: &[f32]) -> f32 {
         sum += f64::from(*sample) * f64::from(*sample);
     }
     let count = f64::from(u32::try_from(block.len()).unwrap_or(1).max(1));
-    as_f32(mathf::sqrt(sum / count))
-}
-
-/// `value` as a sample.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "a test signal in minus one to one, where the pivot is exact to \
-              far more digits than the assertions read"
-)]
-fn as_f32(value: f64) -> f32 {
-    value as f32
+    mathf::single(mathf::sqrt(sum / count))
 }
 
 #[test]

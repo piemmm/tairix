@@ -1,0 +1,26 @@
+[package]
+name = "tairix-scatter"
+description = "TAIRiX keyed scatter: one place offered to each cell of a lattice fixed to the land, thinned in rounds so no two kept crowd each other, the higher ranked standing: one round is Matern's second process, enough rounds thinning one by one from the highest ranked. A cell's fate hangs on a bounded halo, so a region thinned in pieces keeps what it keeps thinned whole; every offer read once, a bounded batch of work at a time across a runner. no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The runner a thinning's rows are read and ruled on across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# The share of rows ruled on, and the tests' float maximum, which keeps to the
+# crate's bit-for-bit rule.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The host test runners, so the tests prove a thinning keeps the same places
+# however its rows are shared.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = ["test-util"] }
+# The tests' keyed draws.
+tairix-mix = { path = "../mix", version = "=0.0.0" }

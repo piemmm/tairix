@@ -7,11 +7,11 @@
 //! grain runs with the face's first coordinate and streaks across its
 //! second, and its end shows its rings.
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{noise3, smoothstep};
 use tairix_util::mathf;
 
-use crate::noise::{noise3, smoothstep};
 use crate::pigment::{lying, Spot, SNOW};
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// Timber of one wood, weathered as long as it has stood.

@@ -20,14 +20,14 @@ use crate::deadwood::{Fungus, Habit};
 
 #[cfg(feature = "scene-tests")]
 use {
-    crate::sample::{mix32, unit},
-    crate::scene::{Draft, Object, Scene, Sight},
+    crate::scene::{Draft, Scene, Sight},
     crate::tone::Encoder,
     crate::trace::{Quality, Tracer},
     crate::vector::Ray,
     alloc::format,
     alloc::string::String,
     std::sync::OnceLock,
+    tairix_mix::{mix32, unit},
 };
 
 /// The picture a scene's tests are composed for.
@@ -197,7 +197,7 @@ fn every_setting_has_a_name_of_its_own() {
 /// What a scene is made of, as its tests read it, whether composed or built.
 #[cfg(feature = "scene-tests")]
 struct Made<'a> {
-    objects: &'a [Object],
+    objects: &'a crate::scene::Objects,
     faces: &'a [Face],
     fields: &'a [Heightfield],
     lawns: &'a [Lawn],
@@ -700,7 +700,7 @@ fn the_camera_stands_in_the_open() {
             };
             // Leaves and blades are thin, and met from either side.
             let thin = matches!(
-                scene.objects[index].shape,
+                scene.objects.get(index).expect("an object").shape,
                 Shape::Instance { .. } | Shape::Lawn { .. }
             );
             assert!(
@@ -741,7 +741,10 @@ fn the_eye_stands_clear_of_the_ground_beneath_it() {
             scene.closest(&Ray::new(eye, Vec3::UP), f64::INFINITY, Sight::Recorded)
         {
             assert!(
-                !matches!(scene.objects[index].shape, Shape::Land { .. }),
+                !matches!(
+                    scene.objects.get(index).expect("an object").shape,
+                    Shape::Land { .. }
+                ),
                 "{setting:?} {seed}: the land lies {} above the eye",
                 hit.t
             );

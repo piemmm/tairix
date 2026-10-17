@@ -45,11 +45,6 @@ impl Chains {
         })
     }
 
-    /// How broad each cell is.
-    pub(super) const fn cell(&self) -> f64 {
-        self.cell
-    }
-
     /// The columns and rows of the cells the square `half` either way of
     /// `at` covers, clamped to the grid, and whether it reaches past it.
     pub(super) fn span(&self, (x, z): (f64, f64), half: f64) -> (Cells, bool) {

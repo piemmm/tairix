@@ -478,7 +478,7 @@ fn ground_bare_of_snow_shows_none_wherever_its_patches_lie() {
 fn drifted_snow_hides_the_ground_only_where_it_lies_deep_enough() {
     let pigment = ground();
     let lying = |depth: f64| {
-        let kept = f64::from(crate::snow::kept(depth)) / 255.0;
+        let kept = f64::from(tairix_land::snow::kept(depth)) / 255.0;
         ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 0.0, 1.0, kept])
     };
     let (bared, crusted, drifted) = (lying(0.0), lying(0.02), lying(0.4));

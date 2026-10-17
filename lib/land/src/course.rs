@@ -8,59 +8,70 @@
 //! squares of a grid it can reach: a question reads one square.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_countryside::plane::{self, Point};
+use tairix_util::mathf::real;
 use tairix_util::{fallible, mathf};
-
-use crate::vector::real;
 
 /// One vertex of a course.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub(crate) struct Mark {
-    pub(crate) x: f64,
-    pub(crate) z: f64,
+pub struct Mark {
+    /// Where it lies along x.
+    pub x: f64,
+    /// Where it lies along z.
+    pub z: f64,
     /// The height the course runs at here: a river's brim, a road's bed.
-    pub(crate) level: f64,
+    pub level: f64,
     /// Its breadth, bank to bank or verge to verge.
-    pub(crate) width: f64,
+    pub width: f64,
     /// How far below its level its bed lies: a river's depth.
-    pub(crate) depth: f64,
-    /// What only a river's marks carry, nought along a road or a path: how
-    /// far its water has run to come here from the divide above its head;
-    /// how many units of pool and riffle it has run through since its head;
-    /// how sharply it bends here, per metre, toward the side `Nearest`
-    /// counts positive; and how steeply its brim falls.
-    pub(crate) run: f64,
-    pub(crate) phase: f64,
-    pub(crate) turn: f64,
-    pub(crate) fall: f64,
+    pub depth: f64,
+    /// How far a river's water has run to come here from the divide above
+    /// its head; nought along a road or a path, as are the three after it.
+    pub run: f64,
+    /// How many units of pool and riffle a river has run through since its
+    /// head.
+    pub phase: f64,
+    /// How sharply a river bends here, per metre, toward the side `Nearest`
+    /// counts positive.
+    pub turn: f64,
+    /// How steeply a river's brim falls.
+    pub fall: f64,
 }
 
 /// The nearest point of a course to a place.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Nearest {
-    /// Which course, and how far along it from its first vertex.
-    pub(crate) course: usize,
-    pub(crate) along: f64,
-    /// How far off the place lies, and on which side, positive to the left
-    /// going downstream.
-    pub(crate) distance: f64,
-    pub(crate) side: f64,
-    /// The course's level, breadth, depth, and its river's run, phase, turn
-    /// and fall there, blended between its vertices.
-    pub(crate) level: f64,
-    pub(crate) width: f64,
-    pub(crate) depth: f64,
-    pub(crate) run: f64,
-    pub(crate) phase: f64,
-    pub(crate) turn: f64,
-    pub(crate) fall: f64,
+pub struct Nearest {
+    /// Which course.
+    pub course: usize,
+    /// How far along it from its first vertex.
+    pub along: f64,
+    /// How far off the place lies.
+    pub distance: f64,
+    /// On which side it lies: positive to the left going downstream.
+    pub side: f64,
+    /// The course's level there, blended between its vertices as the rest
+    /// of its marks' are.
+    pub level: f64,
+    /// Its breadth.
+    pub width: f64,
+    /// Its depth.
+    pub depth: f64,
+    /// Its river's run.
+    pub run: f64,
+    /// Its river's phase.
+    pub phase: f64,
+    /// Its river's turn.
+    pub turn: f64,
+    /// Its river's fall.
+    pub fall: f64,
     /// Which way the course runs there, as a unit step in x and z:
     /// downstream along a river.
-    pub(crate) toward: (f64, f64),
+    pub toward: (f64, f64),
     /// How far past one of its ends the place lies, along its line there:
     /// nought where its nearest point falls within the course.
-    pub(crate) past: f64,
+    pub past: f64,
 }
 
 /// A segment of a course as a place lies against it: the segment's first
@@ -76,13 +87,22 @@ struct Segment {
 
 /// How far from a course a point may ask after it: `per_width` times the
 /// course's breadth there, and `beyond` more.
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Reach {
-    pub(crate) per_width: f64,
-    pub(crate) beyond: f64,
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Reach {
+    /// How many of the course's breadths.
+    pub per_width: f64,
+    /// How far more.
+    pub beyond: f64,
 }
 
 impl Reach {
+    /// How far from the middle of the segment from `a` to `b` a point asks
+    /// after it: the reach at its broadest, and half that breadth.
+    fn about(&self, (a, b): (&Mark, &Mark)) -> f64 {
+        let widest = mathf::fmax(a.width, b.width);
+        self.of(widest) + 0.5 * widest
+    }
+
     fn of(&self, width: f64) -> f64 {
         self.per_width * width + self.beyond
     }
@@ -90,7 +110,7 @@ impl Reach {
 
 /// A set of courses and the index over them.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Courses {
+pub struct Courses {
     marks: Vec<Mark>,
     /// Where each course's marks start in `marks`, and one past the last.
     starts: Vec<u32>,
@@ -99,13 +119,15 @@ pub(crate) struct Courses {
     index: Index,
 }
 
-/// Segments bucketed by the grid squares they can reach.
+/// Segments bucketed by the grid squares they can reach, as far as `reach`
+/// has them reach.
 #[derive(Clone, Debug, Default)]
 struct Index {
     origin: (f64, f64),
     size: f64,
     columns: usize,
     rows: usize,
+    reach: Reach,
     /// Each square's first entry in `entries`, and one past its last.
     offsets: Vec<u32>,
     /// Segments, as the index of their first mark.
@@ -114,7 +136,8 @@ struct Index {
 
 impl Courses {
     /// No courses at all.
-    pub(crate) fn none() -> Self {
+    #[must_use]
+    pub fn none() -> Self {
         Self::default()
     }
 
@@ -122,41 +145,50 @@ impl Courses {
     /// `span` across so a point may ask for any course within `reach` of it,
     /// a broad course reaching further than a narrow one, all at once; `None`
     /// when the heap will not hold them.
-    pub(crate) fn new(
-        courses: &[Vec<Mark>],
-        square: ((f64, f64), f64),
-        reach: Reach,
-    ) -> Option<Self> {
+    #[must_use]
+    pub fn new(courses: &[Vec<Mark>], square: ((f64, f64), f64), reach: Reach) -> Option<Self> {
         let mut indexing = Indexing::copied(courses, square, reach)?;
         while !indexing.step(usize::MAX)? {}
         indexing.finish()
     }
 
     /// How many courses there are.
-    pub(crate) fn len(&self) -> usize {
+    #[must_use]
+    pub fn len(&self) -> usize {
         self.starts.len().saturating_sub(1)
     }
 
+    /// Whether there are none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Where course `index`'s marks lie among every course's; `None` past
+    /// the last course.
+    fn marks_of(&self, index: usize) -> Option<Range<usize>> {
+        let start = *self.starts.get(index)? as usize;
+        let end = *self.starts.get(index.checked_add(1)?)? as usize;
+        Some(start..end)
+    }
+
     /// Course `index`'s marks.
-    pub(crate) fn course(&self, index: usize) -> &[Mark] {
-        let (Some(&start), Some(&end)) = (self.starts.get(index), self.starts.get(index + 1))
-        else {
-            return &[];
-        };
-        self.marks.get(start as usize..end as usize).unwrap_or(&[])
+    #[must_use]
+    pub fn course(&self, index: usize) -> &[Mark] {
+        self.marks_of(index)
+            .and_then(|marks| self.marks.get(marks))
+            .unwrap_or(&[])
     }
 
     /// Course `index` as it runs `along` its length from its first mark,
     /// blended between the marks either side and held at its ends; `None`
     /// for a course with no marks.
-    pub(crate) fn at(&self, index: usize, along: f64) -> Option<Mark> {
-        let (start, end) = (
-            *self.starts.get(index)? as usize,
-            *self.starts.get(index + 1)? as usize,
-        );
+    #[must_use]
+    pub fn at(&self, index: usize, along: f64) -> Option<Mark> {
+        let marks = self.marks_of(index)?;
         blended(
-            self.marks.get(start..end)?,
-            self.along.get(start..end)?,
+            self.marks.get(marks.clone())?,
+            self.along.get(marks)?,
             along,
         )
     }
@@ -165,23 +197,22 @@ impl Courses {
     /// across it to its left — from its marks a metre either side, the place
     /// held that far within its ends so the way holds right to and past
     /// them; `None` for a course with no marks.
-    pub(crate) fn way(&self, index: usize, along: f64) -> Option<((f64, f64), (f64, f64))> {
-        let (start, end) = (
-            *self.starts.get(index)? as usize,
-            *self.starts.get(index + 1)? as usize,
-        );
-        let length = *self.along.get(start..end)?.last()?;
-        let inside = 1.0f64.min(0.5 * length);
+    #[must_use]
+    pub fn way(&self, index: usize, along: f64) -> Option<((f64, f64), (f64, f64))> {
+        let length = *self.along.get(self.marks_of(index)?)?.last()?;
+        let inside = mathf::fmin(1.0f64, 0.5 * length);
         let middle = mathf::clamp(along, inside, length - inside);
         let (before, after) = (self.at(index, middle - 1.0)?, self.at(index, middle + 1.0)?);
         let (dx, dz) = (after.x - before.x, after.z - before.z);
-        let span = mathf::hypot(dx, dz).max(1e-6);
+        let span = mathf::fmax(mathf::hypot(dx, dz), 1e-6);
         Some(((dx / span, dz / span), (-dz / span, dx / span)))
     }
 
     /// The nearest point of any course to `(x, z)` within the reach the
-    /// index was built for, if one lies that near.
-    pub(crate) fn nearest(&self, x: f64, z: f64) -> Option<Nearest> {
+    /// index was built for at the course's breadth there and half that
+    /// breadth more, if one lies that near.
+    #[must_use]
+    pub fn nearest(&self, x: f64, z: f64) -> Option<Nearest> {
         let mut best: Option<Segment> = None;
         for segment in self.segments(x, z)? {
             if best.is_none_or(|held| segment.distance < held.distance) {
@@ -192,8 +223,9 @@ impl Courses {
     }
 
     /// The nearest point to `(x, z)` of each course within the reach the
-    /// index was built for, a course at a time.
-    pub(crate) fn each_nearest(&self, x: f64, z: f64, mut each: impl FnMut(Nearest)) {
+    /// index was built for, as [`Courses::nearest`] measures it, a course at
+    /// a time.
+    pub fn each_nearest(&self, x: f64, z: f64, mut each: impl FnMut(Nearest)) {
         let Some(segments) = self.segments(x, z) else {
             return;
         };
@@ -255,7 +287,8 @@ impl Courses {
             };
             let share = unclamped.clamp(0.0, 1.0);
             let distance = mathf::hypot(x - (here.x + dx * share), z - (here.z + dz * share));
-            Some(Segment {
+            // Past its reach a segment lies in a square only as squares fall.
+            (distance <= index.reach.about((here, next))).then_some(Segment {
                 mark,
                 unclamped,
                 distance,
@@ -321,7 +354,8 @@ impl Courses {
 
 /// The marks of `line` from `from` to `to` along it, `width` broad; `None`
 /// when the heap will not hold them or the line has no length.
-pub(crate) fn traced(line: &[Point], (from, to): (f64, f64), width: f64) -> Option<Vec<Mark>> {
+#[must_use]
+pub fn traced(line: &[Point], (from, to): (f64, f64), width: f64) -> Option<Vec<Mark>> {
     let mark = |at: Point| Mark {
         x: at.x,
         z: at.y,
@@ -344,7 +378,8 @@ pub(crate) fn traced(line: &[Point], (from, to): (f64, f64), width: f64) -> Opti
 
 /// `marks` smoothed by Chaikin's corner cutting, `rounds` times over, its two
 /// ends kept where they are; `None` when the heap will not hold it.
-pub(crate) fn smoothed(marks: &[Mark], rounds: u32) -> Option<Vec<Mark>> {
+#[must_use]
+pub fn smoothed(marks: &[Mark], rounds: u32) -> Option<Vec<Mark>> {
     let mut current = fallible::collected(marks.len(), marks.iter().copied())?;
     for _ in 0..rounds {
         if current.len() < 3 {
@@ -386,7 +421,7 @@ impl Squares {
     /// the point and little more, so a question tests few segments.
     fn over(marks: &[Mark], (origin, span): ((f64, f64), f64), reach: Reach) -> Option<Self> {
         let mean = marks.iter().map(|mark| mark.width).sum::<f64>() / real(marks.len().max(1));
-        let size = reach.of(mean).max(span / 1024.0).max(1e-3);
+        let size = mathf::fmax(mathf::fmax(reach.of(mean), span / 1024.0), 1e-3);
         let across = usize::try_from(mathf::round_i32(mathf::ceil(span / size)))
             .unwrap_or(1)
             .max(1);
@@ -408,17 +443,16 @@ impl Squares {
     /// `from`.
     fn cell(&self, value: f64, from: f64, count: usize) -> usize {
         let at = mathf::floor((value - from) / self.size);
-        usize::try_from(mathf::round_i32(at.max(0.0)))
+        usize::try_from(mathf::round_i32(mathf::fmax(at, 0.0)))
             .unwrap_or(0)
             .min(count - 1)
     }
 
     /// Hand `visit` every square the segment from `a` to `b` can reach.
     fn visit(&self, (a, b): (&Mark, &Mark), visit: &mut dyn FnMut(usize)) {
-        let widest = a.width.max(b.width);
-        let pad = self.reach.of(widest) + 0.5 * widest;
-        let (x0, x1) = (a.x.min(b.x) - pad, a.x.max(b.x) + pad);
-        let (z0, z1) = (a.z.min(b.z) - pad, a.z.max(b.z) + pad);
+        let pad = self.reach.about((a, b));
+        let (x0, x1) = (mathf::fmin(a.x, b.x) - pad, mathf::fmax(a.x, b.x) + pad);
+        let (z0, z1) = (mathf::fmin(a.z, b.z) - pad, mathf::fmax(a.z, b.z) + pad);
         for row in self.cell(z0, self.origin.1, self.rows)..=self.cell(z1, self.origin.1, self.rows)
         {
             for column in self.cell(x0, self.origin.0, self.columns)
@@ -431,13 +465,13 @@ impl Squares {
 }
 
 /// How many marks, segments or squares a unit of an indexing takes.
-pub(crate) const INDEX_UNIT: usize = 1 << 16;
+pub const INDEX_UNIT: usize = 1 << 16;
 
 /// Courses being indexed, a bounded share of the work a step: their marks
 /// gathered, then the squares each segment reaches counted, the counts summed
 /// into each square's first entry, and every segment filed in its squares.
 #[derive(Debug)]
-pub(crate) struct Indexing {
+pub struct Indexing {
     sources: Vec<Vec<Mark>>,
     courses: Courses,
     square: ((f64, f64), f64),
@@ -472,11 +506,7 @@ impl Indexing {
     /// `courses` to be indexed over the square from `origin` `span` across,
     /// each to be asked after within `reach` of it, gathered a unit at a time;
     /// `None` when the heap will not hold them.
-    pub(crate) fn new(
-        courses: Vec<Vec<Mark>>,
-        square: ((f64, f64), f64),
-        reach: Reach,
-    ) -> Option<Self> {
+    pub fn new(courses: Vec<Vec<Mark>>, square: ((f64, f64), f64), reach: Reach) -> Option<Self> {
         let total: usize = courses.iter().map(Vec::len).sum();
         let mut gathered = Courses::none();
         if !(fallible::reserve(&mut gathered.marks, total)
@@ -514,7 +544,7 @@ impl Indexing {
     /// The next unit of the indexing, at most `budget` marks, segments or
     /// squares; whether it is whole, or `None` when the heap will not hold
     /// it.
-    pub(crate) fn step(&mut self, budget: usize) -> Option<bool> {
+    pub fn step(&mut self, budget: usize) -> Option<bool> {
         let budget = budget.max(1);
         let courses = &mut self.courses;
         self.stage = match core::mem::replace(&mut self.stage, Indexed::Done) {
@@ -614,7 +644,8 @@ impl Indexing {
     }
 
     /// The courses, once indexed; `None` before.
-    pub(crate) fn finish(self) -> Option<Courses> {
+    #[must_use]
+    pub fn finish(self) -> Option<Courses> {
         matches!(self.stage, Indexed::Done).then_some(self.courses)
     }
 }
@@ -651,6 +682,7 @@ impl Courses {
             size: squares.size,
             columns: squares.columns,
             rows: squares.rows,
+            reach: squares.reach,
             entries: fallible::filled(total, 0u32)?,
             offsets: Vec::new(),
         };
@@ -718,7 +750,7 @@ impl Courses {
 }
 
 /// How far along `course` each of its marks lies from its first.
-pub(crate) fn travelled(course: &[Mark]) -> impl Iterator<Item = f64> + '_ {
+pub fn travelled(course: &[Mark]) -> impl Iterator<Item = f64> + '_ {
     let mut total = 0.0;
     let mut last: Option<&Mark> = None;
     course.iter().map(move |mark| {
@@ -733,7 +765,8 @@ pub(crate) fn travelled(course: &[Mark]) -> impl Iterator<Item = f64> + '_ {
 /// `marks`, lying `along` their course, as they run `at` that far along it:
 /// blended between the marks either side and held at its ends; `None` for
 /// no marks.
-pub(crate) fn blended(marks: &[Mark], along: &[f64], at: f64) -> Option<Mark> {
+#[must_use]
+pub fn blended(marks: &[Mark], along: &[f64], at: f64) -> Option<Mark> {
     let last = along.len().min(marks.len()).checked_sub(1)?;
     let next = along
         .partition_point(|&mark| mark <= at)
@@ -749,7 +782,8 @@ pub(crate) fn blended(marks: &[Mark], along: &[f64], at: f64) -> Option<Mark> {
 }
 
 /// The mark `t` of the way from `a` to `b`.
-pub(crate) fn between(a: Mark, b: Mark, t: f64) -> Mark {
+#[must_use]
+pub fn between(a: Mark, b: Mark, t: f64) -> Mark {
     let blend = |from: f64, to: f64| from + (to - from) * t;
     Mark {
         x: blend(a.x, b.x),

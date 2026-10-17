@@ -14,6 +14,7 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_land::Season;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
@@ -141,18 +142,6 @@ impl Species {
     }
 }
 
-/// The time of year a tree is grown for.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Season {
-    Spring,
-    Summer,
-    /// Its leaves turned, and this share of them fallen.
-    Autumn {
-        fallen: u8,
-    },
-    Winter,
-}
-
 /// The materials a tree is made in: its bark, its leaves, and the wood its
 /// breaks show; and the fruit it bears in its season, if it does.
 #[derive(Copy, Clone, Debug)]
@@ -240,6 +229,10 @@ pub(crate) struct Growth {
     stage: Stage,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a growth holds one stage, and a box could not fail gracefully"
+)]
 #[derive(Debug)]
 enum Stage {
     /// Growing the stems of `level`, those of the next gathering behind.
@@ -668,7 +661,7 @@ impl Grower {
 
     fn next_key(&mut self) -> u32 {
         self.key = self.key.wrapping_add(1);
-        crate::sample::mix32(self.key ^ self.dice.next_u32())
+        tairix_mix::mix32(self.key ^ self.dice.next_u32())
     }
 
     /// Grow `stem`, pushing its children for the next level into `next`.
@@ -986,7 +979,7 @@ pub(crate) fn leaf(
     let size = (0.8 + 0.4 * unit()) * leafing.length.min(twig * 1.5);
     let fold = leafing.fold * (0.6 + 0.6 * unit());
     *count = count.wrapping_add(1);
-    let key = crate::sample::mix32(*count ^ dice.next_u32());
+    let key = tairix_mix::mix32(*count ^ dice.next_u32());
     Some(Blade {
         base: singles(base),
         normal: singles(normal),
@@ -1050,7 +1043,7 @@ pub(crate) fn palm(
     let side = Vec3::new(mathf::cos(turn), 0.0, mathf::sin(turn));
     let segments = 24u32;
     let radius = 0.018 * height;
-    let mut key = crate::sample::mix32(u32::try_from(seed & 0xffff_ffff).unwrap_or(0));
+    let mut key = tairix_mix::mix32(u32::try_from(seed & 0xffff_ffff).unwrap_or(0));
     let foot = 1.35 * radius;
     let mut at = palm_foot(&mut assembly, (foot, side), (stock, roots, key), &mut dice)?;
     let mut dir = Vec3::UP;
@@ -1061,7 +1054,7 @@ pub(crate) fn palm(
         let bend = lean * (1.0 - s) * 2.0 / f64::from(segments);
         dir = (dir * mathf::cos(bend) + side * mathf::sin(bend)).normalized();
         let end = at + dir * (rising / f64::from(segments));
-        key = crate::sample::mix32(key ^ segment);
+        key = tairix_mix::mix32(key ^ segment);
         // The trunk bends in the upright plane through `side`, square to which
         // its bark is begun.
         assembly.push(Part::Tube(Tube::new(
@@ -1095,7 +1088,7 @@ pub(crate) fn palm(
             outline: Outline::Lanceolate,
             hang: 0.35,
         };
-        key = crate::sample::mix32(key ^ (u32::from(frond) << 8));
+        key = tairix_mix::mix32(key ^ (u32::from(frond) << 8));
         grow_frond(
             &mut |part| assembly.push(part),
             (crown, around),
@@ -1144,7 +1137,7 @@ fn palm_foot(
         let out = tube.way(angle);
         let thick = thick * (0.65 + 0.6 * dice.next_f64());
         let from = Vec3::UP * rise + out * (girth - 1.2 * thick);
-        let root_key = crate::sample::mix32(key ^ u32::try_from(root).unwrap_or(0) ^ 0x7007);
+        let root_key = tairix_mix::mix32(key ^ u32::try_from(root).unwrap_or(0) ^ 0x7007);
         let reach = 0.015 + 0.07 * dice.next_f64() * dice.next_f64() + 0.3 * rise;
         // Out from the swelling, bowing down under its own weight into the
         // soil, and on beneath it out of sight.
@@ -1234,7 +1227,7 @@ fn grow_frond(
         let s = f64::from(step) / f64::from(steps);
         heading = (heading - Vec3::UP * (shape.droop / f64::from(steps))).normalized();
         let next = point + heading * (shape.length / f64::from(steps));
-        key = crate::sample::mix32(key ^ step);
+        key = tairix_mix::mix32(key ^ step);
         push(Part::Tube(Tube::new(
             (point, next),
             (
@@ -1264,7 +1257,7 @@ fn grow_frond(
                         * shape.leaflet.0
                         * (1.0 - 0.55 * leafy)
                         * (0.85 + 0.3 * dice.next_f64());
-                    key = crate::sample::mix32(key ^ pair ^ 0x5a);
+                    key = tairix_mix::mix32(key ^ pair ^ 0x5a);
                     push(Part::Leaf(Blade {
                         base: singles(base),
                         normal: singles(normal),
@@ -1292,7 +1285,7 @@ pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
     let mut dice = NonCryptoRng::seed_from_u64(seed);
     let mut assembly =
         Assembly::with_room(usize::from(fronds) * (1 + 2 * LEAFLETS as usize) * 10, 0)?;
-    let mut key = crate::sample::mix32(u32::try_from(seed >> 32).unwrap_or(0) ^ 0xf3);
+    let mut key = tairix_mix::mix32(u32::try_from(seed >> 32).unwrap_or(0) ^ 0xf3);
     for frond in 0..fronds {
         let around = TAU * (f64::from(frond) + 0.6 * dice.next_f64()) / f64::from(fronds);
         // The inner fronds stand up, the outer arch over.
@@ -1307,7 +1300,7 @@ pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
             outline: Outline::Shoot { count: 12 },
             hang: 0.05,
         };
-        key = crate::sample::mix32(key ^ (u32::from(frond) << 8));
+        key = tairix_mix::mix32(key ^ (u32::from(frond) << 8));
         grow_frond(
             &mut |part| assembly.push(part),
             (Vec3::ZERO, around),

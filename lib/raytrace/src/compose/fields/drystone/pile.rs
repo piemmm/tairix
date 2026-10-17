@@ -78,7 +78,7 @@ impl Pile {
 
     /// Where along the face sample `at` lies.
     pub(super) fn x_of(&self, at: usize) -> f64 {
-        self.start + SAMPLE * f64::from(u32::try_from(at).unwrap_or(u32::MAX))
+        self.start + SAMPLE * mathf::real(at)
     }
 
     /// The samples from `from` to `to` along the face.

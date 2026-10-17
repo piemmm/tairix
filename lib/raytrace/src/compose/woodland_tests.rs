@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use super::*;
 use crate::compose::{planted_at, Composition, Job, Progress, Setting, Stage};
 use crate::detail::Detail;
+use crate::wood::{Affinity, Habit, KINDS};
 #[cfg(feature = "scene-tests")]
 use crate::{compose::Recipe, shape::Shape};
 
@@ -12,45 +13,6 @@ const EYE: Vantage = Vantage {
     eye: Vec3::new(0.0, 1.7, 0.0),
     heading: 0.0,
 };
-
-#[test]
-fn a_crown_keeps_its_peers_off_but_a_much_shorter_tree_may_stand_beneath_it() {
-    let mut crowns = Crowns::new(((0.0, 0.0), 100.0), 30.0).expect("a grid");
-    let tall = Stood {
-        at: (0.0, 0.0),
-        height: 20.0,
-        reach: 6.0,
-        apart: 0.6,
-    };
-    crowns.add(tall).expect("stood");
-    let peer = |x: f64| Stood {
-        at: (x, 0.0),
-        height: 19.0,
-        reach: 6.0,
-        apart: 0.6,
-    };
-    assert!(
-        crowns.crowds(&peer(7.0)),
-        "peers' trunks keep more than 7.2 m apart"
-    );
-    assert!(!crowns.crowds(&peer(7.4)));
-    let young = |x: f64| Stood {
-        at: (x, 0.0),
-        height: 5.0,
-        reach: 1.5,
-        apart: 0.6,
-    };
-    assert!(
-        !crowns.crowds(&young(3.0)),
-        "a sapling under the crown's edge"
-    );
-    assert!(crowns.crowds(&young(1.2)), "but never against the trunk");
-    // Across a cell's wall, at x = 20, as readily as within one.
-    let mut crowns = Crowns::new(((0.0, 0.0), 100.0), 30.0).expect("a grid");
-    crowns.add(peer(19.0)).expect("stood");
-    assert!(crowns.crowds(&peer(21.0)));
-    assert!(!crowns.crowds(&peer(27.0)));
-}
 
 #[test]
 fn a_tree_just_ahead_of_the_eye_walls_the_view_off_and_one_aside_does_not() {
@@ -72,22 +34,6 @@ fn a_tree_just_ahead_of_the_eye_walls_the_view_off_and_one_aside_does_not() {
     );
 }
 
-/// Every place `sowing` sows within the square `square`.
-fn sown_over(sowing: &Sowing, square: ((f64, f64), f64)) -> Vec<Seedling> {
-    let mut seedlings = Vec::new();
-    for ring in 0..sowing.rings() {
-        sow_ring(
-            (ring, sowing.ring(ring)),
-            (&EYE, sowing.about),
-            square,
-            7,
-            &mut seedlings,
-        )
-        .expect("sown");
-    }
-    seedlings
-}
-
 #[test]
 fn a_wood_is_sown_as_closely_throughout_reaching_only_as_far_as_its_places_fit() {
     let fine = Sowing {
@@ -95,7 +41,7 @@ fn a_wood_is_sown_as_closely_throughout_reaching_only_as_far_as_its_places_fit()
         about: 40.0,
         far: 1200.0,
     };
-    let whole = fine.places_in(fine.rings());
+    let whole = fine.places();
     let kept = fine.fitted(2.0 * whole);
     assert!((kept.far - fine.far).abs() < 1e-9, "fits as it is");
     // Kept to a third of them, it stops short, its places as close as ever
@@ -103,62 +49,437 @@ fn a_wood_is_sown_as_closely_throughout_reaching_only_as_far_as_its_places_fit()
     let budget = whole / 3.0;
     let kept = fine.fitted(budget);
     assert!(kept.far < fine.far && (kept.sown - fine.sown).abs() < 1e-12);
-    let places = kept.places_in(kept.rings());
-    assert!(
-        places <= budget && places > 0.98 * budget,
-        "{places} of {budget}"
-    );
-    // The places it sows are the places it planned.
-    let sown = real(sown_over(&kept, ((0.0, 0.0), 1e5)).len());
-    assert!((sown / places - 1.0).abs() < 0.01, "{sown} of {places}");
+    assert!((kept.places() / budget - 1.0).abs() < 1e-9);
     // An eye's round alone too big to hold is cut short too.
     let round = fine.fitted(100.0);
+    assert!(round.far < fine.about && (round.about - round.far).abs() < 1e-12);
+    assert!((round.places() / 100.0 - 1.0).abs() < 1e-9);
+}
+
+/// A region all about an eye out to 40 m and across its view to 120 m stood
+/// one by one, then on to 300 m carried on, over a land 2 km across.
+const REGION: Region = Region {
+    eye: (3.0, -5.0),
+    heading: 0.4,
+    across: ACROSS,
+    about: 40.0,
+    near: 120.0,
+    far: 300.0,
+    traced: ((0.0, 0.0), 1000.0),
+};
+
+#[test]
+fn a_region_spans_every_place_about_the_eye_and_across_the_view_and_little_more() {
+    let sown = Sown { side: 2.0, seed: 7 };
+    let spans = REGION.spans(&sown).expect("spans");
+    assert!(spans.windows(2).all(|pair| pair[0].row < pair[1].row));
+    let spanned = |(column, row): Cell| {
+        spans
+            .iter()
+            .any(|span| span.row == row && (span.columns.0..span.columns.1).contains(&column))
+    };
+    let (mut near, mut far, mut held) = (0.0, 0.0, 0.0);
+    for row in -200..200 {
+        for column in -200..200 {
+            let cell = (column, row);
+            let (at, _) = sown.place(cell).expect("a place");
+            held += f64::from(u8::from(spanned(cell)));
+            let (dx, dz) = (at.0 - REGION.eye.0, at.1 - REGION.eye.1);
+            let distance = mathf::hypot(dx, dz);
+            let across = wrapped(mathf::atan2(dx, dz) - REGION.heading).abs() <= ACROSS;
+            match REGION.part(at) {
+                Some(Part::Near {
+                    distance: within,
+                    across: facing,
+                }) => {
+                    assert!(spanned(cell), "{cell:?}");
+                    assert!((within - distance).abs() < 1e-9 && facing == across);
+                    assert!(distance < 40.0 || (across && distance < 120.0));
+                    near += 1.0;
+                }
+                Some(Part::Far) => {
+                    assert!(spanned(cell), "{cell:?}");
+                    assert!(across && (120.0..=300.0).contains(&distance));
+                    far += 1.0;
+                }
+                None => assert!(distance >= 40.0 && (!across || distance > 300.0)),
+            }
+        }
+    }
+    let sowing = |far: f64| Sowing {
+        sown: 2.0,
+        about: 40.0,
+        far,
+    };
+    let (expected_near, expected_all) = (sowing(120.0).places(), sowing(300.0).places());
     assert!(
-        round.far < fine.about && round.places_in(round.rings()) <= 100.0,
-        "{}",
-        round.far
+        (near / expected_near - 1.0).abs() < 0.01,
+        "{near} of {expected_near}"
     );
+    let expected_far = expected_all - expected_near;
+    assert!(
+        (far / expected_far - 1.0).abs() < 0.01,
+        "{far} of {expected_far}"
+    );
+    assert!(
+        held < 1.12 * (near + far),
+        "{held} spanned for {}",
+        near + far
+    );
+    // Traced only so far, it spans only the land's own cells.
+    let edged = Region {
+        traced: ((0.0, 0.0), 50.0),
+        ..REGION
+    };
+    for span in edged.spans(&sown).expect("spans") {
+        assert!((-26..=26).contains(&span.row), "{span:?}");
+        assert!(span.columns.0 >= -26 && span.columns.1 <= 27, "{span:?}");
+    }
+}
+
+/// One kind of trees a wood far off and near alike grows, ten metres tall,
+/// covering most of the ground.
+fn ten_metre_wood() -> Reader {
+    let habit = Habit {
+        affinity: Affinity::EVEN,
+        prototypes: [0; VARIANTS],
+        heights: [10.0; VARIANTS],
+        bark: 0,
+        crown: 0.2,
+        scaled: (0.75, 1.35),
+    };
+    let mut kinds = [None; KINDS];
+    kinds[0] = Some(habit);
+    Reader {
+        woodland: Woodland {
+            cover: 0.9,
+            patch: 260.0,
+            closure: (0.45, 0.8),
+            stature: (0.8, 1.0),
+            gaps: 0.2,
+            most: 100_000,
+            open: (1.5, 0.3),
+        },
+        rooting: crate::wood::ANYWHERE,
+        kinds,
+        seeds: (3, 4),
+        layer: Layer::Canopy,
+    }
+}
+
+/// The lie of level, green ground.
+const GREEN: tairix_land::attributes::Attributes = [0, 128, 0, 0, 255, 0, 0, 0];
+
+/// What a wood stands on a level, green land seen from `vantage`, sown on
+/// `sown` over `region` and carried on far off where `beyond` asks: the
+/// places stood one by one, the wood far off, and the land's grids.
+fn grown(
+    vantage: &Vantage,
+    (sown, region): (Sown, Region),
+    beyond: bool,
+) -> (Vec<Offer>, Option<FarWood>, Stage) {
+    let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
+    let land = crate::compose::testland::land(&mut stage, &|_, _| 0.0, GREEN);
+    let reader = ten_metre_wood();
+    let far = beyond.then(|| {
+        let stretch = Stretch {
+            eye: region.eye,
+            heading: region.heading,
+            across: ACROSS,
+            to: region.far,
+        };
+        FarWood::new((reader, sown), (land.grids, &stage.fields), stretch).expect("a wood")
+    });
+    let most = usize::try_from(reader.woodland.most).expect("a count");
+    let sheltering = Some(reader.widest_room());
+    let mut standing = Standing::new(
+        &stage,
+        (&reader, most),
+        (sown, region),
+        (far, None, sheltering),
+    )
+    .expect("standing");
+    let runner = tairix_parallel::Threaded::new(4);
+    let mut steps = 0;
+    while !standing
+        .step(&mut stage, (&land, &runner), (vantage, None))
+        .expect("stood")
+    {
+        steps += 1;
+        assert!(steps < 100_000);
+    }
+    (stood(&standing), standing.beyond.take(), stage)
+}
+
+/// The trees `standing` stood, as the canopy they make holds them.
+fn stood(standing: &Standing) -> Vec<Offer> {
+    standing
+        .thinned
+        .as_ref()
+        .and_then(|thinned| thinned.canopy.as_ref())
+        .map(|canopy| canopy.trees.clone())
+        .expect("a standing that shelters what grows beneath it")
+}
+
+/// Every two of `trees` that crowd each other.
+fn crowded(trees: &[Offer]) -> Vec<(Offer, Offer)> {
+    let mut sorted = trees.to_vec();
+    sorted.sort_by(|a, b| a.at.0.total_cmp(&b.at.0));
+    let widest = ten_metre_wood().widest_room();
+    let mut pairs = Vec::new();
+    for (index, tree) in sorted.iter().enumerate() {
+        for other in sorted[index + 1..]
+            .iter()
+            .take_while(|other| other.at.0 - tree.at.0 < widest)
+        {
+            if crowd(tree, other) {
+                pairs.push((*tree, *other));
+            }
+        }
+    }
+    pairs
 }
 
 #[test]
-fn places_are_sown_all_about_the_eye_near_it_and_across_the_view_beyond() {
-    let sowing = Sowing {
-        sown: 2.0,
-        about: 40.0,
-        far: 120.0,
+fn a_wood_stands_the_same_trees_at_a_place_from_wherever_it_is_seen() {
+    let sown = lattice(&ten_metre_wood(), 1.4);
+    let seen_from = |eye: (f64, f64), heading: f64| {
+        let vantage = Vantage {
+            eye: Vec3::new(eye.0, 1.7, eye.1),
+            heading,
+        };
+        let region = Region {
+            eye,
+            heading,
+            across: ACROSS,
+            about: 60.0,
+            near: 70.0,
+            far: 70.0,
+            traced: ((0.0, 0.0), 200.0),
+        };
+        grown(&vantage, (sown, region), false).0
     };
-    let sown = |square: ((f64, f64), f64)| sown_over(&sowing, square);
-    let seedlings = sown(((0.0, 0.0), 1000.0));
-    let (mut near, mut ahead) = (0, 0);
-    for seedling in &seedlings {
-        let (x, z) = seedling.at;
-        let distance = mathf::hypot(x, z);
-        assert!(distance <= 120.0 + 1e-6);
-        if distance < 40.0 {
-            near += 1;
-        } else {
-            let turn = mathf::atan2(x, z);
-            assert!(
-                turn.abs() <= ACROSS + 0.06,
-                "beyond the eye's round only across the view: {turn}"
-            );
-            ahead += 1;
+    // Well clear of either eye and the view each keeps open before it.
+    let window = |trees: Vec<Offer>| -> Vec<Offer> {
+        let mut within: Vec<Offer> = trees
+            .into_iter()
+            .filter(|tree| tree.at.0.abs() < 10.0 && tree.at.1.abs() < 20.0)
+            .collect();
+        within.sort_by(|a, b| a.at.0.total_cmp(&b.at.0).then(a.at.1.total_cmp(&b.at.1)));
+        within
+    };
+    let west = seen_from((-30.0, 0.0), 0.0);
+    let east = seen_from((30.0, 0.0), core::f64::consts::PI);
+    assert!(crowded(&west).is_empty() && crowded(&east).is_empty());
+    let (west, east) = (window(west), window(east));
+    assert!(west.len() > 10, "{}", west.len());
+    assert_eq!(west, east);
+}
+
+#[test]
+fn a_wood_far_off_carries_on_the_one_stood_near_as_one_wood() {
+    let sown = lattice(&ten_metre_wood(), 1.4);
+    let vantage = Vantage {
+        eye: Vec3::new(0.0, 1.7, -120.0),
+        heading: 0.0,
+    };
+    let region = |near: f64| Region {
+        eye: (0.0, -120.0),
+        heading: 0.0,
+        across: ACROSS,
+        about: 20.0,
+        near,
+        far: 190.0,
+        traced: ((0.0, 0.0), 200.0),
+    };
+    let (stood, far, stage) = grown(&vantage, (sown, region(80.0)), true);
+    let far = far.expect("carried on");
+    let carried: Vec<Offer> = far.kept(&stage.fields).collect();
+    assert!(
+        stood.len() > 300 && carried.len() > 300,
+        "{} and {}",
+        stood.len(),
+        carried.len()
+    );
+    let distance = |tree: &Offer| mathf::hypot(tree.at.0, tree.at.1 + 120.0);
+    assert!(stood.iter().all(|tree| distance(tree) < 80.0));
+    assert!(carried
+        .iter()
+        .all(|tree| (80.0..=190.0).contains(&distance(tree)) && far.across(tree.at)));
+    // Together they are the wood the land grows there stood whole: no trunk
+    // in another's room where they meet, and none missing.
+    let (whole, _, _) = grown(&vantage, (sown, region(190.0)), false);
+    let order = |trees: &mut Vec<Offer>| {
+        trees.sort_by(|a, b| a.at.0.total_cmp(&b.at.0).then(a.at.1.total_cmp(&b.at.1)));
+    };
+    let mut joined: Vec<Offer> = stood.iter().chain(&carried).copied().collect();
+    let mut whole = whole;
+    order(&mut joined);
+    order(&mut whole);
+    assert_eq!(joined.len(), whole.len());
+    assert!(joined == whole, "the wood far off is the wood stood near");
+    assert!(crowded(&whole).is_empty());
+}
+
+/// However many cores a runner claims, a step stands no more of a wood's
+/// trees than one core sets on the stage, and every tree kept stands.
+#[test]
+fn a_step_stands_no_more_trees_than_one_core_sets_out() {
+    let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
+    let land = crate::compose::testland::land(&mut stage, &|_, _| 0.0, GREEN);
+    let reader = ten_metre_wood();
+    let vantage = Vantage {
+        eye: Vec3::new(0.0, 1.7, -60.0),
+        heading: 0.0,
+    };
+    let region = Region {
+        eye: (0.0, -60.0),
+        heading: 0.0,
+        across: ACROSS,
+        about: 120.0,
+        near: 190.0,
+        far: 190.0,
+        traced: ((0.0, 0.0), 200.0),
+    };
+    let most = usize::try_from(reader.woodland.most).expect("a count");
+    let sown = lattice(&reader, 1.4);
+    let mut standing = Standing::new(&stage, (&reader, most), (sown, region), (None, None, None))
+        .expect("a standing");
+    let wide = tairix_parallel::Reversed::new(64);
+    while standing.thinned.is_none() {
+        let stood = standing.step(&mut stage, (&land, &wide), (&vantage, None));
+        assert_eq!(stood, Some(false));
+    }
+    let places = standing
+        .thinned
+        .as_ref()
+        .map_or(0, |thinned| thinned.places);
+    assert!(places > STAND_MOST, "{places}");
+    loop {
+        let before = standing.stood;
+        let whole = standing
+            .step(&mut stage, (&land, &wide), (&vantage, None))
+            .expect("stood");
+        assert!(
+            standing.stood - before <= STAND_MOST,
+            "{}",
+            standing.stood - before
+        );
+        if whole {
+            break;
         }
     }
-    let expected_near = PI * 40.0 * 40.0 / 4.0;
-    let expected_ahead = ACROSS * (120.0 * 120.0 - 40.0 * 40.0) / 4.0;
+    assert_eq!(standing.stood, places);
+}
+
+/// A standing left no room stands nothing, so a wood whose canopy took all
+/// its room leaves its subcanopy out rather than thinning it for nothing.
+#[test]
+fn a_standing_left_no_room_stands_nothing() {
+    let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
+    let land = crate::compose::testland::land(&mut stage, &|_, _| 0.0, GREEN);
+    let reader = ten_metre_wood();
+    let vantage = Vantage {
+        eye: Vec3::new(0.0, 1.7, 0.0),
+        heading: 0.0,
+    };
+    let region = Region {
+        eye: (0.0, 0.0),
+        heading: 0.0,
+        across: ACROSS,
+        about: 40.0,
+        near: 40.0,
+        far: 40.0,
+        traced: ((0.0, 0.0), 200.0),
+    };
+    let sown = lattice(&reader, 1.4);
+    let mut standing = Standing::new(&stage, (&reader, 0), (sown, region), (None, None, None))
+        .expect("a standing");
+    assert_eq!(standing.most, 0);
+    let objects = stage.objects.len();
+    let runner = tairix_parallel::Threaded::new(4);
+    while !standing
+        .step(&mut stage, (&land, &runner), (&vantage, None))
+        .expect("stood")
+    {}
+    assert_eq!((standing.stood, stage.objects.len()), (0, objects));
+}
+
+#[test]
+fn a_subcanopy_stands_beneath_the_canopy_and_never_in_a_canopy_trees_room() {
+    let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
+    let land = crate::compose::testland::land(&mut stage, &|_, _| 0.0, GREEN);
+    let canopy = ten_metre_wood();
+    let vantage = Vantage {
+        eye: Vec3::new(0.0, 1.7, 0.0),
+        heading: 0.0,
+    };
+    let region = Region {
+        eye: (0.0, 0.0),
+        heading: 0.0,
+        across: ACROSS,
+        about: 70.0,
+        near: 70.0,
+        far: 70.0,
+        traced: ((0.0, 0.0), 200.0),
+    };
+    let runner = tairix_parallel::Threaded::new(4);
+    let stand = |standing: &mut Standing, stage: &mut Stage| {
+        while !standing
+            .step(stage, (&land, &runner), (&vantage, None))
+            .expect("stood")
+        {}
+        stood(standing)
+    };
+    let most = usize::try_from(canopy.woodland.most).expect("a count");
+    let room = canopy.widest_room();
+    let mut above = Standing::new(
+        &stage,
+        (&canopy, most),
+        (lattice(&canopy, 2.8), region),
+        (None, None, Some(room)),
+    )
+    .expect("a canopy");
+    let tall = stand(&mut above, &mut stage);
+    let (oracle, canopied) = above.sheltered().expect("a canopy to grow beneath");
+    assert!(canopied > 40.0, "{canopied}");
+    let beneath = Reader {
+        layer: Layer::Subcanopy,
+        ..canopy
+    };
+    let region = Region {
+        about: canopied,
+        near: canopied,
+        far: canopied,
+        ..region
+    };
+    let mut below = Standing::new(
+        &stage,
+        (&beneath, most),
+        (lattice(&beneath, 1.7), region),
+        (None, Some(oracle), Some(beneath.widest_room())),
+    )
+    .expect("a subcanopy");
+    let short = stand(&mut below, &mut stage);
     assert!(
-        (f64::from(near) / expected_near - 1.0).abs() < 0.05,
-        "{near} of {expected_near}"
+        tall.len() > 100 && short.len() > 100,
+        "{} over {}",
+        tall.len(),
+        short.len()
     );
+    for tree in &short {
+        assert!(!tall.iter().any(|over| crowd(tree, over)), "{tree:?}");
+        assert!(mathf::hypot(tree.at.0, tree.at.1) < canopied);
+    }
+    assert!(crowded(&short).is_empty());
+    // Drawn from its own lattice and the lower shares of its stands.
+    let highest = |trees: &[Offer]| trees.iter().map(|tree| tree.height).fold(0.0, f32::max);
     assert!(
-        (f64::from(ahead) / expected_ahead - 1.0).abs() < 0.05,
-        "{ahead} of {expected_ahead}"
+        highest(&short) < highest(&tall),
+        "{} under {}",
+        highest(&short),
+        highest(&tall)
     );
-    let inland = sown(((0.0, 50.0), 20.0));
-    assert!(inland
-        .iter()
-        .all(|seedling| seedling.at.0.abs() < 20.0 && (seedling.at.1 - 50.0).abs() < 20.0));
 }
 
 /// A composition of `setting` under `seed` for a picture `size`, its jobs run
@@ -241,53 +562,6 @@ fn a_forest_stands_thousands_of_trees_none_in_the_way_of_another() {
             distance > DEADFALL_CLEAR && distance <= DEADFALL_REACH + 1.0,
             "a fallen trunk at {distance}"
         );
-    }
-}
-
-/// A ranking hands its places out tallest first, those as tall in the order
-/// they were added — as one sort of them all would — however its runs were
-/// shared among cores, across run boundaries and with many heights alike.
-#[test]
-fn a_ranking_takes_its_places_tallest_first_as_one_sort_would() {
-    for count in [0usize, 1, 7, RUN - 1, RUN, RUN + 1, 3 * RUN + 1234] {
-        let heights: Vec<f64> = (0..count)
-            .map(|index| {
-                // Rounded to tenths, so most heights recur many times.
-                let draw = unit(mix32(u32::try_from(index).expect("index") ^ 0x2545));
-                mathf::round(300.0 * draw) / 10.0
-            })
-            .collect();
-        let mut expected: Vec<(f32, u32)> = heights
-            .iter()
-            .enumerate()
-            .map(|(index, &height)| (single(height), u32::try_from(index).expect("index")))
-            .collect();
-        expected.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        let expected: Vec<u32> = expected.into_iter().map(|(_, index)| index).collect();
-        let runners: [&dyn JobRunner; 3] = [
-            &tairix_parallel::SERIAL,
-            &tairix_parallel::Reversed::new(3),
-            &tairix_parallel::Threaded::new(4),
-        ];
-        for runner in runners {
-            let mut ranking = Ranking::default();
-            assert!(ranking.reserve(count));
-            for (index, &height) in heights.iter().enumerate() {
-                ranking.add(height, u32::try_from(index).expect("index"));
-            }
-            let mut units = 0;
-            while !ranking.ranked() {
-                ranking.rank(runner).expect("held");
-                units += 1;
-            }
-            assert!(units <= count.div_ceil(RUN), "{units} units for {count}");
-            let mut taken = Vec::new();
-            while let Some(index) = ranking.next() {
-                taken.push(index);
-            }
-            assert!(ranking.exhausted());
-            assert_eq!(taken, expected, "{count} places");
-        }
     }
 }
 
@@ -552,11 +826,11 @@ fn a_streams_growing_never_reports_less_done() {
 
 #[cfg(feature = "scene-tests")]
 #[test]
-fn a_wood_far_off_stands_as_thickly_as_the_trees_stood_one_by_one_before_it() {
+fn a_forest_carried_on_far_off_is_one_wood_with_the_trees_stood_before_it() {
     let mut composition = planted(Setting::Forest, 1, (640, 360));
     let carried = composition.carried_on();
     assert!(carried > 0, "a forest carried on at Maximum");
-    // Matched and surveyed once the prototypes its trees are measured by grow.
+    // Surveyed once the prototypes its trees are measured by grow.
     let runner = tairix_parallel::Threaded::new(8);
     while !composition
         .advance(&runner, &mut || false)
@@ -571,35 +845,53 @@ fn a_wood_far_off_stands_as_thickly_as_the_trees_stood_one_by_one_before_it() {
         .as_ref()
         .map(|(_, camera)| camera.eye())
         .expect("seen");
-    let from = far.begins();
-    let stood_in = |ring: (f64, f64)| {
-        let stood = stage
-            .objects
+    let distance = |at: (f64, f64)| mathf::hypot(at.0 - eye.x, at.1 - eye.z);
+    // The canopy's trees stood one by one — each where its own cell's place
+    // is, as the land offered it; the subcanopy's stand elsewhere — and those
+    // carried on beyond.
+    let stood: Vec<Offer> = trunks(&composition)
+        .into_iter()
+        .filter_map(|at| {
+            far.offered_at((at.x, at.z), &stage.fields)
+                .filter(|tree| tree.at == (at.x, at.z))
+        })
+        .filter(|tree| far.across(tree.at))
+        .collect();
+    let carried: Vec<Offer> = far.kept(&stage.fields).collect();
+    let meets = carried
+        .iter()
+        .map(|tree| distance(tree.at))
+        .fold(f64::INFINITY, f64::min);
+    assert!(meets.is_finite() && stood.len() > 1000);
+    assert!(stood.iter().all(|tree| distance(tree.at) <= meets + 1e-6));
+    // No trunk in another's room where the two meet.
+    let meeting = |tree: &&Offer| (0.95 * meets..1.05 * meets).contains(&distance(tree.at));
+    let mut near: Vec<Offer> = stood.iter().filter(meeting).copied().collect();
+    near.extend(carried.iter().filter(meeting));
+    near.sort_by(|a, b| a.at.0.total_cmp(&b.at.0));
+    for (index, tree) in near.iter().enumerate() {
+        for other in near[index + 1..]
             .iter()
-            .filter(|object| match object.shape {
-                Shape::Instance {
-                    prototype, pose, ..
-                } => {
-                    let (dx, dz) = (pose.at.x - eye.x, pose.at.z - eye.z);
-                    let distance = mathf::hypot(dx, dz);
-                    matches!(
-                        stage.recipes.get(prototype as usize),
-                        Some(Recipe::Tree { .. })
-                    ) && (ring.0..ring.1).contains(&distance)
-                        && far.across((pose.at.x, pose.at.z))
-                }
-                _ => false,
-            })
+            .take_while(|other| other.at.0 - tree.at.0 < 40.0)
+        {
+            assert!(!crowd(tree, other), "{tree:?} crowds {other:?}");
+        }
+    }
+    // As thick either side.
+    let thickness = |trees: &[Offer], (from, to): (f64, f64)| {
+        let count = trees
+            .iter()
+            .filter(|tree| (from..to).contains(&distance(tree.at)))
             .count();
-        crate::vector::real(stood) / (ACROSS * (ring.1 * ring.1 - ring.0 * ring.0))
+        crate::vector::real(count) / (ACROSS * (to * to - from * from))
     };
-    // Matched over the ring short of where it begins, it stands as thickly
-    // nearer still, where the trees stood one by one met other ground.
-    let ring = (0.3 * from, 0.6 * from);
-    let (near, (off, _)) = (stood_in(ring), far.density(ring, &stage.fields));
+    let (before, after) = (
+        thickness(&stood, (0.85 * meets, meets)),
+        thickness(&carried, (meets, 1.15 * meets)),
+    );
     assert!(
-        near > 0.0 && (off / near - 1.0).abs() < 0.15,
-        "{off} against {near}"
+        before > 0.0 && (after / before - 1.0).abs() < 0.15,
+        "{after} against {before}"
     );
     // Each is traced as the tiles a crown stands over.
     let mut tiles = 0;

@@ -8,6 +8,8 @@ use core::hash::Hasher;
 
 use alloc::vec::Vec;
 
+use tairix_util::mathf;
+
 use crate::holding::HoldingId;
 use crate::plane::Point;
 use crate::site::{Settled, Settlement};
@@ -247,7 +249,7 @@ pub(crate) fn edges_from(
         };
         // Of three equidistant nodes, the edge between the later two yields.
         let in_lune = |(c, at): (usize, Point)| {
-            let far = squared(at, here.at).max(squared(at, there.at));
+            let far = mathf::fmax(squared(at, here.at), squared(at, there.at));
             far < span || (far <= span && c < a)
         };
         let middle = here.at.lerp(there.at, 0.5);

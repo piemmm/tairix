@@ -1,23 +1,30 @@
-//! How a wood stands on a land: where its trees grow and what each one is,
-//! read from the place alone, so the trees stood one by one about the eye and
-//! those hashed from the cells of the wood far off grow alike.
+//! How a wood stands on a land: where its trees grow, what each one is, and
+//! how much room two keep between them, read from the place alone, so a tree
+//! stood one by one about the eye and one traced in the wood far off grow
+//! alike.
 //!
 //! A wood covers the ground in patches, opens in gaps where trees fell, and
 //! within them grows in stands of its kinds, each stand as tall as it is old;
 //! each kind keeps to the ground it takes to, and the ground's slope, wet and
 //! growth, its roads and paths, and the heights it keeps between decide
 //! whether a tree roots there at all.
+//!
+//! Its places are sown one to each cell of a lattice fixed to the land and
+//! thinned over [`ROUNDS`] rounds of `lib/scatter`'s rule, taller first: a
+//! place stands once no taller one still undecided crowds it within the
+//! pair's room, and yields to any taller that stands.
 
 use core::f64::consts::TAU;
 
+use tairix_mix::{mix32, numbered, unit};
+use tairix_noise::{cells2, fbm2, smoothstep};
 use tairix_util::mathf;
 
 use crate::heightfield::Heightfield;
-use crate::land::{Grids, Lie};
-use crate::noise::{cells2, fbm2, smoothstep};
-use crate::sample::{mix32, unit};
+use crate::land::Grids;
 use crate::shade::Shade;
-use crate::vector::{Frame, Pose, Vec3};
+use crate::vector::{single, Frame, Pose, Vec3};
+use tairix_land::attributes::Lie;
 
 /// How a wood grows over a land.
 #[derive(Copy, Clone, Debug)]
@@ -198,7 +205,12 @@ impl Habit {
 
     /// The tallest any tree of the kind stands.
     pub(crate) fn tallest(&self) -> f64 {
-        self.scaled.1 * self.heights.iter().copied().fold(0.0, f64::max)
+        self.scaled.1 * self.tallest_grown()
+    }
+
+    /// The tallest of its grown trees.
+    pub(crate) fn tallest_grown(&self) -> f64 {
+        self.heights.iter().copied().fold(0.0, mathf::fmax)
     }
 
     /// The tallest a tree of the kind wanted no taller than `wanted` stands:
@@ -221,7 +233,7 @@ impl Habit {
         } else if first.is_finite() {
             first
         } else {
-            self.heights.iter().copied().fold(0.0, f64::max)
+            self.tallest_grown()
         };
         (grown * self.scaled.1).min(wanted.max(grown * self.scaled.0))
     }
@@ -269,15 +281,229 @@ impl Tree {
     }
 }
 
+/// The lattice a wood's places are sown on, fixed to the land: one place to
+/// each cell `side` metres square, jittered within it and drawn from a key of
+/// the cell's own under `seed`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Sown {
+    pub(crate) side: f64,
+    pub(crate) seed: u32,
+}
+
+impl Sown {
+    /// The place cell `(column, row)` holds, and its draws; `None` for a cell
+    /// further off than any land reaches.
+    pub(crate) fn place(&self, (column, row): (i64, i64)) -> Option<((f64, f64), u32)> {
+        let key = numbered(
+            numbered(u64::from(self.seed), column.cast_unsigned()),
+            row.cast_unsigned(),
+        );
+        let draw = u32::try_from(key >> 32).ok()?;
+        let along = |index: i64, salt: u32| {
+            Some((f64::from(i32::try_from(index).ok()?) + unit(mix32(draw ^ salt))) * self.side)
+        };
+        Some((
+            (along(column, 0x2c1b_3c6d)?, along(row, 0x297a_2d39)?),
+            draw,
+        ))
+    }
+
+    /// The cell holding `at`; `None` further off than any land reaches.
+    pub(crate) fn cell(&self, at: (f64, f64)) -> Option<(i64, i64)> {
+        let index = |along: f64| {
+            let cell = mathf::floor(along / self.side);
+            (cell.abs() < f64::from(i32::MAX)).then(|| i64::from(mathf::round_i32(cell)))
+        };
+        Some((index(at.0)?, index(at.1)?))
+    }
+
+    /// How many cells apart, on either axis, two places nearer than `room`
+    /// may lie: each lies within its own cell.
+    pub(crate) fn reach(&self, room: f64) -> Option<u32> {
+        u32::try_from(mathf::round_i32(mathf::ceil(room / self.side)).max(1)).ok()
+    }
+
+    /// Whether two places `cells` apart on the axis they lie further apart
+    /// along may lie nearer than `room`: each within its own cell, they are
+    /// at least a whole cell fewer apart.
+    pub(crate) fn near(&self, cells: u32, room: f64) -> bool {
+        (f64::from(cells) - 1.0) * self.side < room
+    }
+}
+
+/// A place a wood offers a tree, as its thinning weighs it: where, its
+/// draws, and how tall the tree that would grow there stands, how far its
+/// crown reaches, and how far apart it keeps from others as a share of their
+/// crowns' reaches together. The tree itself is read again from the place
+/// wherever it is stood.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Offer {
+    pub(crate) at: (f64, f64),
+    pub(crate) draw: u32,
+    pub(crate) height: f32,
+    pub(crate) reach: f32,
+    pub(crate) apart: f32,
+}
+
+impl Offer {
+    /// The place `(at, draw)` growing `tree`, as its thinning weighs it.
+    pub(crate) fn of(tree: &Tree, (at, draw): ((f64, f64), u32)) -> Self {
+        Self {
+            at,
+            draw,
+            height: single(tree.height),
+            reach: single(tree.reach),
+            apart: single(tree.apart),
+        }
+    }
+
+    /// How it ranks among the places it might crowd: taller first, then by
+    /// its draws.
+    pub(crate) fn rank(&self) -> (u32, u32) {
+        // A height is never negative, so its bits order as it does.
+        (self.height.to_bits(), self.draw)
+    }
+}
+
+/// How much of a crown a much shorter tree may stand under: at a trunk's
+/// share `UNDER` of its neighbour's height and below, its crown needs only
+/// `LAYERED` of the room a peer's would.
+const UNDER: (f64, f64) = (0.4, 0.75);
+const LAYERED: f64 = 0.35;
+
+/// How many rounds a wood's thinning runs: a place still undecided after
+/// them yields, so its fate hangs on the places within `2 × ROUNDS − 1` rooms
+/// of it alone.
+pub(crate) const ROUNDS: u32 = 4;
+
+/// The room about a trunk `height` tall that other pieces keep clear of.
+pub(crate) fn trunk(height: f64) -> f64 {
+    0.25 + 0.025 * height
+}
+
+/// Whether the trees `a` and `b` offer crowd each other: their trunks nearer
+/// than their crowns allow, a much shorter tree standing under a taller one's
+/// crown more readily than beside a peer's, and never against its trunk.
+pub(crate) fn crowd(a: &Offer, b: &Offer) -> bool {
+    let (dx, dz) = (a.at.0 - b.at.0, a.at.1 - b.at.1);
+    let apart = dx * dx + dz * dz;
+    let heights = (f64::from(a.height), f64::from(b.height));
+    let trunks = trunk(heights.0) + trunk(heights.1) + 0.5;
+    if apart < trunks * trunks {
+        return true;
+    }
+    // Most pairs stand beyond their crowns' whole room, layered or not.
+    let spacing = mathf::fmax(f64::from(a.apart), f64::from(b.apart));
+    let crowns = spacing * (f64::from(a.reach) + f64::from(b.reach));
+    if apart >= crowns * crowns {
+        return false;
+    }
+    let tall = mathf::fmax(mathf::fmax(heights.0, heights.1), 1e-3);
+    let under = mathf::fmin(heights.0, heights.1) / tall;
+    let layered = LAYERED + (1.0 - LAYERED) * smoothstep(UNDER.0, UNDER.1, under);
+    apart < (crowns * layered) * (crowns * layered)
+}
+
+/// What bounds the room the places of a set keep: the most any of them keeps
+/// apart as a share of two crowns' reaches, the broadest crown, and the
+/// tallest tree.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Spread {
+    apart: f32,
+    reach: f32,
+    height: f32,
+}
+
+impl Spread {
+    /// The spread of `offer` alone.
+    pub(crate) fn of(offer: &Offer) -> Self {
+        Self {
+            apart: offer.apart,
+            reach: offer.reach,
+            height: offer.height,
+        }
+    }
+
+    /// The spread of its places and `other`'s together.
+    pub(crate) fn join(self, other: Self) -> Self {
+        Self {
+            apart: self.apart.max(other.apart),
+            reach: self.reach.max(other.reach),
+            height: self.height.max(other.height),
+        }
+    }
+
+    /// The most room `offer` keeps with any place it holds: no pair of them
+    /// [`crowd`]s further apart.
+    pub(crate) fn room(self, offer: &Offer) -> f64 {
+        let spacing = mathf::fmax(f64::from(offer.apart), f64::from(self.apart));
+        let crowns = spacing * (f64::from(offer.reach) + f64::from(self.reach));
+        let trunks = trunk(f64::from(offer.height)) + trunk(f64::from(self.height)) + 0.5;
+        mathf::fmax(crowns, trunks)
+    }
+}
+
 /// What a wood's trees are read by: how it grows, the ground it takes to,
-/// its kinds, and the seeds its patches, and its stands and kinds, are laid
-/// out under.
+/// its kinds, the seeds its patches, and its stands and kinds, are laid out
+/// under, and which of its layers it reads.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Reader {
     pub(crate) woodland: Woodland,
     pub(crate) rooting: Rooting,
     pub(crate) kinds: [Option<Habit>; KINDS],
     pub(crate) seeds: (u32, u32),
+    pub(crate) layer: Layer,
+}
+
+/// A layer of plants, each sown on a lattice of its own: a wood's canopy,
+/// the height its stands rise to; its subcanopy, trees that came up late or
+/// lost the race for the light, overtopped by the canopy or suppressed under
+/// it, waiting in its shade for a gap; or the floor beneath it, plants of
+/// every age.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Layer {
+    Canopy,
+    Subcanopy,
+    Floor,
+}
+
+impl Layer {
+    /// The share of its stand's height a plant of the layer drawn as `draw`
+    /// grows to.
+    fn rank(self, draw: u32) -> f64 {
+        let (place, within) = (
+            unit(mix32(draw ^ 0x1f83_d9ab)),
+            unit(mix32(draw ^ 0x5be0_cd19)),
+        );
+        let held = match self {
+            Self::Subcanopy if place < SUPPRESSED / (SUPPRESSED + OVERTOPPED) => Held::Suppressed,
+            Self::Subcanopy => Held::Overtopped,
+            Self::Floor if place < SUPPRESSED => Held::Suppressed,
+            Self::Floor if place < SUPPRESSED + OVERTOPPED => Held::Overtopped,
+            Self::Canopy | Self::Floor => Held::Canopy,
+        };
+        match held {
+            Held::Suppressed => 0.35 + 0.25 * within,
+            Held::Overtopped => 0.6 + 0.25 * within,
+            Held::Canopy => 0.88 + 0.24 * within,
+        }
+    }
+
+    /// The most share of its stand's height a plant of the layer grows to.
+    fn highest(self) -> f64 {
+        match self {
+            Self::Canopy | Self::Floor => 1.12,
+            Self::Subcanopy => 0.85,
+        }
+    }
+}
+
+/// Where in its stand a plant holds: among the canopy, overtopped by it, or
+/// suppressed beneath it.
+enum Held {
+    Canopy,
+    Overtopped,
+    Suppressed,
 }
 
 /// How much of the ground crowns thrown down at random, no closer than they
@@ -303,9 +529,9 @@ const DENSITY_BREADTH: f64 = 0.45;
 const GAP_SPACING: f64 = 90.0;
 const GAP_REACH: (f64, f64) = (8.0, 35.0);
 
-/// The shares of a stand's trees overtopped by the canopy, and suppressed
-/// beneath it: trees that came up late, or lost the race for the light, and
-/// wait in the shade for a gap.
+/// The shares of a stand's plants of every age overtopped by its canopy, and
+/// suppressed beneath it; a subcanopy holds them alone, in these
+/// proportions.
 const OVERTOPPED: f64 = 0.25;
 const SUPPRESSED: f64 = 0.15;
 
@@ -325,15 +551,88 @@ impl Reader {
         place: ((f64, f64), u32),
         beneath: Option<&Shade>,
     ) -> Option<Tree> {
-        let chance = unit(place.1);
-        let sprout = self.sprout(place, beneath)?;
+        self.grown(&self.sprout(place, beneath)?, ground)
+    }
+
+    /// The tree `sprout` grows on the land `grids` trace in `fields`, if it
+    /// grows one: as often as the wood's patches, the light and the ground
+    /// there suit one.
+    pub(crate) fn grown(
+        &self,
+        sprout: &Sprout,
+        (grids, fields): (&Grids, &[Heightfield]),
+    ) -> Option<Tree> {
+        let Sprout {
+            at,
+            draw,
+            in_patches,
+            light,
+            ..
+        } = *sprout;
+        let chance = unit(draw);
         // Turned away by the wood's patches or the light before the ground
-        // need be read.
-        if (self.rooting.streams <= 0.0 && chance >= sprout.in_patches) || chance >= sprout.light {
+        // need be read, and by the ground before its kind and spacing are.
+        if (self.rooting.streams <= 0.0 && chance >= in_patches) || chance >= light {
             return None;
         }
-        let (tree, suits) = self.grow(&sprout, ground)?;
-        (chance < suits).then_some(tree)
+        let lie = grids.lie(fields, at.0, at.1);
+        let wooded = in_patches.max(self.rooting.drawn(lie.wet)).min(1.0);
+        let suits = wooded * light * self.rooting.suits(&lie, at);
+        if chance >= suits || grids.wet_over(fields, at, lie.height) {
+            return None;
+        }
+        let (kind, habit) = self.kind(&lie, at, draw)?;
+        let wanted = self.wanted(habit, sprout, (wooded, lie.green));
+        let variant = habit.nearest(wanted, unit(mix32(draw ^ 0x6a09_e667)));
+        let natural = *habit.heights.get(variant)?;
+        let scale = habit.sized(wanted, natural);
+        let height = natural * scale;
+        let (thickest, openest) = self.woodland.closure;
+        let breadth = DENSITY_BREADTH * self.woodland.patch.max(1.0);
+        let openness = 0.5
+            + 0.5
+                * fbm2(
+                    at.0 / breadth,
+                    at.1 / breadth,
+                    self.seeds.0 ^ 0x77,
+                    (3, 0.5, 2.0),
+                );
+        let apart = (thickest + (openest - thickest) * smoothstep(0.3, 0.7, openness))
+            * (1.0 + EDGE_OPENING * (1.0 - wooded));
+        Some(Tree {
+            kind,
+            variant: u8::try_from(variant).ok()?,
+            scale,
+            height,
+            reach: habit.crown * height,
+            apart,
+            base: rooted(&lie, height),
+        })
+    }
+
+    /// The most room any two of its layer's trees keep between their trunks.
+    pub(crate) fn widest_room(&self) -> f64 {
+        let tallest = |habit: &Habit| habit.highest(self.tallest_wanted(habit));
+        let highest = self.kinds().map(tallest).fold(0.0, mathf::fmax);
+        let widest = self
+            .kinds()
+            .map(|habit| habit.crown * tallest(habit))
+            .fold(0.0, mathf::fmax);
+        let (thickest, openest) = self.woodland.closure;
+        let apart = mathf::fmax(thickest, openest) * (1.0 + EDGE_OPENING);
+        mathf::fmax(apart * 2.0 * widest, 2.0 * trunk(highest) + 0.5)
+    }
+
+    /// The tallest a tree of `habit` is ever wanted in its layer: its tallest
+    /// grown height at the wood's greatest stature and its layer's highest
+    /// share of its stand, at the heart of the wood on the greenest ground.
+    fn tallest_wanted(&self, habit: &Habit) -> f64 {
+        let (least, most) = self.woodland.stature;
+        habit.tallest_grown()
+            * mathf::fmax(least, most)
+            * self.layer.highest()
+            * edged(1.0)
+            * greened(1.0)
     }
 
     /// What the place `(at, draw)` alone says of the tree it would grow,
@@ -387,66 +686,12 @@ impl Reader {
     /// edge is lower than its heart, and good ground grows taller. Rises with
     /// both.
     fn wanted(&self, habit: &Habit, sprout: &Sprout, (wooded, green): (f64, f64)) -> f64 {
-        let tallest = habit.heights.iter().copied().fold(0.0, f64::max);
         let (least, most) = self.woodland.stature;
-        let edge = 0.82 + 0.18 * smoothstep(0.35, 0.95, wooded);
-        tallest
+        habit.tallest_grown()
             * (least + (most - least) * sprout.age)
-            * rank(sprout.draw)
-            * edge
-            * (0.92 + 0.12 * green)
-    }
-
-    /// The tree `sprout` grows on the land `grids` trace in `fields`, and
-    /// how well the ground there suits one, `0.0..=1.0`; `None` where it
-    /// suits none.
-    pub(crate) fn grow(
-        &self,
-        sprout: &Sprout,
-        (grids, fields): (&Grids, &[Heightfield]),
-    ) -> Option<(Tree, f64)> {
-        let Sprout {
-            at,
-            draw,
-            in_patches,
-            light,
-            ..
-        } = *sprout;
-        let patches = self.seeds.0;
-        let lie = grids.lie(fields, at.0, at.1);
-        let wooded = in_patches.max(self.rooting.drawn(lie.wet)).min(1.0);
-        let suits = wooded * light * self.rooting.suits(&lie, at);
-        if suits <= 0.0 || grids.wet_over(fields, at, lie.height) {
-            return None;
-        }
-        let (kind, habit) = self.kind(&lie, at, draw)?;
-        let wanted = self.wanted(habit, sprout, (wooded, lie.green));
-        let variant = habit.nearest(wanted, unit(mix32(draw ^ 0x6a09_e667)));
-        let natural = *habit.heights.get(variant)?;
-        let scale = habit.sized(wanted, natural);
-        let height = natural * scale;
-        let (thickest, openest) = self.woodland.closure;
-        let breadth = DENSITY_BREADTH * self.woodland.patch.max(1.0);
-        let openness = 0.5
-            + 0.5
-                * fbm2(
-                    at.0 / breadth,
-                    at.1 / breadth,
-                    patches ^ 0x77,
-                    (3, 0.5, 2.0),
-                );
-        let apart = (thickest + (openest - thickest) * smoothstep(0.3, 0.7, openness))
-            * (1.0 + EDGE_OPENING * (1.0 - wooded));
-        let tree = Tree {
-            kind,
-            variant: u8::try_from(variant).ok()?,
-            scale,
-            height,
-            reach: habit.crown * height,
-            apart,
-            base: rooted(&lie, height),
-        };
-        Some((tree, suits))
+            * self.layer.rank(sprout.draw)
+            * edged(wooded)
+            * greened(green)
     }
 
     /// Which of its kinds grows at `at`, on ground `lie` describes: the one
@@ -503,6 +748,18 @@ pub(crate) fn gap(woodland: &Woodland, seed: u32, at: (f64, f64)) -> f64 {
     1.0 - smoothstep(0.75 * reach, reach, found.nearest * GAP_SPACING)
 }
 
+/// How much of its height a tree keeps where its wood covers `wooded` of the
+/// ground: a wood's edge is lower than its heart.
+fn edged(wooded: f64) -> f64 {
+    0.82 + 0.18 * smoothstep(0.35, 0.95, wooded)
+}
+
+/// How much of its height a tree reaches on ground growing `green`: good
+/// ground grows taller.
+fn greened(green: f64) -> f64 {
+    0.92 + 0.12 * green
+}
+
 /// How readily a shrub or a young tree grows under a canopy hiding `hidden`
 /// of the sky, `0.0..=1.0`: least in the deepest shade, most in the gaps and
 /// along the edges, and less again out in the open, where grass takes the
@@ -510,22 +767,6 @@ pub(crate) fn gap(woodland: &Woodland, seed: u32, at: (f64, f64)) -> f64 {
 fn thrives_beneath(hidden: f64) -> f64 {
     let light = 1.0 - hidden;
     (0.03 + 0.97 * smoothstep(0.05, 0.3, light)) * (1.0 - 0.6 * smoothstep(0.7, 0.95, light))
-}
-
-/// The share of its stand's height a tree as `draw` has it grows to: most
-/// the canopy's, the overtopped and the suppressed lower.
-fn rank(draw: u32) -> f64 {
-    let (place, within) = (
-        unit(mix32(draw ^ 0x1f83_d9ab)),
-        unit(mix32(draw ^ 0x5be0_cd19)),
-    );
-    if place < SUPPRESSED {
-        0.35 + 0.25 * within
-    } else if place < SUPPRESSED + OVERTOPPED {
-        0.6 + 0.25 * within
-    } else {
-        0.88 + 0.24 * within
-    }
 }
 
 /// The height a trunk `height` tall is based at on ground `lie` describes:

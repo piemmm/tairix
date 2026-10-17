@@ -2,13 +2,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_countryside::usage::Crop;
+use tairix_land::attributes::{GROWN, ROWS, SNOW};
+use tairix_land::grown::{Grown, Stage as Growth};
+use tairix_land::snow;
 
 use super::*;
-use crate::farmed::{Grown, Stage as Growth};
-use crate::heightfield::{GROWN, ROWS, SNOW};
 use crate::land::Land;
 use crate::prototype::{Assembly, Part, Prototype, Tube};
-use crate::snow;
 use crate::vector::real;
 
 /// What the test land grows where its maize stands, and how its rows run.

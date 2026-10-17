@@ -21,11 +21,11 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_land::attributes::{self, Attributes, CHANNELS, GROWN, PLAIN, QUANTITIES, ROWS};
 use tairix_parallel::JobRunner;
 use tairix_util::fallible;
-use tairix_util::mathf::{self, fmax, fmin};
+use tairix_util::mathf::{self, bilinear, fmax, fmin};
 
-use crate::band;
 use crate::lanes::{Corners, Lanes};
 use crate::shape::{quadratic, reciprocal, Aabb, Hit};
 use crate::vector::{cell_of, real, share, Ray, Vec3};
@@ -86,24 +86,6 @@ struct Waiting {
 /// attributes there, empty for a grid that carries none.
 pub(crate) type Row<'a> = (usize, &'a mut [f32], &'a mut [Attributes]);
 
-/// The channels of what a land is like that a grid carries at each vertex.
-/// First its quantities, each blended between vertices: how wet, what the
-/// water laid down or wore away, how much of a road and of a path is there,
-/// how much grows, and how deep snow lies. Then what a farmed land grows
-/// there and the way its rows run (`farmed`): categories, read at the nearest
-/// vertex and never blended.
-pub(crate) const QUANTITIES: usize = 6;
-pub(crate) const CHANNELS: usize = QUANTITIES + 2;
-pub(crate) const WET: usize = 0;
-pub(crate) const SEDIMENT: usize = 1;
-pub(crate) const GREEN: usize = 4;
-pub(crate) const SNOW: usize = QUANTITIES - 1;
-pub(crate) const GROWN: usize = QUANTITIES;
-pub(crate) const ROWS: usize = QUANTITIES + 1;
-
-/// What a land is like at one vertex, a byte to a channel.
-pub(crate) type Attributes = [u8; CHANNELS];
-
 /// What the four vertices about a place carry, and how far across and down
 /// between them the place lies.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -123,12 +105,7 @@ impl Patch {
     /// Its quantity `channel`, blended as the place lies between its corners,
     /// `0.0..=1.0`; nought for one it does not carry.
     pub(crate) fn quantity(&self, channel: usize) -> f64 {
-        let value = |corner: Attributes| {
-            corner
-                .get(channel)
-                .map_or(0.0, |&value| f64::from(value) / 255.0)
-        };
-        bilinear(self.corners.map(value), (self.across, self.down))
+        attributes::blended(self.corners, channel, (self.across, self.down))
     }
 
     /// What grows about the place.
@@ -218,11 +195,6 @@ pub(crate) fn apart(
 /// The height a vertex is given where the grid has no surface.
 pub(crate) const ABSENT: f32 = f32::NEG_INFINITY;
 
-/// What a grid carrying no attributes is like everywhere: dry, neither worn
-/// nor built up, on no road or path, green enough for anything to grow, and
-/// bare of snow.
-pub(crate) const PLAIN: [f64; QUANTITIES] = [0.0, 0.5, 0.0, 0.0, 1.0, 0.0];
-
 impl Heightfield {
     /// Its rows `range`, as disjoint bands `rows` rows high, each with the
     /// row it starts at.
@@ -255,14 +227,6 @@ fn banded(
         .map(move |(band, values)| (start + band * rows, values))
 }
 
-/// The blend of a cell's corners `[h00, h10, h01, h11]` at `(across, down)`
-/// within it.
-pub(crate) fn bilinear([h00, h10, h01, h11]: [f64; 4], (across, down): (f64, f64)) -> f64 {
-    let top = h00 + (h10 - h00) * across;
-    let bottom = h01 + (h11 - h01) * across;
-    top + (bottom - top) * down
-}
-
 /// The cells each side of a grid whose vertices are `side` a side.
 fn cells_of(side: usize) -> usize {
     side.saturating_sub(1)
@@ -273,12 +237,40 @@ impl Heightfield {
     /// `origin`; `None` for a grid of no cells, or when the heap will not
     /// hold it.
     pub(crate) fn new(cells: usize, origin: (f64, f64), step: f64, wrap: bool) -> Option<Self> {
-        if cells == 0 || step.is_nan() || step <= 0.0 {
-            return None;
-        }
         let side = cells.checked_add(1)?;
         let mut heights = Vec::new();
         if !fallible::reserve(&mut heights, side.checked_mul(side)?) {
+            return None;
+        }
+        Self::holding((side, origin, step), (heights, Vec::new()), wrap)
+    }
+
+    /// The grid of the vertices `heights` and what each carries, `attributes`,
+    /// hold row by row, `side` a side, `step` apart and its first vertex at
+    /// `origin`, taken whole: what a piece of a land is refined into. `None`
+    /// for a grid of no cells or vertices that do not fill it, or when the
+    /// heap will not hold its pyramid.
+    pub(crate) fn of_vertices(
+        (side, origin, step): (usize, (f64, f64), f64),
+        (heights, attributes): (Vec<f32>, Vec<Attributes>),
+    ) -> Option<Self> {
+        let area = side.checked_mul(side)?;
+        if heights.len() != area || attributes.len() != area {
+            return None;
+        }
+        Self::holding((side, origin, step), (heights, attributes), false)
+    }
+
+    /// The grid `side` a side over `heights` and `attributes`, which carries
+    /// what the land is like at each vertex when `attributes` holds any, its
+    /// pyramid reserved.
+    fn holding(
+        (side, origin, step): (usize, (f64, f64), f64),
+        (heights, attributes): (Vec<f32>, Vec<Attributes>),
+        wrap: bool,
+    ) -> Option<Self> {
+        let cells = side.checked_sub(1).filter(|&cells| cells > 0)?;
+        if step.is_nan() || step <= 0.0 {
             return None;
         }
         let mut levels = Vec::new();
@@ -299,6 +291,7 @@ impl Heightfield {
         if !fallible::reserve(&mut maxima, total) {
             return None;
         }
+        let carries = !attributes.is_empty();
         Some(Self {
             side,
             origin,
@@ -311,8 +304,8 @@ impl Heightfield {
             high: 0.0,
             mean: 0.0,
             absent: None,
-            attributes: Vec::new(),
-            carries: false,
+            attributes,
+            carries,
         })
     }
 
@@ -358,6 +351,12 @@ impl Heightfield {
     /// The heights, row by row, of the rows written so far.
     pub(crate) fn heights(&self) -> &[f32] {
         &self.heights
+    }
+
+    /// What the land is like at each vertex written so far, row by row; none
+    /// for a grid that carries none.
+    pub(crate) fn attributes(&self) -> &[Attributes] {
+        &self.attributes
     }
 
     /// The heights and the attributes both of `rows`, to set together; the
@@ -540,7 +539,7 @@ impl Heightfield {
         };
         // Joined onto those before band by band, so the mean sums its bands in
         // one order however many a unit holds.
-        band::fold(
+        tairix_parallel::fold_bands(
             runner,
             peaks,
             (rows.start / per, per * cells),
@@ -574,7 +573,7 @@ impl Heightfield {
         let peaks = upper
             .get_mut(rows.start * blocks..rows.end * blocks)
             .unwrap_or_default();
-        band::for_each(
+        tairix_parallel::for_each_band(
             runner,
             peaks,
             (rows.start / per, per * blocks),

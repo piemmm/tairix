@@ -63,6 +63,8 @@ tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 # dependency rather than a `Run`-only one: the terminal states its own row and
 # never restates the order around it.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The screen fuzz's reproducible per-row jitter.
+tairix-mix = { path = "../../../lib/mix", version = "=0.0.0" }
 
 # The package is both the terminal-emulator engine library (above) and the
 # `Run` entry-point binary of the on-disk `terminal.app` bundle

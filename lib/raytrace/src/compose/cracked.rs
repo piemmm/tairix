@@ -5,18 +5,19 @@
 
 use core::f64::consts::FRAC_1_SQRT_2;
 
+use tairix_noise::{fbm2, hash2};
 use tairix_util::mathf;
 
 use super::landscape::ground_of;
 use super::lattice::snap;
 use super::{Dice, Recipe, Stage};
-use crate::land::{Land, Lie};
+use crate::land::Land;
 use crate::material::{Finish, Material, Relief};
 use crate::mud::{Crust, Mud};
-use crate::noise::{fbm2, hash2};
 use crate::pigment::Pigment;
 use crate::shape::Shape;
 use crate::vector::{Frame, Pose, Vec3};
+use tairix_land::attributes::Lie;
 
 /// The side of a tile of cracked mud, and how many tiles of a crust are
 /// drawn to choose among.

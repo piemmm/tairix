@@ -28,17 +28,19 @@
 
 use core::f64::consts::TAU;
 
+use tairix_land::attributes::{Attributes, CHANNELS, QUANTITIES};
+use tairix_land::grown::{Grown, CODES};
+use tairix_land::snow;
+use tairix_mix::{mix32, mix64, unit};
+use tairix_noise::{cell, cells2, hash2, noise2, smoothstep};
 use tairix_util::mathf::{self, fmax, fmin};
 
-use crate::farmed::{Drill, Grown, CODES};
+use crate::farmed::Drill;
 use crate::grazing;
-use crate::heightfield::{Attributes, Grows, Heightfield, ABSENT, CHANNELS, QUANTITIES};
+use crate::heightfield::{Grows, Heightfield, ABSENT};
 use crate::leaf::Outline;
-use crate::noise::{cell, cells2, hash2, noise2, smoothstep};
-use crate::sample::{mix32, mix64, unit};
 use crate::shade::Shade;
 use crate::shape::{reciprocal, Aabb, Geometry, Hit};
-use crate::snow;
 use crate::vector::{byte, whole, Members, Ray, Vec3};
 use crate::walk::Walk;
 

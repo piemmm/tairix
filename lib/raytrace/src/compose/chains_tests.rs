@@ -43,8 +43,12 @@ fn a_square_past_the_grid_is_clamped_to_it_and_says_so() {
 
 #[test]
 fn a_grid_kept_within_its_most_cells_grows_its_cells_instead() {
+    // 200 m across in at most 50 cells: each 4 m, not the half metre asked.
     let chains = Chains::new(((0.0, 0.0), 100.0), 0.5, 50).expect("a grid");
-    assert!((chains.cell() - 4.0).abs() < 1e-12);
+    assert_eq!(chains.span((-96.1, 99.9), 0.0).0, ((0, 0), (49, 49)));
+    assert_eq!(chains.span((-95.9, 0.0), 0.0).0, ((1, 1), (25, 25)));
+    // Cells asked broader than that are kept as asked.
     let fine = Chains::new(((0.0, 0.0), 100.0), 8.0, 50).expect("a grid");
-    assert!((fine.cell() - 8.0).abs() < 1e-12);
+    assert_eq!(fine.span((-92.1, 0.0), 0.0).0, ((0, 0), (12, 12)));
+    assert_eq!(fine.span((-91.9, 0.0), 0.0).0, ((1, 1), (12, 12)));
 }

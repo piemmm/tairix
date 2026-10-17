@@ -123,3 +123,6 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 [dev-dependencies]
 # `hex` is intentionally not depended on: doc/unit tests construct fixtures
 # from byte literals so the audit surface stays minimal.
+
+# The randomised cases' fixed-seed draws.
+tairix-mix = { path = "../mix", version = "=0.0.0" }

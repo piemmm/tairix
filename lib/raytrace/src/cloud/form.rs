@@ -1,28 +1,30 @@
-//! What a deck's cloud is made of where it stands: its weather, the heaps or
-//! sheets it lays over its columns, their turrets, and the extinction their
-//! water or ice holds.
+//! What a deck's cloud is made of where it stands: its weather, the sheets it
+//! lays over its columns, the envelope of a heap or a sheet, its turrets,
+//! and the extinction its water or ice holds.
 //!
-//! A deck's weather map says how far within a footprint each column stands
-//! and where its base and top lie there. Over each footprint a cloud stands
-//! as an envelope — a dome for a heap, a plateau for a sheet — on a flat base
-//! at the level its air condenses, the envelope's surface pushed out into
+//! A field deck's weather map says how far within a footprint each column
+//! stands and where its base and top lie there; a heaped deck's heaps say it
+//! for themselves (`heaps`). Over each footprint a cloud stands as an
+//! envelope — a dome for a heap, a plateau for a sheet — on a flat base at
+//! the level its air condenses, the envelope's surface pushed out into
 //! turrets on turrets by billowing noise at six scales, each settling to its
 //! mean where a footprint is too coarse to see it, and past them a fringe of
-//! diluted droplets the wisps cut into puffs and filaments. Water holds
+//! diluted droplets the wisps cut into puffs and filaments, a coarse read
+//! averaging that edge across its footprint so it holds the water a sharp
+//! read does. Water holds
 //! extinction rising with height as adiabatic liquid water does, so a heap is
 //! thinnest at its base and densest high in its body; ice holds it evenly.
 
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, fbm2_resolved, hash3, noise2, resolved, smoothstep};
 use tairix_parallel::JobRunner;
-use tairix_util::{fallible, mathf};
+use tairix_util::fallible;
+use tairix_util::mathf::{self, bilinear};
 
 use super::{Deck, Matter};
-use crate::band;
-use crate::heightfield::bilinear;
-use crate::noise::{cell, fbm2_resolved, hash3, noise2, resolved, smoothstep};
-use crate::sample::{mix32, unit};
 use crate::vector::{cell_of, power, real, single, Vec3};
 
 /// Texels along each edge of the billowing noise, and of the finer one.
@@ -99,6 +101,12 @@ const DEEPEST_CUT: f64 = 0.85;
 const FRINGE_DEPTHS: usize = 17;
 const FRINGE_BILLOWS: usize = 9;
 const WISP_BINS: usize = 256;
+/// The depths into the fringe its mean is summed to, for a blurred read to
+/// average what a sharp one holds.
+const FRINGE_SUMS: usize = 33;
+/// The most texels, or blocks of them, a box's most is read over along each
+/// side; past it a coarser block of a texture's peaks is read.
+const MOST_BLOCKS: i64 = 4;
 /// The bubbles' cells along each side of a period of their texture, and the
 /// least and greatest radius a bubble swells to, as a share of a cell.
 const BUBBLE_CELLS: f64 = 4.0;
@@ -114,7 +122,7 @@ pub(super) const AVERAGED: f64 = 0.25;
 /// holds grow (Stephens, 1978): a deck's extinction is taken this high above
 /// its base, and no column is taken as thinner than this above it.
 const ADIABATIC: f64 = 1000.0;
-const LEAST_RISE: f64 = 1.0;
+pub(super) const LEAST_RISE: f64 = 1.0;
 
 /// How a read of the cloud takes its edges: bounding every read as finely
 /// resolved as a footprint so many metres across; as a march too coarse for
@@ -141,6 +149,74 @@ impl Tile {
             side,
             texels: fallible::filled(side.checked_mul(side)?.checked_mul(side)?, 0)?,
         })
+    }
+
+    /// The texture's most over blocks two texels across, then four, and on up
+    /// to the whole tile; `None` when the heap will not hold them.
+    fn peaks(&self) -> Option<Vec<Tile>> {
+        let mut peaks: Vec<Tile> = Vec::new();
+        let mut side = self.side;
+        while side > 1 {
+            let finer = peaks.last().unwrap_or(self);
+            side /= 2;
+            let mut coarser = Tile::new(side)?;
+            for (index, slot) in coarser.texels.iter_mut().enumerate() {
+                let (x, y, z) = (index % side, index / side % side, index / (side * side));
+                let mut most = 0u8;
+                for corner in 0..8 {
+                    let (dx, dy, dz) = (corner & 1, (corner >> 1) & 1, corner >> 2);
+                    let at = ((2 * z + dz) * finer.side + 2 * y + dy) * finer.side + 2 * x + dx;
+                    most = most.max(finer.texels.get(at).copied().unwrap_or(u8::MAX));
+                }
+                *slot = most;
+            }
+            peaks.try_reserve(1).ok()?;
+            peaks.push(coarser);
+        }
+        Some(peaks)
+    }
+
+    /// The most the texture, read trilinearly as [`Tile::at`] reads it, holds
+    /// anywhere over the box `low..high` of its texels, wrapping: over the
+    /// texels a read in the box touches, read from the finest of itself and
+    /// `peaks` that holds them in no more than [`MOST_BLOCKS`] along each
+    /// side, else `peak`.
+    fn most_over(&self, (peaks, peak): (&[Tile], f64), (low, high): (Vec3, Vec3)) -> f64 {
+        // A read touches the texel it lies in and the next along each axis.
+        let first = |value: f64| i64::from(cell(value).0.cast_signed());
+        let spans = [(low.x, high.x), (low.y, high.y), (low.z, high.z)]
+            .map(|(low, high)| (first(low), first(high) + 1));
+        let widest = spans
+            .iter()
+            .map(|(from, to)| to - from + 1)
+            .max()
+            .unwrap_or(0);
+        let mut breadth = 1i64;
+        let mut grid = self;
+        for coarser in peaks {
+            if widest <= MOST_BLOCKS * breadth {
+                break;
+            }
+            breadth *= 2;
+            grid = coarser;
+        }
+        if widest > MOST_BLOCKS * breadth || grid.side == 0 {
+            return peak;
+        }
+        let mask = i64::try_from(grid.side - 1).unwrap_or(0);
+        let blocks = |(from, to): (i64, i64)| (from.div_euclid(breadth), to.div_euclid(breadth));
+        let ((x0, x1), (y0, y1), (z0, z1)) = (blocks(spans[0]), blocks(spans[1]), blocks(spans[2]));
+        let at = |block: i64| usize::try_from(block & mask).unwrap_or(0);
+        let mut most = 0u8;
+        for z in z0..=z1 {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let index = (at(z) * grid.side + at(y)) * grid.side + at(x);
+                    most = most.max(grid.texels.get(index).copied().unwrap_or(u8::MAX));
+                }
+            }
+        }
+        f64::from(most) / 255.0
     }
 
     /// The most the texture holds anywhere, which no read of it passes.
@@ -184,15 +260,24 @@ impl Tile {
 }
 
 /// The two noises a bank's clouds are cut from, and what is known of them
-/// once built: the billows' mean and peak, and the wisps' mean.
+/// once built: the billows' mean, peak and peaks over ever broader blocks,
+/// and the wisps' mean.
 #[derive(Clone, Debug)]
 pub(super) struct Textures {
     pub(super) shape: Tile,
     pub(super) detail: Tile,
     shape_mean: f64,
     shape_peak: f64,
+    /// The billows' most over blocks two, four and on up to the whole tile
+    /// across; none where the heap would not hold them, the peak bounding
+    /// every block alone.
+    shape_peaks: Vec<Tile>,
     pub(super) wisp_mean: f64,
     fringe_mean: [f64; FRINGE_DEPTHS * FRINGE_BILLOWS],
+    /// The fringe's mean summed from its outer reach to each of the
+    /// [`FRINGE_SUMS`] depths into it, in shares of its span, and the mean
+    /// there; by billowing.
+    fringe_sum: [(f64, f64); FRINGE_SUMS * FRINGE_BILLOWS],
 }
 
 impl Textures {
@@ -202,8 +287,10 @@ impl Textures {
             detail: Tile::new(DETAIL_SIDE)?,
             shape_mean: 0.5,
             shape_peak: 1.0,
+            shape_peaks: Vec::new(),
             wisp_mean: 0.5,
             fringe_mean: [0.0; FRINGE_DEPTHS * FRINGE_BILLOWS],
+            fringe_sum: [(0.0, 0.0); FRINGE_SUMS * FRINGE_BILLOWS],
         })
     }
 
@@ -214,6 +301,7 @@ impl Textures {
         fill_tile(&mut self.shape, layers, runner, &|p| bubbles(p, seed));
         if last {
             (self.shape_mean, self.shape_peak) = (self.shape.mean(), self.shape.peak());
+            self.shape_peaks = self.shape.peaks().unwrap_or_default();
         }
     }
 
@@ -224,13 +312,15 @@ impl Textures {
         fill_tile(&mut self.detail, layers, runner, &|p| wisps(p, seed));
         if last {
             self.wisp_mean = self.detail.mean();
-            self.fringe_mean = self.fringe_means();
+            let counts = self.wisp_counts();
+            self.fringe_mean = fringe_means(&counts);
+            self.fringe_sum = fringe_sums(&counts);
         }
     }
 
-    /// The fringe's mean over every place its wisps are read wholly
-    /// resolved, at each of the tabulated depths into it and billowings.
-    fn fringe_means(&self) -> [f64; FRINGE_DEPTHS * FRINGE_BILLOWS] {
+    /// The wisps as every place reads them wholly resolved, counted into
+    /// bins of their value.
+    fn wisp_counts(&self) -> [u32; WISP_BINS] {
         let side = self.detail.side;
         let mut counts = [0u32; WISP_BINS];
         for index in 0..side * side * side {
@@ -245,22 +335,7 @@ impl Textures {
                 *count += 1;
             }
         }
-        let total = f64::from(counts.iter().sum::<u32>().max(1));
-        let mut means = [0.0; FRINGE_DEPTHS * FRINGE_BILLOWS];
-        for (index, mean) in means.iter_mut().enumerate() {
-            let into = real(index % FRINGE_DEPTHS) / real(FRINGE_DEPTHS - 1);
-            let billowing = real(index / FRINGE_DEPTHS) / real(FRINGE_BILLOWS - 1);
-            *mean = counts
-                .iter()
-                .enumerate()
-                .map(|(bin, &count)| {
-                    let wisp = (real(bin) + 0.5) / real(WISP_BINS);
-                    f64::from(count) * eroded(into, wisp, billowing)
-                })
-                .sum::<f64>()
-                / total;
-        }
-        means
+        counts
     }
 
     /// The fringe's mean `into` of the way into it where it is `billowing`.
@@ -282,31 +357,67 @@ impl Textures {
         )
     }
 
+    /// The fringe's mean summed from its outer reach to `into` of the way
+    /// through it where it is `billowing`, in shares of its span, the whole
+    /// body counted on past it: between the tabulated depths the cubic whose
+    /// rate is the mean at each.
+    fn fringe_sum_at(&self, into: f64, billowing: f64) -> f64 {
+        if into <= 0.0 {
+            return 0.0;
+        }
+        let beyond = (into - 1.0).max(0.0);
+        let step = 1.0 / real(FRINGE_SUMS - 1);
+        let (i, u) = cell_of(into.min(1.0) / step);
+        let (i, u) = if i >= FRINGE_SUMS - 1 {
+            (FRINGE_SUMS - 2, 1.0)
+        } else {
+            (i, u)
+        };
+        let (j, v) = cell_of(billowing.clamp(0.0, 1.0) * real(FRINGE_BILLOWS - 1));
+        let along = |j: usize| {
+            let at = |i: usize| {
+                self.fringe_sum
+                    .get(j.min(FRINGE_BILLOWS - 1) * FRINGE_SUMS + i)
+                    .copied()
+                    .unwrap_or_default()
+            };
+            let ((from, rate), (to, next)) = (at(i), at(i + 1));
+            let (squared, cubed) = (u * u, u * u * u);
+            from * (2.0 * cubed - 3.0 * squared + 1.0)
+                + rate * step * (cubed - 2.0 * squared + u)
+                + to * (3.0 * squared - 2.0 * cubed)
+                + next * step * (cubed - squared)
+        };
+        let (here, next) = (along(j), along(j + 1));
+        here + (next - here) * v + beyond
+    }
+
     /// How dense a cloud stands `surface` metres within its turrets'
-    /// surface, its skin and fringe as wide as `widths` has them and its
-    /// fringe `billowing` there: whole past its skin, and diluted outward
-    /// across its fringe as the cube of how far into it the place lies, so
-    /// its outer half holds a few hundredths of the body's water and a
-    /// grazing look through it shows the sky; cut by its wisps as far as
-    /// `turrets` resolves them.
-    fn fringed(
-        &self,
-        surface: f64,
-        (skin, fringe): (f64, f64),
-        billowing: f64,
-        turrets: &Turrets,
-    ) -> f64 {
-        let ramp = smoothstep(-fringe, 0.5 * skin, surface);
-        let into = ramp * ramp * ramp;
+    /// surface across `edge`, its fringe `billowing` there: what the wisps
+    /// leave of it on the whole, averaged over the edge's blur so a blurred
+    /// read holds what a sharp one does, and as far as `turrets` resolves
+    /// them, the wisps' own cut, thinned so it takes no more than that
+    /// whole.
+    fn fringed(&self, surface: f64, edge: Edge, billowing: f64, turrets: &Turrets) -> f64 {
+        let into = edge.density(surface);
         let Some((wisp, kept)) = turrets.wisps.filter(|_| into > 0.0 && into < 1.0) else {
             return into;
         };
-        let cut = eroded(into, wisp, billowing);
-        if kept >= 1.0 {
-            return cut;
+        // Interpolation never lifts the mean past the uncut edge.
+        let mean = edge
+            .average(surface, |at| self.fringe_sum_at(at, billowing))
+            .clamp(0.0, into);
+        if kept <= 0.0 {
+            return mean;
         }
-        let mean = self.fringe_mean_at(into, billowing);
-        mean + (cut - mean) * kept
+        let typical = self.fringe_mean_at(into, billowing);
+        let thinning = if into > typical {
+            ((into - mean) / (into - typical)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let cut = into - thinning * (into - eroded(into, wisp, billowing));
+        mean + (cut - mean) * kept.min(1.0)
     }
 
     /// The wisps at `texel` of their texture, each of the [`FINER`] reads
@@ -327,9 +438,34 @@ impl Textures {
         bubbles * (self.shape_peak - self.shape_mean)
     }
 
+    /// The most the turrets of `deck` push its envelope out anywhere over the
+    /// box `low..high` of its billows' own coordinates, read through a
+    /// footprint `footprint` metres across: each scale by the most its
+    /// bubbles stand there, as far as such a read resolves it.
+    pub(super) fn reach_over(&self, deck: &Deck, (low, high): (Vec3, Vec3), footprint: f64) -> f64 {
+        let period = deck.billow * 8.0;
+        let per = real(SHAPE_SIDE) / period;
+        BUBBLES
+            .iter()
+            .zip(bubble_reach(deck))
+            .enumerate()
+            .map(|(index, (&(times, start, _), reach))| {
+                let weight = resolved_scale(index, footprint, period) * reach;
+                if weight <= 0.0 {
+                    return 0.0;
+                }
+                let most = self.shape.most_over(
+                    (&self.shape_peaks, self.shape_peak),
+                    (low * (per * times) + start, high * (per * times) + start),
+                );
+                weight * (most - self.shape_mean)
+            })
+            .sum()
+    }
+
     /// Where a place `inside` metres within `deck`'s envelope stands against
-    /// its turrets at `grained`, its billows' own coordinates, its skin and
-    /// fringe as wide as `widths` has them: each scale finer than
+    /// its turrets at `grained`, its billows' own coordinates, across `edge`:
+    /// each scale finer than
     /// `footprint` metres settled to its mean, or, `bounding`, pushed out as
     /// far as any finer scale could past the first. Read no further once the
     /// scales still to come could neither bring the surface out to the place
@@ -339,19 +475,17 @@ impl Textures {
         deck: &Deck,
         grained: Vec3,
         (footprint, bounding): (f64, bool),
-        (inside, (skin, fringe)): (f64, (f64, f64)),
+        (inside, edge): (f64, Edge),
     ) -> Surface {
         let reach = bubble_reach(deck);
         let period = deck.billow * 8.0;
         let texel = grained * (real(SHAPE_SIDE) / period);
         let (rise, fall) = (self.shape_peak - self.shape_mean, self.shape_mean);
-        // A scale's bubbles are some half a cell across.
         let kept: [f64; BUBBLES.len()] = core::array::from_fn(|index| {
-            let times = BUBBLES.get(index).map_or(1.0, |&(times, ..)| times);
-            if index == 0 || bounding {
+            if bounding {
                 1.0
             } else {
-                resolved(footprint, 0.5 * period / (BUBBLE_CELLS * times))
+                resolved_scale(index, footprint, period)
             }
         });
         let mut ahead: f64 = reach
@@ -373,10 +507,10 @@ impl Textures {
                     out += weight * (self.shape.at(texel * times + start) - self.shape_mean);
                 }
             }
-            if inside + out + ahead * rise + fringe <= 0.0 {
+            if inside + out + ahead * rise + edge.outer() <= 0.0 {
                 return Surface::Clear;
             }
-            let least = inside + out - ahead * fall - 0.5 * skin;
+            let least = inside + out - ahead * fall - edge.inner();
             if least >= 0.0 {
                 return Surface::Solid(least);
             }
@@ -426,14 +560,97 @@ struct Turrets {
 /// with the wisps' cells cut out of it where it mixes away, leaving
 /// filaments, and the walls between them where it billows, leaving puffs.
 fn eroded(into: f64, wisp: f64, billowing: f64) -> f64 {
+    thinned(into, cut(wisp, billowing))
+}
+
+/// How much of a fringe's depth the wisps standing at `wisp` cut away where
+/// it is `billowing`.
+fn cut(wisp: f64, billowing: f64) -> f64 {
     let wisp = wisp.clamp(0.0, 1.0);
-    let cut = DEEPEST_CUT
+    DEEPEST_CUT
         * smoothstep(
             CUTTING.0,
             CUTTING.1,
             wisp + (1.0 - 2.0 * wisp) * billowing.clamp(0.0, 1.0),
-        );
+        )
+}
+
+/// What a cut of `cut` leaves of a fringe `into` of the way into it.
+fn thinned(into: f64, cut: f64) -> f64 {
     ((into - cut) / (1.0 - cut)).clamp(0.0, 1.0)
+}
+
+/// The wisps' wholly resolved values, counted as `counts`, summed through
+/// `per_bin` of each bin, as a share of them all.
+fn over_wisps(counts: &[u32; WISP_BINS], per_bin: impl Fn(usize) -> f64) -> f64 {
+    let total = f64::from(counts.iter().sum::<u32>().max(1));
+    counts
+        .iter()
+        .enumerate()
+        .map(|(bin, &count)| f64::from(count) * per_bin(bin))
+        .sum::<f64>()
+        / total
+}
+
+/// The wisps' value in the middle of bin `bin`.
+fn wisp_of(bin: usize) -> f64 {
+    (real(bin) + 0.5) / real(WISP_BINS)
+}
+
+/// The fringe's mean over the wisps counted as `counts`, at each of the
+/// tabulated depths into it and billowings.
+fn fringe_means(counts: &[u32; WISP_BINS]) -> [f64; FRINGE_DEPTHS * FRINGE_BILLOWS] {
+    core::array::from_fn(|index| {
+        let into = real(index % FRINGE_DEPTHS) / real(FRINGE_DEPTHS - 1);
+        let billowing = real(index / FRINGE_DEPTHS) / real(FRINGE_BILLOWS - 1);
+        over_wisps(counts, |bin| eroded(into, wisp_of(bin), billowing))
+    })
+}
+
+/// The fringe's mean over the wisps counted as `counts`, summed from its
+/// outer reach to each of the [`FRINGE_SUMS`] depths into it in shares of
+/// its span, and the mean there, at each tabulated billowing: each wisp's
+/// cut summed exactly from where the fringe first thickens past it.
+fn fringe_sums(counts: &[u32; WISP_BINS]) -> [(f64, f64); FRINGE_SUMS * FRINGE_BILLOWS] {
+    let mut sums = [(0.0, 0.0); FRINGE_SUMS * FRINGE_BILLOWS];
+    for (row, depths) in sums.as_chunks_mut::<FRINGE_SUMS>().0.iter_mut().enumerate() {
+        let billowing = real(row) / real(FRINGE_BILLOWS - 1);
+        // Each bin's cut, where the fringe first thickens past it, and what
+        // the fringe sums to there.
+        let cuts: [(f64, f64, f64); WISP_BINS] = core::array::from_fn(|bin| {
+            let cut = cut(wisp_of(bin), billowing);
+            let from = undiluted(cut);
+            (cut, from, diluted_sum(from))
+        });
+        for (depth, slot) in depths.iter_mut().enumerate() {
+            let into = real(depth) / real(FRINGE_SUMS - 1);
+            let (summed, share) = (diluted_sum(into), diluted(into));
+            let sum = over_wisps(counts, |bin| match cuts.get(bin) {
+                Some(&(cut, from, before)) if into > from => {
+                    (summed - before - cut * (into - from)) / (1.0 - cut)
+                }
+                _ => 0.0,
+            });
+            let mean = over_wisps(counts, |bin| {
+                cuts.get(bin).map_or(0.0, |&(cut, ..)| thinned(share, cut))
+            });
+            *slot = (sum, mean);
+        }
+    }
+    sums
+}
+
+/// How far a read through a footprint `footprint` metres across resolves
+/// scale `index` of bubbles whose texture repeats every `period` metres: the
+/// first always, and each finer one as far as the footprint sees it, a
+/// scale's bubbles some half a cell across.
+fn resolved_scale(index: usize, footprint: f64, period: f64) -> f64 {
+    let times = BUBBLES.get(index).map_or(1.0, |&(times, ..)| times);
+    if index == 0 {
+        1.0
+    } else {
+        resolved(footprint, 0.5 * period / (BUBBLE_CELLS * times))
+    }
 }
 
 /// How far `deck`'s bubbles reach at each scale, in metres: a heap's the
@@ -469,11 +686,45 @@ impl Blend {
             self.across,
         )
     }
+
+    /// How a place `altitude` above the scene's level over the point stands
+    /// against `deck`'s envelope there.
+    pub(super) fn placed(&self, deck: &Deck, altitude: f64) -> Option<Placed> {
+        let base = self.at(|corner| corner.base);
+        let depth = (self.at(|corner| corner.top) - base).max(0.0);
+        Placed::of(
+            self.at(|corner| corner.edge),
+            altitude - base,
+            shape(deck, depth),
+        )
+    }
+}
+
+/// How a place stands against the envelope of a deck's cloud over it: how
+/// far above its base, how deep the envelope stands, and how far within it
+/// the place lies, in metres, negative outside.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(super) struct Placed {
+    pub(super) rise: f64,
+    pub(super) depth: f64,
+    pub(super) inside: f64,
+}
+
+impl Placed {
+    /// A place `rise` above the base of an envelope shaped `shape`, `edge`
+    /// metres within its footprint; `None` at or below its base.
+    pub(super) fn of(edge: f64, rise: f64, shape: (f64, f64)) -> Option<Self> {
+        (rise > 0.0).then(|| Self {
+            rise,
+            depth: shape.0,
+            inside: within_envelope(edge, rise, shape),
+        })
+    }
 }
 
 /// The shape of `deck`'s envelope over a column `depth` deep: that depth,
 /// and the run in from the footprint's edge over which it rises to it.
-fn shape(deck: &Deck, depth: f64) -> (f64, f64) {
+pub(super) fn shape(deck: &Deck, depth: f64) -> (f64, f64) {
     let heap = deck.heap.clamp(0.0, 1.0);
     let depth = depth.max(LEAST_RISE);
     let (sheet, heaped) = (SHEET_RUN * depth, HEAP_RUN * deck.billow);
@@ -523,40 +774,29 @@ pub(super) struct Held {
     pub(super) within: f64,
 }
 
-/// What `deck`'s cloud holds at `altitude` over `column`, read at `grained`
-/// in its billows' coordinates with its edges as `edges` has them; `None`
-/// where none stands.
+/// What `deck`'s cloud holds at a place standing against its envelope as
+/// `placed` has it, read at `grained` in its billows' coordinates with its
+/// edges as `edges` has them; `None` where none stands.
 pub(super) fn cloud(
     deck: &Deck,
     textures: &Textures,
-    (column, altitude): (&Blend, f64),
+    placed: Placed,
     grained: Vec3,
     edges: Edges,
 ) -> Option<Held> {
-    let base = column.at(|corner| corner.base);
-    let rise = altitude - base;
-    if rise <= 0.0 {
-        return None;
-    }
-    let depth = (column.at(|corner| corner.top) - base).max(0.0);
-    let shape = shape(deck, depth);
-    let inside = within_envelope(column.at(|corner| corner.edge), rise, shape);
+    let Placed {
+        rise,
+        depth,
+        inside,
+    } = placed;
     let footprint = edges_footprint(deck, edges);
-    let skin = skin(deck, footprint);
-    let billowing = smoothstep(BILLOWING.0, BILLOWING.1, rise / shape.0);
-    // Never narrower than half its skin, so a coarser footprint widens the
-    // edge about the surface rather than eating into the cloud.
-    let fringe = fringe(deck, billowing).max(0.5 * skin);
-    if inside + textures.reach(deck) + fringe <= 0.0 {
+    let billowing = smoothstep(BILLOWING.0, BILLOWING.1, rise / depth);
+    let edge = Edge::of(deck, billowing, footprint);
+    if inside + textures.reach(deck) + edge.outer() <= 0.0 {
         return None;
     }
     let bounding = matches!(edges, Edges::Bounding(_));
-    match textures.surface(
-        deck,
-        grained,
-        (footprint, bounding),
-        (inside, (skin, fringe)),
-    ) {
+    match textures.surface(deck, grained, (footprint, bounding), (inside, edge)) {
         Surface::Clear => None,
         Surface::Solid(within) => Some(Held {
             extinction: extinction(deck, rise),
@@ -564,10 +804,10 @@ pub(super) fn cloud(
         }),
         Surface::Edge(turrets) => {
             let surface = inside + turrets.out;
-            let density = textures.fringed(surface, (skin, fringe), billowing, &turrets);
+            let density = textures.fringed(surface, edge, billowing, &turrets);
             (density > 0.0).then(|| Held {
                 extinction: density * extinction(deck, rise),
-                within: surface - 0.5 * skin,
+                within: surface - edge.inner(),
             })
         }
     }
@@ -575,32 +815,133 @@ pub(super) fn cloud(
 
 /// Whether `deck`'s cloud, read through a `footprint` metres across, can
 /// stand anywhere over columns standing no further within their footprint
-/// than `edge` and no deeper than `depth`, no nearer its base than `rise`:
+/// than `edge`, under envelopes no deeper or steeper than `shape`, no nearer
+/// their base than `rise`, its turrets pushing out no further than `reach`:
 /// as a place lies no further within its envelope for a column less far
-/// within its footprint, a shallower column or a place higher above its
-/// base, the envelope at those holds every place among them, its turrets and
-/// fringe reaching out at their furthest.
+/// within its footprint, a shallower or gentler envelope or a place higher
+/// above its base, the envelope at those holds every place among them, its
+/// turrets and fringe reaching out at their furthest.
 pub(super) fn may_hold(
     deck: &Deck,
-    textures: &Textures,
-    (edge, depth, rise): (f64, f64, f64),
-    footprint: f64,
+    (edge, shape, rise): (f64, (f64, f64), f64),
+    (reach, footprint): (f64, f64),
 ) -> bool {
-    let inside = within_envelope(edge, rise.max(0.0), shape(deck, depth));
-    inside + textures.reach(deck) + fringe(deck, 0.0).max(0.5 * skin(deck, footprint)) > 0.0
+    let inside = within_envelope(edge, rise.max(0.0), shape);
+    inside + reach + Edge::widest(deck, footprint).outer() > 0.0
 }
 
-/// How wide `deck`'s cloud's edge stands, in metres, read through a
-/// `footprint` metres across: never sharper than its droplets make it, and
-/// never wider than a billow, so its bands hold every read.
-fn skin(deck: &Deck, footprint: f64) -> f64 {
-    SKIN.max(footprint.min(deck.billow))
+/// How far outside its envelope a read of `deck`'s cloud taken as `edges` has
+/// them can meet any of it: as far as its turrets reach, and the fringe at
+/// its broadest through the read's footprint past them.
+pub(super) fn read_margin(deck: &Deck, textures: &Textures, edges: Edges) -> f64 {
+    textures.reach(deck) + Edge::widest(deck, edges_footprint(deck, edges)).outer()
 }
 
-/// How far out past its turrets `deck`'s fringe reaches, in metres, where it
-/// is `billowing`.
-fn fringe(deck: &Deck, billowing: f64) -> f64 {
-    deck.billow * (FRINGE.1 + (FRINGE.0 - FRINGE.1) * billowing.clamp(0.0, 1.0))
+/// How far past its envelope `deck`'s cloud can stand, its turrets reaching
+/// `reach`: as far as they reach, and the fringe at its broadest past them.
+pub(super) fn standing_margin(deck: &Deck, reach: f64) -> f64 {
+    reach + Edge::widest(deck, f64::INFINITY).outer()
+}
+
+/// The least share of its way out past its footprint a place outside lies
+/// from the envelope: below the base the envelope falls at [`FALL`], so the
+/// chord to it is never shorter than that fall's share of the way out, and
+/// no place outside lies further within than that share of its way out.
+pub(super) fn outside_share() -> f64 {
+    FALL / mathf::hypot(1.0, FALL)
+}
+
+/// A cloud's edge as a read through a footprint sees it: its fringe of
+/// diluted droplets reaching `fringe` metres out past its turrets and its
+/// [`SKIN`], the whole averaged over `blur` metres about each place, so a
+/// coarse read holds the water a fine one does.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Edge {
+    fringe: f64,
+    blur: f64,
+}
+
+impl Edge {
+    /// `deck`'s edge where it is `billowing`, read through a `footprint`
+    /// metres across: averaged over no more than a billow, so its bands hold
+    /// every read.
+    fn of(deck: &Deck, billowing: f64, footprint: f64) -> Self {
+        Self {
+            fringe: deck.billow * (FRINGE.1 + (FRINGE.0 - FRINGE.1) * billowing.clamp(0.0, 1.0)),
+            blur: footprint.clamp(0.0, deck.billow),
+        }
+    }
+
+    /// The edge reaching furthest out, where the fringe is broadest.
+    pub(super) fn widest(deck: &Deck, footprint: f64) -> Self {
+        Self::of(deck, 0.0, footprint)
+    }
+
+    /// How far out past the turrets any of the edge reaches, in metres.
+    pub(super) fn outer(self) -> f64 {
+        self.fringe + 0.5 * self.blur
+    }
+
+    /// How far in past the turrets the cloud stands whole, in metres.
+    fn inner(self) -> f64 {
+        f64::midpoint(SKIN, self.blur)
+    }
+
+    /// The share of the body's density standing `surface` metres within the
+    /// turrets: diluted outward from the skin's middle across the fringe as
+    /// the cube of how far into it a place lies, so its outer half holds a
+    /// few hundredths of the body's water and a grazing look through it
+    /// shows the sky; averaged over the blur.
+    fn density(self, surface: f64) -> f64 {
+        self.average(surface, diluted_sum).clamp(0.0, 1.0)
+    }
+
+    /// A share of the body's density `summed` across the edge, from the
+    /// fringe's outer reach to each share of the way to the skin's middle,
+    /// averaged over the blur about `surface` metres within the turrets.
+    fn average(self, surface: f64, summed: impl Fn(f64) -> f64) -> f64 {
+        let span = self.fringe + 0.5 * SKIN;
+        let half = 0.5 * self.blur.max(span * SHARPEST_BLUR);
+        let into = |at: f64| (at + self.fringe) / span;
+        span * (summed(into(surface + half)) - summed(into(surface - half))) / (2.0 * half)
+    }
+}
+
+/// The least an edge is averaged over, as a share of its span: far sharper
+/// than a read can tell, and wide enough that the difference
+/// [`Edge::average`] takes does not round away.
+const SHARPEST_BLUR: f64 = 1e-3;
+
+/// The share of the body's density a fringe holds `into` of the way through
+/// it, from its outer reach to the skin's middle.
+fn diluted(into: f64) -> f64 {
+    let ramp = mathf::smoothstep(into);
+    ramp * ramp * ramp
+}
+
+/// [`diluted`] summed from the fringe's outer reach to `into` of the way
+/// through it, the whole body counted on past it.
+fn diluted_sum(into: f64) -> f64 {
+    if into <= 0.0 {
+        return 0.0;
+    }
+    if into >= 1.0 {
+        return DILUTED_WHOLE + (into - 1.0);
+    }
+    // (3t² − 2t³)³ = 27t⁶ − 54t⁷ + 36t⁸ − 8t⁹, summed term by term.
+    let squared = into * into;
+    let seventh = squared * squared * squared * into;
+    seventh * (27.0 / 7.0 + into * (-27.0 / 4.0 + into * (4.0 - 0.8 * into)))
+}
+
+/// What [`diluted`] sums to across the whole fringe.
+const DILUTED_WHOLE: f64 = 43.0 / 140.0;
+
+/// How far into a fringe [`diluted`] reaches `share` of the body's density:
+/// the inverse of its smoothstep, through its cube root.
+fn undiluted(share: f64) -> f64 {
+    let ramp = power(share.clamp(0.0, 1.0), 1.0 / 3.0);
+    0.5 - mathf::sin(mathf::asin(1.0 - 2.0 * ramp) / 3.0)
 }
 
 /// The footprint, in metres, a read of `deck` taken as `edges` has them
@@ -625,27 +966,14 @@ pub(super) fn extinction(deck: &Deck, rise: f64) -> f64 {
 /// apart hold: how much of it its footprints cover, and its column, whose
 /// edge the covers about it give once they are laid.
 pub(super) fn weather(deck: &Deck, (x, z): (f64, f64), spacing: f64) -> (f32, Column) {
-    let (cos, sin) = (mathf::cos(deck.heading), mathf::sin(deck.heading));
-    let along = (x * cos + z * sin) / (deck.scale * deck.stretch);
-    let across = (-x * sin + z * cos) / deck.scale;
     // Its features across the wind are its narrowest.
     let footprint = spacing / deck.scale;
-    // Pushed about by a slower field, so the cover gathers in drifts.
-    let (u, v) = (
-        along + 0.5 * noise2(along * 0.3, across * 0.3, deck.seed ^ 0x51),
-        across + 0.5 * noise2(along * 0.3 + 3.1, across * 0.3 + 1.7, deck.seed ^ 0x93),
-    );
+    let (u, v) = drifting(deck, (x, z));
     let field = fbm2_resolved(u, v, deck.seed, (5, 0.55, 2.02), footprint);
     // The same field's broadest octaves alone: high where a cloud is broad,
     // low over a blob the finer octaves alone lift past its edge.
     let broad = fbm2_resolved(u, v, deck.seed, (2, 0.55, 2.02), footprint);
-    let drift = fbm2_resolved(
-        u * 0.23,
-        v * 0.23,
-        deck.seed ^ 0x77,
-        (3, 0.5, 2.0),
-        footprint * 0.23,
-    );
+    let drift = drift(deck, (u, v), footprint);
     // How far into a cloud's footprint a column lies: its edge where the
     // drifting field passes the quantile that leaves the deck's cover of the
     // sky covered, its middle as far again beyond.
@@ -655,9 +983,7 @@ pub(super) fn weather(deck: &Deck, (x, z): (f64, f64), spacing: f64) -> (f32, Co
     };
     let cover = into(field);
     let drift = 0.5 + 0.5 * drift;
-    let lift =
-        noise2(x / 5_000.0, z / 5_000.0, deck.seed ^ 0xba5e) * resolved(spacing / 5_000.0, 1.0);
-    let base = deck.base + deck.base_spread * lift;
+    let base = base_at(deck, (x, z), spacing);
     // Deeper the broader the field of cloud a heap stands in.
     let grown = smoothstep(FOOTPRINT, 1.0, into(broad));
     let depth = deck.depth.0 + (deck.depth.1 - deck.depth.0) * grown * (0.6 + 0.4 * drift);
@@ -669,6 +995,40 @@ pub(super) fn weather(deck: &Deck, (x, z): (f64, f64), spacing: f64) -> (f32, Co
             top: single(base + depth),
         },
     )
+}
+
+/// Where `deck`'s weather lies at `(x, z)` in its features' own units, along
+/// the wind and across it, pushed about by a slower field so it gathers in
+/// drifts.
+pub(super) fn drifting(deck: &Deck, (x, z): (f64, f64)) -> (f64, f64) {
+    let (cos, sin) = (mathf::cos(deck.heading), mathf::sin(deck.heading));
+    let along = (x * cos + z * sin) / (deck.scale * deck.stretch);
+    let across = (-x * sin + z * cos) / deck.scale;
+    (
+        along + 0.5 * noise2(along * 0.3, across * 0.3, deck.seed ^ 0x51),
+        across + 0.5 * noise2(along * 0.3 + 3.1, across * 0.3 + 1.7, deck.seed ^ 0x93),
+    )
+}
+
+/// The slow field `deck`'s weather gathers in drifts by, roughly
+/// `-1.0..=1.0`, at `(u, v)` in its features' units, as finely as a
+/// footprint `footprint` of those units resolves it.
+pub(super) fn drift(deck: &Deck, (u, v): (f64, f64), footprint: f64) -> f64 {
+    fbm2_resolved(
+        u * 0.23,
+        v * 0.23,
+        deck.seed ^ 0x77,
+        (3, 0.5, 2.0),
+        footprint * 0.23,
+    )
+}
+
+/// The height of `deck`'s clouds' base over `(x, z)`, drawn only as finely
+/// as columns `spacing` apart hold.
+pub(super) fn base_at(deck: &Deck, (x, z): (f64, f64), spacing: f64) -> f64 {
+    let lift =
+        noise2(x / 5_000.0, z / 5_000.0, deck.seed ^ 0xba5e) * resolved(spacing / 5_000.0, 1.0);
+    deck.base + deck.base_spread * lift
 }
 
 /// The value below which a normal variate falls `share` of the time, through
@@ -838,7 +1198,7 @@ pub(super) fn band_over(deck: &Deck, corners: [Column; 4], reach: f64) -> (f32, 
     let least = |values: [f64; 4]| values.into_iter().fold(f64::INFINITY, f64::min);
     let (bases, tops) = (values(|corner| corner.base), values(|corner| corner.top));
     let depth = most(corners.map(|corner| f64::from(corner.top - corner.base).max(0.0)));
-    let margin = reach + fringe(deck, 0.0).max(0.5 * skin(deck, f64::INFINITY));
+    let margin = standing_margin(deck, reach);
     let Some(highest) = highest_rise(
         most(values(|corner| corner.edge)),
         shape(deck, depth),
@@ -855,7 +1215,7 @@ pub(super) fn band_over(deck: &Deck, corners: [Column; 4], reach: f64) -> (f32, 
 /// its footprint, to within half a metre above; `None` where none can. A
 /// place lies no further within the envelope the higher it stands, so the
 /// height is found by halving.
-fn highest_rise(edge: f64, shape: (f64, f64), margin: f64) -> Option<f64> {
+pub(super) fn highest_rise(edge: f64, shape: (f64, f64), margin: f64) -> Option<f64> {
     let reaches = |rise: f64| within_envelope(edge, rise, shape) + margin > 0.0;
     if !reaches(0.0) {
         return None;
@@ -968,7 +1328,7 @@ fn fill_tile(
     else {
         return;
     };
-    band::for_each(runner, texels, (layers.start, per_layer), &|layer, band| {
+    tairix_parallel::for_each_band(runner, texels, (layers.start, per_layer), &|layer, band| {
         for (index, texel) in band.iter_mut().enumerate() {
             let p = Vec3::new(
                 real(index % side) + 0.5,

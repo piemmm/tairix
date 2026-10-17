@@ -12,18 +12,22 @@
 use core::f64::consts::{FRAC_PI_2, TAU};
 
 use tairix_countryside::usage::Crop;
+use tairix_land::attributes::{sediment_of, GREEN, PATH, ROAD, SEDIMENT, SNOW, WET};
+use tairix_land::course::{Courses, Nearest};
+use tairix_land::grown::{Grown, Stage, CODES};
+use tairix_land::snow;
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, cells2, fbm2, hash3, noise2, octaves_within, smoothstep};
 use tairix_util::mathf;
 
-use crate::course::{Courses, Nearest};
-use crate::farmed::{self, Drill, Grown, Stage, CODES};
+use crate::farmed::{self, Drill};
 use crate::grass::{CROP_KINDS, WILD_KINDS};
-use crate::land::{Surface, Ways, DAMP_BANK, RUT, SOAKED, SURFACES, TRACK_GAUGE};
-use crate::noise::{cell, cells2, fbm2, hash3, noise2, octaves_within, smoothstep};
 use crate::pigment::Spot;
-use crate::sample::{mix32, unit};
 use crate::shade::Shades;
-use crate::snow;
 use crate::vector::Vec3;
+use tairix_land::plan::{Surface, SURFACES};
+use tairix_land::ways::{Ways, RUT, TRACK_GAUGE};
+use tairix_land::{DAMP_BANK, SOAKED};
 
 /// The grains of ground too fine to model, to a metre, coarsest first: a
 /// crumb or a fine pebble, coarse sand, fine sand; and the shade a grain and
@@ -179,7 +183,7 @@ impl Ground {
     /// but the most saturated ground and covers the soil, and snow lies over
     /// whatever is beneath it.
     pub(crate) fn moisture(&self, spot: &Spot) -> Moisture {
-        let [wet, _, _, _, green, _] = spot.ground;
+        let (wet, green) = (spot.ground[WET], spot.ground[GREEN]);
         let bare = (1.0 - green) * (1.0 - self.snowed(spot, 0.0));
         Moisture {
             standing: smoothstep(0.82, 1.0, wet) * bare,
@@ -197,9 +201,8 @@ impl Ground {
             self.snow_line + 30.0,
             spot.height + 45.0 * patch,
         ) * smoothstep(0.5, 0.78, spot.normal.y);
-        let [.., channel] = spot.ground;
         let drifted = snow::buries(
-            snow::depth_of(channel) * (1.0 + SNOW_EDGES * patch),
+            snow::depth_of(spot.ground[SNOW]) * (1.0 + SNOW_EDGES * patch),
             GROUND_BURIED,
         );
         lying.max(drifted)
@@ -330,8 +333,9 @@ impl Ground {
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
         let palette = &self.palette;
         let (p, width) = (spot.p, spot.width.max(1e-5));
-        let [wet, laid, road, footpath, green, _] = spot.ground;
-        let laid = 2.0 * laid - 1.0;
+        let ground = spot.ground;
+        let (wet, road, footpath, green) = (ground[WET], ground[ROAD], ground[PATH], ground[GREEN]);
+        let laid = sediment_of(ground[SEDIMENT]);
         let upright = spot.normal.y;
         let seed = self.seed;
         let patch = fbm2(

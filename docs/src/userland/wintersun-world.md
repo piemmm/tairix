@@ -96,15 +96,21 @@ machine and for every realm, and nothing in it grows with the world's extent.
 
 ### The chunk
 
-Fine detail, on demand. It reads the realm field, adds everything below the
-coarse step, and depends on nothing outside a fixed ring of cells:
+Fine detail, on demand. Its ground is a piece of the realm's land; everything
+else below the coarse step it adds from a fixed ring of cells:
 
-1. **Relief** — detail noise in *absolute* world units (texture does not
-   scale with the realm the way structure does), ridged inside belts and
-   billowed into dunes where it is dry.
+1. **Relief** — the chunk's working grid as a piece of the realm's land
+   (`land::RealmLand`): the realm field refined by `lib/land`, the desktop ray
+   tracer's land generator at its *Maximum*, through a level across the whole
+   realm and a level at the cells (`docs/src/lib/land.md`). Its detail is in
+   *absolute* world units (texture does not scale with the realm the way
+   structure does), ridged inside belts, billowed into dunes where it is dry
+   and fading into the sea floor, and it is worn by droplets from blocks of
+   ground a store keeps, the piece exactly as the realm worn whole. A chunk off
+   the realm's land is refused.
 2. **Water** — channels carved along the coarse drainage, widening with
    discharge; standing water only where the coarse field holds it — a hollow
-   in the detail relief on dry ground is texture, not a basin. The sea stands
+   in the fine relief on dry ground is texture, not a basin. The sea stands
    at sea level and a lake at the coarse surface, and a cell is the sea's
    where the coarse water about it mostly is. Then the shore distance is
    measured.
@@ -116,15 +122,17 @@ coarse step, and depends on nothing outside a fixed ring of cells:
 
 Scatter is last because it reads the structure stamp: nothing grows on a road.
 
-The build is a resumable phase machine, and the partially-built chunk is
-readable throughout, so a client draws the coarse ground it already has rather
-than blocking a frame on generation.
+The build is a resumable phase machine, its relief one phase that refines the
+chunk's ground whole, and the partially-built chunk is readable throughout. A
+client solves chunks on a worker of its own, so no frame waits on generation,
+and draws the coarse ground it already has meanwhile.
 
 ## The halo, and why it is exactly as wide as it is
 
 Everything a chunk computes is either a read of the realm field — global, so
-identical for every query — or a pure function of absolute position. Neither
-depends on a neighbour. Two kinds of quantity do: the **shore distance**,
+identical for every query — a pure function of absolute position, or its
+relief, a piece of the realm's land, which the land generator keeps exact by
+its own construction. None depends on a neighbour. Two kinds of quantity do: the **shore distance**,
 which is a distance transform, and the slope and drainage gradient, which are
 stencils over the fine relief.
 
@@ -205,16 +213,19 @@ The arithmetic is written to be target-independent:
 - Arithmetic is IEEE-754 `f64` restricted to the exactly-specified operations
   plus `lib/util::mathf`, TAIRiX's own libm. Rust contracts no fused
   multiply-add, so `a * b + c` stays two operations.
-- Everything stored is a quantised integer, so a stored value is a bit
-  pattern rather than a rounding.
+- Everything a chunk stores is a quantised integer, so a stored value is a bit
+  pattern rather than a rounding; the land's levels and the worn ground
+  beneath them are single-precision values computed in one fixed order, the
+  same bits on every target.
 - Every sort, priority queue and traversal has a total order with an index
   tiebreak. An `f64` comparator has none, so the flood's heap, the wind sweep
   and the road search all order integers.
 
 "Written to be" is not evidence, so the claim is staked on one constant,
-`digest::REFERENCE_DIGEST`: a fixed realm is solved, its coarse field and six
-spread-out chunks are folded into a digest, and that digest must equal the
-constant. The host suite asserts it, and so does one vertical per Tier-1
+`digest::REFERENCE_DIGEST`: a fixed realm is solved, and its coarse field,
+then six spread-out chunks worn from its land, are folded a stage at a time
+(`digest::Folding`) into a digest that must equal the constant; the QEMU
+verticals report each stage, so none is mistaken for a hung guest. The host suite asserts it, and so does one vertical per Tier-1
 target — `tests/integration/world_determinism_qemu_{aarch64,riscv64,x86_64}`
 under QEMU, and `tests/integration/world_determinism_wasm32` under a real
 WebAssembly engine. Agreement between targets follows from each agreeing with
@@ -231,16 +242,25 @@ with a 32-bit `usize`.
 Resident cost is the working set, never the world's extent:
 
 - The realm field is a fixed grid, a few mebibytes at the resolution ceiling
-  and the same on every machine.
+  and the same on every machine, and so is the land's level 0 across the whole
+  realm: about 2048 cells a side whatever its extent, the field's samples a
+  few times over and the samples padding its edge a little more, some 16 MiB
+  of single-precision heights.
+- The worn ground a client's chunks are solved from lives in a second
+  `lib/reclaim` cache (`cache::GroundCache`), so a chunk beside one already
+  solved fills and wears only the ground no earlier chunk reached; the
+  reference scene and the digest keep theirs in a bounded store of their own,
+  released only when they end.
 - Chunks live in a `lib/reclaim` cache whose budget is derived from the memory
   the machine reported — supplied by the caller from the System Information
   API, because a library picking a capacity for itself would be the
   hand-chosen ceiling the charter forbids — and released through the system's
   pressure bands. Its generation token is the realm parameter document, so
   changing any of it invalidates every entry.
-- Nothing is written to disk. Recomputing a chunk is cheaper than reading it
-  back, so only player-caused change is stored, and a realm is O(changes) on
-  disk and O(working set) in RAM whatever its extent.
+- Nothing is written to disk. A chunk is a pure function of the realm's
+  parameters, recomputed wherever it is needed, so only player-caused change
+  is stored, and a realm is O(changes) on disk and O(working set) in RAM
+  whatever its extent.
 
 Allocation is fallible throughout: a machine too short to hold the field gets
 a typed refusal, never an abort.

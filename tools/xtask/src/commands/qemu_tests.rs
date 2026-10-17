@@ -1875,8 +1875,9 @@ static TESTS: &[QemuTest] = &[
     // Tier-1 target on purpose: the defect it exists to catch is one
     // compiler backend lowering the same arithmetic differently from
     // another, which no single-target run can see. Pure computation over
-    // the boot heap — no device, no disk, one CPU — so the 90-second
-    // inactivity budget is generous for a debug-profile guest.
+    // the boot heap — no device, no disk, one CPU — reported a stage of the
+    // fold at a time, so its longest silence is one probe chunk solved
+    // alone, some 20 seconds on a debug-profile guest.
     QemuTest {
         package: "tairix-test-world-determinism-qemu-aarch64",
         binary: "tairix-test-world-determinism-qemu-aarch64",
@@ -1906,8 +1907,9 @@ static TESTS: &[QemuTest] = &[
     // Tier-1 target on purpose: the defect it exists to catch is one
     // compiler backend lowering the same arithmetic differently from
     // another, which no single-target run can see. Pure computation over
-    // the boot heap — no device, no disk, one CPU — so the 90-second
-    // inactivity budget is generous for a debug-profile guest.
+    // the boot heap — no device, no disk, one CPU — reported a stage of the
+    // fold at a time, so its longest silence is one probe chunk solved
+    // alone, some 20 seconds on a debug-profile guest.
     QemuTest {
         package: "tairix-test-world-determinism-qemu-riscv64",
         binary: "tairix-test-world-determinism-qemu-riscv64",
@@ -1937,8 +1939,9 @@ static TESTS: &[QemuTest] = &[
     // Tier-1 target on purpose: the defect it exists to catch is one
     // compiler backend lowering the same arithmetic differently from
     // another, which no single-target run can see. Pure computation over
-    // the boot heap — no device, no disk, one CPU — so the 90-second
-    // inactivity budget is generous for a debug-profile guest.
+    // the boot heap — no device, no disk, one CPU — reported a stage of the
+    // fold at a time, so its longest silence is one probe chunk solved
+    // alone, some 20 seconds on a debug-profile guest.
     QemuTest {
         package: "tairix-test-world-determinism-qemu-x86-64",
         binary: "tairix-test-world-determinism-qemu-x86-64",
@@ -12979,7 +12982,7 @@ fn wintersun_reference(
     use tairix_wintersun_app::reference::{self, World};
 
     let fail = |what: &str| format!("wintersun reference {width}x{height}: {what}");
-    let mut world = World::generate().map_err(|e| fail(&e.to_string()))?;
+    let mut world = World::generate(&tairix_parallel::SERIAL).map_err(|e| fail(&e.to_string()))?;
     let set = tairix_wintersun_figure::motion::Set::new().map_err(|e| fail(&format!("{e:?}")))?;
     let clips = set.clips().map_err(|e| fail(&format!("{e:?}")))?;
     let mut window =

@@ -10,15 +10,15 @@
 
 use core::f64::consts::TAU;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cells3, hash2, noise3, smoothstep, NOISE_SLOPE};
 use tairix_util::mathf;
 
 use crate::cactus::{
     self, cushion, profile, Ribs, CORK_ROUGH, CROWN, CUSHION, CUTICLE, FELT, MEAN_RIB, WOOL,
 };
 use crate::cover::{CRUST, MOSS};
-use crate::noise::{cells3, hash2, noise3, smoothstep, NOISE_SLOPE};
 use crate::pigment::{lying, Spot, SNOW};
-use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
 /// The pattern a bark is cut in.

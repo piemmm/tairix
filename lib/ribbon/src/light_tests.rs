@@ -10,12 +10,13 @@ use tairix_raster::{DitherRow, Pixel, Surface};
 
 use crate::SKY;
 use tairix_theme::motion::{seconds, SceneClock};
+use tairix_util::mathf::single;
 
 use super::{
-    along, bernstein, curtain, falloff_reach, index_of, monotone, narrow, needed_pushes,
-    sample_across, tone_entry, tone_index, Fall, Light, Rows, Tally, CHUNK, CONTROLS, DITHER_LANES,
-    EDGE_MARGIN, EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN,
-    PIXELS_PER_SAMPLE, QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
+    along, bernstein, curtain, falloff_reach, index_of, monotone, needed_pushes, sample_across,
+    tone_entry, tone_index, Fall, Light, Rows, Tally, CHUNK, CONTROLS, DITHER_LANES, EDGE_MARGIN,
+    EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN, PIXELS_PER_SAMPLE,
+    QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
 };
 
 const WIDE: (u32, u32) = (640, 360);
@@ -56,12 +57,12 @@ fn channels(lanes: u64) -> [i32; 3] {
 
 /// The exposure the tone curve lifts to `luma`.
 fn exposure_for(luma: f64) -> f32 {
-    narrow(-tairix_util::mathf::ln(1.0 - luma / EMBER_TOP))
+    single(-tairix_util::mathf::ln(1.0 - luma / EMBER_TOP))
 }
 
 /// The screen's pixel rows as a float, for comparing heights against it.
 fn rows_of((_, height): (u32, u32)) -> f32 {
-    narrow(f64::from(height))
+    single(f64::from(height))
 }
 
 /// Step `light` on `clock` through `seconds`, `every` seconds apart, handing
@@ -127,7 +128,7 @@ fn the_light_that_shows_lifts_every_pixel_a_whole_level() {
         let bytes = lanes.to_le_bytes();
         [0, 2, 4].map(|at| u16::from_le_bytes([bytes[at], bytes[at + 1]]))
     };
-    let seen = tone_index(narrow(LEAST_SEEN));
+    let seen = tone_index(single(LEAST_SEEN));
     assert!(
         fixed(tone_entry(seen))[0] >= 1 << 8,
         "{:?}",
@@ -136,7 +137,7 @@ fn the_light_that_shows_lifts_every_pixel_a_whole_level() {
     assert!(fixed(tone_entry(seen - 1))
         .iter()
         .all(|channel| *channel < 1 << 8));
-    assert_eq!(tone_index(narrow(LEAST_LIGHT)), seen - 1);
+    assert_eq!(tone_index(single(LEAST_LIGHT)), seen - 1);
 }
 
 #[test]
@@ -153,7 +154,7 @@ fn every_strand_runs_from_the_left_edge_to_the_right() {
         }
         let tall = rows_of(size);
         let inset = if clock.is_empty() {
-            narrow(EDGE_MARGIN) * tall - 0.01
+            single(EDGE_MARGIN) * tall - 0.01
         } else {
             0.0
         };
@@ -377,7 +378,7 @@ fn the_ribbon_rises_close_beneath_the_text() {
     let wide = Rect::new(432, 156, 1056, 399);
     let size = (1920, 1080);
     let nearest = |light: &mut Light, text: Rect| {
-        let bottom = narrow(f64::from(text.bottom()));
+        let bottom = single(f64::from(text.bottom()));
         let mut nearest = f32::MAX;
         run(light, text, 240, 1.0, |light| {
             let clearance = light.roam.clearance.as_ref().expect("a clearance");

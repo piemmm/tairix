@@ -3,10 +3,14 @@ extern crate std;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_scatter::{Cell, Offers, Span, Thinning};
+
 use super::*;
 use crate::land::NESTS;
 use crate::prototype::{Part, Prototype, Tube};
-use crate::wood::{Affinity, Rooting, Woodland, ANYWHERE, KINDS, VARIANTS};
+use crate::wood::{
+    crowd, Affinity, Layer, Rooting, Spread, Woodland, ANYWHERE, KINDS, ROUNDS, VARIANTS,
+};
 
 /// A tree ten metres tall: a trunk, and a crown about its top.
 fn tree() -> Prototype {
@@ -88,30 +92,119 @@ fn reader(cover: f64) -> Reader {
         rooting: Rooting { ..ANYWHERE },
         kinds,
         seeds: (3, 4),
+        layer: Layer::Canopy,
     }
 }
 
+/// Where the wood far off stands: ahead of an eye at the land's middle, out
+/// to 1.5 km.
 const STRETCH: Stretch = Stretch {
     eye: (0.0, 0.0),
     heading: 0.0,
     across: 1.15,
-    from: 150.0,
     to: 1500.0,
-    cell: 3.0,
-    sown: 1.35,
 };
 
-/// The wood far off over `fields`, measured and surveyed as a scene does once
-/// its trees' prototypes are grown.
-fn wood(fields: &[Heightfield]) -> FarWood {
-    built(&reader(0.9), fields)
+/// How far off the trees it carries on begin: nearer, they stand one by one.
+const FROM: f64 = 150.0;
+
+/// The lattice its places are sown on.
+const SOWN: Sown = Sown {
+    side: 3.0,
+    seed: 11,
+};
+
+/// The trees the land offers over `fields` within `stretch`, from [`FROM`]
+/// on, for a test's wood to keep as the scene's thinning keeps its own.
+struct Ring<'a> {
+    reader: Reader,
+    fields: &'a [Heightfield],
+    stretch: Stretch,
 }
 
-fn built(reader: &Reader, fields: &[Heightfield]) -> FarWood {
-    surveyed(
-        FarWood::new((*reader, 11), (GRIDS, fields), STRETCH).expect("a wood"),
+impl Offers for Ring<'_> {
+    type Offer = Offer;
+    type Rank = (u32, u32);
+    type Bound = Spread;
+
+    fn reach(&self) -> u32 {
+        SOWN.reach(self.reader.widest_room()).expect("a reach")
+    }
+
+    fn offer(&self, cell: Cell) -> Option<Offer> {
+        let (at, draw) = SOWN.place(cell)?;
+        let (dx, dz) = (at.0 - self.stretch.eye.0, at.1 - self.stretch.eye.1);
+        let distance = mathf::hypot(dx, dz);
+        let across =
+            wrapped(mathf::atan2(dx, dz) - self.stretch.heading).abs() <= self.stretch.across;
+        let ((cx, cz), half) = GRIDS.traced(self.fields);
+        let on_land = (at.0 - cx).abs() < half && (at.1 - cz).abs() < half;
+        if !across || !on_land || !(FROM..=self.stretch.to).contains(&distance) {
+            return None;
+        }
+        let tree = self.reader.tree((&GRIDS, self.fields), (at, draw), None)?;
+        Some(Offer::of(&tree, (at, draw)))
+    }
+
+    fn rank(&self, offer: &Offer) -> (u32, u32) {
+        offer.rank()
+    }
+
+    fn crowds(&self, offer: &Offer, other: &Offer) -> bool {
+        crowd(offer, other)
+    }
+
+    fn bound(&self, offer: &Offer) -> Spread {
+        Spread::of(offer)
+    }
+
+    fn join(&self, one: Spread, other: Spread) -> Spread {
+        one.join(other)
+    }
+
+    fn within(&self, offer: &Offer, spread: Spread, cells: u32) -> bool {
+        SOWN.near(cells, spread.room(offer))
+    }
+}
+
+/// The wood far off over `fields`, its trees kept and its survey taken as a
+/// scene keeps and takes them once its trees' prototypes are grown.
+fn wood(fields: &[Heightfield]) -> FarWood {
+    built(&reader(0.9), fields, STRETCH)
+}
+
+fn built(reader: &Reader, fields: &[Heightfield], stretch: Stretch) -> FarWood {
+    surveyed(kept(reader, fields, stretch), fields)
+}
+
+/// `reader`'s wood far off over `stretch` of `fields`, every tree the land's
+/// thinning keeps there marked.
+fn kept(reader: &Reader, fields: &[Heightfield], stretch: Stretch) -> FarWood {
+    let mut wood = FarWood::new((*reader, SOWN), (GRIDS, fields), stretch).expect("a wood");
+    let ring = Ring {
+        reader: *reader,
         fields,
-    )
+        stretch,
+    };
+    let (low, high) = wood.extent(0.0);
+    let (first, last) = (
+        SOWN.cell(low).expect("a cell"),
+        SOWN.cell(high).expect("a cell"),
+    );
+    let spans = (first.1..=last.1)
+        .map(|row| Span {
+            row,
+            columns: (first.0, last.0 + 1),
+        })
+        .collect();
+    let mut thinning = Thinning::new(spans, ring.reach(), ROUNDS).expect("a thinning");
+    let mut kept = Vec::new();
+    let runner = tairix_parallel::Threaded::new(4);
+    while !thinning.step(&ring, &runner, &mut kept).expect("thinned") {}
+    for (cell, offer) in &kept {
+        wood.mark(*cell, offer).expect("every tree kept marked");
+    }
+    wood
 }
 
 /// `wood` surveyed over `fields` a step at a time, as a scene's composing
@@ -123,7 +216,7 @@ fn surveyed(wood: FarWood, fields: &[Heightfield]) -> FarWood {
     loop {
         steps += 1;
         match surveying
-            .step((fields, &prototypes), &tairix_parallel::SERIAL)
+            .step(fields, &tairix_parallel::SERIAL)
             .expect("surveyed")
         {
             ControlFlow::Continue(more) => {
@@ -153,8 +246,8 @@ fn geometry<'a>(
 }
 
 /// The nearest of `wood`'s trees `ray` meets in `(near, far)`, found by
-/// meeting every tree whose trunk stands within its crowns' reach of the
-/// ray's track, one by one.
+/// meeting every tree marked whose trunk stands within its crowns' reach of
+/// the ray's track, one by one.
 fn met_one_by_one(
     wood: &FarWood,
     ray: &Ray,
@@ -172,12 +265,16 @@ fn met_one_by_one(
             ray.origin.z.max(end.z) + wood.reach,
         ),
     );
-    let index = |at: f64, origin: f64| crate::noise::cell(((at - origin) / wood.cell).max(0.0)).0;
+    let index =
+        |at: f64, origin: f64| tairix_noise::cell(((at - origin) / wood.sown.side).max(0.0)).0;
     let mut best: Option<Hit> = None;
     for row in index(low.1, wood.origin.1)..=index(high.1, wood.origin.1) {
         for column in index(low.0, wood.origin.0)..=index(high.0, wood.origin.0) {
-            let place = wood.place((column, row));
-            let Some(((prototype, pose, scale, key), _)) = wood.placed(place, geometry.fields)
+            if !wood.marking.marked((column, row)) {
+                continue;
+            }
+            let Some(((prototype, pose, scale, key), _)) =
+                wood.placed((column, row), geometry.fields)
             else {
                 continue;
             };
@@ -263,11 +360,7 @@ fn a_ray_over_the_crowns_or_short_of_the_wood_meets_nothing_and_a_shadow_ray_agr
     let level = Ray::new(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 0.0, 1.0));
     assert!(met_walking(wood, &level, 140.0, geometry).is_none());
     let hit = met_walking(wood, &level, 1e9, geometry).expect("a tree ahead");
-    assert!(
-        hit.t > STRETCH.from - wood.reach && hit.t < STRETCH.to,
-        "{}",
-        hit.t
-    );
+    assert!(hit.t > FROM - wood.reach && hit.t < STRETCH.to, "{}", hit.t);
     for tile in &tiles {
         let span = (1e-6, 1e9);
         assert_eq!(
@@ -291,8 +384,7 @@ fn a_hit_on_a_far_tree_places_that_tree_again_and_carries_its_bark_and_key() {
     // The point met lies on the prototype as that placing places it.
     let local = pose.point_to_local(level.at(hit.t));
     let bounds = prototypes[0].bounds();
-    let ((_, placed_pose, scale, placed_key), _) =
-        wood.placed(wood.place(cell), &fields).expect("its tree");
+    let ((_, placed_pose, scale, placed_key), _) = wood.placed(cell, &fields).expect("its tree");
     assert_eq!(placed_pose, pose);
     assert_eq!(placed_key, key);
     let within = local * (1.0 / scale);
@@ -305,75 +397,70 @@ fn a_hit_on_a_far_tree_places_that_tree_again_and_carries_its_bark_and_key() {
 }
 
 #[test]
-fn a_far_wood_keeps_to_its_ring_across_the_view_and_stands_no_tree_off_its_patches() {
+fn a_far_wood_traces_the_trees_its_thinning_kept_and_stands_none_off_its_patches() {
     let fields = ground();
     let wood = wood(&fields);
-    let mut standing = 0;
-    for row in 0..1300u32 {
-        for column in (0..1300u32).step_by(3) {
-            let place = wood.place((column, row));
-            if wood.tree_of(place, &fields).is_none() {
-                continue;
-            }
-            standing += 1;
-            let (x, z) = place.0;
-            let distance = mathf::hypot(x, z);
-            assert!(
-                (STRETCH.from..=STRETCH.to).contains(&distance),
-                "{distance}"
-            );
-            assert!(mathf::atan2(x, z).abs() <= STRETCH.across + 1e-9);
+    let kept: Vec<Offer> = wood.kept(&fields).collect();
+    assert!(kept.len() > 1000, "{}", kept.len());
+    for tree in &kept {
+        let distance = mathf::hypot(tree.at.0, tree.at.1);
+        assert!((FROM..=STRETCH.to).contains(&distance), "{distance}");
+        assert!(wood.across(tree.at));
+    }
+    // No two kept crowd each other.
+    let mut sorted = kept.clone();
+    sorted.sort_by(|a, b| a.at.0.total_cmp(&b.at.0));
+    for (index, tree) in sorted.iter().enumerate() {
+        for other in sorted[index + 1..]
+            .iter()
+            .take_while(|other| other.at.0 - tree.at.0 < 20.0)
+        {
+            assert!(!crowd(tree, other), "{tree:?} and {other:?}");
         }
     }
-    assert!(standing > 1000, "{standing}");
-    // A wood covering the least share of the ground stands the fewest trees
-    // over the same cells, only in the patches it keeps.
-    let stood = |wood: &FarWood| {
-        (0..400u32)
-            .flat_map(|row| (0..400u32).map(move |column| (column + 500, row + 900)))
-            .filter(|&cell| wood.tree_of(wood.place(cell), &fields).is_some())
-            .count()
-    };
-    let bare = FarWood::new((reader(0.0), 11), (GRIDS, &fields), STRETCH).expect("a wood");
-    let (few, many) = (stood(&bare), stood(&wood));
-    assert!(20 * few < many, "{few} against {many}");
+    // A wood covering the least share of the ground stands the fewest trees,
+    // only in the patches it keeps.
+    let bare = kept_trees(&reader(0.0), &fields);
+    assert!(20 * bare < kept.len(), "{bare} against {}", kept.len());
+}
+
+/// How many trees `reader`'s wood far off keeps over `fields`.
+fn kept_trees(reader: &Reader, fields: &[Heightfield]) -> usize {
+    kept(reader, fields, STRETCH).kept(fields).count()
 }
 
 #[test]
-fn a_far_woods_tiles_cover_its_ring_and_bound_its_crowns() {
+fn a_far_woods_tiles_cover_its_trees_and_bound_their_crowns() {
     let fields = rising(0.02);
     let prototypes = [tree()];
-    let wood = built(&reader(0.9), &fields);
+    let unsurveyed = kept(&reader(0.9), &fields, STRETCH);
+    let wood = surveyed(unsurveyed.clone(), &fields);
     let tiles: Vec<Tile> = wood.tiles(&fields).collect();
     assert!(!tiles.is_empty() && tiles.len() < (TILES * TILES) as usize);
     let mut covered = 0;
-    for row in (0..1334u32).step_by(5) {
-        for column in (0..1334u32).step_by(5) {
-            let place = wood.place((column, row));
-            let Some(((prototype, pose, scale, _), _)) = wood.placed(place, &fields) else {
-                continue;
-            };
-            let ((x, z), top) = (
-                place.0,
-                pose.at.y + prototypes[prototype as usize].bounds().max.y * scale,
-            );
-            let tile = tiles
-                .iter()
-                .find(|tile| {
-                    tile.from.0 <= x && x <= tile.to.0 && tile.from.1 <= z && z <= tile.to.1
-                })
-                .expect("a tile over every tree");
-            let bounds = tile.bounds();
-            assert!(
-                bounds.min.y <= pose.at.y && bounds.max.y >= top,
-                "({x}, {z}): {top} in {bounds:?}"
-            );
-            covered += 1;
-        }
+    for tree in wood.kept(&fields) {
+        let cell = (
+            u32::try_from(SOWN.cell(tree.at).expect("a cell").0 - wood.first.0).expect("on it"),
+            u32::try_from(SOWN.cell(tree.at).expect("a cell").1 - wood.first.1).expect("on it"),
+        );
+        let ((prototype, pose, scale, _), _) = wood.placed(cell, &fields).expect("placed");
+        let ((x, z), top) = (
+            tree.at,
+            pose.at.y + prototypes[prototype as usize].bounds().max.y * scale,
+        );
+        let tile = tiles
+            .iter()
+            .find(|tile| tile.from.0 <= x && x <= tile.to.0 && tile.from.1 <= z && z <= tile.to.1)
+            .expect("a tile over every tree");
+        let bounds = tile.bounds();
+        assert!(
+            bounds.min.y <= pose.at.y && bounds.max.y >= top,
+            "({x}, {z}): {top} in {bounds:?}"
+        );
+        covered += 1;
     }
     assert!(covered > 500, "{covered}");
     // Unsurveyed, a tile reaches as high as the tallest tree over its ground.
-    let unsurveyed = FarWood::new((reader(0.9), 11), (GRIDS, &fields), STRETCH).expect("a wood");
     for tile in unsurveyed.tiles(&fields) {
         assert!(tile.bounds().max.y >= tile.ground.1 + unsurveyed.tallest);
     }
@@ -390,11 +477,11 @@ fn a_place_alone_bounds_the_tree_its_ground_grows() {
     let mut grown = 0;
     for row in (500..900u32).step_by(2) {
         for column in (500..800u32).step_by(2) {
-            let place = wood.place((column, row));
+            let place = wood.place((column, row)).expect("a place");
             let Some(sprout) = wood.reader.sprout(place, None) else {
                 continue;
             };
-            if let Some((tree, _)) = wood.reader.grow(&sprout, (&wood.grids, &fields)) {
+            if let Some(tree) = wood.reader.grown(&sprout, (&wood.grids, &fields)) {
                 assert!(tree.height <= wood.reader.highest(&sprout) + 1e-9);
                 grown += 1;
             }
@@ -415,14 +502,14 @@ fn a_survey_passes_by_the_ground_above_a_woods_tree_line_and_misses_no_tree_belo
         },
         ..reader(0.9)
     };
-    let woods = vec![built(&lined, &fields)];
+    let woods = vec![built(&lined, &fields, STRETCH)];
     let geometry = geometry(&fields, &prototypes, &woods);
     let wood = &woods[0];
     let survey = wood.survey.as_ref().expect("surveyed");
     let cell_at = |(x, z): (f64, f64)| {
         (
-            crate::noise::cell((x - wood.origin.0) / wood.cell).0,
-            crate::noise::cell((z - wood.origin.1) / wood.cell).0,
+            tairix_noise::cell((x - wood.origin.0) / wood.sown.side).0,
+            tairix_noise::cell((z - wood.origin.1) / wood.sown.side).0,
         )
     };
     let reached = |at: (f64, f64)| {
@@ -436,7 +523,7 @@ fn a_survey_passes_by_the_ground_above_a_woods_tree_line_and_misses_no_tree_belo
     assert!(!reached((0.0, -900.0)), "behind the eye, out of the view");
     // A block's crowns stand no higher than its highest ground and its
     // tallest tree, rounded outward.
-    let span = f64::from(BLOCK) * wood.cell;
+    let span = f64::from(BLOCK) * wood.sown.side;
     let block = survey.of(cell_at((0.0, 300.0))).1.expect("surveyed");
     let (ground, crowns) = (f64::from(block.low), f64::from(block.high));
     assert!(crowns > ground && crowns <= ground + 0.1 * 3.0 * span + wood.tallest + 1e-3);
@@ -462,25 +549,18 @@ fn a_survey_passes_by_the_ground_above_a_woods_tree_line_and_misses_no_tree_belo
 }
 
 #[test]
-fn a_survey_marks_exactly_the_cells_that_keep_a_tree_and_bounds_every_crown_about_them() {
+fn a_survey_bounds_every_crown_about_the_cells_kept_and_their_trees_read_again() {
     let fields = rising(0.02);
     let prototypes = [tree()];
-    let wood = built(&reader(0.9), &fields);
+    let wood = wood(&fields);
     let survey = wood.survey.as_ref().expect("surveyed");
     let spread = wood.spread;
-    let (mut standing, mut read) = (0, 0);
-    // Close over a stretch of the ring, sparsely over the whole lattice.
-    let close = (550..850u32).flat_map(|column| (650..1100u32).map(move |row| (column, row)));
-    let sparse = (0..1334u32)
-        .step_by(7)
-        .flat_map(|column| (0..1334u32).step_by(7).map(move |row| (column, row)));
-    for cell in close.chain(sparse) {
-        read += 1;
-        let placed = wood.placed(wood.place(cell), &fields);
-        assert_eq!(wood.standing(cell).is_some(), placed.is_some(), "{cell:?}");
-        let Some(((prototype, pose, scale, _), _)) = placed else {
-            continue;
-        };
+    let mut standing = 0;
+    for cell in wood.marking.cells() {
+        assert!(wood.standing(cell).is_some(), "{cell:?}");
+        let ((prototype, pose, scale, _), _) = wood
+            .placed(cell, &fields)
+            .expect("a kept cell's tree read again");
         standing += 1;
         let top = pose.at.y + prototypes[prototype as usize].bounds().max.y * scale;
         for down in 0..=2 * spread {
@@ -494,106 +574,64 @@ fn a_survey_marks_exactly_the_cells_that_keep_a_tree_and_bounds_every_crown_abou
             }
         }
     }
-    assert!(standing > 2000, "{standing} of {read}");
+    assert!(standing > 2000, "{standing}");
+    // A cell kept by none stands no tree, though its place may grow one.
+    let unkept = (0..1334u32)
+        .flat_map(|column| (0..1334u32).map(move |row| (column, row)))
+        .find(|&cell| !wood.marking.marked(cell) && wood.placed(cell, &fields).is_some())
+        .expect("a place the thinning dropped");
+    assert!(wood.standing(unkept).is_none());
+}
+
+/// A tree off the wood's marking, behind the eye or off the land, is refused
+/// rather than dropped, and leaves what the wood stands as it was.
+#[test]
+fn a_far_wood_refuses_a_tree_off_its_marking() {
+    let fields = ground();
+    let mut wood = kept(&reader(0.9), &fields, STRETCH);
+    let before = wood.marking.cells().count();
+    let offer = wood.kept(&fields).next().expect("a tree");
+    let behind = SOWN.cell((0.0, -500.0)).expect("a cell");
+    let off = [
+        behind,
+        (wood.first.0 - 1, wood.first.1),
+        (wood.first.0, wood.first.1 - 1),
+        (wood.first.0 + 100_000, wood.first.1),
+    ];
+    for cell in off {
+        assert!(wood.mark(cell, &offer).is_none(), "{cell:?}");
+    }
+    assert_eq!(wood.marking.cells().count(), before);
 }
 
 #[test]
-fn a_survey_keeps_to_the_ground_its_ring_across_the_view_covers() {
+fn a_survey_keeps_to_the_ground_its_stretch_across_the_view_covers() {
     let fields = ground();
     let wood = wood(&fields);
     let survey = wood.survey.as_ref().expect("surveyed");
-    let span = f64::from(BLOCK) * wood.cell;
+    let span = f64::from(BLOCK) * wood.sown.side;
     let all_about = (2.0 * STRETCH.to / span).powi(2);
     assert!(
         crate::vector::real(survey.blocks.len()) < 0.5 * all_about,
         "{}",
         survey.blocks.len()
     );
-    assert!(survey.marks.len() < survey.blocks.len());
-    // Looking out off the traced square, it surveys nothing and stands no
-    // tree.
+    // Looking out off the traced square, it keeps no tree and is traced as
+    // no tile.
     let outward = Stretch {
         eye: (1900.0, 0.0),
         heading: core::f64::consts::FRAC_PI_2,
         across: 0.3,
         ..STRETCH
     };
-    let away = surveyed(
-        FarWood::new((reader(0.9), 11), (GRIDS, &fields), outward).expect("a wood"),
-        &fields,
-    );
-    let survey = away.survey.as_ref().expect("surveyed");
-    assert!(survey.blocks.is_empty() && survey.marks.is_empty());
+    let away = built(&reader(0.9), &fields, outward);
+    assert_eq!(away.kept(&fields).count(), 0);
     assert!(away.standing((1300, 666)).is_none());
     assert_eq!(away.tiles(&fields).count(), 0);
 }
 
 #[test]
-fn a_wood_matched_to_trees_standing_as_its_own_would_fills_the_ground_as_they_do() {
-    let fields = ground();
-    let stretch = Stretch {
-        from: 1500.0,
-        to: 1900.0,
-        ..STRETCH
-    };
-    let wood = || FarWood::new((reader(0.9), 11), (GRIDS, &fields), stretch).expect("a wood");
-    // The trees a wood filling a third of the ground stands over the ring it
-    // is matched over, every place of it read.
-    let aimed = FarWood {
-        filled: 0.3,
-        ..wood()
-    };
-    let ring = FarWood {
-        from: MATCHED * aimed.from,
-        to: aimed.from,
-        ..aimed.clone()
-    };
-    let stood: Vec<(f64, f64)> = (0..1334u32)
-        .flat_map(|row| (0..1334u32).map(move |column| (column, row)))
-        .map(|cell| ring.place(cell))
-        .filter(|&place| ring.tree_of(place, &fields).is_some())
-        .map(|(at, _)| at)
-        .collect();
-    assert!(stood.len() > 5000, "{}", stood.len());
-    let mut matching = wood().matching(stood.into_iter()).expect("matching");
-    let (mut steps, mut done) = (0, 0.0);
-    let matched = loop {
-        steps += 1;
-        match matching
-            .step(&fields, &tairix_parallel::SERIAL)
-            .expect("read")
-        {
-            ControlFlow::Continue(more) => {
-                assert!(more.done() > done && more.done() < 1.0);
-                done = more.done();
-                matching = more;
-            }
-            ControlFlow::Break(wood) => break wood,
-        }
-    };
-    assert!(steps > 2, "{steps}");
-    assert!(
-        (matched.filled / 0.3 - 1.0).abs() < 0.1,
-        "{}",
-        matched.filled
-    );
-    // Where none stood, it keeps the share its crowns fill when packed.
-    let none = wood().matching(core::iter::empty()).expect("matching");
-    let mut matching = none;
-    let unmatched = loop {
-        match matching
-            .step(&fields, &tairix_parallel::SERIAL)
-            .expect("read")
-        {
-            ControlFlow::Continue(more) => matching = more,
-            ControlFlow::Break(wood) => break wood,
-        }
-    };
-    assert!((unmatched.filled - PACKED).abs() < 1e-12);
-}
-
-#[test]
-fn every_crown_lies_over_a_tile_however_near_the_rings_edge_it_stands() {
+fn every_crown_lies_over_a_tile_however_near_the_woods_edge_it_stands() {
     let fields = ground();
     // Its far edge just short of a tile's, 1500 m ahead: a crown standing at
     // the edge reaches over the next tile alone.
@@ -601,10 +639,7 @@ fn every_crown_lies_over_a_tile_however_near_the_rings_edge_it_stands() {
         to: 1498.0,
         ..STRETCH
     };
-    let wood = surveyed(
-        FarWood::new((reader(0.9), 11), (GRIDS, &fields), stretch).expect("a wood"),
-        &fields,
-    );
+    let wood = built(&reader(0.9), &fields, stretch);
     let tiles: Vec<Tile> = wood.tiles(&fields).collect();
     let over = |(x, z): (f64, f64)| {
         tiles
@@ -612,19 +647,13 @@ fn every_crown_lies_over_a_tile_however_near_the_rings_edge_it_stands() {
             .any(|tile| tile.from.0 <= x && x <= tile.to.0 && tile.from.1 <= z && z <= tile.to.1)
     };
     let mut overhanging = 0;
-    for row in 0..1334u32 {
-        for column in 0..1334u32 {
-            let place = wood.place((column, row));
-            if wood.tree_of(place, &fields).is_none() {
-                continue;
-            }
-            let (x, z) = place.0;
-            for corner in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                let reached = (x + corner.0 * wood.reach, z + corner.1 * wood.reach);
-                assert!(over(reached), "({x}, {z}) reaching {reached:?}");
-            }
-            overhanging += u32::from(z + wood.reach > 1500.0);
+    for tree in wood.kept(&fields) {
+        let (x, z) = tree.at;
+        for corner in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let reached = (x + corner.0 * wood.reach, z + corner.1 * wood.reach);
+            assert!(over(reached), "({x}, {z}) reaching {reached:?}");
         }
+        overhanging += u32::from(z + wood.reach > 1500.0);
     }
-    assert!(overhanging > 0, "a crown reaches past the ring's edge");
+    assert!(overhanging > 0, "a crown reaches past its edge");
 }

@@ -12,14 +12,24 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use tairix_parallel::JobRunner;
-use tairix_util::{fallible, mathf};
-
 use tairix_countryside::boundary::Style;
 use tairix_countryside::network::Rank;
 use tairix_countryside::site::Villages;
 use tairix_countryside::usage::Mix;
 use tairix_countryside::{self as countryside, Point};
+use tairix_land::attributes::Lie;
+use tairix_land::channel::{Section, Station};
+use tairix_land::coarse::Crossing;
+use tairix_land::course::{Courses, Mark};
+use tairix_land::grown::Grown;
+use tairix_land::plan::{Farming, Level, Plan as LandPlan, Rivers, Roadway, Surface, Wear, LEVELS};
+use tairix_land::relief::{Landform, Terrain};
+use tairix_land::snow::Snowpack;
+use tairix_land::ways::Ways;
+use tairix_land::Season;
+use tairix_noise::smoothstep;
+use tairix_parallel::JobRunner;
+use tairix_util::{fallible, mathf};
 
 use super::architecture::Aqueduct;
 use super::courses::{Dressing, Mason, Opening, Quarry, Ring, Wall, Weathering};
@@ -35,29 +45,19 @@ use super::waterside;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
 use super::woodland::{Beneath, Deadfall, Wood};
 use super::{direction, lumens, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
-use crate::solid::Form;
-
-use crate::channel::{Section, Station};
-use crate::course::Mark;
-use crate::farmed::Grown;
 use crate::grass::Seen;
 use crate::ground::{Ground, Palette, Rock, Tilled};
 use crate::heightfield::Heightfield;
-use crate::land::{
-    self, Build, Crossing, Farming, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan,
-    Rivers, Roadway, Surface, Survey, Ways, Wear, NESTS,
-};
+use crate::land::{self, Build, Fields, Horizon, Laid, Land, NearWater, Plan, Survey, NESTS};
 use crate::material::{Finish, Foam, Material, Relief, Wind};
-use crate::noise::smoothstep;
 use crate::pigment::Pigment;
 use crate::rock::Lithology;
 use crate::scene::Exposure;
+use crate::sea::Sea;
 use crate::shade::Rect;
-use crate::shape::Shape;
-use crate::snow::Snowpack;
-use crate::terrain::{Landform, Sea, Terrain};
-use crate::tree::Season;
-use crate::vector::{real, Frame, Pose, Vec3};
+use crate::shape::{Aabb, Shape};
+use crate::solid::Form;
+use crate::vector::{real, wrapped, Frame, Pose, Vec3};
 use crate::wood::{Rooting, Woodland, ANYWHERE};
 
 /// The colours of a region's ground, as sRGB.
@@ -260,28 +260,24 @@ pub(super) fn lay(
     material: usize,
     water: Option<usize>,
 ) -> Option<Build> {
-    let (cells, step) = (plan.cells.1, plan.far_step());
-    let origin = (
-        plan.relief.centre.0 - plan.reach,
-        plan.relief.centre.1 - plan.reach,
-    );
-    let far = stage.field(Heightfield::new(cells, origin, step, false)?)?;
-    // Each finer grid is laid once the eye is sited; until then a grid of
-    // one cell holds its place among the scene's.
+    // Each of the land's grids but the horizon's is laid once its piece of
+    // the land is refined; until then a grid of one cell holds its place
+    // among the scene's.
+    let origin = plan.land.relief.centre;
+    let placeholder = |stage: &mut Stage| stage.field(Heightfield::new(1, origin, 1.0, false)?);
+    let far = placeholder(stage)?;
     let mut nested = [None; NESTS];
     for (slot, nest) in nested.iter_mut().zip(&plan.nests) {
         if nest.is_some() {
-            *slot = Some(stage.field(Heightfield::new(1, origin, 1.0, false)?)?);
+            *slot = Some(placeholder(stage)?);
         }
     }
-    // The lakes' and rivers' grids, like the finer grids, are laid once the
-    // land knows it has any.
     let fresh = match water {
-        Some(_) => Some(stage.field(Heightfield::new(1, origin, 1.0, false)?)?),
+        Some(_) => Some(placeholder(stage)?),
         None => None,
     };
     let near_fresh = match (water, plan.near_water) {
-        (Some(_), Some(_)) => Some(stage.field(Heightfield::new(1, origin, 1.0, false)?)?),
+        (Some(_), Some(_)) => Some(placeholder(stage)?),
         _ => None,
     };
     let beyond = match (plan.horizon, plan.horizon_placing()) {
@@ -297,7 +293,10 @@ pub(super) fn lay(
     // Beyond the horizon grid a floor below anything the land can reach, so
     // a ray passing over its edge still meets ground.
     if beyond.is_some() {
-        stage.ground(plan.relief.lowest() - 2.0 * plan.roughness - 1.0, material)?;
+        stage.ground(
+            plan.land.relief.lowest() - 2.0 * plan.land.roughness - 1.0,
+            material,
+        )?;
     }
     if let Some(water) = water {
         for field in [fresh, near_fresh].into_iter().flatten() {
@@ -323,22 +322,82 @@ pub(super) fn horizon(reach: f64) -> Horizon {
     }
 }
 
-/// Finer grids about the eye, each 1024 cells a side: one `reaches.0`
-/// either way over the middle distance and one `reaches.1` either way
-/// underfoot, droplets running over each as `droplets` has them per vertex.
+/// A finer level about the eye: how far either way of its middle its square
+/// reaches, and the droplets run over it, to each vertex they may start on.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Nest {
+    pub(super) reach: f64,
+    pub(super) droplets: f64,
+}
+
+/// How many of its cells a finer level's square spans about: its step a
+/// 512th of its reach.
+const NEST_CELLS: f64 = 1024.0;
+
+/// Two finer levels about the eye: one `reaches.0` either way over the middle
+/// distance and one `reaches.1` either way underfoot, droplets running over
+/// each as `droplets` has them per vertex.
 pub(super) fn nests(reaches: (f64, f64), droplets: (f64, f64)) -> [Option<Nest>; NESTS] {
     [
         Some(Nest {
             reach: reaches.0,
-            cells: 1024,
             droplets: droplets.0,
         }),
         Some(Nest {
             reach: reaches.1,
-            cells: 1024,
             droplets: droplets.1,
         }),
     ]
+}
+
+/// A land's levels, and how far each finer one's square reaches about the
+/// eye.
+pub(super) struct Levels {
+    /// The coarse lattice's cells a side.
+    pub(super) cells: usize,
+    pub(super) land: [Option<Level>; LEVELS],
+    pub(super) nests: [Option<f64>; NESTS],
+}
+
+/// The levels of a land `reach` either way: the far grid of `cells.1` cells
+/// over the coarse lattice's `cells.0`, which it must divide, droplets
+/// running over it as `droplets` has them; then each finer level `finer`
+/// names, its parent's step divided by the whole number, at least one,
+/// nearest that step over a `NEST_CELLS`th of its square's breadth.
+pub(super) fn levels(
+    reach: f64,
+    cells: (usize, usize),
+    droplets: f64,
+    finer: [Option<Nest>; NESTS],
+) -> Levels {
+    let mut land = [None; LEVELS];
+    let mut nests = [None; NESTS];
+    let ratio = (cells.0 > 0 && cells.1.is_multiple_of(cells.0))
+        .then(|| u32::try_from(cells.1 / cells.0).ok())
+        .flatten();
+    if let (Some(ratio), Some(slot)) = (ratio, land.first_mut()) {
+        *slot = Some(Level { ratio, droplets });
+        let mut step = 2.0 * reach / real(cells.1);
+        for ((nest, slot), reach_slot) in finer.iter().zip(land.iter_mut().skip(1)).zip(&mut nests)
+        {
+            let Some(nest) = nest else {
+                break;
+            };
+            let wanted = 2.0 * nest.reach / NEST_CELLS;
+            let ratio = u32::try_from(mathf::round_i32(step / wanted).max(1)).unwrap_or(1);
+            *slot = Some(Level {
+                ratio,
+                droplets: nest.droplets,
+            });
+            *reach_slot = Some(nest.reach);
+            step /= f64::from(ratio);
+        }
+    }
+    Levels {
+        cells: cells.0,
+        land,
+        nests,
+    }
 }
 
 /// Where the eye stands, and which way it looks.
@@ -607,8 +666,22 @@ impl Scheme {
             Self::Stream { lithology } => stream_scene(stage, dice, land, (vantage?, lithology)),
             Self::Sculpture(grounds) => {
                 let vantage = vantage?;
+                let set_out = stage.objects.len();
                 sculpture_piece(stage, dice, land, &vantage)?;
-                grounds.scheme().scene(stage, dice, land, Some(vantage))
+                let middle = stage
+                    .objects
+                    .iter_from(set_out)
+                    .try_fold(Aabb::EMPTY, |around, object| {
+                        Some(around.union(object.shape.bounds(stage.geometry())?))
+                    })?;
+                let look = grounds.scheme().scene(stage, dice, land, Some(vantage))?;
+                if !middle.is_finite() {
+                    return Some(look);
+                }
+                Some(Look {
+                    view: framing(look.view, middle.centre(), stage.aspect),
+                    ..look
+                })
             }
             Self::Aqueduct(aqueduct) => aqueduct.finish(stage, dice, land, vantage?),
         }
@@ -1041,7 +1114,7 @@ pub(super) fn in_sight(height: &dyn Fn(f64, f64) -> f64, eye: Vec3, target: Vec3
 /// Paint `land`'s ways onto its ground, their courses handed to the
 /// ground's pigment.
 fn paint_ways(stage: &mut Stage, land: &mut Land) {
-    if land.ways.surfaced.iter().all(|courses| courses.len() == 0) {
+    if land.ways.surfaced.iter().all(Courses::is_empty) {
         return;
     }
     if let Some(ground) = ground_of(stage, land) {
@@ -1212,26 +1285,34 @@ pub(super) fn backdrop(
         tilt: (0.0, 0.0),
         clearing: Some((level, radius)),
     };
-    let plan = Plan {
-        relief: terrain.clone(),
+    let levels = levels(
         reach,
-        sea: None,
-        wear: GENTLE,
-        rivers: None,
-        road: None,
-        farming: None,
-        roughness: 0.6,
-        ridges: 0.35,
-        droplets: 0.03,
-        cells: (192, 512),
-        nests: nests((700.0, (3.0 * radius).max(70.0)), (0.08, 0.08)),
+        (192, 576),
+        0.03,
+        nests((700.0, (3.0 * radius).max(70.0)), (0.08, 0.08)),
+    );
+    let plan = Plan {
+        land: LandPlan {
+            relief: terrain.clone(),
+            reach,
+            sea: None,
+            wear: GENTLE,
+            rivers: None,
+            road: None,
+            farming: None,
+            roughness: 0.6,
+            ridges: 0.35,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
+        },
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let material = ground(stage, dice, soil_colours, (-1e3, NO_SNOW, 0.7), 3.0)?;
     let build = lay(stage, plan, material, None)?;
@@ -1786,40 +1867,43 @@ pub(super) fn meadow(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     } else {
         None
     };
+    let levels = levels(reach, (256, 1024), 0.05, nests((700.0, 80.0), (0.08, 0.12)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: Wear {
-            passes: 32,
-            incision: 2.0e-3,
-            creep: 0.08,
-            repose: 0.9,
-            infill: 0.3,
-            strata: None,
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                passes: 32,
+                incision: 2.0e-3,
+                creep: 0.08,
+                repose: 0.9,
+                infill: 0.3,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 4.0e5,
+                width: 3.0,
+                meander: 1.2,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.05,
+            }),
+            road,
+            farming: None,
+            roughness: 1.2,
+            ridges: 0.35,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 4.0e5,
-            width: 3.0,
-            meander: 1.2,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.05,
-        }),
-        road,
-        farming: None,
-        roughness: 1.2,
-        ridges: 0.35,
-        droplets: 0.05,
-        cells: (256, 1024),
-        nests: nests((700.0, 80.0), (0.08, 0.12)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let soil = dice.pick(&[GREEN, GREEN, GOLDEN, HIGHLAND])?;
     let material = ground(stage, dice, &soil, (-1e3, NO_SNOW, 0.72), 4.0)?;
@@ -2044,46 +2128,49 @@ pub(super) fn farmland(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         lanes: region.lanes,
         season,
     };
+    let levels = levels(reach, (256, 1024), 0.04, nests((700.0, 80.0), (0.06, 0.1)));
     let mut plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: Wear {
-            passes: 28,
-            incision: 1.6e-3,
-            creep: 0.09,
-            repose: 0.9,
-            infill: 0.35,
-            strata: None,
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                passes: 28,
+                incision: 1.6e-3,
+                creep: 0.09,
+                repose: 0.9,
+                infill: 0.35,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 5.0e5,
+                width: 3.0,
+                meander: 1.3,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.04,
+            }),
+            road,
+            farming: Some(farming),
+            roughness: 0.9,
+            ridges: 0.25,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 5.0e5,
-            width: 3.0,
-            meander: 1.3,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.04,
-        }),
-        road,
-        farming: Some(farming),
-        roughness: 0.9,
-        ridges: 0.25,
-        droplets: 0.04,
-        cells: (256, 1024),
-        nests: nests((700.0, 80.0), (0.06, 0.1)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let material = ground(stage, dice, &region.soil, (-1e3, NO_SNOW, 0.72), 4.0)?;
     till(stage, material)?;
     let water = river(stage, dice)?;
     if season == Season::Winter {
-        plan.snowpack = Some(Snowpack {
+        plan.land.snowpack = Some(Snowpack {
             heading: dice.range(0.0, TAU),
             fallen: dice.range(0.12, 0.35),
             seed: dice.seed(),
@@ -2268,33 +2355,36 @@ pub(super) fn forest(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         tilt: (0.0, 0.0),
         clearing: Some((level, glade)),
     };
+    let levels = levels(reach, (256, 1024), 0.04, nests((700.0, 64.0), (0.08, 0.1)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: GENTLE,
-        rivers: Some(Rivers {
-            catchment: 2.0e5,
-            width: 1.8,
-            meander: 1.6,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.1,
-        }),
-        road: None,
-        farming: None,
-        roughness: 0.8,
-        ridges: 0.3,
-        droplets: 0.04,
-        cells: (256, 1024),
-        nests: nests((700.0, 64.0), (0.08, 0.1)),
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: GENTLE,
+            rivers: Some(Rivers {
+                catchment: 2.0e5,
+                width: 1.8,
+                meander: 1.6,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.1,
+            }),
+            road: None,
+            farming: None,
+            roughness: 0.8,
+            ridges: 0.3,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
+        },
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let material = ground(stage, dice, &GREEN, (-1e3, NO_SNOW, 0.7), 3.0)?;
     let water = river(stage, dice)?;
@@ -2502,43 +2592,51 @@ pub(super) fn alpine(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     lies.sort_by(f64::total_cmp);
     let lake = lies.get(12).copied()?;
     let snow_line = lake + dice.range(0.45, 0.65) * height;
-    let plan = Plan {
-        relief,
+    let levels = levels(
         reach,
-        sea: Some(lake),
-        wear: Wear {
-            passes: 22,
-            incision: 1.4e-3,
-            creep: 0.012,
-            repose: 1.5,
-            infill: 0.3,
-            strata: None,
+        (384, 1152),
+        0.06,
+        nests((1000.0, 90.0), (0.08, 0.12)),
+    );
+    let plan = Plan {
+        land: LandPlan {
+            relief,
+            reach,
+            sea: Some(lake),
+            wear: Wear {
+                passes: 22,
+                incision: 1.4e-3,
+                creep: 0.012,
+                repose: 1.5,
+                infill: 0.3,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 1.5e6,
+                width: 6.0,
+                meander: 0.9,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.3,
+            }),
+            road: None,
+            farming: None,
+            roughness: 22.0,
+            ridges: 0.75,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: Some(snow_line),
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 1.5e6,
-            width: 6.0,
-            meander: 0.9,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.3,
-        }),
-        road: None,
-        farming: None,
-        roughness: 22.0,
-        ridges: 0.75,
-        droplets: 0.06,
-        cells: (384, 1024),
-        nests: nests((1000.0, 90.0), (0.08, 0.12)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(Horizon {
             cells: 512,
             ..horizon(reach)
         }),
-        snow_line: Some(snow_line),
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let material = ground(stage, dice, &HIGHLAND, (lake + 1.5, snow_line, 0.68), 5.0)?;
     let water = lake_water(stage, dice)?;
@@ -2714,40 +2812,43 @@ pub(super) fn coast(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         tilt: (0.0, 0.0),
         clearing: None,
     };
+    let levels = levels(reach, (256, 1024), 0.05, nests((700.0, 70.0), (0.08, 0.12)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: Some(0.0),
-        wear: Wear {
-            passes: 16,
-            incision: 6.0e-4,
-            creep: 0.06,
-            repose: 1.0,
-            infill: 0.3,
-            strata: None,
+        land: LandPlan {
+            relief,
+            reach,
+            sea: Some(0.0),
+            wear: Wear {
+                passes: 16,
+                incision: 6.0e-4,
+                creep: 0.06,
+                repose: 1.0,
+                infill: 0.3,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 2.5e5,
+                width: 3.0,
+                meander: 1.2,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.05,
+            }),
+            road: None,
+            farming: None,
+            roughness: 1.5,
+            ridges: 0.5,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 2.5e5,
-            width: 3.0,
-            meander: 1.2,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.05,
-        }),
-        road: None,
-        farming: None,
-        roughness: 1.5,
-        ridges: 0.5,
-        droplets: 0.05,
-        cells: (256, 1024),
-        nests: nests((700.0, 70.0), (0.08, 0.12)),
+        nests: levels.nests,
         near_water: None,
         horizon: None,
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let soil = dice.pick(&[GREEN, GOLDEN, VOLCANIC, HIGHLAND])?;
     let material = ground(stage, dice, &soil, (1.8, NO_SNOW, 0.72), 3.0)?;
@@ -3084,26 +3185,34 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
     } else {
         None
     };
-    let plan = Plan {
-        relief,
+    let levels = levels(
         reach,
-        sea: None,
-        wear,
-        rivers: None,
-        road,
-        farming: None,
-        roughness,
-        ridges: if dunes { 0.0 } else { 0.6 },
-        droplets: droplets.0,
-        cells: (256, 1024),
-        nests: nests((700.0, 80.0), (droplets.1, droplets.2)),
+        (256, 1024),
+        droplets.0,
+        nests((700.0, 80.0), (droplets.1, droplets.2)),
+    );
+    let plan = Plan {
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear,
+            rivers: None,
+            road,
+            farming: None,
+            roughness,
+            ridges: if dunes { 0.0 } else { 0.6 },
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: if dunes { 0.0 } else { 0.12 },
+            seed: dice.seed(),
+        },
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: if dunes { 0.0 } else { 0.12 },
-        seed: dice.seed(),
     };
     let material = if dunes {
         sand(stage, dice)?
@@ -3152,7 +3261,7 @@ fn sand(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
 /// stand beside near the land's middle.
 fn road_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
     let roads = survey.ways().of(survey.road()?.surface);
-    if roads.len() == 0 || !dice.chance(0.65) {
+    if roads.is_empty() || !dice.chance(0.65) {
         return None;
     }
     let course = roads.course(0);
@@ -3537,35 +3646,38 @@ pub(super) fn winter(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         radius: reach,
         clearing: Some((level, pond)),
     };
+    let levels = levels(reach, (256, 1024), 0.01, nests((700.0, 72.0), (0.015, 0.0)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: Wear {
-            incision: 1.0e-4,
-            ..GENTLE
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                incision: 1.0e-4,
+                ..GENTLE
+            },
+            rivers: None,
+            road: None,
+            farming: None,
+            roughness: 0.6,
+            // Snow lies smooth over whatever the ground beneath it is, and
+            // softens what water cut in it.
+            ridges: 0.0,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: Some(Snowpack {
+                heading: dice.range(0.0, TAU),
+                fallen: dice.range(0.2, 0.6),
+                seed: dice.seed(),
+            }),
+            pond: Some(((0.0, 0.0), 1.3 * pond)),
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: None,
-        road: None,
-        farming: None,
-        roughness: 0.6,
-        // Snow lies smooth over whatever the ground beneath it is, and
-        // softens what water cut in it.
-        ridges: 0.0,
-        droplets: 0.01,
-        cells: (256, 1024),
-        nests: nests((700.0, 72.0), (0.015, 0.0)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: Some(Snowpack {
-            heading: dice.range(0.0, TAU),
-            fallen: dice.range(0.2, 0.6),
-            seed: dice.seed(),
-        }),
-        pond: Some(((0.0, 0.0), 1.3 * pond)),
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let material = ground(stage, dice, &FROZEN, (-1e3, NO_SNOW, 0.6), 2.0)?;
     let ice = stage.material(
@@ -3769,41 +3881,44 @@ fn island(stage: &mut Stage, dice: &mut Dice, facing: f64) -> Option<Build> {
         seed: dice.seed(),
     };
     let reach = 1.4 * radius;
+    let levels = levels(reach, (128, 512), 0.04, [None; NESTS]);
     let plan = Plan {
-        relief: Terrain {
-            rim: Some(form.lowest()),
-            form,
-            datum: 0.0,
-            centre,
-            radius: reach,
-            tilt: (0.0, 0.0),
-            clearing: None,
+        land: LandPlan {
+            relief: Terrain {
+                rim: Some(form.lowest()),
+                form,
+                datum: 0.0,
+                centre,
+                radius: reach,
+                tilt: (0.0, 0.0),
+                clearing: None,
+            },
+            reach,
+            sea: Some(0.0),
+            wear: Wear {
+                passes: 12,
+                incision: 6.0e-4,
+                creep: 0.06,
+                repose: 1.0,
+                infill: 0.3,
+                strata: None,
+            },
+            rivers: None,
+            road: None,
+            farming: None,
+            roughness: 1.0,
+            ridges: 0.5,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        reach,
-        sea: Some(0.0),
-        wear: Wear {
-            passes: 12,
-            incision: 6.0e-4,
-            creep: 0.06,
-            repose: 1.0,
-            infill: 0.3,
-            strata: None,
-        },
-        rivers: None,
-        road: None,
-        farming: None,
-        roughness: 1.0,
-        ridges: 0.5,
-        droplets: 0.04,
-        cells: (128, 512),
-        nests: [None; NESTS],
+        nests: levels.nests,
         near_water: None,
         horizon: None,
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let soil = dice.pick(&[GREEN, VOLCANIC])?;
     let material = ground(stage, dice, &soil, (1.5, NO_SNOW, 0.72), 3.0)?;
@@ -3909,40 +4024,43 @@ pub(super) fn canyon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         clearing: None,
     };
     let bed = height / steps;
+    let levels = levels(reach, (256, 1024), 0.06, nests((700.0, 90.0), (0.08, 0.12)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: Wear {
-            passes: 20,
-            incision: 1.4e-3,
-            creep: 0.015,
-            repose: 1.6,
-            infill: 0.3,
-            strata: Some((bed, 4.0)),
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                passes: 20,
+                incision: 1.4e-3,
+                creep: 0.015,
+                repose: 1.6,
+                infill: 0.3,
+                strata: Some((bed, 4.0)),
+            },
+            rivers: Some(Rivers {
+                catchment: 6.0e5,
+                width: 7.0,
+                meander: 0.8,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.4,
+            }),
+            road: None,
+            farming: None,
+            roughness: 2.5,
+            ridges: 0.6,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 0.15,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 6.0e5,
-            width: 7.0,
-            meander: 0.8,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.4,
-        }),
-        road: None,
-        farming: None,
-        roughness: 2.5,
-        ridges: 0.6,
-        droplets: 0.06,
-        cells: (256, 1024),
-        nests: nests((700.0, 90.0), (0.08, 0.12)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 0.15,
-        seed: dice.seed(),
     };
     let material = ground(stage, dice, &RED_ROCK, (-1e3, NO_SNOW, 0.8), bed / 2.0)?;
     let water = river(stage, dice)?;
@@ -4099,40 +4217,43 @@ pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         heading: heading + FRAC_PI_2 + dice.range(-0.4, 0.4),
         ..roadway(dice, &[Surface::Tarmac, Surface::Gravel, Surface::Track])?
     };
+    let levels = levels(reach, (256, 1024), 0.05, nests((700.0, 80.0), (0.08, 0.12)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: Wear {
-            passes: 24,
-            incision: 1.2e-3,
-            creep: 0.07,
-            repose: 0.9,
-            infill: 0.35,
-            strata: None,
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                passes: 24,
+                incision: 1.2e-3,
+                creep: 0.07,
+                repose: 0.9,
+                infill: 0.35,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 3.0e5,
+                width: 4.5,
+                meander: 1.4,
+                flowing: 1.0,
+                ledges: 0.0,
+                outcrops: 0.15,
+            }),
+            road: Some(road),
+            farming: None,
+            roughness: 1.2,
+            ridges: 0.35,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 3.0e5,
-            width: 4.5,
-            meander: 1.4,
-            flowing: 1.0,
-            ledges: 0.0,
-            outcrops: 0.15,
-        }),
-        road: Some(road),
-        farming: None,
-        roughness: 1.2,
-        ridges: 0.35,
-        droplets: 0.05,
-        cells: (256, 1024),
-        nests: nests((700.0, 80.0), (0.08, 0.12)),
+        nests: levels.nests,
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let soil = dice.pick(&[GREEN, GREEN, GOLDEN, HIGHLAND])?;
     let material = ground(stage, dice, &soil, (-1e3, NO_SNOW, 0.72), 4.0)?;
@@ -4274,43 +4395,46 @@ pub(super) fn stream(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         clearing: None,
     };
     let bed = &stage.densities.bed;
+    let levels = levels(reach, (256, 1024), 0.05, nests((500.0, 24.0), (0.08, 0.1)));
     let plan = Plan {
-        relief,
-        reach,
-        sea: None,
-        wear: Wear {
-            passes: 20,
-            incision: 1.2e-3,
-            creep: 0.07,
-            repose: 0.9,
-            infill: 0.3,
-            strata: None,
+        land: LandPlan {
+            relief,
+            reach,
+            sea: None,
+            wear: Wear {
+                passes: 20,
+                incision: 1.2e-3,
+                creep: 0.07,
+                repose: 0.9,
+                infill: 0.3,
+                strata: None,
+            },
+            rivers: Some(Rivers {
+                catchment: 1.5e5,
+                width: 2.2,
+                meander: 0.9,
+                flowing: dice.range(0.28, 0.5),
+                ledges,
+                outcrops,
+            }),
+            road: None,
+            farming: None,
+            roughness: 1.0,
+            ridges: 0.4,
+            cells: levels.cells,
+            levels: levels.land,
+            snow_line: None,
+            snowpack: None,
+            pond: None,
+            growth: 1.0,
+            seed: dice.seed(),
         },
-        rivers: Some(Rivers {
-            catchment: 1.5e5,
-            width: 2.2,
-            meander: 0.9,
-            flowing: dice.range(0.28, 0.5),
-            ledges,
-            outcrops,
-        }),
-        road: None,
-        farming: None,
-        roughness: 1.0,
-        ridges: 0.4,
-        droplets: 0.05,
-        cells: (256, 1024),
-        nests: nests((500.0, 24.0), (0.08, 0.1)),
+        nests: levels.nests,
         near_water: Some(NearWater {
             reach: bed.water.0,
             cells: bed.water.1,
         }),
         horizon: Some(horizon(reach)),
-        snow_line: None,
-        snowpack: None,
-        pond: None,
-        growth: 1.0,
-        seed: dice.seed(),
     };
     let soil = dale(lithology);
     let bedding = match lithology {
@@ -4406,7 +4530,7 @@ fn stream_vantage(survey: &Survey<'_>, dice: &mut Dice, runner: &dyn JobRunner) 
     // between dry banks rather than through a lake, and running; each
     // mark's standing weighed across the runner.
     let mut placed = fallible::collected(marks.len(), core::iter::repeat(0u32))?;
-    crate::band::for_each(runner, &mut placed, (0, MARKS), &|band, placed| {
+    tairix_parallel::for_each_band(runner, &mut placed, (0, MARKS), &|band, placed| {
         let weighed = marks.get(band * MARKS..).unwrap_or_default();
         for (&(course, index, _), slot) in weighed.iter().zip(placed) {
             let course_marks = rivers.course(course);
@@ -4442,7 +4566,7 @@ fn stream_vantage(survey: &Survey<'_>, dice: &mut Dice, runner: &dyn JobRunner) 
         }
         interest
     };
-    crate::band::for_each(runner, &mut placed, (0, MARKS), &|band, placed| {
+    tairix_parallel::for_each_band(runner, &mut placed, (0, MARKS), &|band, placed| {
         let ranked = marks.get(band * MARKS..).unwrap_or_default();
         for (&(course, _, here), slot) in ranked.iter().zip(placed) {
             *slot = if *slot == most {
@@ -4605,6 +4729,65 @@ pub(super) fn sculpture(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> 
         ..landing
     }))
 }
+
+/// `view` turned, if it must be, just far enough to bring `middle` within
+/// [`FRAMED_WITHIN`] of the way from the middle of a picture `aspect` times
+/// as wide as it is tall to each of its edges: about the vertical first,
+/// then up or down, which only ever brings it nearer the middle across; any
+/// other view as it is.
+fn framing(view: View, middle: Vec3, aspect: f64) -> View {
+    let View::Placed {
+        eye,
+        target,
+        fov,
+        aperture,
+    } = view
+    else {
+        return view;
+    };
+    let ahead = target - eye;
+    let reach = ahead.length().max(1e-9);
+    let toward = middle - eye;
+    let (bearing, across) = (
+        mathf::atan2(toward.x, toward.z),
+        mathf::hypot(toward.x, toward.z),
+    );
+    let pitch = mathf::asin((ahead.y / reach).clamp(-1.0, 1.0));
+    let (sin, cos) = (mathf::sin(pitch), mathf::cos(pitch));
+    // Behind the film, or straight above or below the eye: looked at.
+    if across < 1e-6 || across * cos + toward.y * sin <= 0.0 {
+        return View::Placed {
+            eye,
+            target: eye + toward.normalized() * reach,
+            fov,
+            aperture,
+        };
+    }
+    let tall = FRAMED_WITHIN * mathf::tan(0.5 * fov);
+    // Within the film's width while `sin b ≤ tall·aspect·(cos b·cos + toward.y
+    // ·sin / across)` for a bearing `b` off the heading; widest where they meet.
+    let (p, q) = (tall * aspect * cos, tall * aspect * sin * toward.y / across);
+    // Never below nought, which rounding at the film's plane can leave it.
+    let widest = mathf::fmax(
+        mathf::atan(p) + mathf::asin((q / mathf::sqrt(1.0 + p * p)).clamp(-1.0, 1.0)),
+        0.0,
+    );
+    let off = wrapped(bearing - mathf::atan2(ahead.x, ahead.z));
+    let heading = bearing - off.clamp(-widest, widest);
+    let elevation = mathf::atan2(toward.y, across * mathf::cos(bearing - heading));
+    let tilt = mathf::atan(tall);
+    let pitch = elevation - (elevation - pitch).clamp(-tilt, tilt);
+    View::Placed {
+        eye,
+        target: eye + direction(heading, 0.0, pitch) * reach,
+        fov,
+        aperture,
+    }
+}
+
+/// How far from the middle of the picture toward each edge a sculpture's
+/// middle is framed within.
+const FRAMED_WITHIN: f64 = 0.8;
 
 /// Where ahead of the eye a sculpture looks for room, nearest the middle
 /// distance first: how far off, and how far either side of the heading.

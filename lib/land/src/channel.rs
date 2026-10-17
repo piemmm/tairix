@@ -23,15 +23,15 @@
 use alloc::vec::Vec;
 use core::f64::consts::PI;
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{cell, hash2, noise2, smoothstep};
+use tairix_util::mathf::{power, real};
 use tairix_util::{fallible, mathf};
 
 use crate::course::{self, Courses, Mark, Nearest};
-use crate::noise::{cell, hash2, noise2, smoothstep};
-use crate::sample::{mix32, unit};
-use crate::vector::{power, real};
 
 /// Gravity in metres a second squared.
-pub(crate) const GRAVITY: f64 = 9.81;
+pub const GRAVITY: f64 = 9.81;
 
 /// Manning's roughness of a bed of cobbles and gravel.
 const MANNING: f64 = 0.04;
@@ -133,7 +133,7 @@ const LUMPS: [f64; 3] = [2.5, 1.0, 0.4];
 const BANK_RELIEF: f64 = 0.15;
 const BREADTH: f64 = 0.08;
 /// The broadest a channel stands against the breadth its course carries.
-pub(crate) const BROADEST: f64 = 1.0 + BREADTH;
+pub const BROADEST: f64 = 1.0 + BREADTH;
 
 /// What a bank's face is laid with, short of where rock outcrops: the
 /// earth of its alluvium.
@@ -148,20 +148,29 @@ const LUMPED: u32 = 0x2b5d;
 
 /// A place along a river's course, as its marks have it there.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Station {
-    pub(crate) along: f64,
+pub struct Station {
+    /// How far along its course it lies.
+    pub along: f64,
     /// The level of its brim, its water's in spate.
-    pub(crate) brim: f64,
-    pub(crate) width: f64,
-    pub(crate) depth: f64,
-    pub(crate) phase: f64,
-    pub(crate) turn: f64,
-    pub(crate) fall: f64,
+    pub brim: f64,
+    /// The channel's breadth there.
+    pub width: f64,
+    /// Its depth at bankfull.
+    pub depth: f64,
+    /// How many units of pool and riffle the river has run through since
+    /// its head.
+    pub phase: f64,
+    /// How sharply it bends there, per metre, toward the side `Nearest`
+    /// counts positive.
+    pub turn: f64,
+    /// How steeply its brim falls.
+    pub fall: f64,
 }
 
 impl Station {
     /// Where `near` lies along its course.
-    pub(crate) fn of(near: &Nearest) -> Self {
+    #[must_use]
+    pub fn of(near: &Nearest) -> Self {
         Self {
             along: near.along,
             brim: near.level,
@@ -175,7 +184,8 @@ impl Station {
 
     /// Course `index` of `courses` as it runs `along` its length; `None` for
     /// a course with no marks.
-    pub(crate) fn on(courses: &Courses, index: usize, along: f64) -> Option<Self> {
+    #[must_use]
+    pub fn on(courses: &Courses, index: usize, along: f64) -> Option<Self> {
         let mark = courses.at(index, along)?;
         Some(Self {
             along,
@@ -191,75 +201,88 @@ impl Station {
 
 /// What shapes a river's channel the whole way down it.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Form {
+pub struct Form {
     /// The share of its channel's depth its water fills, on average: one in
     /// spate, less in a dry season.
-    pub(crate) flowing: f64,
+    pub flowing: f64,
     /// The share of its groups of units whose fall gathers at a ledge of
-    /// bedded rock, and of its banks rock outcrops in.
-    pub(crate) ledges: f64,
-    pub(crate) outcrops: f64,
-    pub(crate) seed: u32,
+    /// bedded rock.
+    pub ledges: f64,
+    /// The share of its banks rock outcrops in.
+    pub outcrops: f64,
+    /// The seed its units, banks and lumps are drawn under.
+    pub seed: u32,
 }
 
 /// A river's channel across one place along it, between its brims.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Section {
-    pub(crate) along: f64,
-    /// Its brim's level, and half its breadth there.
-    pub(crate) brim: f64,
-    pub(crate) half: f64,
-    /// The level its water stands at, and how steeply it falls there.
-    pub(crate) water: f64,
-    pub(crate) slope: f64,
-    /// Where its deepest line runs across it, signed as `Nearest` has it,
-    /// and its bed's level there.
-    pub(crate) thalweg: f64,
-    pub(crate) deepest: f64,
+pub struct Section {
+    /// How far along its course it lies.
+    pub along: f64,
+    /// Its brim's level.
+    pub brim: f64,
+    /// Half its breadth there.
+    pub half: f64,
+    /// The level its water stands at.
+    pub water: f64,
+    /// How steeply its water falls there.
+    pub slope: f64,
+    /// Where its deepest line runs across it, signed as `Nearest` has it.
+    pub thalweg: f64,
+    /// Its bed's level along its deepest line.
+    pub deepest: f64,
     /// How its pool's bed rises from its deepest line to either brim, the
     /// negative side's first: as this power of the share of the way there.
-    pub(crate) rise: [f64; 2],
+    pub rise: [f64; 2],
     /// How fast its water runs along its deepest line.
-    pub(crate) running: f64,
-    /// How much of a pool it is, `0.0..=1.0`, and of a ledge's bare rock.
-    pub(crate) pool: f64,
-    pub(crate) ledge: f64,
-    pub(crate) seed: u32,
+    pub running: f64,
+    /// How much of a pool it is, `0.0..=1.0`.
+    pub pool: f64,
+    /// How much of a ledge's bare rock it is, `0.0..=1.0`.
+    pub ledge: f64,
+    /// The seed its bed's lumps are drawn under.
+    pub seed: u32,
 }
 
 /// A river's channel across one place along it and the banks either side
 /// of it, the negative side's first.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Banked {
-    pub(crate) section: Section,
-    pub(crate) banks: [Bank; 2],
+pub struct Banked {
+    /// The channel between its brims.
+    pub section: Section,
+    /// Its banks, the negative side's first.
+    pub banks: [Bank; 2],
 }
 
 /// How a river's bank rises from its brim to the land beyond it.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Bank {
-    /// How broad its face is from the brim; how high up it a bench breaks
-    /// it, as a share of its height, how broad that bench is and the face
-    /// above it.
-    pub(crate) face: f64,
-    pub(crate) bench: f64,
-    pub(crate) shelf: f64,
-    pub(crate) upper: f64,
+pub struct Bank {
+    /// How broad its face is from the brim.
+    pub face: f64,
+    /// How high up the face a bench breaks it, as a share of its height.
+    pub bench: f64,
+    /// How broad that bench is.
+    pub shelf: f64,
+    /// How broad the face above the bench is.
+    pub upper: f64,
     /// How far its top stands above the land beyond, as a share of the
     /// land's height over the brim.
-    pub(crate) lift: f64,
-    /// How much of it is the bank a pool cuts, and how much of its face bare
-    /// rock outcrops in.
-    pub(crate) cut: f64,
-    pub(crate) rock: f64,
+    pub lift: f64,
+    /// How much of it is the bank a pool cuts.
+    pub cut: f64,
+    /// How much of its face bare rock outcrops in.
+    pub rock: f64,
 }
 
 impl Bank {
     /// How far from the brim its face runs and its whole rise to the land, on
     /// a grid `step` apart, each face at least two steps broad.
     fn spans(&self, step: f64) -> (f64, f64) {
-        let face = self.face.max(2.0 * step);
-        (face, face + self.shelf + self.upper.max(2.0 * step))
+        let face = mathf::fmax(self.face, 2.0 * step);
+        (
+            face,
+            face + self.shelf + mathf::fmax(self.upper, 2.0 * step),
+        )
     }
 }
 
@@ -319,7 +342,7 @@ impl Unit {
         } else {
             (
                 Kind::Riffle,
-                first + mathf::floor(into.min(GROUP - 1.0)),
+                first + mathf::floor(mathf::fmin(into, GROUP - 1.0)),
                 1.0,
             )
         };
@@ -340,7 +363,7 @@ impl Unit {
     /// Its long profile, on a river whose pools lie `spacing` apart and
     /// whose depth is `depth`, when it falls `fall` in all.
     fn long(&self, spacing: f64, (fall, depth): (f64, f64)) -> Long {
-        let length = (spacing * self.span).max(1e-3);
+        let length = mathf::fmax(spacing * self.span, 1e-3);
         let deeper = 0.5 + unit(mix32(self.key ^ 1));
         match self.kind {
             Kind::Riffle => {
@@ -352,11 +375,14 @@ impl Unit {
                 }
             }
             Kind::Ledge => {
-                let quick = ((TONGUE.0 + TONGUE.1 * fall) / length).min(0.2);
+                let quick = mathf::fmin((TONGUE.0 + TONGUE.1 * fall) / length, 0.2);
                 Long {
                     quick,
-                    deepest: (quick + (0.5 + 1.5 * fall) / length).min(0.5),
-                    pool: (POOL * deeper + PLUNGE * fall / depth.max(1e-3)).min(MOST_POOL),
+                    deepest: mathf::fmin(quick + (0.5 + 1.5 * fall) / length, 0.5),
+                    pool: mathf::fmin(
+                        POOL * deeper + PLUNGE * fall / mathf::fmax(depth, 1e-3),
+                        MOST_POOL,
+                    ),
                 }
             }
         }
@@ -382,7 +408,7 @@ impl Unit {
         } else {
             0.0
         };
-        lip.max(slab)
+        mathf::fmax(lip, slab)
     }
 }
 
@@ -415,8 +441,16 @@ impl Long {
 /// gentle stream (Leopold and Wolman, 1957), shortening toward the steps of
 /// a steep one (Montgomery and Buffington, 1997).
 fn spacing(width: f64, (along, fall): (f64, f64), seed: u32) -> f64 {
-    let typical = SPACING * width.max(LEAST_WIDTH) / (1.0 + fall.max(0.0) / STEPPED_FALL);
-    typical * (1.0 + JITTER * noise2(along / (15.0 * width.max(LEAST_WIDTH)), 0.5, seed ^ UNITS))
+    let typical =
+        SPACING * mathf::fmax(width, LEAST_WIDTH) / (1.0 + mathf::fmax(fall, 0.0) / STEPPED_FALL);
+    typical
+        * (1.0
+            + JITTER
+                * noise2(
+                    along / (15.0 * mathf::fmax(width, LEAST_WIDTH)),
+                    0.5,
+                    seed ^ UNITS,
+                ))
 }
 
 /// How a channel's bed or bank heaves and hollows at `(along, across)` its
@@ -434,15 +468,17 @@ fn lumps((along, across): (f64, f64), seed: u32) -> f64 {
 
 /// How fast water `depth` deep runs where its surface falls `slope`: as
 /// Manning's law has it, never past the swiftest a stony stream runs.
-pub(crate) fn manning(depth: f64, slope: f64) -> f64 {
-    let depth = depth.max(0.0);
-    let speed = power(depth, 2.0 / 3.0) * mathf::sqrt(slope.max(0.0)) / MANNING;
-    speed.min(swiftest(depth))
+#[must_use]
+pub fn manning(depth: f64, slope: f64) -> f64 {
+    let depth = mathf::fmax(depth, 0.0);
+    let speed = power(depth, 2.0 / 3.0) * mathf::sqrt(mathf::fmax(slope, 0.0)) / MANNING;
+    mathf::fmin(speed, swiftest(depth))
 }
 
 /// The swiftest water `depth` deep runs.
-pub(crate) fn swiftest(depth: f64) -> f64 {
-    MOST_FROUDE * mathf::sqrt(GRAVITY * depth.max(0.0))
+#[must_use]
+pub fn swiftest(depth: f64) -> f64 {
+    MOST_FROUDE * mathf::sqrt(GRAVITY * mathf::fmax(depth, 0.0))
 }
 
 /// A river's channel along its course at one place, everything about it
@@ -461,32 +497,37 @@ struct Profile {
 impl Profile {
     /// The channel at `station` under `form`.
     fn at(station: &Station, form: &Form) -> Self {
-        let depth = station.depth.max(1e-3);
+        let depth = mathf::fmax(station.depth, 1e-3);
         let flowing = form.flowing.clamp(0.0, 1.0);
         let spacing = spacing(station.width, (station.along, station.fall), form.seed);
         let unit = Unit::at(station.phase, form);
         let v = unit.within(station.phase);
-        let fall = station.fall.max(0.0) * spacing * unit.span;
+        let fall = mathf::fmax(station.fall, 0.0) * spacing * unit.span;
         let long = unit.long(spacing, (fall, depth));
         let stepped = long.fallen(v) - v;
         let hollow = long.hollow(v);
         let follows = unit.follows(flowing);
         // The water stands on its crests as its depth's share has it on
         // average, so its pools stand above that and its riffles below.
-        let typical = station.fall.max(0.0) * spacing;
+        let typical = mathf::fmax(station.fall, 0.0) * spacing;
         let riffled = Kind::Riffle.follows(flowing);
-        let crest = (depth * (flowing - CREST) + riffled * typical * MEAN_STEP).max(LEAST_DEPTH);
+        let crest = mathf::fmax(
+            depth * (flowing - CREST) + riffled * typical * MEAN_STEP,
+            LEAST_DEPTH,
+        );
         let water = station.brim - depth * (1.0 - CREST) + crest - follows * fall * stepped;
         let raised = -CREST + (CREST + long.pool) * hollow;
-        let deepest =
-            (station.brim - depth * (1.0 + raised) - fall * stepped).min(water - LEAST_DEPTH);
+        let deepest = mathf::fmin(
+            station.brim - depth * (1.0 + raised) - fall * stepped,
+            water - LEAST_DEPTH,
+        );
         // What runs over a crest runs down the riffle below it as steeply as
         // a typical riffle's water falls there.
         let quickest = 1.5 * (1.0 - SLOW) / f64::midpoint(RIFFLE.0, RIFFLE.1) + SLOW;
-        let riffle = station.fall.max(LEAST_FALL) * (1.0 + riffled * (quickest - 1.0));
+        let riffle = mathf::fmax(station.fall, LEAST_FALL) * (1.0 + riffled * (quickest - 1.0));
         let over_crest = manning(crest, riffle) * crest;
         let thalweg = water - deepest;
-        let running = (over_crest / thalweg).min(swiftest(thalweg));
+        let running = mathf::fmin(over_crest / thalweg, swiftest(thalweg));
         // A bend's own swing takes over from the alternate bars of a
         // straight reach as it tightens.
         let bend = station.turn * station.width;
@@ -497,7 +538,7 @@ impl Profile {
             .clamp(-MOST_SWING, MOST_SWING);
         Self {
             water,
-            slope: station.fall.max(0.0) * (1.0 + follows * (long.falling(v) - 1.0)),
+            slope: mathf::fmax(station.fall, 0.0) * (1.0 + follows * (long.falling(v) - 1.0)),
             deepest,
             swing,
             hollow,
@@ -508,23 +549,29 @@ impl Profile {
 }
 
 /// The level a river's water stands at `station` under `form`.
-pub(crate) fn water(station: &Station, form: &Form) -> f64 {
+#[must_use]
+pub fn water(station: &Station, form: &Form) -> f64 {
     Profile::at(station, form).water
 }
 
 /// The farthest from the middle of a course `width` wide, on a grid `step`
 /// apart, its channel has any say over the ground: its broadest brim, the
 /// broadest its bank's faces and shelf ever run, and the softening beyond.
-pub(crate) fn farthest_say(width: f64, step: f64) -> f64 {
-    let width = width.max(NARROWEST);
-    let face = (GENTLE * (1.0 + GENTLE_WANDER) * width).max(STEEP.0 + STEEP.1 * width);
+#[must_use]
+pub fn farthest_say(width: f64, step: f64) -> f64 {
+    let width = mathf::fmax(width, NARROWEST);
+    let face = mathf::fmax(
+        GENTLE * (1.0 + GENTLE_WANDER) * width,
+        STEEP.0 + STEEP.1 * width,
+    );
     let beyond = (SHELF.0 + SHELF.1 + UPPER.0 + UPPER.1) * width;
     0.5 * BROADEST * width + face + beyond + 6.0 * step
 }
 
 impl Banked {
     /// The channel at `station` under `form` and its banks.
-    pub(crate) fn new(station: &Station, form: &Form) -> Self {
+    #[must_use]
+    pub fn new(station: &Station, form: &Form) -> Self {
         let profile = Profile::at(station, form);
         let bank = |side: f64| bank(station, form, &profile, side);
         Self {
@@ -541,7 +588,8 @@ impl Banked {
     /// The ground `across` the course, where the land beyond its banks
     /// stands at `top`: its bed within its brims, and its bank beyond, each
     /// face at least two of a grid's `step`s broad.
-    pub(crate) fn ground(&self, across: f64, top: f64, step: f64) -> f64 {
+    #[must_use]
+    pub fn ground(&self, across: f64, top: f64, step: f64) -> f64 {
         let section = &self.section;
         let beyond = across.abs() - section.half;
         if beyond < 0.0 {
@@ -553,7 +601,11 @@ impl Banked {
         let height = top - section.brim;
         // A perched river's bank falls to the land beyond rather than rising.
         let top = if height >= 0.0 {
-            section.brim + (height * (1.0 + bank.lift * lifted)).max(LEAST_BANK.min(height))
+            section.brim
+                + mathf::fmax(
+                    height * (1.0 + bank.lift * lifted),
+                    mathf::fmin(LEAST_BANK, height),
+                )
         } else {
             top
         };
@@ -570,7 +622,8 @@ impl Banked {
 
     /// How far beyond its brim on the side `across` lies its bank's face
     /// runs, a grid's `step` softening it.
-    pub(crate) fn bank_reach(&self, across: f64, step: f64) -> f64 {
+    #[must_use]
+    pub fn bank_reach(&self, across: f64, step: f64) -> f64 {
         self.bank(across).spans(step).1
     }
 
@@ -578,7 +631,8 @@ impl Banked {
     /// `-1.0..=1.0`: sand up its bars and in the deep of its pools, in
     /// patches; bare rock at a ledge; and the earth of its banks' faces and
     /// of the walls its pools cut down to the deep water.
-    pub(crate) fn laid(&self, across: f64) -> f64 {
+    #[must_use]
+    pub fn laid(&self, across: f64) -> f64 {
         let section = &self.section;
         let ledge = section.ledge;
         // Where its rock outcrops in a bank it stands out of the earth as
@@ -606,26 +660,27 @@ impl Banked {
             0.5,
             noise2(section.along / 1.8, across / 1.1, section.seed ^ SAND),
         );
-        let sand = section.pool * (0.85 * bar).max(deep) * patches;
+        let sand = section.pool * mathf::fmax(0.85 * bar, deep) * patches;
         (sand * (1.0 - ledge) - ledge).clamp(-1.0, 1.0)
     }
 }
 
 impl Section {
     /// The channel at `station` under `form`.
-    pub(crate) fn new(station: &Station, form: &Form) -> Self {
+    #[must_use]
+    pub fn new(station: &Station, form: &Form) -> Self {
         Self::of(station, form, &Profile::at(station, form))
     }
 
     /// The channel at `station` under `form`, whose long profile is
     /// `profile` there.
     fn of(station: &Station, form: &Form, profile: &Profile) -> Self {
-        let width = station.width.max(NARROWEST);
+        let width = mathf::fmax(station.width, NARROWEST);
         let breadth = noise2(station.along / (3.0 * width), 0.71, form.seed ^ BROADENED);
         let half = 0.5 * width * (1.0 + BREADTH * breadth.clamp(-1.0, 1.0));
         let swing = profile.swing;
         let toward = POOL_RISE + CUT_RISE * swing.abs();
-        let away = (POOL_RISE - BAR_RISE * swing.abs()).max(LEAST_RISE);
+        let away = mathf::fmax(POOL_RISE - BAR_RISE * swing.abs(), LEAST_RISE);
         let rise = if swing >= 0.0 {
             [away, toward]
         } else {
@@ -652,9 +707,9 @@ impl Section {
     fn toward_brim(&self, across: f64) -> (usize, f64) {
         let c = self.thalweg;
         if across >= c {
-            (1, (across - c) / (self.half - c).max(1e-9))
+            (1, (across - c) / mathf::fmax(self.half - c, 1e-9))
         } else {
-            (0, (c - across) / (self.half + c).max(1e-9))
+            (0, (c - across) / mathf::fmax(self.half + c, 1e-9))
         }
     }
 
@@ -663,7 +718,8 @@ impl Section {
     /// two as much of a pool as the place is; lumped by the gravel its floods
     /// heaped and the hollows they scoured, most between its deepest line
     /// and its brims, so its water's edge wanders as a stream's does.
-    pub(crate) fn bed(&self, across: f64) -> f64 {
+    #[must_use]
+    pub fn bed(&self, across: f64) -> f64 {
         let (side, share) = self.toward_brim(across);
         let share = share.clamp(0.0, 1.0);
         let riffle = smoothstep(RIFFLE_FLAT, 1.0, share);
@@ -674,30 +730,36 @@ impl Section {
     }
 
     /// How deep its water stands `across` the course.
-    pub(crate) fn depth(&self, across: f64) -> f64 {
+    #[must_use]
+    pub fn depth(&self, across: f64) -> f64 {
         self.water_at(across).0
     }
 
     /// How deep its water stands `across` the course, and how fast it runs
     /// there: as fast for its depth as Manning's law has it against its
     /// deepest line, never past critical.
-    pub(crate) fn water_at(&self, across: f64) -> (f64, f64) {
+    #[must_use]
+    pub fn water_at(&self, across: f64) -> (f64, f64) {
         if across.abs() >= self.half {
             return (0.0, 0.0);
         }
-        let depth = (self.water - self.bed(across)).max(0.0);
+        let depth = mathf::fmax(self.water - self.bed(across), 0.0);
         let deepest = self.water - self.deepest;
         if depth <= 0.0 || deepest <= 0.0 {
             return (depth, 0.0);
         }
-        let speed = (self.running * power(depth / deepest, 2.0 / 3.0)).min(swiftest(depth));
+        let speed = mathf::fmin(
+            self.running * power(depth / deepest, 2.0 / 3.0),
+            swiftest(depth),
+        );
         (depth, speed)
     }
 
     /// How far across the course its water's edge lies on `side`, `-1.0` or
     /// `1.0`: where the bed, rising steadily from its deepest line, meets
     /// the water.
-    pub(crate) fn edge(&self, side: f64) -> f64 {
+    #[must_use]
+    pub fn edge(&self, side: f64) -> f64 {
         let brim = side.signum() * self.half;
         let (mut wet, mut dry) = (self.thalweg, brim);
         if self.bed(dry) <= self.water {
@@ -718,7 +780,7 @@ impl Section {
 /// The bank on `side` of the channel at `station` under `form`, its deep
 /// water swung and its pool and ledge as `profile` has them.
 fn bank(station: &Station, form: &Form, profile: &Profile, side: f64) -> Bank {
-    let width = station.width.max(NARROWEST);
+    let width = mathf::fmax(station.width, NARROWEST);
     let along = station.along;
     let salt = if side >= 0.0 { 0x9e37 } else { 0x79b9 };
     let wander = |scale: f64, key: u32| {
@@ -730,8 +792,10 @@ fn bank(station: &Station, form: &Form, profile: &Profile, side: f64) -> Bank {
         .clamp(-1.0, 1.0)
     };
     let slumped = 0.7 * smoothstep(0.35, 0.7, wander(2.0, 1));
-    let cut =
-        (smoothstep(0.1, 0.45, profile.swing * side) * (0.4 + 0.6 * profile.hollow)).max(slumped);
+    let cut = mathf::fmax(
+        smoothstep(0.1, 0.45, profile.swing * side) * (0.4 + 0.6 * profile.hollow),
+        slumped,
+    );
     let gentle = GENTLE * width * (1.0 + GENTLE_WANDER * wander(3.0, 2));
     let steep = STEEP.0 + STEEP.1 * width;
     let bench = 1.0 - (1.0 - cut) * 0.7 * smoothstep(-0.1, 0.5, wander(4.0, 3));
@@ -754,7 +818,7 @@ fn bank(station: &Station, form: &Form, profile: &Profile, side: f64) -> Bank {
 /// Count `course`'s units of pool and riffle from its head under `seed`,
 /// and mark at each of its marks how sharply it bends and how steeply its
 /// brim falls; `None` when the heap will not hold the work.
-pub(crate) fn survey(course: &mut [Mark], seed: u32) -> Option<()> {
+pub fn survey(course: &mut [Mark], seed: u32) -> Option<()> {
     let mut along = Vec::new();
     if !fallible::reserve(&mut along, course.len()) {
         return None;
@@ -764,9 +828,12 @@ pub(crate) fn survey(course: &mut [Mark], seed: u32) -> Option<()> {
     let total = along.last().copied().unwrap_or(0.0);
     let mut falls = fallible::filled(course.len(), 0.0)?;
     for (fall, &at) in falls.iter_mut().zip(&along) {
-        let (from, to) = ((at - FALL_REACH).max(0.0), (at + FALL_REACH).min(total));
+        let (from, to) = (
+            mathf::fmax(at - FALL_REACH, 0.0),
+            mathf::fmin(at + FALL_REACH, total),
+        );
         if to > from {
-            *fall = ((level(from) - level(to)) / (to - from)).max(0.0);
+            *fall = mathf::fmax((level(from) - level(to)) / (to - from), 0.0);
         }
     }
     for (mark, fall) in course.iter_mut().zip(falls) {

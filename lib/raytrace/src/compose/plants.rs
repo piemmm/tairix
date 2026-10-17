@@ -9,6 +9,8 @@
 use alloc::vec::Vec;
 use core::f64::consts::TAU;
 
+use tairix_land::Season;
+use tairix_noise::smoothstep;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
@@ -24,11 +26,10 @@ use crate::grass::{
 };
 use crate::leaf::Outline;
 use crate::material::{Finish, Material, Relief};
-use crate::noise::smoothstep;
 use crate::pigment::{Blades, Crowd, Foliage, Pigment};
 use crate::shade::{Rect, Sampling, Shade, Shades};
 use crate::shape::Shape;
-use crate::tree::{Envelope, Fruit, Leafing, Level, Season, Species, Stock};
+use crate::tree::{Envelope, Fruit, Leafing, Level, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Vec3};
 use crate::wood::{Affinity, Habit, KINDS, VARIANTS};
 

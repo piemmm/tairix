@@ -8,10 +8,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_land::channel::{manning, swiftest};
 use tairix_parallel::Threaded;
 
 use super::*;
-use crate::channel::{manning, swiftest};
 
 /// A plane channel `width` across and `depth` deep at its brim, which stands
 /// at nought, filled `flowing` full and falling `slope`: a parabola across,
@@ -349,14 +349,14 @@ fn a_train_of_standing_waves_dies_away_behind_a_ridge() {
 fn no_place_stands_past_what_water_can() {
     let stones: Vec<Stone> = (0..400)
         .map(|index| {
-            let key = crate::sample::mix32(index ^ 0x77);
+            let key = tairix_mix::mix32(index ^ 0x77);
             Stone {
                 at: (
-                    1.5 + 9.0 * crate::sample::unit(key),
-                    3.2 * crate::sample::unit(crate::sample::mix32(key ^ 1)) - 1.6,
+                    1.5 + 9.0 * tairix_mix::unit(key),
+                    3.2 * tairix_mix::unit(tairix_mix::mix32(key ^ 1)) - 1.6,
                 ),
                 reach: (0.15, 0.12),
-                top: 0.05 + 0.3 * crate::sample::unit(crate::sample::mix32(key ^ 2)),
+                top: 0.05 + 0.3 * tairix_mix::unit(tairix_mix::mix32(key ^ 2)),
             }
         })
         .collect();
@@ -400,14 +400,14 @@ fn no_place_stands_past_what_water_can() {
 fn a_crest_is_held_once_to_what_water_can_stand() {
     let stones: Vec<Stone> = (0..400)
         .map(|index| {
-            let key = crate::sample::mix32(index ^ 0x77);
+            let key = tairix_mix::mix32(index ^ 0x77);
             Stone {
                 at: (
-                    1.5 + 9.0 * crate::sample::unit(key),
-                    3.2 * crate::sample::unit(crate::sample::mix32(key ^ 1)) - 1.6,
+                    1.5 + 9.0 * tairix_mix::unit(key),
+                    3.2 * tairix_mix::unit(tairix_mix::mix32(key ^ 1)) - 1.6,
                 ),
                 reach: (0.15, 0.12),
-                top: 0.05 + 0.3 * crate::sample::unit(crate::sample::mix32(key ^ 2)),
+                top: 0.05 + 0.3 * tairix_mix::unit(tairix_mix::mix32(key ^ 2)),
             }
         })
         .collect();
@@ -446,14 +446,14 @@ fn a_flow_is_the_same_on_any_runner() {
     ];
     let crowd = u32::try_from(3 * TAKEN).expect("a crowd of stones");
     stones.extend((0..crowd).map(|index| {
-        let key = crate::sample::mix32(index ^ 0x5c);
+        let key = tairix_mix::mix32(index ^ 0x5c);
         Stone {
             at: (
-                1.0 + 10.0 * crate::sample::unit(key),
-                3.4 * crate::sample::unit(crate::sample::mix32(key ^ 1)) - 1.7,
+                1.0 + 10.0 * tairix_mix::unit(key),
+                3.4 * tairix_mix::unit(tairix_mix::mix32(key ^ 1)) - 1.7,
             ),
             reach: (0.03, 0.02),
-            top: 0.02 + 0.2 * crate::sample::unit(crate::sample::mix32(key ^ 2)),
+            top: 0.02 + 0.2 * tairix_mix::unit(tairix_mix::mix32(key ^ 2)),
         }
     }));
     let alone = solve(riffle(), stones.clone(), &tairix_parallel::SERIAL);

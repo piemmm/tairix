@@ -389,9 +389,13 @@ happens to be wide enough. A fixed sample count, never a step in world units,
 is also what keeps its cost the same for a realm four chunks across and one
 four thousand chunks across.
 
-The chunk stage is the fine one: it reads the realm field, adds everything
-below the coarse step, and depends on nothing outside a fixed ring of cells.
-Only two kinds of quantity it computes depend on neighbours — the shore
+The chunk stage is the fine one. Its ground is the realm's land: the realm
+field refined through a level across the whole realm and a level at the cells
+by the desktop ray tracer's land generator (`lib/land`, `plans/RAYTRACE.md`
+RT40.5), worn by its droplets from blocks of ground a pure function of their
+place, so a chunk is its piece of the realm worn whole. Everything else below
+the coarse step it adds from a fixed ring of cells. Only two kinds of quantity
+it computes depend on neighbours — the shore
 distance, a distance transform, and the slope and drainage-gradient stencils —
 which is why the ring exists; its radius is the widest of those bands plus the
 scatter step a footing is read across. Scatter (6) is inherently fine and runs
@@ -401,10 +405,11 @@ there, last, because it reads the structure stamp: nothing grows on a road.
    plane with per-plate drift; boundary convergence gives mountain belts,
    divergence gives rifts and inland seas. This is what stops a heightfield
    looking like noise: ranges get a direction and a reason.
-2. **Relief.** Multi-octave gradient noise, domain-warped, amplitude-shaped by
-   the uplift field, with ridged octaves inside mountain belts and billowed
-   octaves in dunes. All from `lib/rng`'s deterministic non-cryptographic tier,
-   keyed per stage so adding a stage cannot shift an earlier one's output.
+2. **Relief.** Multi-octave value noise, domain-warped, amplitude-shaped by
+   the uplift field, with ridged octaves inside mountain belts; below the
+   coarse step, the land generator's detail of the realm's grain, ridged in a
+   belt and billowed into dunes where it is dry. All keyed per stage, so adding
+   a stage cannot shift an earlier one's output.
 3. **Hydrology.** Flow direction and accumulation over the relief; channels
    where accumulation crosses a threshold, widening downstream — streams
    become rivers become estuaries. Lakes fill depressions to their outflow.
@@ -436,19 +441,21 @@ WS25–WS31 widen stages 4–7, add landforms, the district scale and cave
 levels, and are set out after WS20.
 
 **Scale.** A chunk is generated on demand, cached in a `lib/reclaim`-governed
-cache sized from discovered RAM, and dropped under pressure — never stored,
-because it is cheaper to recompute than to page in, and never resident in
-bulk. Player-caused changes are the only world state that persists, as sparse
+cache sized from discovered RAM, the worn ground it was solved from in another,
+and dropped under pressure — never stored, as a pure function of the realm's
+parameters, and never resident in bulk. Player-caused changes are the only
+world state that persists, as sparse
 deltas in the store, applied over the generated base. A realm's world is
 therefore O(changes) on disk and O(working set) in RAM regardless of its
 extent, which is what §26.7's floor demands.
 
 **Generation is incremental and interruptible.** A chunk's stages are
-individually bounded and resumable, and generation runs on `lib/parallel`'s
-runner (`Serial` where there is no second core, which is not a stub but the
-correct runner). A client never blocks a frame on generation: a chunk not yet
-ready draws as the coarse relief the previous stage already answered (§28.5 —
-a paint reads nothing and draws a meaningful placeholder for what has not
+resumable, its relief one stage refining its ground whole, and generation runs
+on `lib/parallel`'s runner (`Serial` where there is no second core, which is
+not a stub but the correct runner). A client never blocks a frame on
+generation: it solves chunks on a worker of its own, and a chunk not yet ready
+draws as the coarse relief the previous stage already answered (§28.5 — a
+paint reads nothing and draws a meaningful placeholder for what has not
 arrived).
 
 **What WS2 now guarantees.** The realm field solves plates, relief with a
@@ -457,11 +464,12 @@ drainage with stream-power incision and hillslope diffusion, climate,
 settlements, minimum-spanning-tree roads routed by integer-cost A\* that
 reuses existing road, and landmark entrances; the drainage, incision,
 diffusion and routing are `lib/terrain`'s, shared with the desktop's ray
-tracer. The chunk adds detail relief,
-the channel carve, the structure stamp, the climate correction, the biome and
-ground blends, and the scatter. Standing water fills a chunk only where the
-coarse field holds a lake or the sea: a hollow in the detail relief on dry
-ground stays dry. Determinism is staked on one constant,
+tracer. A chunk takes its ground from the realm's land, the realm field
+refined and worn by `lib/land` at the tracer's *Maximum* (`land::RealmLand`;
+a chunk off the land is refused), and adds the channel carve, the structure
+stamp, the climate correction, the biome and ground blends, and the scatter.
+Standing water fills a chunk only where the coarse field holds a lake or the
+sea: a hollow in the fine relief on dry ground stays dry. Determinism is staked on one constant,
 `digest::REFERENCE_DIGEST`, asserted by the host suite and by one vertical per
 Tier-1 target (`tests/integration/world_determinism_qemu_{aarch64,riscv64,
 x86_64}` and `tests/integration/world_determinism_wasm32`, the last under a
@@ -548,8 +556,13 @@ WS2's pipeline stays; what it produces is too narrow.
 
 These items make the world as varied as a real one without giving up
 anything decision 2 and WS2 stand on. The desktop ray tracer's land generator
-is to build this land too, at its *Maximum* detail, moved into renderer-neutral
-crates that keep these rules (`plans/RAYTRACE.md` RT40). WS32 and WS33, which show the world in
+builds this land too, at its *Maximum* detail, in renderer-neutral crates that
+keep these rules (`plans/RAYTRACE.md` RT40): a chunk's ground is a piece of its
+finest level, worn from blocks of ground kept between chunks, exactly as the
+realm worn whole (RT40.5). So do its woods:
+the tracer sows a canopy and a subcanopy each on a lattice fixed to the land
+and thins them, in rounds, by `lib/scatter`'s rule, the one WinterSun's
+scatter keeps in a single round (RT40.2). WS32 and WS33, which show the world in
 3D from a camera the player positions, and WS27, which draws what they place
 and makes it solid, are in §3. Every new stage is a pure function of the realm,
 seam-free by construction, bounded in memory by the working set, and folded

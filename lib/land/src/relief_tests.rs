@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use tairix_mix::{mix32, unit};
 
 use super::*;
 
@@ -65,7 +65,7 @@ fn no_landform_falls_below_its_lowest() {
                 height >= lowest - 1e-9,
                 "{form:?} at ({x}, {z}): {height} below {lowest}"
             );
-            highest = highest.max(height);
+            highest = mathf::fmax(highest, height);
         }
         assert!(highest > lowest + 1.0, "{form:?} has some relief");
     }
@@ -226,6 +226,11 @@ fn a_clearings_edge_wanders_and_pins_its_level_within() {
         tilt: (0.0, 0.0),
         clearing: Some((level, radius)),
     };
+    let clearing = terrain.clearing().expect("a clearing");
+    assert_eq!(
+        (clearing.centre, clearing.level, clearing.radius),
+        (terrain.centre, level, radius)
+    );
     let round = |distance: f64, angle: f64| {
         (
             20.0 + distance * mathf::sin(angle),
@@ -236,17 +241,17 @@ fn a_clearings_edge_wanders_and_pins_its_level_within() {
     for step in 0..96u32 {
         let angle = core::f64::consts::TAU * f64::from(step) / 96.0;
         let (x, z) = round(0.75 * radius, angle);
-        assert!(terrain.keep(x, z) <= 0.0, "{angle}: relief kept within");
-        assert!((terrain.pin(x, z, 99.0) - level).abs() < 1e-12);
+        assert!(clearing.keep(x, z) <= 0.0, "{angle}: relief kept within");
+        assert!((clearing.pin(x, z, 99.0) - level).abs() < 1e-12);
         assert!((terrain.height(x, z) - level).abs() < 1e-9);
         let (x, z) = round(3.1 * radius, angle);
         assert!(
-            (terrain.keep(x, z) - 1.0).abs() < 1e-12,
+            (clearing.keep(x, z) - 1.0).abs() < 1e-12,
             "{angle}: all kept beyond"
         );
-        assert!((terrain.pin(x, z, 99.0) - 99.0).abs() < 1e-12);
+        assert!((clearing.pin(x, z, 99.0) - 99.0).abs() < 1e-12);
         let (x, z) = round(radius, angle);
-        if terrain.keep(x, z) > 0.0 {
+        if clearing.keep(x, z) > 0.0 {
             kept_at_radius += 1;
         } else {
             bare_at_radius += 1;
@@ -255,71 +260,6 @@ fn a_clearings_edge_wanders_and_pins_its_level_within() {
     assert!(
         kept_at_radius > 0 && bare_at_radius > 0,
         "its edge wanders: {kept_at_radius} kept and {bare_at_radius} bare at its radius"
-    );
-}
-
-#[test]
-fn a_sea_repeats_every_period_and_keeps_to_its_height() {
-    let period = 1024.0;
-    let sea = Sea::new(period, (50.0, 4.0, 2.0), (0.4, 0.6), 17);
-    let (mut highest, mut sum, mut squares): (f64, f64, f64) = (0.0, 0.0, 0.0);
-    let samples = 20_000u32;
-    for (x, z) in places(samples, 600.0) {
-        let here = sea.height(x, z);
-        assert!((sea.height(x + period, z) - here).abs() < 1e-9);
-        assert!((sea.height(x, z - 2.0 * period) - here).abs() < 1e-9);
-        highest = highest.max(here.abs());
-        sum += here;
-        squares += here * here;
-    }
-    let mean = sum / f64::from(samples);
-    let deviation = mathf::sqrt(squares / f64::from(samples) - mean * mean);
-    // Four standard deviations are the significant height the sea was
-    // asked for, and its highest crest no more than about that.
-    assert!(
-        (4.0 * deviation - 2.0).abs() < 0.25,
-        "significant height {}",
-        4.0 * deviation
-    );
-    assert!(highest < 2.0, "the highest crest {highest}");
-}
-
-#[test]
-fn a_sea_runs_before_its_wind() {
-    // Along the wind the swell rises and falls; across it, much less.
-    let sea = Sea::new(1024.0, (60.0, 4.0, 2.0), (0.0, 0.1), 3);
-    let range = |step: (f64, f64)| {
-        let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
-        for i in 0..400 {
-            let at = f64::from(i) * 0.5;
-            let height = sea.height(step.0 * at, step.1 * at);
-            low = low.min(height);
-            high = high.max(height);
-        }
-        high - low
-    };
-    assert!(range((1.0, 0.0)) > 2.0 * range((0.0, 1.0)));
-}
-
-/// No swell is shorter than the shortest the sea was given, so a grid of a
-/// quarter of that holds every one without aliasing; and the longest is the
-/// swell asked for.
-#[test]
-fn a_seas_swells_keep_within_their_lengths() {
-    let sea = Sea::new(1024.0, (60.0, 4.0, 2.0), (0.7, 0.5), 9);
-    let lengths: Vec<f64> = sea
-        .waves
-        .iter()
-        .map(|wave| core::f64::consts::TAU / mathf::hypot(wave.kx, wave.kz))
-        .collect();
-    // Snapped to the period, a length moves by less than a part in ten.
-    assert!(
-        lengths.iter().all(|length| *length > 4.0 * 0.9),
-        "{lengths:?}"
-    );
-    assert!(
-        lengths.iter().any(|length| *length > 60.0 * 0.9),
-        "{lengths:?}"
     );
 }
 
@@ -361,7 +301,7 @@ fn a_valley_runs_along_its_compass_heading() {
 #[test]
 fn a_valleys_sides_climb_out_of_its_floor() {
     let (heading, floor, height) = (0.7, 70.0, 260.0);
-    let run = (height / SIDE_SLOPE).max(1.5 * floor);
+    let run = mathf::fmax(height / SIDE_SLOPE, 1.5 * floor);
     // Past the farthest the course wanders and a spur stands out.
     let beyond = 0.5 * floor + run + floor;
     for seed in [3, 11, 29] {
@@ -379,7 +319,7 @@ fn a_valleys_sides_climb_out_of_its_floor() {
             let along = 200.0 * f64::from(step);
             let lowest = (-40..=40)
                 .map(|k| at(along, 0.03 * floor * f64::from(k)))
-                .fold(f64::INFINITY, f64::min);
+                .fold(f64::INFINITY, mathf::fmin);
             for side in [-1.0, 1.0] {
                 let upland = at(along, side * beyond);
                 assert!(
@@ -391,7 +331,7 @@ fn a_valleys_sides_climb_out_of_its_floor() {
                     let across = side * beyond * f64::from(k) / 400.0;
                     (at(along, across + side * 2.0) - at(along, across)).abs() / 2.0
                 });
-                let steepest = climbs.fold(0.0, f64::max);
+                let steepest = climbs.fold(0.0, mathf::fmax);
                 assert!(
                     steepest < 1.5,
                     "seed {seed} along {along}: a side as steep as {steepest}"

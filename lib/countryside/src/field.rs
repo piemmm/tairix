@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_util::mathf;
+use tairix_util::mathf::{self, real};
 
 use crate::ground::{self, Ground};
 use crate::holding::{HoldingId, Lattice};
@@ -201,15 +201,6 @@ fn whole(value: f64) -> usize {
     usize::try_from(mathf::round_i32(mathf::floor(value).clamp(0.0, 2.0e9))).unwrap_or(0)
 }
 
-/// A count as `f64`.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "a holding's cells are counted far within an f64's whole numbers"
-)]
-fn real(count: usize) -> f64 {
-    count as f64
-}
-
 /// The fields of `holding`, among what `surround` holds about it; `Err`
 /// where the heap will not hold them.
 pub(crate) fn parcels(
@@ -290,14 +281,24 @@ fn corridors(
         let verge = rank.laying().verge;
         for pair in line.stations.windows(2) {
             let (a, b) = (pair[0], pair[1]);
-            let reach = 0.5 * a.width.max(b.width) + verge + half_diagonal;
+            let reach = 0.5 * mathf::fmax(a.width, b.width) + verge + half_diagonal;
             let span = |low: f64, high: f64, origin: f64, count: usize| {
                 let from = whole((low - reach - origin) / CELL);
                 let to = whole((high + reach - origin) / CELL).min(count.saturating_sub(1));
                 from..=to
             };
-            for row in span(a.at.y.min(b.at.y), a.at.y.max(b.at.y), origin.y, rows) {
-                for column in span(a.at.x.min(b.at.x), a.at.x.max(b.at.x), origin.x, columns) {
+            for row in span(
+                mathf::fmin(a.at.y, b.at.y),
+                mathf::fmax(a.at.y, b.at.y),
+                origin.y,
+                rows,
+            ) {
+                for column in span(
+                    mathf::fmin(a.at.x, b.at.x),
+                    mathf::fmax(a.at.x, b.at.x),
+                    origin.x,
+                    columns,
+                ) {
                     let at = centre(origin, column, row);
                     if crate::plane::onto_segment(at, a.at, b.at).1 < reach * reach {
                         if let Some(cell) = cells.get_mut(row * columns + column) {
@@ -446,7 +447,7 @@ fn cut(
 /// The size a field of ground lying `slope` and `lie` is cut to: smaller on
 /// good, level ground worked closely, larger on steep, stony or wet ground.
 fn field_size(slope: f64, lie: ground::Lie) -> f64 {
-    let rough = 1.0 + 3.0 * slope.min(0.5) + 1.2 * lie.stony + 0.8 * lie.wet;
+    let rough = 1.0 + 3.0 * mathf::fmin(slope, 0.5) + 1.2 * lie.stony + 0.8 * lie.wet;
     32_000.0 * rough * (1.25 - 0.5 * lie.fertile)
 }
 
@@ -502,7 +503,7 @@ fn split(
             .iter()
             .map(|&index| place(index).dot(axis))
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), v| {
-                (low.min(v), high.max(v))
+                (mathf::fmin(low, v), mathf::fmax(high, v))
             })
     };
     let (along_reach, across_reach) = (reach(along), reach(across));
@@ -567,7 +568,7 @@ fn long_axis(parcels: &Parcels, members: &[usize], along: Point) -> Point {
                     let at =
                         Point::new(real(index % parcels.columns), real(index / parcels.columns))
                             .dot(axis);
-                    (low.min(at), high.max(at))
+                    (mathf::fmin(low, at), mathf::fmax(high, at))
                 });
         high - low
     };

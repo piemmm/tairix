@@ -21,6 +21,10 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_land::channel::{Banked, Form, Section, Station, BROADEST};
+use tairix_mix::{mix32, unit};
+use tairix_noise::hash3;
+use tairix_noise::smoothstep;
 use tairix_parallel::JobRunner;
 use tairix_rng::NonCryptoRng;
 use tairix_util::{fallible, mathf};
@@ -29,21 +33,17 @@ use super::chains::Chains;
 use super::footprint::{Footprints, Taken, GAP};
 use super::lattice::Lattice;
 use super::plants::{Drift, Piece};
-use super::woodland::{Ranking, Runs, KEPT};
+use super::ranking::{Ranking, Runs};
+use super::woodland::KEPT;
 use super::{rgb, Dice, Recipe, Stage, GRANITES};
-use crate::band;
-use crate::channel::{Banked, Form, Section, Station, BROADEST};
 use crate::cover::MOSS;
 use crate::deadwood::{LOG_TAPER, SUNK};
 use crate::ground::Rock;
 use crate::heightfield::Heightfield;
 use crate::land::{seam, water_rows, Land};
 use crate::material::{Finish, Material, Relief, CARRIED_FOAM};
-use crate::noise::hash3;
-use crate::noise::smoothstep;
 use crate::pigment::Pigment;
 use crate::rock::{Habit, Lithology, MOST_FRACTURES};
-use crate::sample::{mix32, unit};
 use crate::shape::Shape;
 use crate::stream::{Flow, Stone, Stretch};
 use crate::vector::{byte, real, share, single, Frame, Pose, Vec3};
@@ -986,7 +986,7 @@ impl Bed {
         fallible::grow_to(&mut lies, end - next, None).then_some(())?;
         let unit = self.laid.get(next..end)?;
         let (bed, fields) = (&*self, &stage.fields);
-        band::for_each(runner, &mut lies, (0, LYING), &|band, lies| {
+        tairix_parallel::for_each_band(runner, &mut lies, (0, LYING), &|band, lies| {
             let stones = unit.get(band * LYING..).unwrap_or_default();
             for (stone, lie) in stones.iter().zip(lies) {
                 *lie = bed.lie(fields, land, *stone);

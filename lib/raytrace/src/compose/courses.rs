@@ -9,6 +9,7 @@
 
 use core::f64::consts::{PI, TAU};
 
+use tairix_mix::{mix32, unit};
 use tairix_util::mathf;
 
 use super::{rgb, Dice, Stage};
@@ -17,7 +18,6 @@ use crate::masonry::{Masonry, Unit};
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
 use crate::prototype::{Assembly, Building, Mesh, Part};
-use crate::sample::{mix32, unit};
 use crate::shape::Shape;
 use crate::solid::{Form, Solid, Wear};
 use crate::timber::Timber;

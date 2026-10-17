@@ -24,11 +24,13 @@
 use core::hash::Hasher;
 
 use tairix_hash::FastHash;
+use tairix_parallel::SERIAL;
 use tairix_wintersun_net::value::ChunkCoord;
 
 use crate::blend::{Blend, Kind};
 use crate::chunk::{Chunk, ChunkBuild};
 use crate::error::WorldError;
+use crate::land::{Keeping, RealmLand};
 use crate::params::{RealmParams, RealmSpec};
 use crate::realm::RealmField;
 
@@ -39,7 +41,7 @@ use crate::realm::RealmField;
 /// is the record of what the generator produces. A change that moves it
 /// is a change to every realm anyone has ever generated, and the new
 /// value is written down deliberately, not pasted from a failure.
-pub const REFERENCE_DIGEST: u64 = 0xDE50_1D65_981D_FDE1;
+pub const REFERENCE_DIGEST: u64 = 0x162F_B55C_9F9C_1D9D;
 
 /// The chunks the reference digest covers, as offsets from the origin.
 ///
@@ -47,6 +49,9 @@ pub const REFERENCE_DIGEST: u64 = 0xDE50_1D65_981D_FDE1;
 /// coast, interior and edge — a stage that is wrong only near the rim
 /// would otherwise pass.
 const PROBE_CHUNKS: [(i32, i32); 6] = [(0, 0), (1, 0), (0, 1), (-3, 2), (5, -4), (-7, -7)];
+
+/// The most bytes of ground the probes keep for one another.
+const PROBE_KEPT_BYTES: usize = 24 * 1024 * 1024;
 
 /// The realm the determinism verticals generate.
 ///
@@ -88,15 +93,61 @@ pub fn reference_params() -> RealmParams {
 ///
 /// Whatever generation refuses.
 pub fn world(params: RealmParams) -> Result<u64, WorldError> {
-    let field = RealmField::generate(params)?;
-    let mut hasher = FastHash::new();
-    fold_realm(&mut hasher, &field);
-    for (dx, dy) in PROBE_CHUNKS {
-        let coord = ChunkCoord { x: dx, y: dy };
-        let chunk = ChunkBuild::new(coord)?.finish(&field)?;
-        fold_chunk(&mut hasher, &chunk);
+    let mut folding = Folding::new(params);
+    loop {
+        if let Some(digest) = folding.step()? {
+            return Ok(digest);
+        }
     }
-    Ok(hasher.finish())
+}
+
+/// A realm's digest being folded a stage at a time — its field and land,
+/// then each probe chunk — so a caller can say how far it has come.
+#[derive(Debug)]
+pub struct Folding {
+    params: RealmParams,
+    land: Option<RealmLand>,
+    // The probes lie near enough to share most of the ground they are worn
+    // from, within what a guest under emulation holds beside the probe it is
+    // solving.
+    kept: Keeping,
+    folded: usize,
+    hasher: FastHash,
+}
+
+impl Folding {
+    /// The digest of `params`, nothing of it folded yet.
+    #[must_use]
+    pub fn new(params: RealmParams) -> Self {
+        Self {
+            params,
+            land: None,
+            kept: Keeping::within(PROBE_KEPT_BYTES),
+            folded: 0,
+            hasher: FastHash::new(),
+        }
+    }
+
+    /// Fold the next stage: the digest, once every stage is folded.
+    ///
+    /// # Errors
+    ///
+    /// Whatever generation refuses, the folding left where it was.
+    pub fn step(&mut self) -> Result<Option<u64>, WorldError> {
+        let Some(land) = &self.land else {
+            let land = RealmLand::new(RealmField::generate(self.params)?, &SERIAL)?;
+            fold_realm(&mut self.hasher, land.field());
+            self.land = Some(land);
+            return Ok(None);
+        };
+        if let Some(&(x, y)) = PROBE_CHUNKS.get(self.folded) {
+            let chunk =
+                ChunkBuild::new(ChunkCoord { x, y })?.finish(land, &mut self.kept, &SERIAL)?;
+            fold_chunk(&mut self.hasher, &chunk);
+            self.folded += 1;
+        }
+        Ok((self.folded == PROBE_CHUNKS.len()).then(|| self.hasher.finish()))
+    }
 }
 
 /// Fold one chunk, for a caller comparing chunks rather than realms.
@@ -115,7 +166,7 @@ pub fn realm(field: &RealmField) -> u64 {
     hasher.finish()
 }
 
-/// Every coarse sample, then every placed thing.
+/// The realm's parameters, then everything generated from them.
 fn fold_realm(hasher: &mut FastHash, field: &RealmField) {
     let spec = field.params().spec();
     hasher.write(&spec.seed.to_le_bytes());
@@ -127,7 +178,11 @@ fn fold_realm(hasher: &mut FastHash, field: &RealmField) {
     hasher.write(&spec.north_latitude.to_le_bytes());
     hasher.write(&spec.south_latitude.to_le_bytes());
     hasher.write(&spec.westerlies.0.to_le_bytes());
+    fold_generated(hasher, field);
+}
 
+/// Every coarse sample, then every placed thing.
+fn fold_generated(hasher: &mut FastHash, field: &RealmField) {
     for sample in field.samples() {
         hasher.write(&sample.elevation.0.to_le_bytes());
         hasher.write(&sample.water.0.to_le_bytes());

@@ -94,7 +94,7 @@ fn the_bands_sink_towards_the_horizon_and_thicken_as_they_go() {
     let centred = |time: f64| {
         let dark = darkening(&sky, &view, rows.clone(), time);
         let (weighted, total) = window.clone().fold((0.0, 0.0), |(weighted, total), at| {
-            (weighted + dark[at] * index_f64(at), total + dark[at])
+            (weighted + dark[at] * mathf::real(at), total + dark[at])
         });
         weighted / total
     };
@@ -140,8 +140,4 @@ fn repainting_the_bands_writes_the_discs_columns_alone() {
             }
         }
     }
-}
-
-fn index_f64(at: usize) -> f64 {
-    f64::from(u32::try_from(at).expect("small"))
 }

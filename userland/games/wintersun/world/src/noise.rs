@@ -75,13 +75,6 @@ pub fn ridged(key: SeedKey, stage: Stage, x: f64, y: f64) -> f64 {
     mathf::clamp(signed, 0.0, 1.0)
 }
 
-/// Billowed noise, in `0.0..1.0`: rounded mounds, for dunes.
-#[must_use]
-pub fn billow(key: SeedKey, stage: Stage, x: f64, y: f64) -> f64 {
-    let signed = summed(key, stage, x, y, mathf::fabs);
-    mathf::clamp(signed, 0.0, 1.0)
-}
-
 /// `(x, y)` displaced by an independent noise field of `stage`, of
 /// amplitude `strength` lattice units.
 ///

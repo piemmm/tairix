@@ -15,23 +15,24 @@
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
-use tairix_countryside::layout::Layout;
+use tairix_countryside::layout::Parcel;
 use tairix_countryside::usage::{Crop, Use};
 use tairix_countryside::Point;
+use tairix_land::grown::{Grown, Stage as Growth};
+use tairix_mix::mix32;
+use tairix_noise::smoothstep;
 use tairix_util::mathf;
 
 use super::super::{rgb, Dice, Stage};
 use super::field_key;
 use super::growing::Growing;
 use crate::detail::Bounds;
-use crate::farmed::{self, Drill, Grown, Stage as Growth};
+use crate::farmed::{self, Drill};
 use crate::land::Land;
 use crate::maize::{drying, Maize};
 use crate::material::{Finish, Material};
-use crate::noise::smoothstep;
 use crate::pigment::Pigment;
 use crate::prototype::{Building, Mapping};
-use crate::sample::mix32;
 use crate::stand::{Plant, Sowing, Stand, DRILLED, PLANTS};
 use crate::vector::{power, single, Vec3};
 
@@ -580,54 +581,57 @@ fn plants(stage: &mut Stage, form: &Form, seed: u64) -> Option<[Plant; PLANTS]> 
     Some(plants)
 }
 
-/// Stand `layout`'s maize fields lying near enough the eye at `eye` on
-/// `land`, their plants built as first wanted from `seed`, thinning away over
-/// `thinning`; `None` when the stage will not hold them.
+/// The plants maize fields stand, each kind built when first wanted: the
+/// green and the ripe.
+pub(super) type Built = [Option<[Plant; PLANTS]>; 2];
+
+/// Stand `parcel` if it is a maize field lying near enough the eye at `eye`
+/// on `land`, its plants built as first wanted from `seed` into `built`,
+/// thinning away over `thinning`: whether it stood; `None` when the stage
+/// will not hold it.
 pub(super) fn stand(
     stage: &mut Stage,
-    (land, layout): (&Land, &Layout),
+    (land, parcel): (&Land, &Parcel),
     eye: Point,
     (thinning, seed): ((f64, f64), u64),
-) -> Option<()> {
-    let mut built: [Option<[Plant; PLANTS]>; 2] = [None, None];
-    for parcel in layout.parcels() {
-        let field = &parcel.field;
-        if parcel.usage.used != Use::Arable(Crop::Maize) || field.cell.distance(eye) > thinning.1 {
-            continue;
-        }
-        let (code, rows) = land
-            .grids
-            .grows(&stage.fields, field.middle.x, field.middle.y);
-        let Some(form) = form(Grown::of(code)) else {
-            continue;
-        };
-        let slot = built.get_mut(usize::from(form.ripe))?;
-        let plants = if let Some(plants) = *slot {
-            plants
-        } else {
-            let made = plants(stage, form, seed ^ u64::from(form.ripe))?;
-            *slot = Some(made);
-            made
-        };
-        let sowing = Sowing {
-            grows: (code, rows),
-            drill: Drill::of(farmed::row_spacing(Crop::Maize), (code, rows)),
-            apart: APART,
-            planting: DRILLED,
-            plants,
-            kinds: VARIANTS,
-            sizes: SIZES,
-            posts: None,
-            eye: (eye.x, eye.y),
-            thinning,
-            seed: Dice::keyed(seed ^ field_key(field.id), 1).seed(),
-        };
-        let Some(stood) = Stand::new((land.grids, &stage.fields), &field.cell, &sowing) else {
-            continue;
-        };
-        stage.stand(stood, usize::try_from(plants[0].material).ok()?)?;
+    built: &mut Built,
+) -> Option<bool> {
+    let field = &parcel.field;
+    if parcel.usage.used != Use::Arable(Crop::Maize) || field.cell.distance(eye) > thinning.1 {
+        return Some(false);
     }
-    Some(())
+    let (code, rows) = land
+        .grids
+        .grows(&stage.fields, field.middle.x, field.middle.y);
+    let Some(form) = form(Grown::of(code)) else {
+        return Some(false);
+    };
+    let slot = built.get_mut(usize::from(form.ripe))?;
+    let plants = if let Some(plants) = *slot {
+        plants
+    } else {
+        let made = plants(stage, form, seed ^ u64::from(form.ripe))?;
+        *slot = Some(made);
+        made
+    };
+    let sowing = Sowing {
+        grows: (code, rows),
+        drill: Drill::of(farmed::row_spacing(Crop::Maize), (code, rows)),
+        apart: APART,
+        planting: DRILLED,
+        plants,
+        kinds: VARIANTS,
+        sizes: SIZES,
+        posts: None,
+        eye: (eye.x, eye.y),
+        thinning,
+        seed: Dice::keyed(seed ^ field_key(field.id), 1).seed(),
+    };
+    let Some(stood) = Stand::new((land.grids, &stage.fields), &field.cell, &sowing) else {
+        return Some(false);
+    };
+    stage.stand(stood, usize::try_from(plants[0].material).ok()?)?;
+    Some(true)
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use core::hash::Hasher;
 
 use alloc::vec::Vec;
 
+use tairix_parallel::SERIAL;
+use tairix_scatter::{Cell, Offers, Span, Thinning};
 use tairix_util::mathf;
 
 use crate::ground::{self, Ground};
@@ -26,6 +28,19 @@ pub struct Villages {
     /// How far from a village its holdings' farms are gathered into it
     /// rather than standing on their own, as a share of the spacing.
     pub gathers: f64,
+}
+
+impl Villages {
+    /// Whether it is a tier of villages at all: a positive finite spacing,
+    /// and an exclusion and a gathering each within `0.0..=1.0`.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        let share = 0.0..=1.0;
+        self.spacing.is_finite()
+            && self.spacing > 0.0
+            && share.contains(&self.exclusion)
+            && share.contains(&self.gathers)
+    }
 }
 
 /// What a settlement is.
@@ -103,6 +118,47 @@ fn offer(
     })
 }
 
+/// The village offers of a tier's squares: each square's place and rank,
+/// crowding another within the tier's exclusion.
+struct Offered<'a> {
+    key: Key,
+    tier: &'a Villages,
+    ground: &'a dyn Ground,
+    reach: f64,
+}
+
+impl Offers for Offered<'_> {
+    type Offer = (Point, (i32, i32), u64);
+    type Rank = u64;
+    type Bound = ();
+
+    fn reach(&self) -> u32 {
+        // An exclusion of at most a square keeps every rival in a neighbour.
+        1
+    }
+
+    fn offer(&self, (x, y): Cell) -> Option<Self::Offer> {
+        let square = (i32::try_from(x).ok()?, i32::try_from(y).ok()?);
+        offer(self.key, self.tier, self.ground, square).map(|(at, rank)| (at, square, rank))
+    }
+
+    fn rank(&self, &(_, _, rank): &Self::Offer) -> Self::Rank {
+        rank
+    }
+
+    fn crowds(&self, (at, _, _): &Self::Offer, (other, _, _): &Self::Offer) -> bool {
+        (*other - *at).length() < self.reach
+    }
+
+    fn bound(&self, _: &Self::Offer) {}
+
+    fn join(&self, (): (), (): ()) {}
+
+    fn within(&self, _: &Self::Offer, (): (), cells: u32) -> bool {
+        cells <= self.reach()
+    }
+}
+
 /// The villages standing in `rect`, in their squares' order; `None` where
 /// the heap will not hold them.
 pub(crate) fn villages(
@@ -111,41 +167,36 @@ pub(crate) fn villages(
     ground: &dyn Ground,
     rect: Rect,
 ) -> Option<Vec<Settlement>> {
-    let square = |value: f64| mathf::round_i32(mathf::floor(value / tier.spacing));
+    let square = |value: f64| i64::from(mathf::round_i32(mathf::floor(value / tier.spacing)));
     let (x0, x1) = (square(rect.low.x), square(rect.high.x));
     let (y0, y1) = (square(rect.low.y), square(rect.high.y));
-    let reach = tier.exclusion.clamp(0.0, 1.0) * tier.spacing;
+    let offered = Offered {
+        key,
+        tier,
+        ground,
+        reach: tier.exclusion.clamp(0.0, 1.0) * tier.spacing,
+    };
+    let mut spans = Vec::new();
+    spans
+        .try_reserve(usize::try_from(y1 - y0 + 1).unwrap_or(0))
+        .ok()?;
+    spans.extend((y0..=y1).map(|row| Span {
+        row,
+        columns: (x0, x1 + 1),
+    }));
+    let mut thinning = Thinning::new(spans, offered.reach(), 1).ok()?;
+    let mut kept = Vec::new();
+    while !thinning.step(&offered, &SERIAL, &mut kept).ok()? {}
     let mut standing = Vec::new();
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let Some((at, rank)) = offer(key, tier, ground, (x, y)) else {
-                continue;
-            };
-            if !rect.contains(at) {
-                continue;
-            }
-            // A strict order on rank, then square: of any two offers within
-            // reach exactly one yields.
-            let outranked = (-1..=1).any(|dy| {
-                (-1..=1).any(|dx| {
-                    (dx, dy) != (0, 0)
-                        && offer(key, tier, ground, (x + dx, y + dy)).is_some_and(
-                            |(other, theirs)| {
-                                (theirs, (x + dx, y + dy)) > (rank, (x, y))
-                                    && (other - at).length() < reach
-                            },
-                        )
-                })
-            });
-            if !outranked {
-                standing.try_reserve(1).ok()?;
-                standing.push(Settlement {
-                    settled: Settled::Village(x, y),
-                    at,
-                });
-            }
-        }
-    }
+    standing.try_reserve(kept.len()).ok()?;
+    standing.extend(
+        kept.into_iter()
+            .filter(|(_, (at, _, _))| rect.contains(*at))
+            .map(|(_, (at, (x, y), _))| Settlement {
+                settled: Settled::Village(x, y),
+                at,
+            }),
+    );
     Some(standing)
 }
 

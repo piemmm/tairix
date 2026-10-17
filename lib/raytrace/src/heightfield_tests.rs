@@ -1,9 +1,11 @@
 use core::f64::consts::TAU;
 
-use super::*;
-use crate::sample::{mix32, unit};
-use crate::vector::single;
+use tairix_land::attributes::GREEN;
+use tairix_mix::{mix32, unit};
 use tairix_parallel::JobRunner;
+
+use super::*;
+use crate::vector::single;
 
 /// A grid of `cells` a side, `step` apart from `origin`, filled from
 /// `height` and sealed.
@@ -76,6 +78,46 @@ fn a_grid_has_cells_and_steps_forward() {
             blocks = blocks.div_ceil(2);
         }
         assert_eq!(field.levels.last().map(|level| level.1), Some(1));
+    }
+}
+
+/// A grid taken whole from a piece's vertices holds them as they came, and
+/// refuses vertices that do not fill it or a step that does not move on.
+#[test]
+fn a_grid_of_vertices_holds_them_whole_and_refuses_a_short_fill() {
+    let side = 5;
+    let heights: Vec<f32> = (0..25_u16).map(|index| f32::from(index) * 0.5).collect();
+    let attributes: Vec<Attributes> = (0..25_u8).map(|index| [index; CHANNELS]).collect();
+    let mut field = Heightfield::of_vertices(
+        (side, (-2.0, 3.0), 0.25),
+        (heights.clone(), attributes.clone()),
+    )
+    .expect("a grid");
+    assert_eq!((field.side(), field.wrap), (side, false));
+    assert_eq!(field.placing(), ((-2.0, 3.0), 0.25));
+    assert_eq!(field.heights(), &heights[..]);
+    assert_eq!(field.attributes_of(3, 2), [13; CHANNELS]);
+    field.seal();
+    assert_eq!((field.low, field.high), (0.0, 12.0));
+
+    let refused = [
+        (side, heights[1..].to_vec(), attributes.clone()),
+        (side, heights.clone(), attributes[1..].to_vec()),
+        (side, heights.clone(), Vec::new()),
+        (1, alloc::vec![0.0], alloc::vec![[0; CHANNELS]]),
+        (0, Vec::new(), Vec::new()),
+    ];
+    for (side, heights, attributes) in refused {
+        let placed = (side, (0.0, 0.0), 1.0);
+        assert!(Heightfield::of_vertices(placed, (heights, attributes)).is_none());
+    }
+    for step in [0.0, -1.0, f64::NAN] {
+        let placed = (side, (0.0, 0.0), step);
+        let vertices = (heights.clone(), attributes.clone());
+        assert!(
+            Heightfield::of_vertices(placed, vertices).is_none(),
+            "{step}"
+        );
     }
 }
 

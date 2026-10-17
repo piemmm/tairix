@@ -1,3 +1,6 @@
+use tairix_mix::{mix32, unit};
+use tairix_util::space::Vec3;
+
 use super::*;
 
 /// Points spread over a few lattice cells either side of the origin.
@@ -57,6 +60,8 @@ fn sums_of_octaves_stay_within_their_ranges() {
         assert!(sum.abs() <= 1.1, "{sum}");
         let ridges = ridged2(p.x, p.z, 9, 6);
         assert!((0.0..=1.0).contains(&ridges), "{ridges}");
+        let billows = billow2(p.x, p.z, 9, 6);
+        assert!((0.0..=1.0).contains(&billows), "{billows}");
         let veins = turbulence3(p, 9, 4);
         assert!((0.0..=1.1).contains(&veins), "{veins}");
     }
@@ -143,9 +148,9 @@ fn cellular_noise_finds_what_a_search_of_every_cell_finds() {
                     record(
                         &mut found,
                         Vec3::new(
-                            jittered(1, dx, fx),
-                            jittered(2, dy, fy),
-                            jittered(3, dz, fz),
+                            jittered(JITTER[0], dx, fx),
+                            jittered(JITTER[1], dy, fy),
+                            jittered(JITTER[2], dz, fz),
                         ),
                         id,
                     );
@@ -169,6 +174,130 @@ fn cellular_noise_finds_what_a_search_of_every_cell_finds() {
             );
         }
     }
+}
+
+/// A sparse search keeps to the features its filter keeps, finds the
+/// nearest of those, and finds none where it keeps none.
+#[test]
+fn a_sparse_search_finds_only_the_features_it_keeps() {
+    let kept = |id: u32| id.is_multiple_of(3);
+    for p in spread(2000) {
+        let all = cells3(p, 41, 0.9);
+        let some = cells3_among(p, 41, 0.9, kept);
+        assert!(!some.nearest.is_finite() || kept(some.id), "{p:?}");
+        assert!(some.nearest >= all.nearest, "{p:?}");
+        assert!(cells3_among(p, 41, 0.9, |_| false).nearest.is_infinite());
+    }
+}
+
+/// A plane cell's id says nothing of where its feature stands, so a field
+/// shaded by its cells' ids does not follow their places.
+#[test]
+fn a_cells_id_is_drawn_apart_from_where_it_stands() {
+    let (mut moments, count) = ([0.0f64; 3], 20_000u32);
+    // Spread wide, so nearly every place finds a feature of its own.
+    for p in spread(count).map(|p| p * 400.0) {
+        let found = cells2(p.x, p.z, 7, 1.0);
+        let feature = p.x + found.toward.x;
+        let offset = feature - mathf::floor(feature) - 0.5;
+        let shade = unit(found.id) - 0.5;
+        moments[0] += offset * shade;
+        moments[1] += offset * offset;
+        moments[2] += shade * shade;
+    }
+    let correlation = moments[0] / mathf::sqrt(moments[1] * moments[2]);
+    assert!(correlation.abs() < 0.05, "{correlation}");
+}
+
+/// Gradient noise rises no faster than its stated slope whatever gradients
+/// its corners pick: at a place and along a way, each corner's part of the
+/// rise is that of the gradient it picks, so the steepest any choice makes
+/// is each corner's steepest pick, summed, searched over the places of half
+/// a cell, which its symmetries make every cell, and over every way.
+#[test]
+fn gradient_noise_rises_no_faster_than_its_slope() {
+    let slope = |t: f64| 30.0 * t * t * (t - 1.0) * (t - 1.0);
+    let corner = |bit: u32, t: f64| {
+        if bit == 1 {
+            (fade(t), slope(t))
+        } else {
+            (1.0 - fade(t), -slope(t))
+        }
+    };
+    let steps = 8u32;
+    let at = |step: u32| 0.5 * f64::from(step) / f64::from(steps);
+    let places = (0..=steps).flat_map(|east| {
+        (0..=steps).flat_map(move |up| (0..=steps).map(move |north| [at(east), at(up), at(north)]))
+    });
+    let ways = (0..1500u32).map(|index| {
+        let height = 1.0 - 2.0 * (f64::from(index) + 0.5) / 1500.0;
+        let around = 2.399_963_229_728_653 * f64::from(index);
+        let level = mathf::sqrt(1.0 - height * height);
+        [
+            level * mathf::cos(around),
+            height,
+            level * mathf::sin(around),
+        ]
+    });
+    let mut space = 0.0f64;
+    for place in places {
+        for way in ways.clone() {
+            let rise: f64 = (0..8u32)
+                .map(|corner_bits| {
+                    let picks =
+                        [0, 1, 2].map(|axis| corner((corner_bits >> axis) & 1, place[axis]));
+                    let weight = picks[0].0 * picks[1].0 * picks[2].0;
+                    let along: f64 = (0..3)
+                        .map(|axis| {
+                            let others: f64 = (0..3)
+                                .filter(|&other| other != axis)
+                                .map(|other| picks[other].0)
+                                .product();
+                            way[axis] * picks[axis].1 * others
+                        })
+                        .sum();
+                    let toward =
+                        [0, 1, 2].map(|axis| place[axis] - f64::from((corner_bits >> axis) & 1));
+                    let reach = [0, 1, 2].map(|axis| toward[axis] * along + weight * way[axis]);
+                    GRADIENTS
+                        .iter()
+                        .map(|gradient| {
+                            gradient[0] * reach[0] + gradient[1] * reach[1] + gradient[2] * reach[2]
+                        })
+                        .fold(f64::NEG_INFINITY, mathf::fmax)
+                })
+                .sum();
+            space = mathf::fmax(space, rise);
+        }
+    }
+    assert!((3.7..NOISE_SLOPE).contains(&space), "space rises {space}");
+    for p in spread(4000) {
+        let step = 1e-6;
+        let rise = |a: f64, b: f64| (b - a).abs() / step;
+        assert!(rise(noise2(p.x, p.z, 3), noise2(p.x + step, p.z, 3)) <= NOISE_SLOPE);
+        assert!(rise(noise2(p.x, p.z, 3), noise2(p.x, p.z + step, 3)) <= NOISE_SLOPE);
+    }
+}
+
+/// Each octave's turn is the last's turned once more by the same angle, a
+/// rotation of unit length.
+#[test]
+fn each_octaves_turn_is_the_last_turned_once_more() {
+    let (step, mut last) = (turn(1.0, 0.0, 1), turn(1.0, 0.0, 0));
+    for octave in 1..8 {
+        let (x, z) = turn(1.0, 0.0, octave);
+        let expected = (
+            last.0 * step.0 - last.1 * step.1,
+            last.0 * step.1 + last.1 * step.0,
+        );
+        assert!(
+            (x - expected.0).abs() < 1e-12 && (z - expected.1).abs() < 1e-12,
+            "{octave}"
+        );
+        assert!((mathf::hypot(x, z) - 1.0).abs() < 1e-12, "{octave}");
+        last = (x, z);
+    }
+    assert_eq!(turn(1.0, 0.0, 8), turn(1.0, 0.0, 0));
 }
 
 #[test]
@@ -203,18 +332,29 @@ fn noise_is_continuous_across_every_lattice_wall() {
                 let (a, w) = (f64::from(along) * 0.37 + 0.1, f64::from(wall));
                 let across_z = |e: f64| noise2(a, w + e, seed);
                 let across_x = |e: f64| noise2(w + e, a, seed);
-                worst = worst
-                    .max((across_z(-1e-9) - across_z(1e-9)).abs())
-                    .max((across_x(-1e-9) - across_x(1e-9)).abs());
+                worst = mathf::fmax(
+                    mathf::fmax(worst, (across_z(-1e-9) - across_z(1e-9)).abs()),
+                    (across_x(-1e-9) - across_x(1e-9)).abs(),
+                );
                 for axis in [Vec3::new(1.0, 0.0, 0.0), Vec3::UP, Vec3::new(0.0, 0.0, 1.0)] {
                     let p = Vec3::new(a, 0.3 + a, 0.7 * a)
                         + axis * (w - (Vec3::new(a, 0.3 + a, 0.7 * a)).dot(axis));
                     let jump =
                         (noise3(p - axis * 1e-9, seed) - noise3(p + axis * 1e-9, seed)).abs();
-                    worst = worst.max(jump);
+                    worst = mathf::fmax(worst, jump);
                 }
             }
         }
     }
     assert!(worst < 1e-6, "noise jumps {worst} across a lattice wall");
+}
+
+/// Billowed octaves lie about a quarter on average, troughs creased where each
+/// octave crosses nought: so a land's dunes, read as twice them less a half,
+/// neither raise nor lower it.
+#[test]
+fn billowed_octaves_lie_about_a_quarter() {
+    let count = 4000;
+    let mean = spread(count).map(|p| billow2(p.x, p.z, 5, 4)).sum::<f64>() / f64::from(count);
+    assert!((mean - 0.25).abs() < 0.02, "{mean}");
 }

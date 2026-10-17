@@ -80,9 +80,9 @@ impl Vec3 {
     #[must_use]
     pub fn min(self, other: Self) -> Self {
         Self::new(
-            self.x.min(other.x),
-            self.y.min(other.y),
-            self.z.min(other.z),
+            crate::mathf::fmin(self.x, other.x),
+            crate::mathf::fmin(self.y, other.y),
+            crate::mathf::fmin(self.z, other.z),
         )
     }
 
@@ -90,16 +90,16 @@ impl Vec3 {
     #[must_use]
     pub fn max(self, other: Self) -> Self {
         Self::new(
-            self.x.max(other.x),
-            self.y.max(other.y),
-            self.z.max(other.z),
+            crate::mathf::fmax(self.x, other.x),
+            crate::mathf::fmax(self.y, other.y),
+            crate::mathf::fmax(self.z, other.z),
         )
     }
 
     /// The greatest component.
     #[must_use]
     pub fn max_element(self) -> f64 {
-        self.x.max(self.y).max(self.z)
+        crate::mathf::fmax(crate::mathf::fmax(self.x, self.y), self.z)
     }
 
     /// How bright this triple looks as a linear Rec. 709 colour.

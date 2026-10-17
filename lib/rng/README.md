@@ -37,7 +37,7 @@ randomness ends up drawn from an invertible generator.
   *lower* its quality. `keyed_by` builds one from a fallible source and none
   at all from a refused draw; `fork` keys an independent child from the
   parent's output.
-- **`NonCryptoRng`** is xoshiro256++ seeded via SplitMix64 — an ordinary
+- **`NonCryptoRng`** is xoshiro256++ seeded via `lib/mix`'s SplitMix64 — an ordinary
   non-cryptographic PRNG, not a security primitive, so implementing it here is
   not hand-rolled cryptography.
 - **`OutputReserve`** is the kernel's bounded reserve of CSPRNG output, and it
@@ -69,8 +69,8 @@ than statistical, because no statistical test can tell a good PRNG from true
 randomness: the key-erasure split asserted against the raw cipher's keystream,
 backtracking resistance, zeroise-on-consume, XOR-folding that cannot degrade a
 key, `const` construction for a `static`, and `Debug` that elides key and
-buffer. Alongside them: the NIST CAVP HMAC-DRBG known-answer vector, the
-SplitMix64 reference vector, Lemire bounded-sampling bias/range checks, the
+buffer. Alongside them: the NIST CAVP HMAC-DRBG known-answer vector,
+Lemire bounded-sampling bias/range checks, the
 entropy-combination and fail-closed paths, and the reserve's seed / refill /
 discard / reseed boundaries.
 

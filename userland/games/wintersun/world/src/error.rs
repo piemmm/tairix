@@ -15,8 +15,8 @@ pub enum WorldError {
     /// A chunk window is not strictly sorted by coordinate, so it could
     /// not be searched.
     UnsortedWindow,
-    /// A chunk coordinate so far out that its cells would not fit a cell
-    /// coordinate.
+    /// A chunk or region off the realm's land, or so far out that its cells
+    /// would not fit a cell coordinate.
     OutOfRange,
     /// A buffer handed to a realm stage does not hold one entry per sample
     /// of the realm's coarse grid.
@@ -28,6 +28,24 @@ impl From<tairix_terrain::TerrainError> for WorldError {
         match error {
             tairix_terrain::TerrainError::OutOfMemory => Self::OutOfMemory,
             tairix_terrain::TerrainError::Shape => Self::Mismatch,
+        }
+    }
+}
+
+impl From<tairix_land::Error> for WorldError {
+    fn from(error: tairix_land::Error) -> Self {
+        match error {
+            tairix_land::Error::OutOfMemory => Self::OutOfMemory,
+            tairix_land::Error::Shape | tairix_land::Error::Unreachable => Self::Mismatch,
+        }
+    }
+}
+
+impl From<tairix_scatter::Error> for WorldError {
+    fn from(error: tairix_scatter::Error) -> Self {
+        match error {
+            tairix_scatter::Error::OutOfMemory => Self::OutOfMemory,
+            tairix_scatter::Error::Shape => Self::OutOfRange,
         }
     }
 }
@@ -44,5 +62,17 @@ mod tests {
             WorldError::OutOfMemory
         );
         assert_eq!(WorldError::from(TerrainError::Shape), WorldError::Mismatch);
+    }
+
+    #[test]
+    fn a_scatter_refusal_keeps_its_cause() {
+        assert_eq!(
+            WorldError::from(tairix_scatter::Error::OutOfMemory),
+            WorldError::OutOfMemory
+        );
+        assert_eq!(
+            WorldError::from(tairix_scatter::Error::Shape),
+            WorldError::OutOfRange
+        );
     }
 }

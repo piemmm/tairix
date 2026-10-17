@@ -405,14 +405,15 @@ fn held(bounds: Aabb) -> Aabb {
     }
 }
 
-/// Parts' worth of a prototype's hierarchy built in one step.
+/// How many of a prototype's parts a step bounds, or visits as its hierarchy
+/// is built.
 pub(crate) const BUILD_UNIT: usize = 24_000;
 
 impl Building {
-    /// Bound about `budget` more of its parts, or, once all are, build about
-    /// that many parts' worth more of its hierarchy; whether it is whole, or
-    /// `None` when the heap will not hold it or a part names what the
-    /// prototype lacks.
+    /// Bound about `budget` more of its parts, or, once all are, build its
+    /// hierarchy visiting about that many; whether it is whole, or `None`
+    /// when the heap will not hold it or a part names what the prototype
+    /// lacks.
     pub(crate) fn step(&mut self, budget: usize) -> Option<bool> {
         if let Some(builder) = self.builder.as_mut() {
             return Some(builder.step(budget));

@@ -2,8 +2,10 @@
 //! undercut wall, part along cracks as wide as the crust is thick, and any
 //! two tiles meet edge to edge in whole plates without a seam.
 
+use tairix_land::attributes::QUANTITIES;
+
 use super::*;
-use crate::heightfield::{Grows, QUANTITIES};
+use crate::heightfield::Grows;
 use crate::prototype::Prototype;
 use crate::vector::{share, Ray};
 

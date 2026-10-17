@@ -1,6 +1,6 @@
 [package]
 name = "tairix-wintersun-world"
-description = "WinterSun's seed-pure procedural world (plans/WINTERSUN.md §2): a realm is a u64 seed and a validated parameter document, and every chunk of terrain is a pure function of the two. Uplift, relief, hydrology, climate, biomes, scatter, settlements and roads, over a two-level scale ladder — one bounded global coarse field per realm, then halo-bounded fine detail per chunk — so resident cost is O(working set) and never O(world extent). no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+description = "WinterSun's seed-pure procedural world (plans/WINTERSUN.md §2): a realm is a u64 seed and a validated parameter document, and every chunk of terrain is a pure function of the two. Uplift, relief, hydrology, climate, biomes, scatter, settlements and roads, over a two-level scale ladder — one bounded global coarse field per realm, then halo-bounded fine detail per chunk, its ground refined and worn by the desktop ray tracer's land generator — so resident cost is O(working set) and never O(world extent). no_std, forbids unsafe, and bit-identical on every Tier-1 target."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,12 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# The long host tests that survey whole realms, whose cost grows with every
+# chunk they solve: `ci-long` and `cargo xtask test --scenes` run them, and `ci`
+# only lints them.
+scene-tests = []
 
 [dependencies]
 # `WorldPoint`, `ChunkCoord` and the sub-unit scale are the wire's, not a
@@ -26,6 +32,14 @@ tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
 # The grid terrain algorithms the realm field runs — drainage, incision,
 # diffusion and road routing — shared with the desktop's ray tracer.
 tairix-terrain = { path = "../../../../lib/terrain", version = "=0.0.0" }
+# The land generator its fine ground is refined with, the desktop ray
+# tracer's own at its finest.
+tairix-land = { path = "../../../../lib/land", version = "=0.0.0" }
+# The one keyed priority rule its scatter is spaced by, shared with the
+# desktop's ray tracer and the countryside's villages, and the runner it is
+# driven with.
+tairix-scatter = { path = "../../../../lib/scatter", version = "=0.0.0" }
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0", default-features = false }
 # The chunk cache is governed, budgeted and reclaimed like every other
 # bounded cache in the system rather than holding memory on its own terms.
 tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }

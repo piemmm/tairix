@@ -71,7 +71,7 @@ fn the_wind_carves_scoured_snow_along_its_way_and_never_through_it() {
             cut <= 0.0 && cut >= -0.8 * thin - 1e-12,
             "{cut} at {x}, {z}"
         );
-        deepest = deepest.min(cut);
+        deepest = mathf::fmin(deepest, cut);
         // Along the wind the form changes far more slowly than across it.
         along += (PACK.carved((x, z + 0.05), thin, 0.05) - cut).abs();
         across += (PACK.carved((x + 0.05, z), thin, 0.05) - cut).abs();
@@ -97,7 +97,7 @@ fn a_grid_too_coarse_for_a_form_keeps_none_of_it() {
 fn depths_are_kept_finely_about_nought() {
     for depth in [0.0, 0.01, 0.03, 0.1, 0.5, 2.0, DEEPEST] {
         let back = depth_of(f64::from(kept(depth)) / 255.0);
-        let allowed = 0.004f64.max(0.02 * depth);
+        let allowed = mathf::fmax(0.004f64, 0.02 * depth);
         assert!((back - depth).abs() <= allowed, "{depth} came back {back}");
     }
     assert_eq!(kept(-1.0), 0);
@@ -189,7 +189,7 @@ fn a_hedges_drift_lies_low_against_it_and_peaks_clear_of_it() {
     let most = |barrier: Barrier| {
         (0..60)
             .map(|step| PACK.drifted(barrier, (0.1 * f64::from(step), 1.0), 0.0))
-            .fold(0.0, f64::max)
+            .fold(0.0, mathf::fmax)
     };
     assert!(
         most(fence) < 0.35 * most(walled),

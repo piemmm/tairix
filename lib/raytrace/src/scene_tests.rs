@@ -8,7 +8,9 @@ use core::f64::consts::{FRAC_PI_2, TAU};
 
 use tairix_util::mathf;
 
-use super::{daylight, Draft, Exposure, Object, Parts, Scene, Sight};
+use super::{
+    daylight, objects_of, Draft, Exposure, Object, Parts, Raising, Scene, Sight, BOUND_MOST,
+};
 use crate::atmosphere::Air;
 use crate::body::{self, sunlight};
 use crate::camera::Camera;
@@ -21,9 +23,9 @@ use crate::shape::Shape;
 use crate::sky::{Dome, Gradient, Seeing, Sky};
 use crate::vector::{Frame, Pose, Ray, Vec3};
 #[cfg(feature = "scene-tests")]
-use crate::{
-    sample::{mix32, unit},
-    vector::PACKET,
+use {
+    crate::vector::PACKET,
+    tairix_mix::{mix32, unit},
 };
 
 fn object(shape: Shape, material: usize, filter: Option<Vec3>) -> Object {
@@ -43,7 +45,7 @@ fn scene(objects: Vec<Object>) -> Scene {
 
 fn parts(objects: Vec<Object>) -> Parts {
     Parts {
-        objects,
+        objects: objects_of(objects),
         faces: Vec::new(),
         fields: Vec::new(),
         prototypes: Vec::new(),
@@ -106,18 +108,45 @@ fn crowd() -> Vec<Object> {
         .collect()
 }
 
+/// However many cores a runner claims, a step finds the boxes of no more of a
+/// scene's objects than one core gathers.
+#[test]
+fn a_step_finds_no_more_boxes_than_one_core_gathers() {
+    let count = u32::try_from(BOUND_MOST + 1000).expect("a count");
+    let many = (0..count)
+        .map(|index| {
+            let (x, z) = (f64::from(index % 400), f64::from(index / 400));
+            object(
+                Shape::Sphere {
+                    centre: Vec3::new(x, 1.0, z),
+                    radius: 0.25,
+                },
+                0,
+                None,
+            )
+        })
+        .collect();
+    let mut building = Scene::building(parts(many)).expect("a building");
+    let wide = tairix_parallel::Reversed::new(1 << 12);
+    assert_eq!(building.step(&wide), Some(false));
+    let Raising::Bounding { next, .. } = &building.raising else {
+        panic!("its boxes were all found in one step");
+    };
+    assert_eq!(*next, BOUND_MOST);
+}
+
 /// A scene of tens of thousands of objects builds its hierarchy a bounded
 /// share a step, and meets every ray as one built at once does.
 #[test]
 fn a_large_scenes_hierarchy_builds_a_step_at_a_time_and_meets_rays_as_one_built_whole() {
-    let mut building =
-        Scene::building(parts(crowd()), &tairix_parallel::Threaded::new(3)).expect("a building");
+    let mut building = Scene::building(parts(crowd())).expect("a building");
+    let runner = tairix_parallel::Threaded::new(3);
     let mut steps = 1;
-    while !building.step() {
+    while !building.step(&runner).expect("built") {
         steps += 1;
     }
     assert!(steps > 2, "built in {steps} steps");
-    let stepped = building.finish();
+    let stepped = building.finish().expect("a whole hierarchy");
     let whole = scene(crowd());
     for index in 0..500u32 {
         let t = f64::from(index);
@@ -334,7 +363,8 @@ fn a_packet_of_eye_rays_finds_what_each_finds_alone() {
                 "pixel {pixel}, ray {lane}"
             );
             if let Some((index, _)) = alone {
-                on_lawns += usize::from(matches!(scene.objects[index].shape, Shape::Lawn { .. }));
+                let met = &scene.objects.get(index).expect("an object").shape;
+                on_lawns += usize::from(matches!(met, Shape::Lawn { .. }));
             }
         }
     }

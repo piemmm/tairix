@@ -3,10 +3,10 @@
 //! without a seam, its marches find the cloud as finely as a pixel holds
 //! it, its shadow is a transmittance, and its light is a cloud's.
 
+use tairix_mix::{mix32, unit};
 use tairix_util::fallible;
 
 use super::*;
-use crate::sample::{mix32, unit};
 
 const CUMULUS: Deck = Deck {
     base: 1200.0,
@@ -28,6 +28,13 @@ const CUMULUS: Deck = Deck {
 const OVERCAST: Deck = Deck {
     cover: 1.0,
     heap: 0.3,
+    ..CUMULUS
+};
+
+/// A broken sheet: lumpy cloud lying as a field, more of it than sky.
+const BROKEN: Deck = Deck {
+    cover: 0.6,
+    heap: 0.55,
     ..CUMULUS
 };
 
@@ -334,19 +341,33 @@ fn looks(count: u32) -> impl Iterator<Item = (Vec3, Vec3)> {
 }
 
 /// Seen from the ground across the bank, low and high, a march lets through
-/// what the cloud it crosses lets through: were its steps long enough to fall
-/// wherever they happened to at a cloud's edge, neighbouring rays would show
-/// that edge in slices, and some would miss clouds altogether.
+/// what the cloud it crosses lets through, over the jitters a pixel's samples
+/// take: were its steps long enough to fall wherever they happened to at a
+/// cloud's edge, neighbouring rays would show that edge in slices, and some
+/// would miss clouds altogether. One sample a step through a fringe the wisps
+/// cut finer than its steps strays about that, so a march alone is held to
+/// as little scatter as a pixel's every sample counts on.
 #[test]
 fn a_march_through_the_bank_agrees_with_one_taken_in_fine_steps() {
     let bank = built(&tairix_parallel::Threaded::new(4));
-    let (mut crossed, mut worst) = (0u32, 0.0f64);
+    let (mut crossed, mut worst, mut squared, mut rays) = (0u32, 0.0f64, 0.0, 0u32);
     for (origin, dir) in looks(240) {
         let reference = integrated(&bank, origin, dir, 2.0);
-        let kept = cloud(&bank, origin, dir, true).map_or(1.0, |(_, kept, _)| kept);
         // Past the transmittance a march takes as opaque, both hide the sky.
         let expected = if reference < OPAQUE { 0.0 } else { reference };
-        worst = worst.max((kept - expected).abs());
+        let kept = |jitter: f64| {
+            bank.seen(origin, dir, Some(PIXEL), jitter)
+                .and_then(|seen| seen.cloud)
+                .map_or(1.0, |(_, kept, _)| kept)
+        };
+        let samples = 8u32;
+        let mean = (0..samples)
+            .map(|sample| kept((f64::from(sample) + 0.5) / f64::from(samples)))
+            .sum::<f64>()
+            / f64::from(samples);
+        worst = worst.max((mean - expected).abs());
+        squared += (kept(0.5) - expected).powi(2);
+        rays += 1;
         crossed += u32::from(reference < 0.9);
     }
     assert!(crossed > 40, "{crossed} of 240 rays cross cloud");
@@ -354,6 +375,8 @@ fn a_march_through_the_bank_agrees_with_one_taken_in_fine_steps() {
         worst < 0.06,
         "a march strays {worst} from the cloud it crosses"
     );
+    let scatter = mathf::sqrt(squared / f64::from(rays));
+    assert!(scatter < 0.02, "a march alone scatters {scatter} about it");
 }
 
 /// A coarse march — what a diffuse surface gathers its sky through — lets
@@ -470,7 +493,7 @@ fn column_at(bank: &Cloudbank, slot: usize, (x, z): (f64, f64)) -> Option<Column
 #[test]
 fn a_columns_edge_is_its_distance_to_the_nearest_crossing() {
     let mut bank =
-        Cloudbank::new([Some(CUMULUS), None], (FINE, COARSE), high_sun(), LEVEL).expect("fits");
+        Cloudbank::new([Some(BROKEN), None], (FINE, COARSE), high_sun(), LEVEL).expect("fits");
     bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
     let runner = tairix_parallel::Threaded::new(4);
     while bank.stage != Stage::Light {
@@ -489,7 +512,7 @@ fn a_columns_edge_is_its_distance_to_the_nearest_crossing() {
                     (place % points, place / points),
                     WEATHER_CELLS,
                 );
-                weather(&CUMULUS, at, spacing).0
+                weather(&BROKEN, at, spacing).0
             })
             .collect();
         let cover = |i: usize, j: usize| covers.get(j * points + i).copied();
@@ -550,7 +573,8 @@ fn a_columns_edge_is_its_distance_to_the_nearest_crossing() {
 
 /// Either side of where one level gives way to the next, the weather, the
 /// sun's optical depth and the shadow read alike: a level's rim is the next
-/// level's own reading, so no seam shows where they meet.
+/// level's own reading, and a deck's heaps the same heaps on both, so no seam
+/// shows where they meet.
 #[test]
 fn the_levels_meet_without_a_seam() {
     let bank = far(&tairix_parallel::Threaded::new(4));
@@ -569,6 +593,27 @@ fn the_levels_meet_without_a_seam() {
             };
             let (inside, outside) = (side(edge * (1.0 - 1e-9)), side(edge * (1.0 + 1e-9)));
             for slot in 0..2 {
+                if let Some(deck) = bank.decks[slot].filter(heaps::cellular) {
+                    // Wherever a heap's cloud can stand, both levels place a
+                    // point by the same heaps.
+                    let margin = form::standing_margin(&deck, bank.textures.reach(&deck));
+                    let placed = |level: &Level, altitude: f64| {
+                        let (u, v) = place_on(bank.centre, level.half, inside, WEATHER_CELLS);
+                        let cell = |at: f64| cell_of(at).0.min(WEATHER_CELLS - 1);
+                        level.heaps[slot]
+                            .placed(cell(v) * WEATHER_CELLS + cell(u), inside, altitude, margin)
+                            .filter(|placed| placed.inside + margin > 0.0)
+                    };
+                    for rise in 0..12u32 {
+                        let altitude = deck.base - 200.0 + 300.0 * f64::from(rise);
+                        assert_eq!(
+                            placed(&pair[0], altitude),
+                            placed(&pair[1], altitude),
+                            "{edge} at {inside:?}, {altitude}"
+                        );
+                    }
+                    continue;
+                }
                 let (Some(a), Some(b)) = (
                     column_at(&bank, slot, inside),
                     column_at(&bank, slot, outside),
@@ -650,7 +695,8 @@ fn a_square_holds_its_cloud_within_its_bands_and_its_densest() {
         let draw = |salt: u32| unit(mix32(square.wrapping_mul(0x85eb_ca6b) ^ salt));
         let breadth = 50.0 + 3000.0 * draw(1);
         let low = (60_000.0 * draw(2) - 30_000.0, 60_000.0 * draw(3) - 30_000.0);
-        let holding = bank.weather_over(low, (low.0 + breadth, low.1 + breadth));
+        let held = (low, (low.0 + breadth, low.1 + breadth));
+        let holding = bank.weather_over(held.0, held.1);
         for sample in 0..60u32 {
             let key = square * 64 + sample;
             let place = |salt: u32| unit(mix32(key.wrapping_mul(0x9e37_79b9) ^ salt));
@@ -661,7 +707,7 @@ fn a_square_holds_its_cloud_within_its_bands_and_its_densest() {
                 continue;
             };
             cloudy += 1;
-            let densest = bank.densest(&holding, (height - 1.0, height + 1.0), 1.0);
+            let densest = bank.densest(&holding, held, (height - 1.0, height + 1.0), 1.0);
             assert!(
                 sample.extinction <= densest * (1.0 + 1e-9),
                 "{} past {densest}",
@@ -771,6 +817,15 @@ fn a_coarse_ray_reaches_cloud_beyond_however_many_clear_columns_it_crosses() {
                 if x < 8_000.0 {
                     column.edge = -1e6;
                 }
+            }
+        }
+        for (deck, heaps) in bank.decks.iter().zip(level.heaps.iter_mut()) {
+            if let Some(deck) = deck.filter(heaps::cellular) {
+                let margin = form::standing_margin(&deck, bank.textures.reach(&deck));
+                // Kept whole cloud and all east of 8 km.
+                heaps
+                    .keep(|heap| f64::from(heap.east) > 8_000.0 + deck.scale + margin * 2.0)
+                    .expect("re-listed");
             }
         }
         bank.fill_bands(index, 0..WEATHER_CELLS, &tairix_parallel::SERIAL);
@@ -947,9 +1002,10 @@ fn cirrus_above_dims_the_sunlight_lighting_the_bank_beneath() {
 
 /// A deck thick enough to scatter the sun many times over sends most of it
 /// back up from its sunlit top and less down through its grey base; a veil
-/// too thin to scatter it twice is barely lit at all.
+/// too thin to scatter it twice glows by the sunlight it scatters once, which
+/// toward the sun's forward lobe is near as bright as the deck's grey base.
 #[test]
-fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
+fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_glows_by_what_it_scatters_once() {
     let runner = tairix_parallel::Threaded::new(4);
     let deck = stood(
         [Some(OVERCAST), None],
@@ -981,7 +1037,13 @@ fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
     );
     let (faint, shows, _) = cloud(&veil, below, Vec3::UP, true).expect("the veil");
     assert!(shows > 0.5, "{shows}");
-    assert!(faint.y < 0.5 * base.y, "{faint:?} beside {base:?}");
+    assert!(faint.y < base.y, "{faint:?} beside {base:?}");
+    let phase = dual_phase(high_sun().y, (DROPLET_LOBES.0, BACK_LOBE), DROPLET_LOBES.1);
+    let once = SUNLIGHT * DROPLETS.albedo * phase * column(&veil, below);
+    assert!(
+        (faint.y / once - 1.0).abs() < 0.05,
+        "{faint:?} against {once} scattered once"
+    );
 }
 
 /// Beneath a deck the clear sky straight overhead shows only as far as the

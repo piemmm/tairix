@@ -911,6 +911,7 @@ version = "0.0.0"
 dependencies = [
  "loom",
  "tairix-fuzzseed",
+ "tairix-mix",
 ]
 
 [[package]]
@@ -1378,6 +1379,7 @@ dependencies = [
  "tairix-hash",
  "tairix-parallel",
  "tairix-rng",
+ "tairix-scatter",
  "tairix-terrain",
  "tairix-util",
 ]
@@ -1446,6 +1448,7 @@ dependencies = [
  "sha2",
  "tairix-abi",
  "tairix-cpuops",
+ "tairix-mix",
  "x25519-dalek",
 ]
 
@@ -2526,6 +2529,7 @@ name = "tairix-fuzzseed"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "tairix-mix",
 ]
 
 [[package]]
@@ -3193,6 +3197,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-land"
+version = "0.0.0"
+dependencies = [
+ "tairix-countryside",
+ "tairix-mix",
+ "tairix-noise",
+ "tairix-parallel",
+ "tairix-terrain",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-link"
 version = "0.0.0"
 dependencies = [
@@ -3338,6 +3354,10 @@ name = "tairix-memguard"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-mix"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-mkdir"
 version = "0.0.0"
 dependencies = [
@@ -3437,6 +3457,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
+ "tairix-mix",
  "tairix-net",
  "tairix-util",
 ]
@@ -3501,10 +3522,19 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-log",
+ "tairix-mix",
  "tairix-net",
  "tairix-netchan",
  "tairix-rng",
  "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-noise"
+version = "0.0.0"
+dependencies = [
+ "tairix-mix",
  "tairix-util",
 ]
 
@@ -3732,9 +3762,13 @@ dependencies = [
  "tairix-colour",
  "tairix-countryside",
  "tairix-hash",
+ "tairix-land",
+ "tairix-mix",
+ "tairix-noise",
  "tairix-parallel",
  "tairix-raster",
  "tairix-rng",
+ "tairix-scatter",
  "tairix-terrain",
  "tairix-util",
 ]
@@ -3832,6 +3866,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-crypto",
  "tairix-fuzzseed",
+ "tairix-mix",
  "zeroize",
 ]
 
@@ -3899,6 +3934,15 @@ dependencies = [
  "tairix-rt",
  "tairix-theme",
  "tairix-window",
+]
+
+[[package]]
+name = "tairix-scatter"
+version = "0.0.0"
+dependencies = [
+ "tairix-mix",
+ "tairix-parallel",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4301,6 +4345,7 @@ dependencies = [
  "tairix-icon",
  "tairix-input",
  "tairix-keymap",
+ "tairix-mix",
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
@@ -4316,6 +4361,7 @@ dependencies = [
 name = "tairix-terrain"
 version = "0.0.0"
 dependencies = [
+ "tairix-hash",
  "tairix-parallel",
  "tairix-rng",
  "tairix-util",
@@ -5346,6 +5392,7 @@ dependencies = [
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
  "tairix-fuzzseed",
+ "tairix-mix",
 ]
 
 [[package]]
@@ -8213,6 +8260,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-log",
+ "tairix-parallel",
  "tairix-raster",
  "tairix-reclaim",
  "tairix-util",
@@ -8252,6 +8300,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
+ "tairix-parallel",
  "tairix-util",
  "tairix-wintersun-net",
  "tairix-wintersun-world",
@@ -8262,9 +8311,12 @@ name = "tairix-wintersun-world"
 version = "0.0.0"
 dependencies = [
  "tairix-hash",
+ "tairix-land",
  "tairix-log",
+ "tairix-parallel",
  "tairix-reclaim",
  "tairix-rng",
+ "tairix-scatter",
  "tairix-terrain",
  "tairix-util",
  "tairix-wintersun-net",
@@ -8388,6 +8440,7 @@ dependencies = [
  "tairix-kernel-ipc",
  "tairix-kernel-syscall",
  "tairix-log",
+ "tairix-mix",
  "tairix-mkimage",
  "tairix-net",
  "tairix-netconfig",

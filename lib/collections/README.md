@@ -18,6 +18,7 @@ depends on it for the inline half of its `SmallVec`.
 | `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts — so the entry count is one per contiguous run |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
 | `ByteQueue` | a bounded byte FIFO kept as one contiguous run, so a stream is parsed or transformed in place; storage committed up front or as bytes arrive, and wiped before it is given back |
+| `ChunkVec<T, CHUNK>` | a growable list held in chunks of `CHUNK` elements: an element never moves once pushed, so a push costs one write or one chunk's allocation however many it holds; indexing costs one load more than a slice |
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: every operation, and each step of an ordered or tagged walk, costs the tree's height; nodes are reserved before a change |
 | `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved or withdrawn in O(log n), everything at or below a bound walked in O(k); room for a slot is reserved before a change and never given back |
 

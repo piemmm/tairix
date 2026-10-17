@@ -38,13 +38,12 @@
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
+use tairix_land::channel::{Section, GRAVITY};
+use tairix_noise::{noise2, smoothstep};
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::band;
-use crate::channel::{Section, GRAVITY};
 use crate::fourier::{self, frequency, transposed, Complex, Fourier};
-use crate::noise::{noise2, smoothstep};
 use crate::vector::{byte, real, share, single, tanh, whole};
 
 /// Water's surface tension over its density, in metres and seconds: past
@@ -245,7 +244,7 @@ impl Flow {
             at(column + 1, row + 1),
         ];
         let blend = |pick: fn((f64, f64)) -> f64| {
-            crate::heightfield::bilinear(corners.map(pick), (across_cell, down))
+            tairix_util::mathf::bilinear(corners.map(pick), (across_cell, down))
         };
         (blend(|corner| corner.0), blend(|corner| corner.1))
     }
@@ -810,7 +809,7 @@ impl Solving {
             .get_mut(rows.start * columns..rows.end * columns)?;
         let most = |one: (f64, f64), other: (f64, f64)| (one.0.max(other.0), one.1.max(other.1));
         let lines = per(columns);
-        let measured = band::fold(
+        let measured = tairix_parallel::fold_bands(
             runner,
             span,
             (0, lines * columns),
@@ -860,7 +859,7 @@ impl Solving {
         taking.clear();
         fallible::grow_to(&mut taking, end - stone, (None, None)).then_some(())?;
         let (stones, this) = (self.stones.get(stone..end)?, &*self);
-        band::for_each(runner, &mut taking, (0, TAKEN), &|band, taking| {
+        tairix_parallel::for_each_band(runner, &mut taking, (0, TAKEN), &|band, taking| {
             let stones = stones.get(band * TAKEN..).unwrap_or_default();
             for (stone, slot) in stones.iter().zip(taking) {
                 *slot = this.taken(*stone);
@@ -966,7 +965,7 @@ impl Solving {
             .grid
             .get_mut(rows.start * columns..rows.end * columns)?;
         let lines = per(columns);
-        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+        tairix_parallel::for_each_band(runner, span, (0, lines * columns), &|band, values| {
             let top = first + band * lines;
             let bottom = top + values.len() / columns;
             let begun = reaching.partition_point(|&(row, ..)| (row as usize) < bottom);
@@ -1017,7 +1016,7 @@ impl Solving {
             .answer
             .get_mut(rows.start * across..rows.end * across)?;
         let lines = per(across);
-        let failed = band::fold(
+        let failed = tairix_parallel::fold_bands(
             runner,
             span,
             (0, lines * across),
@@ -1190,7 +1189,7 @@ impl Solving {
             .rise
             .get_mut(rows.start * columns..rows.end * columns)?;
         let lines = per(columns);
-        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+        tairix_parallel::for_each_band(runner, span, (0, lines * columns), &|band, values| {
             for (offset, line) in values.chunks_mut(columns).enumerate() {
                 let row = first + band * lines + offset;
                 let across = real(row) * cell - half;
@@ -1277,7 +1276,7 @@ impl Solving {
             .held
             .get_mut(rows.start * columns..rows.end * columns)?;
         let lines = per(columns);
-        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+        tairix_parallel::for_each_band(runner, span, (0, lines * columns), &|band, values| {
             let at = (first + band * lines) * columns;
             let rises = rise.get(at..at + values.len()).unwrap_or_default();
             let measured = places.get(at..at + values.len()).unwrap_or_default();
@@ -1317,7 +1316,7 @@ impl Solving {
             held.get(at..at + columns).unwrap_or_default()
         };
         let lines = per(columns);
-        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+        tairix_parallel::for_each_band(runner, span, (0, lines * columns), &|band, values| {
             let top = first + band * lines;
             for (offset, line) in values.chunks_mut(columns).enumerate() {
                 let row = top + offset;

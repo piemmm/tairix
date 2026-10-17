@@ -1,6 +1,6 @@
-use super::*;
+use tairix_mix::{mix32, unit};
 
-use crate::sample::{mix32, unit};
+use super::*;
 
 /// A spread of circles across a square `reach` either way of the middle,
 /// some reaching past it.
@@ -157,4 +157,36 @@ fn a_negative_radius_is_answered_as_the_whole_list_would() {
     indexed
         .claim((10.0, 10.0), -50.0, Taken::Piece)
         .expect("a negative radius chains into the cells about its point");
+}
+
+/// The index grows a block at a time: as circles spread across the ground,
+/// a block's cells already holding chains are never moved, and each block
+/// is made once, when a circle first reaches it.
+#[test]
+fn the_index_grows_a_block_at_a_time_and_never_moves_a_cell() {
+    let mut footprints = Footprints::default();
+    footprints
+        .claim((1.0, 1.0), 0.3, Taken::Piece)
+        .expect("claimed");
+    let first = footprints.heads.first().map(Vec::as_ptr).expect("a block");
+    let mut reached = alloc::collections::BTreeSet::new();
+    let mut reach = |(x, z): (f64, f64)| {
+        let ((west, east), (south, north)) = covered((x, z), 0.3 + 0.5 * GAP);
+        for row in south..=north {
+            for column in west..=east {
+                reached.insert(place_of((column, row)).0);
+            }
+        }
+    };
+    reach((1.0, 1.0));
+    for index in 0..20_000u32 {
+        let at = (f64::from(index % 200) * 3.1, f64::from(index / 200) * 3.1);
+        footprints.claim(at, 0.3, Taken::Piece).expect("claimed");
+        reach(at);
+    }
+    assert_eq!(footprints.heads.first().map(Vec::as_ptr), Some(first));
+    assert_eq!(footprints.heads.len(), reached.len());
+    assert_eq!(footprints.blocks.len(), reached.len());
+    assert!(reached.len() > 4, "{}", reached.len());
+    assert!(!footprints.clear((3.1, 3.1), 0.3));
 }

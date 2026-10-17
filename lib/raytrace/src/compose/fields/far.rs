@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 use tairix_countryside::boundary::{standing, Boundary, Kind as Bound};
 use tairix_countryside::plane::{self, Walk};
 use tairix_countryside::Point;
+use tairix_land::Season;
+use tairix_noise::{noise2, smoothstep};
 use tairix_util::mathf;
 
 use super::drystone::{self, Walling};
@@ -21,11 +23,9 @@ use crate::compose::{rgb, Dice, Stage};
 use crate::heightfield::Heightfield;
 use crate::land::Land;
 use crate::material::{Finish, Material};
-use crate::noise::{noise2, smoothstep};
 use crate::pigment::{Clumped, Pigment};
 use crate::prototype::{normals_of, Facet, Part, Prototype};
 use crate::shape::Shape;
-use crate::tree::Season;
 use crate::vector::{share, singles, Frame, Pose, Vec3};
 
 /// How many pixels apart a far boundary's stations stand, and how few pixels

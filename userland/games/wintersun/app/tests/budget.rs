@@ -61,6 +61,7 @@ use tairix_wintersun_figure::rig::Placement;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
+use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
@@ -171,38 +172,69 @@ fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
     best / RIGS
 }
 
-/// Draw the baseline frame [`RUNS`] times, returning the cheapest run's
-/// per-pass costs, the per-figure placement cost and the picture every run
-/// drew.
-fn measure(runner: &dyn JobRunner) -> Measured {
-    let params = RealmParams::new(RealmSpec {
-        extent_chunks: 64,
-        coarse_samples: 64,
-        plates: 8,
-        ..RealmParams::default_realm(0x4255_4447_4554).spec()
-    })
-    .expect("the spec is in range");
-    let field = RealmField::generate(params).expect("the realm generates");
-    let camera = Camera::new(
-        WorldPoint { x: 0, y: 0 },
-        Zoom::DEFAULT,
-        realm_bounds(params),
-    );
-    let view = Viewport::new(BASELINE_WIDTH, BASELINE_HEIGHT, RenderScale::ONE)
-        .expect("the baseline is a real window");
-    let (w, h) = view.render();
-    let held: Vec<Chunk> = visible_chunks(camera.visible(&view))
-        .filter(|c| params.holds_chunk(c.x, c.y))
-        .map(|coord| {
-            ChunkBuild::new(coord)
-                .expect("a chunk fits")
-                .finish(&field)
-                .expect("a chunk generates")
+/// The baseline realm's land, and every chunk the baseline view needs, solved
+/// once across `runner` for every frame drawn from them.
+struct Baseline {
+    land: RealmLand,
+    held: Vec<Chunk>,
+    camera: Camera,
+    view: Viewport,
+}
+
+impl Baseline {
+    fn solve(runner: &dyn JobRunner) -> Self {
+        let params = RealmParams::new(RealmSpec {
+            extent_chunks: 64,
+            coarse_samples: 64,
+            plates: 8,
+            ..RealmParams::default_realm(0x4255_4447_4554).spec()
         })
-        .collect();
+        .expect("the spec is in range");
+        let land = RealmField::generate(params)
+            .and_then(|field| RealmLand::new(field, runner))
+            .expect("the realm generates");
+        let camera = Camera::new(
+            WorldPoint { x: 0, y: 0 },
+            Zoom::DEFAULT,
+            realm_bounds(params),
+        );
+        let view = Viewport::new(BASELINE_WIDTH, BASELINE_HEIGHT, RenderScale::ONE)
+            .expect("the baseline is a real window");
+        let mut worn = Keeping::within(usize::MAX);
+        let held = visible_chunks(camera.visible(&view))
+            .filter(|c| params.holds_chunk(c.x, c.y))
+            .map(|coord| {
+                ChunkBuild::new(coord)
+                    .expect("a chunk fits")
+                    .finish(&land, &mut worn, runner)
+                    .expect("a chunk generates")
+            })
+            .collect();
+        Self {
+            land,
+            held,
+            camera,
+            view,
+        }
+    }
+}
+
+/// Draw the baseline frame [`RUNS`] times across `runner`, returning the
+/// cheapest run's per-pass costs, the per-figure placement cost and the
+/// picture every run drew.
+fn measure(runner: &dyn JobRunner, baseline: &Baseline) -> Measured {
+    let Baseline {
+        land,
+        held,
+        camera,
+        view,
+    } = baseline;
+    let (camera, view) = (*camera, *view);
+    let params = land.field().params();
+    let (w, h) = view.render();
     let borrowed: Vec<&Chunk> = held.iter().collect();
     let chunks = ChunkWindow::new(&borrowed).expect("generated in coordinate order");
-    let roads = RoadDecals::from_realm(&field).expect("the roads fit");
+    let roads = RoadDecals::from_realm(land.field()).expect("the roads fit");
     let decals = roads.decals().expect("the decals fit");
     let warp = Warp::new(params.seed());
     let fray = Fray::new(params.seed());
@@ -301,11 +333,13 @@ fn report(label: &str, times: &FrameTimes) {
 
 #[test]
 fn the_baseline_frame_is_measured_and_threading_does_not_change_it() {
+    let threads = Threaded::new(REFERENCE_CORES);
+    let baseline = Baseline::solve(&threads);
     let Measured {
         times,
         placement_ns,
         pixels: serial,
-    } = measure(&tairix_parallel::SERIAL);
+    } = measure(&tairix_parallel::SERIAL, &baseline);
     report("one thread", &times);
     println!(
         "  placing one figure: {}.{:01} us on one core",
@@ -317,7 +351,7 @@ fn the_baseline_frame_is_measured_and_threading_does_not_change_it() {
         times: threaded,
         pixels: concurrent,
         ..
-    } = measure(&Threaded::new(REFERENCE_CORES));
+    } = measure(&threads, &baseline);
     report(&format!("{REFERENCE_CORES} threads"), &threaded);
     println!(
         "  speedup {}.{:02}x on {REFERENCE_CORES} threads (bench estimate, not a guarantee)",

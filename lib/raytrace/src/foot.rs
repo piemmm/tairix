@@ -7,12 +7,12 @@
 
 use core::f64::consts::TAU;
 
+use tairix_mix::mix32;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::flare::{Flare, Lobe, MOST_LOBES};
 use crate::prototype::{point, Part, Tube};
-use crate::sample::mix32;
 use crate::vector::{power, real, single, Vec3};
 
 /// How far up a trunk, in its radii, its swell all round falls to `1/e` of

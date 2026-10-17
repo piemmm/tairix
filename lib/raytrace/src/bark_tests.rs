@@ -1,7 +1,9 @@
 use core::f64::consts::PI;
 
+use tairix_land::attributes::QUANTITIES;
+
 use super::*;
-use crate::heightfield::{Grows, QUANTITIES};
+use crate::heightfield::Grows;
 
 const KINDS: [BarkKind; 10] = [
     BarkKind::Furrowed,

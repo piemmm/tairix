@@ -5,10 +5,9 @@
 //! holding at most one, so the grass reads the pats it grows about from the
 //! same draws the pats themselves are laid from, wherever either looks.
 
+use tairix_mix::{mix32, unit};
+use tairix_noise::{hash2, noise2, smoothstep};
 use tairix_util::mathf;
-
-use crate::noise::{hash2, noise2, smoothstep};
-use crate::sample::{mix32, unit};
 
 /// The side of a cell of the lattice pats are hashed from, and the share of
 /// cells holding one: about one pat to twenty square metres.
