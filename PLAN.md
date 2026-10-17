@@ -225,6 +225,7 @@ plan's ledger. A `blocked` row names its blocker.
 | CODEVERIFY | The recurring code-quality sweeps (`plans/CODEVERIFY.md`) | in progress |
 | WAFFLE | The comment-discipline sweep (`plans/WAFFLE.md`) | planned |
 | RUST | The Rust toolchain on TAIRiX, and TAIRiX building itself (`plans/RUST.md`) | planned |
+| TEMPORARY | The open decisions and work the Raspberry Pi 4 investigation left, and the owned-dialog and content-sized-alert work; deleted when done (`plans/TEMPORARY.md`) | planned |
 
 ## Stage 0 — Repository foundation
 

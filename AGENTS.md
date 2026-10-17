@@ -1599,7 +1599,7 @@ You are not exempt from any rule above. In addition:
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | Which bundles are installed: the shared program-store walk (`lib/appstore`), its roots in resolution precedence and its containment bounds, and the icon bar's kernel-attested application identity | `plans/NEW-TASKBAR.md` |
     | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs and per-boot scratch | `plans/APPDATA.md` |
-    | Default desktop apps going live: app windows, live app data channels, the file picker, and the alerts — the desktop-drawn error, warning and question windows every application raises, their 4:3 layout, owner modality and earned focus | `plans/APPWIN.md` |
+    | Default desktop apps going live: app windows, live app data channels, the file picker, and the alerts — the desktop-drawn error, warning and question windows every application raises, their content-sized layout, owner modality and earned focus — and the rule that every dialog, form and progress display is a window of its own | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | The file manager's interaction and icons: marquee and modifier selection, drag-and-drop between windows and onto the desktop with its copy/move cursors, the New ▸ submenu, one window per folder and the activation that raises it, folder content cards, image thumbnails and the store that keeps them per content generation, the item-name and title type, two-line names and in-place rename, the compact tile and the ground between tiles, the `UserFiles` home tree | `plans/FILES-INTERACTION.md` |
     | The picture and document viewer (`view.app`): the formats it claims, the page-source seam every document is reached through, sequence/animation decode, the sandboxed document decode, and the shared app-side window shell | `plans/VIEW.md` |
@@ -1687,6 +1687,7 @@ You are not exempt from any rule above. In addition:
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
     | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
+    | The temporary work list from the Raspberry Pi 4 investigation: the USB host controller's serve loop never waiting (D1125), mass-storage medium detection, spin-up and deadlines, attached-volume names, removable-media ownership, DESK-21, owned dialog windows replacing in-window panels, and content-sized alerts | `plans/TEMPORARY.md` |
 
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a

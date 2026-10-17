@@ -75,6 +75,21 @@ exception.
 - **Headless stays first-class** (§17.3): everything here lives in
   `userland/gui/*`, `userland/apps/*`, and `lib/*`; no non-GUI crate
   gains a GUI edge, and a headless image simply ships no desktop session.
+- **No dialog is drawn inside the window it serves.** Every dialog, form,
+  sheet, question and progress display an application shows is a window of its
+  own: an alert (AW8), or an owned dialog window that the application draws
+  and the desktop frames, places, titles with its attested name, and holds
+  modal over its owner when asked. An application painting a modal panel,
+  veil or sheet over its own window's content is forbidden. Such a panel is
+  clipped to the window, cannot be moved or raised, and makes every
+  application re-implement modality. The surfaces that still do it, and the
+  shared helpers that let them, are being removed (`plans/TEMPORARY.md`
+  TMP-7).
+- **Alerts and dialog windows size to their content.** The width is set by a
+  readable measure and the button row; the height is exactly what the
+  content needs, capped at the screen's, past which the text scrolls. No
+  fixed aspect ratio applies, and nothing within the protocol's bounds is
+  elided (`plans/TEMPORARY.md` TMP-8).
 - **Not in this plan:** the input-device→seat topology policy
   (`plans/PI.md` P11 / the seat manager), and the GUI widget vocabulary
   (`plans/GUI-CONTROLS-DESIGN.md`).
@@ -543,9 +558,10 @@ application draws the chrome that names who is speaking.
   so every alert can be declined. A spec that breaks a rule is refused whole,
   and a refused request mints no id. The request names the caller's own event
   mailbox or is refused.
-- **The window**: exactly 4:3, frame included — the smallest such extent at or
-  above `ALERT_MIN_WIDTH` that seats all it says, capped at the largest the
-  screen holds, past which the detail scrolls; nothing is elided. RISC OS's
+- **The window**: laid out as §0 requires, sized to what it says. The 4:3
+  shape the renderer still forces, and the headline it still cuts at six lines
+  (`plans/OPEN-DEFECTS.md` D1129), are removed by `plans/TEMPORARY.md` TMP-8.
+  RISC OS's
   error box is the model: the severity mark on the left, the text beside it,
   the buttons along the foot at the right, wrapping to a row above when they
   do not fit across. The frame is `WindowFrame::dialog()`,
@@ -582,9 +598,9 @@ application draws the chrome that names who is speaking.
   cannot open, a window an application was refused (`app::refuse`, every one
   built by the one `refusal_alert`), the picker's replace question, the
   session's confirmation and resolution prompts, and a refused drop
-  (`plans/NEW-TASKBAR.md` T21). Forms stay in their windows: go to line, a new
-  picture's size, a settings sheet, a credential prompt. A long operation's
-  progress panel is its own surface, not a question.
+  (`plans/NEW-TASKBAR.md` T21). Forms and progress are not alerts, but
+  neither is drawn inside the window it serves: each is an owned dialog
+  window (§0).
 - Coverage: the `lib/abi` round trip and fail-closed decode; the `lib/window`
   loopback suite (answered exactly once, an owner that is the caller's own
   top-level window, an ownerless alert, the per-application bound, a refusal
