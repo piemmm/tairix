@@ -157,18 +157,20 @@ callee fails closed rather than parking forever. `BlkCompletion` leads with a
 `MediumError`(39)/`DeviceOffline`(40); `BlkDeviceClass::budget()` is the single
 per-class deadline/retry/grace/queue-depth policy, and a consumer *discovers*
 which class to apply rather than assuming one: the driver that binds the
-hardware declares it (`Block::device_class`; `Removable` for a USB LUN and the
-SD host, `Virtual` for virtio-blk, default `Virtual` = the bounded
-unclassified envelope), it travels in the geometry completion
-(`BlkCompletion::class`, decoded fail-safe to `Virtual` on an unrecognised
-word), and both consumers adopt it at connect for every later request. The
-class is patience policy, not authority, so an untrusted driver cannot buy
-itself more than the widest class budget. Every wrapping layer forwards its
-inner device's class (partition window, block cache, `SharedBlock`, the
-retained-writes journal, both remote clients) and a composition folds its live
-members with `BlkDeviceClass::most_patient` (the six RAID engines +
-`RaidArray`, through the shared `aggregate_device_class`), so the real
-hardware's envelope survives every layer. Consumers rewritten in place: the
+hardware declares what the device *is* (`Block::medium` → `BlkMedium`: a USB
+LUN a flash drive or a disk by its INQUIRY removable-medium bit, the SD host an
+SD card, virtio-blk a virtual disk; none declared stays unknown), the class is
+derived from that medium (`BlockClass::device_class`, served as the bounded
+unclassified envelope when unknown) so the two cannot disagree, the medium
+travels in the geometry completion (`BlkCompletion::medium`, an unrecognised
+word decoding to unknown), and both consumers adopt it at connect for every
+later request. The class is patience policy, not authority, so an untrusted
+driver cannot buy itself more than the widest class budget. Every wrapping
+layer forwards its inner device's medium (partition window, block cache,
+`SharedBlock`, the retained-writes journal, both remote clients) and a
+composition composes its live members' through `BlkMedium::of_members` (the
+six RAID engines + `RaidArray`), so the real hardware's envelope survives every
+layer. Consumers rewritten in place: the
 kernel `blkclient` (deadlined, `TimedOut`→fail closed) and volmgr's `RtBlkCall`
 (now `call_post`+`CallReply` wait-set+`call_reap`). `lib/rt` gained the three
 wrappers; the C header and syscall-table hash regenerate through the drift
@@ -459,9 +461,9 @@ parks: it advances one rung per reissued attempt, which are already spaced by th
 consumer's reissue cadence and per-request deadline — stronger than a driver-side
 backoff timer for head-of-line freedom (§26.1), and provable host-side. `usb_msd`
 is the first consumer: after each reply its serve loop consults the LUN's ladder
-from the just-folded `BlkHealth` state and, on `Reset`, clears the unit's bulk
-pipes (`ScsiDevice::scrub_window`, its one data-path reset) and logs an
-`MSD_RECOVERY_RESET` audit event; the reset is only issued for a unit already
+from the just-folded `BlkHealth` state and, on `Reset`, resets the transport
+(`ScsiDevice::reset_transport`, which clears the halt of each bulk pipe on the
+device and in the controller) and logs an `MSD_RECOVERY_RESET` audit event; the reset is only issued for a unit already
 answered reissuably, so it never stalls an unrelated LUN. `virtio_blk`/`emmc2`
 inherit the same primitive when brought up as user-space serve processes,
 mapping `Reset` to their own queue/controller re-init.
@@ -634,9 +636,9 @@ domain):** a fault-domain owner need not be a *bus* node in the tree — a leaf
 driver's own shared transport that fans out to several logical units is equally
 a fault-domain owner of those units (the `FaultDomain` doc now states this), and
 `usb_msd` is the first live consumer. Every LUN behind one Bulk-Only / UAS
-device shares the *same* bulk pipe pair, so the data-path reset the recovery
-ladder escalates (`ScsiDevice::scrub_window`) is a transport-wide event, not a
-per-LUN one. The serve loop now owns one `FaultDomain` for that shared transport
+device shares the *same* bulk pipe pair, so the transport reset the recovery
+ladder escalates (`ScsiDevice::reset_transport`) is a transport-wide event, not
+a per-LUN one. The serve loop now owns one `FaultDomain` for that shared transport
 (owner = the device's own discovered URB transport grant, never a board
 constant; the removable-class grace window). The per-request coordination is the
 pure, host-tested `recover::serve_lun_with_domain` in the crate's `lib`: it

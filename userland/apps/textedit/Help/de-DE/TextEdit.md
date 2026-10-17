@@ -24,6 +24,18 @@ Binärdaten aussieht, öffnet sich in der Hex-Ansicht, die jedes Byte als zwei
 Hex-Ziffern neben seinem Zeichen zeigt und dieselben Bytes bearbeitet wie die
 Textansicht.
 
+Ein ausführbares Programm — ein TAIRiX-Programmabbild, eine ELF64-Datei oder
+ein WebAssembly-Modul — öffnet sich stattdessen in der Code-Ansicht: zuerst
+seine Bereiche, dann die Befehle jedes Code-Bereichs, je einer pro Zeile mit
+Adresse und Kodierungsbytes, beschriftet mit den Symbolen, an denen sie
+beginnen, und den Symbolen, zu denen ihre Sprünge führen. Die Code-Ansicht
+ist schreibgeschützt; Text- und Hex-Ansicht bearbeiten dieselbe Datei. Der
+Code wird von einem eigenen zweiten Arbeitsprozess ohne jeden Zugriff
+dekodiert und im Befehlssatz gelesen, den die Datei nennt, sonst in dem
+dieses Rechners; „Befehlssatz“ im Menü Ansicht liest ihn als einen anderen,
+und das Ansichtsfeld der Statuszeile bietet die Code-Ansicht neben Text und
+Hex an.
+
 Quelltexte werden eingefärbt: HTML, XML und SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python und Shell-Skripte. Die
 Einstellungsdateien des Systems — Anwendungseinstellungen, die

@@ -118,7 +118,7 @@ pub use derive::{derive_summary, memory_pressured, Hysteresis};
 pub use machine::machine_report;
 pub use model::{
     apply_action, build_model, map_section, signal_pid, DeviceMeters, Effect, LiveMeters,
-    PanelModel, RateTrace, SessionReport,
+    PanelModel, SessionReport,
 };
 pub use panel::{
     refusal_notice, win_resizable, win_sizing, Panel, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE,

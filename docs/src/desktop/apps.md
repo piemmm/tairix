@@ -1306,11 +1306,22 @@ spelled as rows that navigate nowhere.
 
 **Volumes come from the live mount table, and the medium is real data.** The
 app reads the ungated `MOUNT_LIST` query through `lib/procinfo`'s
-`for_each_mount`, keeps only mounts that are actually serving I/O, and passes
-each one's label, target, and `MountRecord::medium()` to the model. The icon is
-`tairix_icon::disk_icon(medium)`: rotational, solid-state, and removable each
-get their own shipped artwork, and a paravirtual or unreported medium gets the
-generic drive glyph — never a guessed classification.
+`for_each_mount`, keeps every mount still serving its data — a degraded,
+recovering or read-only conflicted volume stays, only one whose device vanished
+goes — and passes each one's label, target, and `MountRecord::medium()` to the
+model. The serving driver declares the medium (`Block::medium`), a layered
+device composes its members' (`BlkMedium::of_members`), and the icon is
+`tairix_icon::disk_icon(medium)`: a hard disk, a solid-state drive, an NVMe
+drive, a USB flash drive, a USB disk and an SD card each get their own shipped
+artwork, and a virtual or unreported medium the generic drive — never a guessed
+classification.
+
+**A volume's root is drawn as its drive wherever it is listed.**
+`Browser::mark_volume_roots` marks each directory entry that is the mount point
+of one of the rail's volumes with that volume's drive picture, so `/Storage`
+lists its volumes as drives rather than as folders. It runs when a listing lands,
+when a watch merges changes, and when the mount table moves, and a listing
+holding no mount point costs it one comparison per place.
 
 **Malformed input is dropped, not repaired.** A volume whose label is empty,
 longer than `MAX_PLACE_LABEL`, or carries a control character; whose target is
@@ -1764,16 +1775,16 @@ app performs every read and unlink under the launching user's own identity, so
 the read-only picker never runs a walk.
 
 The Delete verb is wired in the `files.app` `Run` binary. Pressing `Delete` on
-a selection opens a modal confirmation `lib/controls` `Dialog`, built by the
-shared `render::build_delete_dialog` from the captured `DeletePlan`: the title
-names a single target or reports the honest count, and the message warns that
-folders (and their contents) are removed when the plan includes a directory
-(`AGENTS.md` §2.24). The honest Action Warmth sits on the safe **Cancel**
-(recommended), never on the destructive **Delete**. `render::modal_dialog_rect`
-centres and clamps the dialog to the window and `render::modal_dialog_action_at`
-mirrors its button geometry so a click resolves to exactly the button pressed
-(`AGENTS.md` §2.2); `Escape` (or Cancel) dismisses it, `Enter` (or Delete)
-confirms. On confirm a *recoverable* removal is a move to Trash (the
+a selection asks first, in an alert of its own window that the desktop draws
+(the session's alert service): the question is the shared
+`render::delete_alert`, built from the captured `DeletePlan`, so the headline
+names a single target or reports the honest count, and the detail warns that
+folders (and their contents) are removed when the plan includes a directory.
+The default answer is the recoverable **Move to Trash** where Trash serves the
+selection; an irreversible **Delete Permanently** is never the answer `Enter`
+gives. The alert holds the window it was asked about until it is answered:
+`Escape` cancels, and the answer reaches the window as `AlertClosed`. On
+confirm a *recoverable* removal is a move to Trash (the
 move-to-Trash section below); this paragraph describes the *permanent* removal
 the app falls back to when Trash is unavailable or cross-volume. It drives a
 `DeleteWalk` to completion — reading each
@@ -1861,19 +1872,18 @@ nothing and the read-only picker never runs it.
 The **move-to-Trash verb** (`plans/NEW-FILEMANAGER.md` FM10b) is wired into the
 confirmed-delete path in the `files.app` `Run` binary. Because a selection lives
 in one directory — hence on one volume — a whole delete plan is uniform, so the
-app decides one disposition for it *before* showing the confirmation, and the
-dialog's wording matches exactly what a confirmed delete will do (`AGENTS.md`
-§2.24). `begin_delete` resolves the user's home from the `HOME` the session
+app decides one disposition for it *before* asking, and the question's wording
+matches exactly what a confirmed delete will do. `begin_delete` resolves the user's home from the `HOME` the session
 exported (the same source the trusted picker starts at), spells the fixed
 `Library/Trash` subtree with the shared `trash::trash_dir` (one definition, so
 the app and its QEMU witness agree on where a trashed item lands, `AGENTS.md`
 §2.2), ensures that directory exists (`fs_mkdir` of `Library` then `Trash` under
 the user's own identity), and — when the Trash and every target share a volume —
 resolves each target's collision-free `trash_dest_path`. If all of that holds
-the removal is a recoverable **move to Trash**: `render::build_delete_dialog` is
-built with `trash::DeleteDisposition::Trash` (a safe, recommended *Move to
-Trash* action and a "you can restore them" message), and on confirm the app
-hands a `Job::Trash` to the operations worker, which renames each target into
+the removal is a recoverable **move to Trash**: the question
+`render::delete_alert` builds for `trash::DeleteDisposition::Trash` is a desktop
+alert whose default answer is *Move to Trash* and which says the items can be
+restored, and on that answer the app hands a `Job::Trash` to the operations worker, which renames each target into
 its captured Trash destination — one `fs_rename` per item, as a delete or paste
 is carried out (`ProgressOp::Trash`), so even a large selection stays
 responsive and cancellable (`AGENTS.md` §2.23). Whether the removal can be a
@@ -1882,9 +1892,9 @@ confirmation opens worded for what its answer found. Anything
 that makes the move impossible — an unset or root `HOME`, a Trash directory that
 cannot be created or stat'd, or a cross-volume target (a mounted volume under
 the current directory) — falls back, fail closed, to the irreversible
-`DeleteWalk` unlink, and the dialog is built with `DeleteDisposition::Permanent`
-(the destructive *Delete Permanently* action and the "cannot be undone"
-warning), so the user is never promised a recovery the removal will not honour.
+`DeleteWalk` unlink, and the question is asked with
+`DeleteDisposition::Permanent` (a warning whose destructive *Delete
+Permanently* is never the `Enter` answer, and "cannot be undone"), so the user is never promised a recovery the removal will not honour.
 Every step is the launching user's own §5.3-checked call — **no new
 capability**, no ambient authority.
 
@@ -1917,30 +1927,18 @@ so the Trash's contents are shown like any other directory. **Empty Trash**
 current directory *is* the user's Trash and it is non-empty (a `ManagerToolModel`
 the app computes from `HOME`, since the engine does not know it); when it is
 enabled, clicking it builds `trash::empty_trash_plan` from the listing the
-window shows, confirms it with the `DeleteDisposition::Permanent` dialog, and —
-on confirm — hands the plan's `DeleteWalk` to the operations worker an
+window shows, asks the `DeleteDisposition::Permanent` question, and — on its
+destructive answer — hands the plan's `DeleteWalk` to the operations worker an
 ordinary delete uses (`ProgressOp::Delete`), under the launching
 user's own `fs_readdir`/`fs_unlink` (no new capability). A stale click recomputes
 the Trash location and refuses to empty anything else (fail closed, `AGENTS.md`
 §5.4).
 
-The whole empty-Trash flow is proven end to end on the production desktop by
-the autoload QEMU vertical (`plans/NEW-FILEMANAGER.md` FM11c, appended after
-FM10's move-to-Trash delete): the runner clicks **Go to Trash** to navigate the
-front files window into `Library/Trash` (now holding the trashed folder),
-clicks **Empty Trash** to open the *Delete Permanently* confirmation, and
-clicks its Delete button — every point reconstructed from the app's own layout
-code (`render::manager_tool_rect` over the whole window for the tools;
-`trash::empty_trash_plan` → `render::build_delete_dialog` with
-`DeleteDisposition::Permanent` → `Dialog::action_rects` for the confirm button,
-the same code the guest paints and hit-tests with, `AGENTS.md` §2.2). The
-guest's PASS gate latches on the kernel's own `FsNodeMutated op=rmdir` audit
-record whose target is under
-`Library/Trash`, observed only after the FM10 move has latched, so no earlier
-removal can satisfy it (fail closed). The empty burst is held behind a one-shot
-serial marker the test kernel emits the first time it observes the move latch,
-so the clicks land only once the folder is provably in the Trash and Empty
-Trash is enabled.
+The flow is host-tested: `lib/browse` proves the plan empties every child and
+never the Trash itself, refuses a root Trash, and asks the question with the
+honest count and folder warning; `files.app` proves the question opens only over
+the Trash listing it read. The autoload QEMU vertical does not drive the file
+manager's stages.
 
 For the file manager to find the user's Trash, the desktop session hands its
 launched apps the **user environment** login exported. Plain `spawn` gives a
@@ -2177,6 +2175,34 @@ On the **Attributes** section everything but the strip's arrows belongs to its
 list and editor. So no key reaches a control the selected section does not
 draw.
 
+### A drive's Properties
+
+Properties on an entry drawn as a drive opens a window whose strip leads with a
+**Drive** section (`render::PropertiesStrip::Drive`), opened on it; the node's
+own General, Permissions and Attributes follow, since a mount point is a
+directory with an owner and a mode too. The section is drawn from the pure
+`tairix_browse::Drive` model, which the window adopts a `DriveSample` into:
+
+- **Capacity** as a `lib/controls` `CompositionRing` of used and free with the
+  share used in its middle, and the whole and what is available beneath it. A
+  format that tracks no fixed capacity says so instead.
+- **Activity** as a duplex `Chart`: reads above the axis and writes below, from
+  a `DuplexRates` history scaled to the least power of two seating its peak,
+  with the latest rates beside the caption. A rate is only ever one device's
+  delta over one measured interval, so a first reading, a gap, or another
+  device behind the volume adds no point.
+- **Facts**: health first, toned by the volume's banded health; then medium,
+  filesystem, mount point, source, device name, options, block size, files free,
+  a warning when the volume is down to its reserve, and the volume identity.
+
+Every reading rides the reader: the mount table and the ungated per-volume
+service counters (`for_each_volume_service`), joined by volume identity, read
+once a second while the Drive section shows and never while it does not. A
+reading repaints only what it moved — the ring, the trace, or, when the facts
+changed, the body — through `render::properties_drive_damage`. When no reader
+was granted, each read is made where it is asked and collected exactly as a
+worker's would be, so the window never waits for ever.
+
 ### Editing permissions
 
 The permission-edit *model* (`plans/NEW-FILEMANAGER.md` FM8b) is
@@ -2213,7 +2239,7 @@ all read the one placement (`render::PermsSection`), so a click always lands
 on the box it depicts (§2.2). Only the file manager's window draws it.
 
 The window keeps its composed section (`render::PermsPanel`, reached through
-`PermsShown`) and composes it again only when what it shows changes: the
+`SectionsShown`) and composes it again only when what it shows changes: the
 node's type, mode and owning ids, the ownership gate, the open id editor and
 the keyboard cursor. A pointer moving over the window, a press and a repaint
 therefore read the kept section rather than building one each; a key, which
@@ -2733,8 +2759,8 @@ broker starts this program *as that account*. The app performs no
 authentication itself and asks for no elevation.
 
 A refused set is therefore an ordinary outcome, not a defect: the app
-states it in its window **and** on `stderr`, leaves the clock untouched,
-and keeps running. It never reports a clock it did not change as changed,
+states it in an error alert held by its window **and** on `stderr`, leaves
+the clock untouched, and keeps running. It never reports a clock it did not change as changed,
 and a refused authentication reads differently from a program that would
 not start.
 

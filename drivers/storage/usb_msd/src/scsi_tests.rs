@@ -31,6 +31,9 @@ struct ScriptedExecutor {
     /// The pending autosense capture.
     sense: Option<Sense>,
     scrubs: usize,
+    resets: usize,
+    /// Transport failures the next executions meet, before any step.
+    failures: VecDeque<Errno>,
 }
 
 impl ScriptedExecutor {
@@ -41,6 +44,8 @@ impl ScriptedExecutor {
             luns: 1,
             sense: None,
             scrubs: 0,
+            resets: 0,
+            failures: VecDeque::new(),
         }
     }
 
@@ -86,6 +91,9 @@ impl ScsiTransport for ScriptedExecutor {
         let is_in = data.is_in();
         let len = data.len();
         self.calls.push((lun, cdb.to_vec(), len, is_in));
+        if let Some(failure) = self.failures.pop_front() {
+            return Err(failure);
+        }
         let step = self.steps.pop_front().ok_or(Errno::NotFound)?;
         let mut transferred = 0;
         if let DataPhase::In(buf) = data {
@@ -108,6 +116,11 @@ impl ScsiTransport for ScriptedExecutor {
 
     fn take_sense(&mut self) -> Option<Sense> {
         self.sense.take()
+    }
+
+    fn reset(&mut self) -> Result<(), Errno> {
+        self.resets += 1;
+        Ok(())
     }
 
     fn scrub(&mut self) {
@@ -312,6 +325,7 @@ fn small_lun_state(write_protected: bool) -> LunState {
             block_count: 1 << 30,
         },
         write_protected,
+        removable: true,
     }
 }
 
@@ -339,6 +353,7 @@ fn lun_block_validates_shape_and_range() {
             block_count: 8,
         },
         write_protected: false,
+        removable: false,
     };
     let mut lun = LunBlock::new(&mut scsi, 0, state);
     let mut torn = [0u8; 100];
@@ -376,6 +391,31 @@ fn lun_block_chunks_a_large_read_into_bounded_commands() {
 }
 
 #[test]
+fn a_broken_exchange_reaches_the_block_engine_as_a_reissuable_outcome() {
+    use tairix_abi::blkio::BlkStatus;
+    for (transport, driver, status) in [
+        // The transport reset in step again: reissue.
+        (
+            Errno::WouldBlock,
+            DriverError::Busy,
+            BlkStatus::TransientError,
+        ),
+        // The device did not answer its own reset: ridden out, then failed.
+        (Errno::TimedOut, DriverError::TimedOut, BlkStatus::Timeout),
+    ] {
+        let mut executor = ScriptedExecutor::new();
+        executor.failures.push_back(transport);
+        let mut scsi = transparent(executor);
+        let mut lun = LunBlock::new(&mut scsi, 0, small_lun_state(false));
+        let mut buf = [0u8; 512];
+        assert_eq!(lun.read_blocks(0, &mut buf), Err(driver), "{transport:?}");
+        let health = BlkStatus::for_driver_health(driver);
+        assert_eq!(health, Some(status));
+        assert!(health.is_some_and(BlkStatus::is_retryable));
+    }
+}
+
+#[test]
 fn a_sensitive_transfer_scrubs_the_shared_window() {
     let mut executor = ScriptedExecutor::new();
     executor.pass_with(vec![0u8; 512]);
@@ -397,4 +437,22 @@ fn an_oversize_or_empty_command_block_is_refused() {
     let outcome = scsi.command(0, &seventeen, DataPhase::None);
     assert_eq!(outcome.err(), Some(Errno::OutOfRange));
     assert!(scsi.transport().calls.is_empty());
+}
+
+/// What a unit is follows its `INQUIRY` removable-medium bit: a removable
+/// medium is a flash drive or a card reader, a fixed one a disk in an
+/// enclosure. Either is served the removable patience.
+#[test]
+fn a_unit_is_a_flash_drive_or_a_usb_disk_by_its_removable_bit() {
+    use tairix_abi::blkio::{BlkDeviceClass, BlkMedium};
+    use tairix_abi::driver::block::{Block, BlockClass};
+    let executor = ScriptedExecutor::new();
+    let mut scsi = transparent(executor);
+    let mut state = small_lun_state(false);
+    for (removable, medium) in [(true, BlkMedium::UsbFlash), (false, BlkMedium::UsbDisk)] {
+        state.removable = removable;
+        let lun = LunBlock::new(&mut scsi, 0, state);
+        assert_eq!(lun.medium(), Some(medium));
+        assert_eq!(lun.device_class(), BlkDeviceClass::Removable);
+    }
 }

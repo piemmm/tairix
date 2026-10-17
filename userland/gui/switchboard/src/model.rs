@@ -21,8 +21,11 @@ use tairix_abi::sysinfo::{
     VolumeIoStatsRecord,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
-use tairix_controls::{ActivityState, PressureState, RecoveryState, MAX_CHART_SAMPLES};
+use tairix_controls::{
+    ActivityState, DuplexRates, PressureState, RateTrace, RecoveryState, MAX_CHART_SAMPLES,
+};
 use tairix_procinfo::display::{format_bytes, format_duration, format_rate, percent};
+use tairix_procinfo::rate::rate_per_sec;
 use tairix_theme::SignalRole;
 
 use crate::derive::{memory_pressured, Hysteresis};
@@ -325,11 +328,8 @@ struct DeviceTrack {
     /// against a counter from an interval other than the one it would divide
     /// by.
     bytes: Option<DirectedBytes>,
-    /// The primary direction's recent rates, in bytes per second, oldest
-    /// first. Held unscaled: the scale they are drawn at follows their peak.
-    primary_rates: Vec<u64>,
-    /// The opposing direction's recent rates, likewise.
-    opposing_rates: Vec<u64>,
+    /// The two directions' recent rates, in bytes per second.
+    rates: DuplexRates,
     /// The display path's recent frames' damage, each a permille of that
     /// frame's own screen, oldest first.
     damage_history: Vec<u16>,
@@ -356,38 +356,6 @@ struct DeviceTrack {
     volume_queue: Option<BlkQueueCounters>,
     /// The volume readings the last fold derived.
     service: VolumeService,
-}
-
-/// The least full scale a byte-rate trace is drawn against, in bytes per
-/// second: below it, one metadata write on an idle device would fill the box
-/// and read as a busy one.
-const TRACE_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
-
-/// One device's byte-rate history, scaled for plotting.
-///
-/// A rate has no ceiling of its own, and any fixed one either flattens an
-/// ordinary desktop's traffic to nothing or clips a fast device's, so the
-/// history is drawn against the least power of two seating its own peak:
-/// whatever the window holds is visible, and its busiest point reaches at
-/// least half the box.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RateTrace {
-    /// The primary direction's points, permille of `full_scale`, oldest
-    /// first.
-    pub primary: Vec<u16>,
-    /// The opposing direction's points, likewise.
-    pub opposing: Vec<u16>,
-    /// The rate, in bytes per second, the box's top edge stands for.
-    pub full_scale: u64,
-}
-
-impl RateTrace {
-    /// Whether neither direction holds a point, so the trace draws nothing
-    /// and states no scale.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.primary.is_empty() && self.opposing.is_empty()
-    }
 }
 
 impl DeviceMeters {
@@ -587,12 +555,9 @@ impl DeviceMeters {
         track.primary_rate = rate(|bytes| bytes.primary);
         track.opposing_rate = rate(|bytes| bytes.opposing);
         track.bytes = now;
-        if let Some(rate) = track.primary_rate {
-            push_bounded(&mut track.primary_rates, rate);
-        }
-        if let Some(rate) = track.opposing_rate {
-            push_bounded(&mut track.opposing_rates, rate);
-        }
+        track
+            .rates
+            .record(track.primary_rate.zip(track.opposing_rate));
     }
 
     /// Drop every device the caller did not record this sample, so an
@@ -605,28 +570,9 @@ impl DeviceMeters {
     /// its own peak; empty for a device that has none.
     #[must_use]
     pub fn rate_trace(&self, id: DeviceId) -> RateTrace {
-        let Some(track) = self.devices.get(&id) else {
-            return RateTrace::default();
-        };
-        let peak = track
-            .primary_rates
-            .iter()
-            .chain(&track.opposing_rates)
-            .copied()
-            .max()
-            .unwrap_or(0);
-        let full_scale = trace_full_scale(peak);
-        let scaled = |rates: &[u64]| {
-            rates
-                .iter()
-                .map(|rate| share_of_scale(*rate, full_scale))
-                .collect()
-        };
-        RateTrace {
-            primary: scaled(&track.primary_rates),
-            opposing: scaled(&track.opposing_rates),
-            full_scale,
-        }
+        self.devices
+            .get(&id)
+            .map_or_else(RateTrace::default, |track| track.rates.trace())
     }
 
     /// The display path's recorded per-frame damage, oldest first.
@@ -677,24 +623,8 @@ const fn mean(total: u64, count: u64) -> Option<u64> {
     Some(total / count)
 }
 
-/// The full scale a byte-rate history peaking at `peak` is drawn against:
-/// the least power of two at or above both the peak and
-/// [`TRACE_FLOOR_BYTES_PER_SEC`].
-fn trace_full_scale(peak: u64) -> u64 {
-    peak.max(TRACE_FLOOR_BYTES_PER_SEC)
-        .checked_next_power_of_two()
-        .unwrap_or(u64::MAX)
-}
-
-/// `rate` as the permille of `full_scale` its point plots at, exact for every
-/// `u64` and clamped at full.
-fn share_of_scale(rate: u64, full_scale: u64) -> u16 {
-    let permille = u128::from(rate) * 1_000 / u128::from(full_scale.max(1));
-    clamp_permille(u64::try_from(permille).unwrap_or(u64::MAX))
-}
-
 /// A computed share as a chart permille, clamped at full rather than wrapping
-/// past the box — the one clamp every trace point passes through.
+/// past the box.
 fn clamp_permille(permille: u64) -> u16 {
     u16::try_from(permille.min(1_000)).unwrap_or(1_000)
 }
@@ -1217,25 +1147,6 @@ impl RollingMeters {
         recorded.push(DeviceId::Graphics);
         self.devices.retain_recorded(&recorded);
     }
-}
-
-/// Nanoseconds in one second, the scale a per-second rate is derived at.
-const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
-
-/// A per-second rate from two readings of one cumulative counter and the
-/// interval between them, or `None` when the interval is unmeasured or
-/// zero (there is nothing to divide by).
-///
-/// A counter that went *backwards* — which a cumulative counter should
-/// never do — yields `0` rather than a wrapped, enormous rate: the delta
-/// saturates, so a bad reading understates rather than invents. The
-/// multiplication is done in [`u128`] so a fast device over a short
-/// interval cannot overflow before the division brings it back in range.
-fn rate_per_sec(now: u64, previous: u64, elapsed_ns: Option<u64>) -> Option<u64> {
-    let elapsed_ns = elapsed_ns.filter(|ns| *ns > 0)?;
-    let delta = u128::from(now.saturating_sub(previous));
-    let per_sec = delta.saturating_mul(u128::from(NANOS_PER_SEC)) / u128::from(elapsed_ns);
-    Some(u64::try_from(per_sec).unwrap_or(u64::MAX))
 }
 
 /// The live [`SwitchboardModel`] plus the scheduler task id behind each row,

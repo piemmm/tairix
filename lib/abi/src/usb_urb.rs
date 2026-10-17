@@ -154,6 +154,13 @@ pub struct UrbRequest {
     /// The 8-byte SETUP packet, meaningful only for a
     /// [`UsbTransferType::Control`] transfer (zero-filled otherwise).
     pub setup: [u8; 8],
+    /// How long, in milliseconds, the controller may hold the transfer before
+    /// abandoning it and answering [`Errno::TimedOut`]. Every bulk transfer
+    /// carries one, so no silent device holds its class driver forever. An
+    /// interrupt transfer may carry none, to wait for the device's next
+    /// report whenever it comes; a control transfer carries none, running
+    /// within the controller's own bound on a request.
+    pub timeout_ms: Option<NonZeroU32>,
 }
 
 /// The parameters of an isochronous stream ([`UsbRequest::IsoStart`]).
@@ -201,6 +208,23 @@ pub enum UsbRequest {
         /// The stream's `bEndpointAddress`.
         endpoint: u8,
     },
+    /// Clear the halt of one of the interface's own bulk endpoints, on the
+    /// device and in the controller, so the pipe restarts empty with both
+    /// data toggles at `DATA0` (USB 2.0 §9.4.5): the step a mass-storage
+    /// reset recovery owes each bulk pipe. Any transfer queued on it is
+    /// abandoned.
+    ClearHalt {
+        /// The endpoint's `bEndpointAddress`.
+        endpoint: u8,
+    },
+    /// Drop every report the controller has captured from the interface's
+    /// interrupt-IN endpoint and not yet delivered, so the next poll is
+    /// answered by one the device sends after this, and a command-completion
+    /// channel never takes an earlier command's answer for its own.
+    DiscardReports {
+        /// The endpoint's `bEndpointAddress`.
+        endpoint: u8,
+    },
 }
 
 /// Operation bytes, each request's first byte.
@@ -211,11 +235,14 @@ mod op {
     pub const ISO_START: u8 = 4;
     pub const ISO_QUEUE: u8 = 5;
     pub const ISO_STOP: u8 = 6;
+    pub const CLEAR_HALT: u8 = 7;
+    pub const DISCARD_REPORTS: u8 = 8;
 }
 
 /// Encoded length of a [`UsbRequest::Transfer`]: `op(1) || endpoint(1) ||
-/// transfer_type(1) || direction(1) || length(4) || setup(8)`.
-pub const URB_REQUEST_LEN: usize = 16;
+/// transfer_type(1) || direction(1) || length(4) || setup(8) ||
+/// timeout_ms(4)`, a timeout of `0` carrying none.
+pub const URB_REQUEST_LEN: usize = 20;
 
 /// Encoded length of a [`UsbRequest::SetInterface`].
 const SET_INTERFACE_LEN: usize = 3;
@@ -228,6 +255,10 @@ const ISO_START_LEN: usize = 12;
 const ISO_QUEUE_LEN: usize = 4;
 /// Encoded length of a [`UsbRequest::IsoStop`].
 const ISO_STOP_LEN: usize = 2;
+/// Encoded length of a [`UsbRequest::ClearHalt`].
+const CLEAR_HALT_LEN: usize = 2;
+/// Encoded length of a [`UsbRequest::DiscardReports`].
+const DISCARD_REPORTS_LEN: usize = 2;
 
 /// The longest request frame, and so the transport endpoint's request bound.
 pub const USB_REQUEST_MAX_LEN: usize = URB_REQUEST_LEN;
@@ -256,6 +287,7 @@ impl UsbRequest {
                 out[3] = urb.direction.as_u8();
                 put_u32(out, 4, urb.length);
                 out[8..16].copy_from_slice(&urb.setup);
+                put_u32(out, 16, urb.timeout_ms.map_or(0, NonZeroU32::get));
             }
             Self::SetInterface {
                 interface,
@@ -285,6 +317,14 @@ impl UsbRequest {
                 out[0] = op::ISO_STOP;
                 out[1] = endpoint;
             }
+            Self::ClearHalt { endpoint } => {
+                out[0] = op::CLEAR_HALT;
+                out[1] = endpoint;
+            }
+            Self::DiscardReports { endpoint } => {
+                out[0] = op::DISCARD_REPORTS;
+                out[1] = endpoint;
+            }
         }
         Ok(len)
     }
@@ -299,6 +339,8 @@ impl UsbRequest {
             Self::IsoStart(_) => ISO_START_LEN,
             Self::IsoQueue { .. } => ISO_QUEUE_LEN,
             Self::IsoStop { .. } => ISO_STOP_LEN,
+            Self::ClearHalt { .. } => CLEAR_HALT_LEN,
+            Self::DiscardReports { .. } => DISCARD_REPORTS_LEN,
         }
     }
 
@@ -324,12 +366,14 @@ impl UsbRequest {
             op::ISO_START => ISO_START_LEN,
             op::ISO_QUEUE => ISO_QUEUE_LEN,
             op::ISO_STOP => ISO_STOP_LEN,
+            op::CLEAR_HALT => CLEAR_HALT_LEN,
+            op::DISCARD_REPORTS => DISCARD_REPORTS_LEN,
             _ => return Err(Errno::OutOfRange),
         };
         if bytes.len() != expect {
             return Err(Errno::LengthOutOfRange);
         }
-        let stream_endpoint = |address: u8| {
+        let device_endpoint = |address: u8| {
             if is_device_endpoint_address(address) {
                 Ok(address)
             } else {
@@ -344,12 +388,23 @@ impl UsbRequest {
                 }
                 let mut setup = [0u8; 8];
                 setup.copy_from_slice(&bytes[8..16]);
+                let transfer_type = UsbTransferType::from_u8(bytes[2])?;
+                let timeout_ms = NonZeroU32::new(read_u32(bytes, 16));
+                let bounded = match transfer_type {
+                    UsbTransferType::Control => timeout_ms.is_none(),
+                    UsbTransferType::Bulk => timeout_ms.is_some(),
+                    UsbTransferType::Interrupt => true,
+                };
+                if !bounded {
+                    return Err(Errno::OutOfRange);
+                }
                 Self::Transfer(UrbRequest {
                     endpoint,
-                    transfer_type: UsbTransferType::from_u8(bytes[2])?,
+                    transfer_type,
                     direction: UsbDirection::from_u8(bytes[3])?,
                     length: read_u32(bytes, 4),
                     setup,
+                    timeout_ms,
                 })
             }
             op::SET_INTERFACE => Self::SetInterface {
@@ -364,7 +419,7 @@ impl UsbRequest {
                     return Err(Errno::OutOfRange);
                 }
                 Self::IsoStart(IsoStartParams {
-                    endpoint: stream_endpoint(bytes[1])?,
+                    endpoint: device_endpoint(bytes[1])?,
                     layout: IsoLayout::new(
                         read_u16(bytes, 2),
                         read_u16(bytes, 4),
@@ -378,12 +433,18 @@ impl UsbRequest {
                     return Err(Errno::OutOfRange);
                 }
                 Self::IsoQueue {
-                    endpoint: stream_endpoint(bytes[1])?,
+                    endpoint: device_endpoint(bytes[1])?,
                     slot,
                 }
             }
-            _ => Self::IsoStop {
-                endpoint: stream_endpoint(bytes[1])?,
+            op::ISO_STOP => Self::IsoStop {
+                endpoint: device_endpoint(bytes[1])?,
+            },
+            op::CLEAR_HALT => Self::ClearHalt {
+                endpoint: device_endpoint(bytes[1])?,
+            },
+            _ => Self::DiscardReports {
+                endpoint: device_endpoint(bytes[1])?,
             },
         })
     }

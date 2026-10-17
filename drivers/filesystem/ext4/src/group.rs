@@ -390,7 +390,13 @@ impl<B: Block> Ext4<B> {
         Ok(())
     }
 
+    /// The checksum `bitmap`'s descriptor records: crc32c over its `bits`
+    /// under `metadata_csum`, and zero where the descriptor reserves the
+    /// field.
     fn bitmap_checksum(&self, bitmap: &[u8], bits: u32) -> u32 {
+        if !self.layout.metadata_csum {
+            return 0;
+        }
         let bytes = (bits as usize).div_ceil(8).min(bitmap.len());
         tairix_crc32c::update(self.layout.csum_seed, &bitmap[..bytes])
     }

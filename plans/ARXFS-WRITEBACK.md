@@ -280,8 +280,9 @@ root. Every teardown does reach an explicit close: the volume-detach path
 flushes the filesystem before the device (`commit_for_detach`) and the
 `system_power` syscall syncs every mounted volume before the platform stops.
 
-The window is one policy function over `Block::device_class()`, which the seam
-already reported and the driver ignored:
+The window is one policy function over the device class the seam reports
+(`BlockClass::device_class`, derived from the medium the driver declares),
+which the driver once ignored:
 
 | Declared class | Rationale | Window |
 |---|---|---|

@@ -46,6 +46,35 @@ another host may be writing, is never replayed, a replay being a write. A
 writable mount sets the superblock's free counts from the group descriptors,
 which every allocation keeps exact and a crash can leave the totals behind.
 
+## Generations
+
+A volume's features decide its generation, as `mount` names it: ext4 once any
+incompatible or read-only-compatible feature past ext3's is on (ext3 knows
+`filetype`, `recover` and `meta_bg`; `sparse_super`, `large_file` and
+`btree_dir`), else ext3 with a journal and ext2 without. A compatible feature
+never decides it, since an older driver mounts the volume regardless.
+`Ext4::generation` reports it, and the volume service publishes it as the
+mount's type, so `df`, `stat` and the file manager show an ext2 stick as ext2.
+
+Writing never moves a volume to a later generation, so the drivers it was made
+for still mount it:
+
+- a file created on a volume without `extent` is block-mapped;
+- a descriptor field only ext4 defines — its flags, bitmap checksums,
+  unused-inode count and own checksum — is written only under the feature
+  that defines it;
+- the high half of an attribute-block number is read only under `64bit`: on
+  ext2 and ext3 those bytes are padding, and GNU Hurd keeps its high mode
+  bits there;
+- a journal keeps the tag format it was made with, taking 64-bit tags and v3
+  checksums only where the volume's own features ask for them.
+
+A revision-0 superblock has no feature words and defines nothing past
+`s_rev_level`. Before the driver stores anything only the dynamic revision
+has — `large_file` for a file past 2 GiB, or the head of the orphan chain — it
+raises the volume to revision 1, keeping the first inode and inode size
+revision 0 fixes, as Linux does.
+
 ## Nodes and mapping
 
 A `NodeId` is the on-disk inode number, so there is no in-memory inode

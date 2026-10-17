@@ -1655,8 +1655,14 @@ fn an_information_row_without_an_attested_identity_is_left_out() {
     let bare = ChainModel::from_app_menu("App", &wire, None);
     assert_eq!(bare.rows().len(), 1, "no identity, no panel to open");
 
-    let facts = FactList::new(vec![Fact::new("Name", "App")]);
-    let attested = ChainModel::from_app_menu("App", &wire, Some(&facts));
+    let sheet = crate::AboutSheet::new(
+        "App",
+        "1.0",
+        None,
+        FactList::new(vec![Fact::new("Author", "TAIRiX")]),
+        tairix_icon::IconKind::AppBundle,
+    );
+    let attested = ChainModel::from_app_menu("App", &wire, Some(&sheet));
     assert_eq!(attested.rows().len(), 2);
     assert!(
         matches!(attested.rows()[1].child(), ChainChild::Info(_)),
@@ -1693,18 +1699,49 @@ fn a_chooseable_row_that_has_children_draws_a_chevron_and_keeps_its_id() {
     assert_eq!(parent.id(), Some(wire_id(1)), "choosing it still answers");
     assert!(parent.drawn().is_submenu(), "and it draws the chevron");
     assert_eq!(parent.child(), &ChainChild::Submenu);
-    assert_eq!(parent.icon_bundle(), None);
+    assert_eq!(parent.icon_source(), None);
 
     let candidate = &model.rows()[1];
     assert_eq!(candidate.parent(), Some(0), "filed under the item above");
     assert_eq!(
-        candidate.icon_bundle(),
-        Some("/System/Applications/view.app"),
+        candidate.icon_source(),
+        Some(&crate::RowIcon::Bundle(alloc::string::String::from(
+            "/System/Applications/view.app"
+        ))),
         "the row asks for a picture; resolving it is the owner's"
     );
     assert!(
         candidate.drawn().artwork().is_none(),
         "a decoded row carries no pixels of its own"
+    );
+    assert_eq!(
+        candidate.drawn().icon(),
+        Some(tairix_icon::IconKind::AppBundle),
+        "until its picture resolves, or if it never does, it draws the application glyph"
+    );
+}
+
+#[test]
+fn a_declared_class_picture_is_resolved_to_its_kind_and_an_unknown_one_to_the_generic() {
+    let mut wire = wire_menu("Files");
+    for (id, asset) in [(1, "folder"), (2, "disk-usb"), (3, "no-such-asset")] {
+        wire.push(AppMenuRow::Item(
+            AppMenuItem::new(wire_id(id), wire_label("Place")).with_icon_asset(
+                tairix_abi::window_ipc::AppMenuAsset::new(asset).expect("a valid asset id"),
+            ),
+        ))
+        .expect("a row");
+    }
+    let model = ChainModel::from_app_menu("Files", &wire, None);
+    let kinds: alloc::vec::Vec<Option<&crate::RowIcon>> =
+        model.rows().iter().map(ChainRow::icon_source).collect();
+    assert_eq!(
+        kinds,
+        [
+            Some(&crate::RowIcon::Class(tairix_icon::IconKind::Folder)),
+            Some(&crate::RowIcon::Class(tairix_icon::IconKind::DiskUsb)),
+            Some(&crate::RowIcon::Class(tairix_icon::IconKind::Generic)),
+        ]
     );
 }
 
@@ -1896,4 +1933,22 @@ fn a_row_text_too_long_for_the_row_is_elided_with_the_mark() {
         marks_elision(|text| drawn(MenuItem::new("").with_shortcut(text))),
         "an accelerator caption"
     );
+}
+
+/// A plate is measured with the leading column its rows draw into, so a
+/// picture resolved after it opened lands in room that was already there.
+#[test]
+fn a_plate_is_measured_with_the_icon_column_its_rows_draw() {
+    let theme = Theme::dark();
+    for percent in [100, 150, 200, 300] {
+        let scale = Scale::from_percent(percent).expect("in range");
+        let border = crate::paint::plate_border(&theme, scale);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let bare = Menu::new(vec![MenuItem::new("")]);
+        assert_eq!(
+            bare.preferred_width(scale, &theme),
+            2 * border + 5 * pad + Menu::icon_side(scale, &theme),
+            "at {percent}%"
+        );
+    }
 }

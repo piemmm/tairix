@@ -1,5 +1,31 @@
 # FIX-DESKTOP.md — Non-blocking desktop: asynchronous process launch
 
+## Ledger
+
+| ID | Item | Status |
+|---|---|---|
+| DESK-1 | Process launch admits the child, which loads its own image | done |
+| DESK-2 | The desktop launcher no longer freezes | done |
+| DESK-3 | The other interactive launch loops | done |
+| DESK-4 | Directory listings and the wallpaper off the loop | done |
+| DESK-5 | Verified shared image cache (`kernel/mem`) | planned |
+| DESK-6 | Demand paging and copy-on-write images | planned |
+| DESK-7 | Docs, README, gate for DESK-5 and DESK-6 | planned |
+| DESK-8 | Icon artwork off the loop | done |
+| DESK-9 | The program catalog off the loop | done |
+| DESK-10 | Settings writes off the loop | done |
+| DESK-11 | The file manager's reads off its loop | done |
+| DESK-12 | The file manager's icon decode off its loop | done |
+| DESK-13 | Redraws scoped to what changed | done |
+| DESK-14 | A settings *Apply* off its loop | done |
+| DESK-15 | Statistics are handed over, never awaited | done |
+| DESK-16 | The settings sheet repaints what its controls reported | done |
+| DESK-17 | A desk hands a job out by taking it | done |
+| DESK-18 | The font protocol is per run, not per glyph | done |
+| DESK-19 | A client's `Present` does not carry the desktop's frame work | planned |
+| DESK-20 | Settings asks for its pictures off its loop | done |
+| DESK-21 | Window-channel requests are posted, never awaited | planned |
+
 Binding under `AGENTS.md`. This plan removes the desktop freeze that
 occurs while an application is loaded and started, fixes it as a
 first-class property of the process-launch path (not a desktop-local
@@ -624,7 +650,7 @@ Each stage is independently reviewable and must leave the whole-project
   job control stays responsive during a load.
 
 ### DESK-4 — Directory listings and the wallpaper off the loop
-- **Done.** Both reads that can take arbitrary time on arbitrary hardware now
+- Both reads that can take arbitrary time on arbitrary hardware now
   run on `lib/rt` worker threads, woken back into the session through one byte
   on a pipe whose read end is a `WaitSourceKind::Stream` wait-set member — no
   new ABI, no second wake mechanism, nothing spinning.
@@ -667,7 +693,7 @@ Each stage is independently reviewable and must leave the whole-project
   reload keeps its items); the cue's two render cases.
 
 ### DESK-8 — Icon artwork off the loop
-- **Done.** Resolving one icon costs a bounded VFS read plus a round trip to
+- Resolving one icon costs a bounded VFS read plus a round trip to
   the parser sandbox that decodes it, and every icon surface — the bar's pins
   and task slots, the launcher popup's rows, a window's title-bar identity, the
   desktop's own column — used to pay it *inside the paint*, on the serve loop. A
@@ -756,7 +782,7 @@ Each stage is independently reviewable and must leave the whole-project
   window whose application has no picture leaves it immediately.
 
 ### DESK-9 — The program catalog off the loop
-- **Done.** The catalogue and the file-type associations are one snapshot read
+- The catalogue and the file-type associations are one snapshot read
   on a worker (`load_programs`, `userland/gui/session/src/library.rs`): the two
   layers merged as before, then one `AppInfo` per catalogued application, all
   fail-closed per layer and per bundle. The `Catalogs` desk is a
@@ -780,7 +806,7 @@ Each stage is independently reviewable and must leave the whole-project
   unreadable manifest claiming nothing.
 
 ### DESK-10 — Settings writes off the loop (the reported slider)
-- **Done.** A control's value is no longer tied to a store write anywhere on
+- A control's value is no longer tied to a store write anywhere on
   the desktop.
   - **`lib/controls`** gives a continuous control a settle point:
     `SliderAction::Settled` alongside `SetValue`, reported by the release that
@@ -809,7 +835,7 @@ Each stage is independently reviewable and must leave the whole-project
   (`lib/util/src/defer_tests.rs`).
 
 ### DESK-13 — Redraws scoped to what changed (the reported slider, again)
-- **Done.** A control's value no longer drives an unscoped rebuild. DESK-10 took
+- A control's value no longer drives an unscoped rebuild. DESK-10 took
   the *write* off the drag; this takes the *work* off it.
   - **`Invalidation`** (`userland/apps/terminal/src/profile.rs`) is the set of
     kinds one profile change makes stale — cell metrics, resolved colours,
@@ -851,7 +877,7 @@ Each stage is independently reviewable and must leave the whole-project
   the screen.
 
 ### DESK-14 — A settings *Apply* off its loop
-- **Done.** Choosing a setting no longer waits on the session's store write,
+- Choosing a setting no longer waits on the session's store write,
   and the arrangement that takes such work is now one shared thing rather than
   a copy per app.
   - **`tairix_rt::work`** is the runtime half of `tairix_util::defer`: the
@@ -890,7 +916,7 @@ Each stage is independently reviewable and must leave the whole-project
 
 ### DESK-15 — Statistics are handed over, never awaited
 
-- **Done.** Two rate-limited self-reports to `sysinfod` — the reclaimable-cache
+- Two rate-limited self-reports to `sysinfod` — the reclaimable-cache
   ledgers (`lib/rt::cachereport`) and the compositor's cumulative frame
   accounting (`session::frames`) — were made with `ipc_call`, which parks the
   calling task off the run queue until the service replies. They sit at the end
@@ -925,7 +951,7 @@ Each stage is independently reviewable and must leave the whole-project
 
 ### DESK-16 — The settings sheet repaints what its controls reported
 
-- **Done.** The sheet's controls were already reporting the rectangles they
+- The sheet's controls were already reporting the rectangles they
   change into the shared damage sink; `present_overlay` created the sink,
   filled it, and dropped it — then allocated a sheet-sized surface, rendered
   the whole sheet, and presented the whole popup. So the reported slider drag
@@ -945,7 +971,7 @@ Each stage is independently reviewable and must leave the whole-project
 
 ### DESK-17 — A desk hands a job out by taking it, never by copying it
 
-- **Done.** Two hand-rolled desks handed a worker its job by *cloning* the
+- Two hand-rolled desks handed a worker its job by *cloning* the
   request and leaving it standing: `tairix_browse::ListingDesk` (the desktop's
   icon column and the trusted file picker) and the session's `WallpaperDesk`.
   `next_job` set the in-flight flag and returned a clone; `deliver` cleared the
@@ -979,7 +1005,7 @@ Each stage is independently reviewable and must leave the whole-project
 
 ### DESK-18 — The font protocol is per run, not per glyph
 
-- **Done.** Text is drawn on the frame path, and a glyph the client cache did
+- Text is drawn on the frame path, and a glyph the client cache did
   not hold was a synchronous `FONT_ENDPOINT` call to `fontd` — 41 of them in a
   13-second hover run, clustered where new text appeared rather than spread:
   **32 calls inside 41 ms** on window-open. The client cache absorbs the
@@ -1023,7 +1049,7 @@ Each stage is independently reviewable and must leave the whole-project
   blit-reference tests are unchanged.
 
 ### DESK-20 — Settings asks for its pictures off its loop
-- **Done.** Each `RenderPreview` round trip is carried by a queued worker of
+- Each `RenderPreview` round trip is carried by a queued worker of
   the pane's own (`tairix_rt::work::Worker::queued`, room for one, with its own
   `WindowClient`). The pane submits, carries on drawing, and adopts the
   acceptance on the worker's wake; `Renders` holds one request unanswered at a
@@ -1035,7 +1061,7 @@ Each stage is independently reviewable and must leave the whole-project
   acceptance lets the next go.
 
 ### DESK-19 — A client's `Present` must not carry the desktop's frame work
-- **Planned.** The desktop session serves window clients and composites on one
+- The desktop session serves window clients and composites on one
   thread, and `WindowServer::present` runs the whole `winframe::decode` of the
   client's frame — and, behind it, whatever composite the session owes — before
   the reply goes out. So every application's `present` measures the desktop's
@@ -1079,8 +1105,52 @@ Each stage is independently reviewable and must leave the whole-project
   property that holds on any machine, and is worth doing for that reason rather
   than for those milliseconds.
 
+### DESK-21 — Window-channel requests are posted, never awaited
+- **The witness.** On a Raspberry Pi 4 the file manager overran its 250 ms
+  budget (274 ms, 252 ms of it blocked across 40 calls) while a window was
+  resized: `route_event` → `resize_window` → `WindowPane::resize_with` →
+  `WindowClient::resize` → `ipc_call`, 34 ms in the sampled call alone. The
+  client already folds a consecutive run of `Resized` into its newest, so the
+  cost is not the number of samples: each geometry step is a round trip that
+  waits for the session's own loop to reach it, and the app inherits the
+  compositor's frame time on every step.
+- **The defect is the channel, not one request.** Every `WindowClient` request
+  is an `ipc_call`, and the ones an app issues per input event — `Resize` per
+  geometry step, `SetCursor` as the pointer moves, `SetTooltip`, `DragVerdict`
+  during a drag, `SetTitle` and `SetSizing` as content changes — each wait on
+  the session. `Present` is DESK-19's.
+- **Design.**
+  1. **The kernel already has the asynchronous half of a call.** `call_post`
+     posts with a deadline and returns a ticket, `call_reap` collects the
+     answer, and a `CallReply` wait source wakes the loop
+     (`plans/FIX-IO.md` IO1). `WindowTransport` gains post and reap, and
+     `WindowClient` posts every request whose answer the app does not need
+     before it can go on; the loop adds the reply source to the wait-set it
+     already blocks on, so no worker thread is involved.
+  2. **Order is the endpoint's.** A posted `Resize` must reach the session
+     before the `Present` of the frame painted at the new size, so the app
+     paints into the fresh surface at once. The stage proves the session
+     serves one client's calls in the order posted, or makes it so.
+  3. **A refusal is an answer, arriving later.** A reaped refusal is surfaced
+     as a typed outcome naming its request: a refused `Resize` drops the fresh
+     surface and repaints at the size the session kept; the others report as
+     they do today.
+  4. **Bounded and coalesced.** At most one request of each kind per window is
+     outstanding; a newer one is held as the latest wanted value and posted
+     when the outstanding answer is reaped, so a burst of cursor or tooltip
+     changes costs one round trip in flight, and the per-client call capacity
+     is never the back-pressure.
+  5. **What stays a call.** `Create`, `OpenMenu`, `OpenAlert` and the desktop
+     queries return something the app needs before it can go on; none is
+     issued per input event, and any that is becomes a posted request whose
+     answer is adopted when reaped.
+- **Proven by** a host test of the client over a transport that answers only
+  when told (no request blocks, order and coalescing hold, a refused resize
+  reverts), and on the Pi by a drag-resize of a file window producing no stall
+  report under `WindowClient`.
+
 ### DESK-11 — The file manager's reads off its loop
-- **Done.** Every unbounded read the file manager makes now runs on one reader
+- Every unbounded read the file manager makes now runs on one reader
   thread, and the window keeps drawing throughout. The three kinds share a
   worker rather than taking one each: the app browses one place at a time, so
   they are never concurrent workloads, and one worker gives the order they are
@@ -1108,7 +1178,7 @@ Each stage is independently reviewable and must leave the whole-project
   (`lib/browse/src/tests.rs`).
 
 ### DESK-12 — The file manager's icon decode off its loop
-- **Done.** The last read the file manager's loop performed every turn — one
+- The last read the file manager's loop performed every turn — one
   bounded artwork read plus one parser-sandbox round trip — now runs on the
   DESK-11 reader thread. Its writes and operations followed
   (`plans/NEW-FILEMANAGER.md` FM20).
@@ -1206,13 +1276,13 @@ Each stage is independently reviewable and must leave the whole-project
 
 ---
 
-## 5. Status
+## 5. What each finished stage guarantees
 
-- **Audit — done** (§1). Both defects (freeze §1.1, eager/unshared build
+- **Audit** (§1). Both defects (freeze §1.1, eager/unshared build
   §1.2) and every affected interactive loop identified; the design is
   fully specified through demand-paged, CoW-shared, verified images
   (§2.6) — no "future work" left implicit (§2.6.4).
-- **DESK-1 — done.** Process launch is asynchronous: `SPAWN` and the driver
+- **DESK-1.** Process launch is asynchronous: `SPAWN` and the driver
   spawn are **admit-then-load**. The handler does only the synchronous §2.1
   work (cap check, path copy-in + `SPAWN_SELF`, attach/streams,
   `resolve_spawn_credential`, `proc_id`/name/spawn_path, program-vs-bundle
@@ -1262,7 +1332,7 @@ Each stage is independently reviewable and must leave the whole-project
     driver_spawn, driver_unload) exercise the admit-then-load path end to end.
     Docs: `docs/src/architecture/multitasking.md` documents the asynchronous
     launch and the reserved statuses.
-- **DESK-2 — done.** The desktop launcher no longer freezes and a refused
+- **DESK-2.** The desktop launcher no longer freezes and a refused
   launch is loud, not silent. Each desktop launch (the taskbar's launchers
   and the program-library popup) admits its child and
   returns at once (DESK-1), and the session remembers the child's label and
@@ -1280,7 +1350,7 @@ Each stage is independently reviewable and must leave the whole-project
   bespoke display QEMU vertical is needed; the reap-and-report logic is
   covered by `launch::tests`. Docs: the "parent reports the refusal"
   subsection in `docs/src/architecture/multitasking.md`.
-- **DESK-3 — done.** The other interactive launch loops now diagnose an
+- **DESK-3.** The other interactive launch loops now diagnose an
   asynchronous load failure loudly where they once relied on a synchronous
   `spawn` `-errno`. All three report the cause through the one shared
   `lib/abi::load_failure_reason` mapping, so a refusal is worded identically
@@ -1311,42 +1381,40 @@ Each stage is independently reviewable and must leave the whole-project
     reap report; the terminal (`shell_load_failure_classifies_reserved_statuses`)
     and login (`session_that_fails_its_async_load_is_reported_as_a_launch_failure`)
     cover their classifications.
-- **DESK-4 — done** (§4 above).
-- **DESK-8 — done.** Icon artwork is decoded on a worker thread; no icon
+- **DESK-4** (§4 above).
+- **DESK-8.** Icon artwork is decoded on a worker thread; no icon
   resolution happens inside a paint.
-- **DESK-9 — done.** The program catalogue and the associations its bundles
+- **DESK-9.** The program catalogue and the associations its bundles
   declare are one snapshot read on a worker; the launcher opens on the
   catalogue in hand and adopts the fresh one when it lands.
-- **DESK-10 — done.** No control's value is tied to a store write: a
+- **DESK-10.** No control's value is tied to a store write: a
   continuous control reports where it settled, the terminal separates the
   profile it renders from the one the store holds, and the desktop session's
   persist-then-adopt happens on a worker.
-- **DESK-11 — done.** Every unbounded read the file manager makes — listings,
+- **DESK-11.** Every unbounded read the file manager makes — listings,
   folder cues, and the "Open With…" bundle scan — runs on one reader thread.
-- **DESK-12 — done.** The file manager's icon decode runs on the DESK-11
+- **DESK-12.** The file manager's icon decode runs on the DESK-11
   reader thread; its writes and operations run off its loop too
   (`plans/NEW-FILEMANAGER.md` FM20).
-- **DESK-15 — done.** No interactive or serve loop waits on a statistics
+- **DESK-15.** No interactive or serve loop waits on a statistics
   report; `tairix_rt::submit::Submission` is the one shape both publishers hand
   them over with.
-- **DESK-16 — done.** The settings sheet's picture is retained and its paint
+- **DESK-16.** The settings sheet's picture is retained and its paint
   scoped to what its controls reported.
-- **DESK-17 — done.** No desk re-runs an answered job; the listing and
+- **DESK-17.** No desk re-runs an answered job; the listing and
   wallpaper workers park instead of looping.
-- **DESK-18 — done.** The font protocol is per run: a cold run of text costs
+- **DESK-18.** The font protocol is per run: a cold run of text costs
   one `FONT_ENDPOINT` round trip rather than one per character, and a warm one
   costs none.
-- **DESK-13 — done.** A profile change costs only the work the field that moved
+- **DESK-13.** A profile change costs only the work the field that moved
   implies; the terminal is the last surface off the shared damage discipline
   and was the only one with this coupling.
-- **DESK-14 — done.** A settings *Apply* runs on a worker; the
+- **DESK-14.** A settings *Apply* runs on a worker; the
   desk-plus-worker arrangement is one shared `lib/rt::work`; and the wait a
   worker's answer arrives on can end without an event, which also closed a
   busy-spin in the file manager.
-- **DESK-20 — done.** Settings' picture requests run on a worker; the pane
+- **DESK-20.** Settings' picture requests run on a worker; the pane
   never waits on the session's serve loop.
-- **DESK-5 … DESK-7 — planned.**
-- **DESK-19 — planned.**
 
 ---
 

@@ -551,9 +551,11 @@ The remaining drawn families are also complete: the value controls
 engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 `WindowControl`/`ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —
 `Notification`/`TaskbarItem`/`TraySignal`), the decision surfaces
-(`decision` — `Dialog`/`Tooltip`/`HelpTip`, with `Dialog::save_changes`, the
-one question a document window asks before closing over changes, whose actions
-`SaveChanges::of` reads), and the form fields
+(`decision` — `Dialog`/`Tooltip`/`HelpTip`, a `Dialog` being a form a window
+draws over itself for an answer typed in it), the alert (`alert` — `Alert`, the
+content of the desktop's own error, warning and question windows: severity
+mark, headline, scrolling detail and the bottom row of answers, sized 4:3 to
+what it says), and the form fields
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
 the `collection` row chrome — never its pointer wash, which is the slot
 control's alone — and a real control in each row's slot, a

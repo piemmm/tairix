@@ -29,17 +29,18 @@
 //! another interface's buffer.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::usb_urb::{
-    decode_completion, encode_completion, encode_error_completion, IsoGrant, IsoLayout,
-    IsoStartParams, UrbRequest, UsbDirection, UsbRequest, UsbSpeed, UsbTransferType,
-    USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN,
+    decode_completion, encode_completion, encode_error_completion, is_device_endpoint_address,
+    IsoGrant, IsoLayout, IsoStartParams, UrbRequest, UsbDirection, UsbRequest, UsbSpeed,
+    UsbTransferType, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_inline::BitSet256;
 
-use crate::descriptor::{ConfigurationHeader, Malformed, CONFIGURATION_HEADER_LEN};
+use crate::descriptor::{address_dci, ConfigurationHeader, Malformed, CONFIGURATION_HEADER_LEN};
 use crate::device::{setup_get_configuration_descriptor, BULK_BUF_LEN, CTRL_DATA_LEN};
 
 /// The controller-side operations the URB transport server drives.
@@ -136,6 +137,41 @@ pub trait UrbEngine {
     ///
     /// As [`Self::bulk_in`].
     fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, DriverError>;
+
+    /// Abandon `urb`, held when its deadline passed: a bulk pipe is stopped
+    /// and restarted empty, so what was queued on it can never complete late
+    /// into a later transfer; a report poll leaves its endpoint armed.
+    ///
+    /// # Errors
+    ///
+    /// A controller fault stopping the pipe.
+    fn abandon(&mut self, urb: &UrbRequest) -> Result<(), DriverError>;
+
+    /// Clear the halt of the bulk endpoint at address `endpoint`, on the
+    /// device and in the controller, restarting the pipe empty with both data
+    /// toggles at `DATA0`; whatever was queued on it is abandoned.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for an endpoint that is none of the
+    /// device's bulk pipes, a controller or device fault, or
+    /// [`DriverError::Unsupported`] from an engine with no bulk pipes.
+    fn clear_halt(&mut self, _endpoint: u8) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
+
+    /// Drop every report captured from the interrupt-IN endpoint at address
+    /// `endpoint` and not yet delivered, so the next report poll is answered
+    /// by one the device sends after this.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfRange`] for an endpoint other than the device's
+    /// interrupt-IN one, a fault reading the controller's events, or
+    /// [`DriverError::Unsupported`] from an engine with no report endpoint.
+    fn discard_reports(&mut self, _endpoint: u8) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported)
+    }
 
     /// Select `alternate` on `interface` — the node's own or one it claimed —
     /// reprogramming the controller for the endpoints the setting brings and
@@ -260,9 +296,7 @@ impl UrbScope {
     /// is one of the interface's own.
     #[must_use]
     pub const fn owns_endpoint(self, address: u8) -> bool {
-        let number = address & 0x0F;
-        let dci = number * 2 + (address >> 7);
-        number != 0 && address & 0x70 == 0 && self.endpoints & (1 << dci) != 0
+        is_device_endpoint_address(address) && self.endpoints & (1 << address_dci(address)) != 0
     }
 }
 
@@ -445,6 +479,27 @@ pub fn drive_urb<E: UrbEngine>(
     }
 }
 
+/// Run `operation` on the interface's own endpoint at address `endpoint`
+/// ([`UsbRequest::ClearHalt`], [`UsbRequest::DiscardReports`]), refusing one
+/// the interface does not own before the engine is touched.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] once the interface is gone,
+/// [`Errno::PermissionDenied`] for another interface's endpoint, or the
+/// engine's refusal.
+pub fn on_own_endpoint<E: UrbEngine>(
+    endpoint: u8,
+    engine: &mut E,
+    operation: impl FnOnce(&mut E, u8) -> Result<(), DriverError>,
+) -> Result<(), Errno> {
+    let scope = engine.scope().ok_or(Errno::NotFound)?;
+    if !scope.owns_endpoint(endpoint) {
+        return Err(Errno::PermissionDenied);
+    }
+    operation(engine, endpoint).map_err(DriverError::as_errno)
+}
+
 /// Frame a completed transfer outcome into a URB completion in `reply`,
 /// returning the reply length.
 ///
@@ -598,6 +653,7 @@ impl<T: UrbCall> UrbClient<T> {
             direction: UsbDirection::In,
             length,
             setup,
+            timeout_ms: None,
         })
     }
 
@@ -615,6 +671,7 @@ impl<T: UrbCall> UrbClient<T> {
             direction: UsbDirection::Out,
             length: 0,
             setup,
+            timeout_ms: None,
         })
         .map(|_| ())
     }
@@ -640,6 +697,7 @@ impl<T: UrbCall> UrbClient<T> {
             direction: UsbDirection::Out,
             length,
             setup,
+            timeout_ms: None,
         })
         .map(|_| ())
     }
@@ -649,56 +707,135 @@ impl<T: UrbCall> UrbClient<T> {
     /// longest report expected; a report may run past it up to one service
     /// interval's payload, so the whole shared buffer receives it.
     ///
+    /// `timeout_ms` bounds the wait; without one the call waits for the
+    /// device's next report whenever it comes.
+    ///
     /// # Errors
     ///
-    /// The carried completion [`Errno`] (a controller/device fault), or an
-    /// encode/transport error. The call blocks until a report arrives, so the
-    /// class driver parks rather than busy-polling for the next report.
-    pub fn interrupt_in(&mut self, endpoint: u8, length: u32) -> Result<u32, Errno> {
+    /// The carried completion [`Errno`] — [`Errno::TimedOut`] for a bounded
+    /// wait no report answered — or an encode/transport error. The call
+    /// blocks until a report arrives, so the class driver parks rather than
+    /// busy-polling for the next report.
+    pub fn interrupt_in(
+        &mut self,
+        endpoint: u8,
+        length: u32,
+        timeout_ms: Option<NonZeroU32>,
+    ) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,
             transfer_type: UsbTransferType::Interrupt,
             direction: UsbDirection::In,
             length,
             setup: [0; 8],
+            timeout_ms,
         })
     }
 
     /// Submit a bulk-IN URB for `endpoint` reading up to `length` bytes into
-    /// the shared buffer, returning the bytes the device delivered (a short
-    /// packet yields fewer than `length`).
+    /// the shared buffer within `timeout_ms`, returning the bytes the device
+    /// delivered (a short packet yields fewer than `length`).
     ///
     /// # Errors
     ///
     /// The carried completion [`Errno`] — notably
     /// [`Errno::EndpointStalled`] when the device answered the transfer
-    /// with STALL (the endpoint is already recovered; the caller runs its
-    /// class-level recovery and may submit again) — or an encode/transport
-    /// error. The call blocks until the transfer completes.
-    pub fn bulk_in(&mut self, endpoint: u8, length: u32) -> Result<u32, Errno> {
+    /// with STALL, [`Errno::DeviceFault`] when it failed on the wire (either
+    /// way the endpoint is already recovered, so the caller runs its
+    /// class-level recovery and may submit again), and [`Errno::TimedOut`]
+    /// when the controller abandoned it at its deadline — or an
+    /// encode/transport error. The call blocks until the transfer ends.
+    pub fn bulk_in(
+        &mut self,
+        endpoint: u8,
+        length: u32,
+        timeout_ms: NonZeroU32,
+    ) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,
             transfer_type: UsbTransferType::Bulk,
             direction: UsbDirection::In,
             length,
             setup: [0; 8],
+            timeout_ms: Some(timeout_ms),
         })
     }
 
     /// Submit a bulk-OUT URB for `endpoint` writing `length` bytes from the
-    /// shared buffer, returning the bytes the device accepted.
+    /// shared buffer within `timeout_ms`, returning the bytes the device
+    /// accepted.
     ///
     /// # Errors
     ///
     /// As [`Self::bulk_in`].
-    pub fn bulk_out(&mut self, endpoint: u8, length: u32) -> Result<u32, Errno> {
+    pub fn bulk_out(
+        &mut self,
+        endpoint: u8,
+        length: u32,
+        timeout_ms: NonZeroU32,
+    ) -> Result<u32, Errno> {
         self.submit(&UrbRequest {
             endpoint,
             transfer_type: UsbTransferType::Bulk,
             direction: UsbDirection::Out,
             length,
             setup: [0; 8],
+            timeout_ms: Some(timeout_ms),
         })
+    }
+
+    /// Clear the halt of the interface's bulk endpoint at address `endpoint`
+    /// ([`UsbRequest::ClearHalt`]): on the device and in the controller, so
+    /// the pipe restarts empty with both data toggles at `DATA0`.
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal — [`Errno::PermissionDenied`] for an endpoint the
+    /// interface does not own — or a transport error.
+    pub fn clear_halt(&mut self, endpoint: u8) -> Result<(), Errno> {
+        self.call_for_status(&UsbRequest::ClearHalt { endpoint })
+    }
+
+    /// Drop every report the HCD has captured from the interface's
+    /// interrupt-IN endpoint at address `endpoint` and not yet delivered
+    /// ([`UsbRequest::DiscardReports`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal — [`Errno::PermissionDenied`] for an endpoint the
+    /// interface does not own, [`Errno::OutOfRange`] for one that is not its
+    /// interrupt-IN endpoint — or a transport error.
+    pub fn discard_reports(&mut self, endpoint: u8) -> Result<(), Errno> {
+        self.call_for_status(&UsbRequest::DiscardReports { endpoint })
+    }
+}
+
+/// The instant a run of transfers must end by, and the clock that says how
+/// near it is: what each URB of a transfer split across several is given is
+/// what remains, so the transfer as a whole never outlives its budget.
+#[derive(Clone, Copy)]
+pub struct Deadline {
+    at_ns: u64,
+    clock: fn() -> u64,
+}
+
+impl Deadline {
+    /// The deadline `budget_ns` from now on `clock`, monotonic nanoseconds.
+    #[must_use]
+    pub fn after(budget_ns: u64, clock: fn() -> u64) -> Self {
+        Self {
+            at_ns: clock().saturating_add(budget_ns),
+            clock,
+        }
+    }
+
+    /// The milliseconds left, rounded up so a sliver still bounds one more
+    /// transfer, or `None` once the deadline has passed.
+    #[must_use]
+    pub fn remaining_ms(self) -> Option<NonZeroU32> {
+        let left = self.at_ns.checked_sub((self.clock)())?;
+        let ms = left.div_ceil(1_000_000).min(u64::from(u32::MAX));
+        NonZeroU32::new(u32::try_from(ms).ok()?)
     }
 }
 
@@ -830,18 +967,25 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         self.client.control_no_data(setup)
     }
 
-    /// Read up to `data.len()` bytes from bulk-IN `endpoint`, returning the
-    /// bytes delivered.
+    /// Read up to `data.len()` bytes from bulk-IN `endpoint` by `deadline`,
+    /// returning the bytes delivered.
     ///
     /// # Errors
     ///
-    /// The completion's [`Errno`].
-    pub fn bulk_in(&mut self, endpoint: u8, data: &mut [u8]) -> Result<usize, Errno> {
+    /// [`Errno::TimedOut`] once `deadline` has passed, or the completion's
+    /// [`Errno`].
+    pub fn bulk_in(
+        &mut self,
+        endpoint: u8,
+        data: &mut [u8],
+        deadline: Deadline,
+    ) -> Result<usize, Errno> {
         let mut at = 0usize;
         while at < data.len() {
             let chunk = (data.len() - at).min(self.chunk());
             let len = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
-            let delivered = usize::try_from(self.client.bulk_in(endpoint, len)?)
+            let timeout = deadline.remaining_ms().ok_or(Errno::TimedOut)?;
+            let delivered = usize::try_from(self.client.bulk_in(endpoint, len, timeout)?)
                 .map_err(|_| Errno::LengthOutOfRange)?
                 .min(chunk);
             data[at..at + delivered].copy_from_slice(&self.shm[..delivered]);
@@ -853,19 +997,25 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
         Ok(at)
     }
 
-    /// Write `data` to bulk-OUT `endpoint`, returning the bytes the device
-    /// accepted.
+    /// Write `data` to bulk-OUT `endpoint` by `deadline`, returning the bytes
+    /// the device accepted.
     ///
     /// # Errors
     ///
-    /// The completion's [`Errno`].
-    pub fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<usize, Errno> {
+    /// As [`Self::bulk_in`].
+    pub fn bulk_out(
+        &mut self,
+        endpoint: u8,
+        data: &[u8],
+        deadline: Deadline,
+    ) -> Result<usize, Errno> {
         let mut at = 0usize;
         while at < data.len() {
             let chunk = (data.len() - at).min(self.chunk());
+            let timeout = deadline.remaining_ms().ok_or(Errno::TimedOut)?;
             self.shm[..chunk].copy_from_slice(&data[at..at + chunk]);
             let len = u32::try_from(chunk).map_err(|_| Errno::LengthOutOfRange)?;
-            let accepted = usize::try_from(self.client.bulk_out(endpoint, len)?)
+            let accepted = usize::try_from(self.client.bulk_out(endpoint, len, timeout)?)
                 .map_err(|_| Errno::LengthOutOfRange)?
                 .min(chunk);
             at += accepted;
@@ -879,25 +1029,53 @@ impl<'a, T: UrbCall> UrbLink<'a, T> {
     /// Read interrupt-IN `endpoint`'s next report into `data`, returning its
     /// length. `expected` is the longest report expected; the report may be
     /// longer, up to one service interval's payload ([`UrbEngine::interrupt_in`]).
+    /// With a `deadline` the wait ends there; without one it lasts until the
+    /// device next reports.
     ///
     /// # Errors
     ///
-    /// [`Errno::BufferTooSmall`] for a report longer than `data`, or the
-    /// completion's [`Errno`].
+    /// [`Errno::BufferTooSmall`] for a report longer than `data`,
+    /// [`Errno::TimedOut`] once `deadline` has passed, or the completion's
+    /// [`Errno`].
     pub fn interrupt_in(
         &mut self,
         endpoint: u8,
         expected: usize,
         data: &mut [u8],
+        deadline: Option<Deadline>,
     ) -> Result<usize, Errno> {
         let len = u32::try_from(expected).map_err(|_| Errno::LengthOutOfRange)?;
-        let delivered = usize::try_from(self.client.interrupt_in(endpoint, len)?)
+        let timeout = match deadline {
+            Some(deadline) => Some(deadline.remaining_ms().ok_or(Errno::TimedOut)?),
+            None => None,
+        };
+        let delivered = usize::try_from(self.client.interrupt_in(endpoint, len, timeout)?)
             .map_err(|_| Errno::LengthOutOfRange)?;
         let report = self.shm.get(..delivered).ok_or(Errno::LengthOutOfRange)?;
         data.get_mut(..delivered)
             .ok_or(Errno::BufferTooSmall)?
             .copy_from_slice(report);
         Ok(delivered)
+    }
+
+    /// Clear the halt of bulk endpoint `endpoint`
+    /// ([`UrbClient::clear_halt`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal, or a transport error.
+    pub fn clear_halt(&mut self, endpoint: u8) -> Result<(), Errno> {
+        self.client.clear_halt(endpoint)
+    }
+
+    /// Drop the reports interrupt-IN endpoint `endpoint` has buffered
+    /// ([`UrbClient::discard_reports`]).
+    ///
+    /// # Errors
+    ///
+    /// The HCD's refusal, or a transport error.
+    pub fn discard_reports(&mut self, endpoint: u8) -> Result<(), Errno> {
+        self.client.discard_reports(endpoint)
     }
 
     /// Zero the shared buffer, so nothing a transfer carried outlives it.

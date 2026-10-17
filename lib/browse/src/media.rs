@@ -258,7 +258,11 @@ impl MediaType {
     /// such as SVG's `application/xml`). A codec's file is likewise its
     /// container's: an Opus file is an Ogg stream, so
     /// [`AudioOpus`](Self::AudioOpus) names [`AudioOgg`](Self::AudioOgg).
-    /// Every other binary type names `None`.
+    /// And every file is, at last, bytes: each broadest file type names
+    /// [`ApplicationOctetStream`](Self::ApplicationOctetStream), so a byte
+    /// editor that claims it opens anything. A directory is no stream of
+    /// bytes, nor is a bundle, which is a directory too: they name `None`.
+    ///
     /// The relation exists so naming a format precisely never narrows what can
     /// open it: association matching walks this chain, offering an application
     /// that declares an ancestor type while ranking one that declares the exact
@@ -289,7 +293,8 @@ impl MediaType {
             Self::InodeDirectory
             | Self::TairixApp
             | Self::TairixService
-            | Self::TairixRxe
+            | Self::ApplicationOctetStream => None,
+            Self::TairixRxe
             | Self::Wasm
             | Self::Elf
             | Self::TextPlain
@@ -322,8 +327,7 @@ impl MediaType {
             | Self::VideoWebm
             | Self::VideoMatroska
             | Self::VideoQuicktime
-            | Self::VideoAvi
-            | Self::ApplicationOctetStream => None,
+            | Self::VideoAvi => Some(Self::ApplicationOctetStream),
         }
     }
 
@@ -1033,8 +1037,9 @@ pub fn media_for_named(name: &str, kind: EntryKind, service_store: bool) -> Medi
     }
 }
 
-/// The icon drawn for a listed entry: its content-type glyph, refined by what
-/// the browser knows about a plain directory's contents.
+/// The icon drawn for a listed entry: the drive a mounted volume's root is
+/// on, else its content-type glyph refined by what the browser knows about a
+/// plain directory's contents.
 ///
 /// A directory that has been probed and holds something draws
 /// [`IconKind::FolderFilled`]; every other case — empty, unprobed, or a probe
@@ -1046,7 +1051,9 @@ pub fn media_for_named(name: &str, kind: EntryKind, service_store: bool) -> Medi
 /// and the desktop all reach it, so no two can picture one entry differently.
 #[must_use]
 pub fn icon_for_entry(entry: &Entry, parent: &[String]) -> IconKind {
-    icon_of(entry, media_for_entry(entry, parent))
+    entry
+        .drive()
+        .unwrap_or_else(|| icon_of(entry, media_for_entry(entry, parent)))
 }
 
 /// `media`'s glyph for `entry`, refined by a plain directory's occupancy.
@@ -1078,6 +1085,9 @@ pub fn entry_icon<'a>(
     entry: &'a Entry,
     scratch: &'a mut String,
 ) -> (IconKind, IconRequest<'a>) {
+    if let Some(drive) = entry.drive() {
+        return (drive, IconRequest::kind(drive));
+    }
     let media = media_for_entry(entry, parent);
     let kind = icon_of(entry, media);
     if let (true, Some(sample)) = (entry.is_directory(), entry.occupancy().pictured()) {

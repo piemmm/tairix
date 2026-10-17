@@ -19,6 +19,8 @@ Binding under `AGENTS.md` (§3, §15.18).
 | M5 | Plates are floating chrome: 80% opacity over the shared chrome blur | **done** |
 | M6 | A row may act *and* open a child: quick-entry fields, candidate submenus with their own icons | **done** |
 | M7 | Submenus survive the crossing: no-row points keep the child and its row's highlight, and aim intent with a settle deadline (§1.3) | **done** |
+| M8 | A row may name class artwork by asset id (`AppMenuItem::with_icon_asset`) | **done** |
+| M9 | The *Info* child is a sheet, and dies with its application | **done** |
 
 Open decisions: none. Decision 4 is **settled** by the owner — floating chrome
 moves to 80% opacity as one shared value, and the blur stays the one the
@@ -912,6 +914,29 @@ fit `APP_MENU_TEXT_BYTES`, so a builder asks what is left before adding a row
 rather than pushing and swallowing a refusal.
 
 ---
+
+### M8 — artwork on a row (landed)
+
+A chooseable row may name a class picture by asset id
+(`AppMenuItem::with_icon_asset`, an `AppMenuAsset` of at most
+`APP_MENU_ASSET_MAX` bytes): the public name an icon master is shipped under
+(`folder`, `disk-usb`). The session resolves it through its artwork cache at
+the row's icon side, the raster, vector and built-in tiers every surface draws
+through, so an application names a picture and can never name a file. An
+unknown id draws the generic glyph, and a bundle row whose bundle will not
+resolve draws the built-in application glyph. The file manager's icon-bar rows
+name the folder artwork for its places and each drive's own for its volumes.
+
+### M9 — the *Info* sheet (landed)
+
+The chain's information child keeps its lifetime — it hangs where a submenu
+would and dies with the chain — and is a sheet (`lib/controls`' `AboutSheet`):
+a band titled "About *App*", the bundle's own artwork beside its name and
+version, its purpose wrapped as prose, and the remaining facts below a rule,
+all inset by the plate's padding and sized to what it states between a floor
+and a ceiling. A bar chain whose application exits is dismissed, and a bar
+chain names its application by its group, never by its index in a strip that
+may move under it.
 
 ## 6. Decisions required (§15.7)
 

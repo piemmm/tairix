@@ -29,7 +29,7 @@ use std::vec;
 use std::vec::Vec;
 
 use tairix_abi::blkio::{
-    encode_error_completion, BlkCompletion, BlkDeviceClass, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
+    encode_error_completion, BlkCompletion, BlkMedium, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
     BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::Block;
@@ -214,7 +214,7 @@ impl SharedMemFacility for TestFacility {
 /// (`plans/FIX-IO.md`).
 struct ServedDevice {
     block: RamBlock,
-    class: Option<BlkDeviceClass>,
+    medium: Option<BlkMedium>,
     flushes: usize,
     geometries: usize,
     /// The block whose write the stick is pulled straight after, if any.
@@ -227,7 +227,7 @@ impl ServedDevice {
     /// reports.
     fn new(block: RamBlock) -> Self {
         Self {
-            class: Some(block.device_class()),
+            medium: block.medium(),
             block,
             flushes: 0,
             geometries: 0,
@@ -245,11 +245,11 @@ impl ServedDevice {
         }
     }
 
-    /// A device whose geometry reply carries a class word this ABI does not
+    /// A device whose geometry reply carries a medium word this ABI does not
     /// define — a driver naming a medium the client cannot recognise.
     fn unclassified(block: RamBlock) -> Self {
         Self {
-            class: None,
+            medium: None,
             ..Self::new(block)
         }
     }
@@ -287,7 +287,7 @@ fn serve(
                                 block_size: geometry.block_size,
                                 block_count: geometry.block_count,
                                 flags: 0,
-                                class: device.class,
+                                medium: device.medium,
                                 name: device.block.device_name(),
                             }
                             .encode(&mut reply)
@@ -700,7 +700,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     // file manager picks a drive icon without guessing one.
     assert_eq!(
         record.medium(),
-        Some(device.lock().unwrap().block.device_class()),
+        device.lock().unwrap().block.medium(),
         "the mount reports the medium the block device declared"
     );
 
@@ -771,6 +771,7 @@ fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     link_round_trip_through_the_real_service_scenario(window_ptr, facility);
     a_taken_catalog_name_is_answered_as_taken_scenario(window_ptr, facility);
     a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(window_ptr, facility);
+    an_ext2_volume_mounts_as_ext2_scenario(window_ptr, facility);
     a_stick_pulled_mid_commit_returns_read_only_scenario(window_ptr, facility);
     an_unpublished_transaction_is_recorded_lost_scenario(window_ptr, facility);
 }
@@ -1827,6 +1828,13 @@ fn ext4_image(uuid: [u8; 16]) -> RamBlock {
     fs.into_block().expect("the volume closes")
 }
 
+/// A real `mke2fs` ext2 volume, as the ext driver's own tests keep it.
+const EXT2_FIXTURE: &[u8] =
+    include_bytes!("../../../drivers/filesystem/ext4/tests/fixtures/ext2.sparse");
+
+#[path = "../../../drivers/filesystem/ext4/tests/support/sparse.rs"]
+mod ext_fixture;
+
 /// Detach the volume `identity` and end its serving round.
 fn retire(identity: [u8; 16], force: bool, round: Inserted) {
     VOLUME_SERVICE
@@ -1933,6 +1941,32 @@ fn a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(
             .err(),
         Some(Errno::ReadOnly)
     );
+    retire(identity, false, round);
+}
+
+/// The mount table names the ext generation a volume's features make it, as
+/// `mount` reports it, not the driver serving it.
+fn an_ext2_volume_mounts_as_ext2_scenario(window_ptr: *mut u8, facility: &'static TestFacility) {
+    let image = ext_fixture::sparse(EXT2_FIXTURE);
+    let identity = Ext4::open_read_only(RamBlock {
+        data: image.clone(),
+    })
+    .expect("an ext2 volume")
+    .volume_uuid();
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0015,
+            owner: 0x70_1025,
+            region_task: 0x70_0025,
+            name: b"ext2vol",
+            fstype: VolumeFsType::Ext4,
+        },
+        ServedDevice::new(RamBlock { data: image }),
+    );
+    round.outcome.expect("the volume attaches");
+    assert_eq!(mount_record(b"ext2vol").fstype_bytes(), b"ext2");
     retire(identity, false, round);
 }
 

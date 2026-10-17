@@ -4,10 +4,28 @@
 //! first driver is `virtio_blk`; the trait carries only the minimum
 //! the filesystem layer needs.
 
-use crate::blkio::{BlkDeviceClass, BlkDeviceName};
+use crate::blkio::{BlkDeviceClass, BlkDeviceName, BlkMedium};
 use crate::sysinfo::MountAvailability;
 
 use super::{BufferClass, DriverError};
+
+/// The patience a block device is served with, derived from what it is.
+///
+/// A blanket extension rather than a method of [`Block`], so no device can
+/// declare a class that disagrees with its medium: every device's class is
+/// [`BlkDeviceClass::of`] its [`Block::medium`].
+pub trait BlockClass {
+    /// The device's broad performance/behaviour class, from which its
+    /// per-request deadline, reissue budget, and recovery grace window are
+    /// derived ([`BlkDeviceClass::budget`]).
+    fn device_class(&self) -> BlkDeviceClass;
+}
+
+impl<B: Block + ?Sized> BlockClass for B {
+    fn device_class(&self) -> BlkDeviceClass {
+        BlkDeviceClass::of(self.medium())
+    }
+}
 
 /// Geometry of a block device.
 #[repr(C)]
@@ -379,30 +397,23 @@ pub trait Block {
         Ok(DeviceHealth::Unavailable)
     }
 
-    /// The device's broad performance/behaviour class, from which its
-    /// per-request deadline, reissue budget, and recovery grace window are
-    /// derived ([`BlkDeviceClass::budget`]).
+    /// What the device is — a hard disk, an `NVMe` drive, a USB flash drive,
+    /// an SD card — declared by the one component that knows: the driver that
+    /// binds the hardware. The patience the device is served with follows from
+    /// it ([`BlockClass::device_class`]), so what a device is said to be and
+    /// how it is served cannot disagree.
     ///
-    /// A spinning disk that is merely spinning up, an `NVMe` namespace, a
-    /// removable unit whose bus is mid-reset, and a paravirtual device have
-    /// genuinely different latency envelopes, so the patience they are owed
-    /// is a property of the device, declared here by the one component that
-    /// knows it: the driver that binds the hardware. A consumer that assumed
-    /// a single envelope for every device would either fail a slow but
-    /// healthy disk early or let a wedged fast device stall its callers for
-    /// far longer than policy intends.
-    ///
-    /// The default is [`BlkDeviceClass::Virtual`] — the declared class of an
-    /// unclassified device: bounded rather than maximally patient, so a
-    /// device whose driver says nothing about itself still fails closed
-    /// promptly when it wedges.
+    /// The default is `None`, a device whose driver says nothing about itself:
+    /// a reader is shown an unknown drive, and it is served the bounded
+    /// paravirtual envelope, so it still fails closed promptly when it wedges.
     ///
     /// A device that *wraps* another (a partition window, a cache, a RAID
     /// composition, a remote client over the block-service seam) reports the
-    /// class of what it wraps rather than its own default, so the envelope of
-    /// the real hardware survives every layer above it.
+    /// medium of what it wraps ([`BlkMedium::of_members`] for several), so the
+    /// real hardware survives every layer above it, and an unknown member
+    /// stays unknown rather than being reported as a medium nobody declared.
     ///
-    /// Reporting the class is a pure observation: it touches no hardware and
+    /// Reporting the medium is a pure observation: it touches no hardware and
     /// cannot fail.
     ///
     /// # Capabilities
@@ -410,8 +421,8 @@ pub trait Block {
     /// Caller must present the driver's [`DriverHandle`].
     ///
     /// [`DriverHandle`]: crate::driver::DriverHandle
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::Virtual
+    fn medium(&self) -> Option<BlkMedium> {
+        None
     }
 
     /// This device's own short name, for a consumer that reports the device
@@ -534,8 +545,8 @@ impl<B: Block + ?Sized> Block for &mut B {
         (**self).device_health()
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        (**self).device_class()
+    fn medium(&self) -> Option<BlkMedium> {
+        (**self).medium()
     }
 
     fn device_name(&self) -> BlkDeviceName {

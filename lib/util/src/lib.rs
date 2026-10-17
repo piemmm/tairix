@@ -62,6 +62,9 @@
 //!   publishers, the session's program-catalogue scan and file calls, the
 //!   file manager's bundle scan and folder-occupancy probes, and the text
 //!   editor's document queue, so no surface invents a second deferral scheme.
+//! * [`hex`] — two hex digits a byte for digests, keys and seeds, consumed by
+//!   the build's signing key set, `tools/cc`'s checksum pins and
+//!   `tools/mkimage`'s root key file.
 //! * [`hexdump`] — the canonical offset/hex/ASCII dump row, consumed by
 //!   `fstree` and the text editor's hex view.
 //! * [`join`] — one bounded line from a list, whole items then how many were
@@ -111,6 +114,7 @@ pub mod count;
 pub mod defer;
 pub mod fallible;
 pub mod fmt;
+pub mod hex;
 pub mod hexdump;
 pub mod join;
 pub mod lanes;

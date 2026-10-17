@@ -8,7 +8,7 @@
 
 use tairix_abi::DriverError;
 
-use crate::bytes::{le16, le32, low32};
+use crate::bytes::{le16, le32, low32, put_le16, put_le32};
 
 /// The superblock's fixed byte offset, whatever the block size.
 pub(crate) const SUPERBLOCK_OFFSET: u64 = 1024;
@@ -77,6 +77,13 @@ const COMPAT_EXCLUDE_BITMAP: u32 = 0x0100;
 pub(crate) const COMPAT_SPARSE_SUPER2: u32 = 0x0200;
 pub(crate) const COMPAT_ORPHAN_FILE: u32 = 0x1000;
 
+/// Incompatible features the mainline ext3 driver mounts; any other makes the
+/// volume ext4.
+const EXT3_INCOMPAT: u32 = INCOMPAT_FILETYPE | INCOMPAT_RECOVER | INCOMPAT_META_BG;
+/// Read-only-compatible features the mainline ext2 and ext3 drivers write,
+/// `btree_dir` among them though nothing ever implemented it.
+const EXT3_RO_COMPAT: u32 = RO_COMPAT_SPARSE_SUPER | RO_COMPAT_LARGE_FILE | RO_COMPAT_BTREE_DIR;
+
 const INCOMPAT_COMPRESSION: u32 = 0x0001;
 pub(crate) const INCOMPAT_FILETYPE: u32 = 0x0002;
 pub(crate) const INCOMPAT_RECOVER: u32 = 0x0004;
@@ -122,6 +129,7 @@ const WRITE_INCOMPAT: u32 = INCOMPAT_FILETYPE
 
 pub(crate) const RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 pub(crate) const RO_COMPAT_LARGE_FILE: u32 = 0x0002;
+const RO_COMPAT_BTREE_DIR: u32 = 0x0004;
 pub(crate) const RO_COMPAT_HUGE_FILE: u32 = 0x0008;
 pub(crate) const RO_COMPAT_GDT_CSUM: u32 = 0x0010;
 /// Block bitmaps count clusters of several blocks.
@@ -145,6 +153,54 @@ const WRITE_RO_COMPAT: u32 = RO_COMPAT_SPARSE_SUPER
 const OS_HURD: u32 = 1;
 /// `s_checksum_type` for crc32c.
 const CHECKSUM_CRC32C: u8 = 1;
+
+/// The first inode and inode size a good-old-revision (0) superblock fixes.
+const GOOD_OLD_FIRST_INO: u32 = 11;
+const GOOD_OLD_INODE_SIZE: u16 = 128;
+
+/// Which member of the ext family a volume's features make it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Generation {
+    /// No journal, and no feature past ext3's.
+    Ext2,
+    /// A journal, and no feature past ext3's.
+    Ext3,
+    /// An incompatible or read-only-compatible feature past ext3's.
+    Ext4,
+}
+
+impl Generation {
+    /// The generation's name, as a user and `mount` know it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ext2 => "ext2",
+            Self::Ext3 => "ext3",
+            Self::Ext4 => "ext4",
+        }
+    }
+
+    const fn of(compat: u32, incompat: u32, ro_compat: u32) -> Self {
+        if incompat & !EXT3_INCOMPAT != 0 || ro_compat & !EXT3_RO_COMPAT != 0 {
+            Self::Ext4
+        } else if compat & COMPAT_HAS_JOURNAL != 0 {
+            Self::Ext3
+        } else {
+            Self::Ext2
+        }
+    }
+}
+
+/// Raise a good-old-revision superblock to the dynamic revision, which alone
+/// has the feature words and every field past `s_rev_level`, keeping the
+/// first inode and inode size revision 0 fixes so the layout is unchanged.
+pub(crate) fn make_dynamic(sb: &mut [u8]) {
+    if le32(sb, SB_REV_LEVEL) == 0 {
+        put_le32(sb, SB_REV_LEVEL, 1);
+        put_le32(sb, SB_FIRST_INO, GOOD_OLD_FIRST_INO);
+        put_le16(sb, SB_INODE_SIZE, GOOD_OLD_INODE_SIZE);
+    }
+}
 
 /// The largest block size this driver stages.
 pub(crate) const MAX_FS_BLOCK: u32 = 4096;
@@ -235,6 +291,7 @@ pub(crate) struct Layout {
     pub(crate) inline_data: bool,
     pub(crate) journal_inum: Option<u32>,
     pub(crate) orphan_file_inum: Option<u32>,
+    pub(crate) generation: Generation,
     /// Why writing is refused, when it is.
     pub(crate) no_write: Option<NoWrite>,
 }
@@ -371,6 +428,7 @@ pub(crate) fn parse(sb: &[u8], device_bytes: u64) -> Result<Layout, DriverError>
         .then(|| le32(sb, SB_ORPHAN_FILE_INUM))
         .filter(|&ino| ino != 0);
     Ok(Layout {
+        generation: Generation::of(compat, incompat, ro_compat),
         no_write: features.write_refusal(sb, &geometry),
         block_size: geometry.block_size,
         cluster_size: geometry.cluster_size,
@@ -524,11 +582,14 @@ impl Geometry {
             return Err(DriverError::BadMagic);
         }
         let (inode_size, first_ino) = if le32(sb, SB_REV_LEVEL) == 0 {
-            (128, 11)
+            (u32::from(GOOD_OLD_INODE_SIZE), GOOD_OLD_FIRST_INO)
         } else {
             (u32::from(le16(sb, SB_INODE_SIZE)), le32(sb, SB_FIRST_INO))
         };
-        if inode_size < 128 || !inode_size.is_power_of_two() || inode_size > block_size {
+        if inode_size < u32::from(GOOD_OLD_INODE_SIZE)
+            || !inode_size.is_power_of_two()
+            || inode_size > block_size
+        {
             return Err(DriverError::BadMagic);
         }
         let wide = features.incompat & INCOMPAT_64BIT != 0;

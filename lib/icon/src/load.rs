@@ -150,6 +150,13 @@ pub const ICON_KINDS: [IconKind; core::mem::variant_count::<IconKind>()] = [
     IconKind::OsWindows,
     IconKind::OsApple,
     IconKind::OsAndroid,
+    IconKind::DiskNvme,
+    IconKind::DiskSdCard,
+    IconKind::DiskExternal,
+    IconKind::AlertError,
+    IconKind::AlertWarning,
+    IconKind::AlertInformation,
+    IconKind::AlertQuestion,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

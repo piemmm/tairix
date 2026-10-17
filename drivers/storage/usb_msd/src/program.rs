@@ -4,11 +4,12 @@
 
 use tairix_abi::blkio::{
     fault_domain_wait_timeout, recovery_wait_timeout, BlkDeviceClass, BlkHealth, BlkHealthState,
-    BlkStatus, FaultDomain, FaultDomainState, RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN,
-    BLK_DATA_LEN, BLK_REQUEST_LEN,
+    BlkMedium, BlkStatus, FaultDomain, FaultDomainState, RecoveryAction, RecoveryLadder,
+    BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::sysinfo::BlkHealthTransition;
+use tairix_abi::usb_urb::ENDPOINT_ADDRESS_IN;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource};
 use tairix_caps::CapabilitySet;
@@ -17,9 +18,12 @@ use tairix_drv_storage_usb_msd::cbi::{Cbi, CbiStatus};
 use tairix_drv_storage_usb_msd::desc::{
     find_storage_interface, StorageInterface, StorageProtocol, UasEndpoints,
 };
-use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery, ServeBuffers};
+use tairix_drv_storage_usb_msd::recover::{
+    failed_closed, serve_lun_with_domain, FailedClosed, LunRecovery, ServeBuffers,
+};
 use tairix_drv_storage_usb_msd::scsi::{
-    CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
+    lun_medium, CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport,
+    DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
 use tairix_drv_storage_usb_msd::serve::{blk_block_for, publish_units};
 use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
@@ -28,7 +32,7 @@ use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 use tairix_usb::device::BULK_BUF_LEN;
-use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink};
+use tairix_usb::transport::{read_configuration, Deadline, UrbCall, UrbClient, UrbLink};
 use tairix_util::fmt::format_hex_u64;
 
 /// Diagnostic event id: the one-shot "LUNs published, serving" beacon.
@@ -51,16 +55,27 @@ const MSD_LUN_SKIPPED: EventId = EventId(27_364);
 /// the driver exits for a clean reload on re-plug.
 const MSD_DETACHED: EventId = EventId(27_365);
 
-/// Diagnostic event id: a LUN's recovery grace window elapsed with no
-/// request and no recovery, so it failed closed. The disk stays present
-/// and its endpoint keeps serving fail-closed answers — a later genuine
-/// return still recovers it (sticky-but-recoverable, no reboot).
+/// Diagnostic event id: a LUN's recovery grace window elapsed without it
+/// answering, so it failed closed. The disk stays present and its endpoint
+/// keeps serving fail-closed answers — a later genuine return still recovers
+/// it (sticky-but-recoverable, no reboot).
 const MSD_GRACE_EXPIRED: EventId = EventId(27_366);
 
-/// Diagnostic event id: the recovery ladder escalated to a data-path reset
+/// Diagnostic event id: the recovery ladder escalated to a transport reset
 /// for a stalling LUN — the bounded step taken to try to bring a recovering
 /// unit back before its grace window is left to fail it closed.
 const MSD_RECOVERY_RESET: EventId = EventId(27_367);
+
+/// Diagnostic event id: a LUN reported itself gone, failing closed with no
+/// grace window to ride out.
+const MSD_HEALTH_OFFLINE: EventId = EventId(27_374);
+
+/// Diagnostic event id: a LUN failed closed on a fault nothing can recover.
+const MSD_HEALTH_FAILED: EventId = EventId(27_375);
+
+/// Diagnostic event id: a broken exchange reset the transport, clearing the
+/// halt of each bulk pipe on the device and in the controller.
+const MSD_TRANSPORT_RESET: EventId = EventId(27_376);
 
 /// Diagnostic event id: a LUN reported itself unhealthy while still serving
 /// valid data (a recovered-error threshold, a pending sector reallocation) —
@@ -141,6 +156,41 @@ fn disconnected(link: &MsdLink) -> bool {
     link.client().transport().disconnected
 }
 
+/// What one command exchange may take before its transfers fail
+/// [`Errno::TimedOut`]: a request's share of the consumer's deadline with as
+/// many queued as the class allows, halved so the reset a broken exchange
+/// owes still lands inside it. Every unit this driver serves is a USB unit,
+/// whose class is the same whatever its medium.
+fn exchange_budget_ns() -> u64 {
+    let budget = BlkMedium::UsbDisk.class().budget();
+    budget.deadline_ns / (2 * u64::from(budget.queue_depth.max(1)))
+}
+
+/// A fresh exchange's deadline.
+fn exchange_deadline() -> Deadline {
+    Deadline::after(exchange_budget_ns(), tairix_rt::clock_get)
+}
+
+/// Clear the halt of each of `endpoints`, in order, logging the reset once
+/// with how it went.
+fn clear_pipes(link: &mut MsdLink, endpoints: &[u8]) -> Result<(), Errno> {
+    let cleared = endpoints
+        .iter()
+        .try_for_each(|&endpoint| link.clear_halt(endpoint));
+    let (level, outcome) = match cleared {
+        Ok(()) => (Level::Warn, 0),
+        Err(errno) => (Level::Error, errno as u64),
+    };
+    log_hex_event(
+        MSD_TRANSPORT_RESET,
+        level,
+        "usb-msd: a broken exchange reset the transport",
+        "errno_hex",
+        outcome,
+    );
+    cleared
+}
+
 /// [`MsdTransport`] (the BOT/CBI seam) over the URB link, addressing the
 /// endpoints the device's own configuration descriptor named.
 struct UrbTransport {
@@ -150,6 +200,8 @@ struct UrbTransport {
     /// The CBI command-completion interrupt endpoint; `0` for a BOT
     /// interface, whose transport never reads one (a use is refused).
     interrupt_endpoint: u8,
+    /// The exchange every transfer is bounded by.
+    exchange: Deadline,
 }
 
 impl MsdTransport for UrbTransport {
@@ -166,19 +218,47 @@ impl MsdTransport for UrbTransport {
     }
 
     fn bulk_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
-        self.link.bulk_in(self.bulk_in_endpoint, data)
+        self.link
+            .bulk_in(self.bulk_in_endpoint, data, self.exchange)
     }
 
     fn bulk_out(&mut self, data: &[u8]) -> Result<usize, Errno> {
-        self.link.bulk_out(self.bulk_out_endpoint, data)
+        self.link
+            .bulk_out(self.bulk_out_endpoint, data, self.exchange)
     }
 
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
         if self.interrupt_endpoint == 0 {
             return Err(Errno::NotImplemented);
         }
+        self.link.interrupt_in(
+            self.interrupt_endpoint,
+            data.len(),
+            data,
+            Some(self.exchange),
+        )
+    }
+
+    fn discard_interrupts(&mut self) -> Result<(), Errno> {
+        if self.interrupt_endpoint == 0 {
+            return Err(Errno::NotImplemented);
+        }
         self.link
-            .interrupt_in(self.interrupt_endpoint, data.len(), data)
+            .discard_reports(self.interrupt_endpoint | ENDPOINT_ADDRESS_IN)
+    }
+
+    fn begin_exchange(&mut self) {
+        self.exchange = exchange_deadline();
+    }
+
+    fn clear_halts(&mut self) -> Result<(), Errno> {
+        clear_pipes(
+            &mut self.link,
+            &[
+                self.bulk_in_endpoint | ENDPOINT_ADDRESS_IN,
+                self.bulk_out_endpoint,
+            ],
+        )
     }
 
     fn scrub(&mut self) {
@@ -191,23 +271,51 @@ impl MsdTransport for UrbTransport {
 struct UasUrbPipes {
     link: MsdLink,
     endpoints: UasEndpoints,
+    /// The exchange every transfer is bounded by.
+    exchange: Deadline,
 }
 
 impl UasPipes for UasUrbPipes {
     fn command_out(&mut self, iu: &[u8]) -> Result<(), Errno> {
-        self.link.bulk_out(self.endpoints.command, iu).map(|_| ())
+        self.link
+            .bulk_out(self.endpoints.command, iu, self.exchange)
+            .map(|_| ())
     }
 
     fn status_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-        self.link.bulk_in(self.endpoints.status, buf)
+        self.link.bulk_in(self.endpoints.status, buf, self.exchange)
     }
 
     fn data_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-        self.link.bulk_in(self.endpoints.data_in, buf)
+        self.link
+            .bulk_in(self.endpoints.data_in, buf, self.exchange)
     }
 
     fn data_out(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        self.link.bulk_out(self.endpoints.data_out, buf)
+        self.link
+            .bulk_out(self.endpoints.data_out, buf, self.exchange)
+    }
+
+    fn begin_exchange(&mut self) {
+        self.exchange = exchange_deadline();
+    }
+
+    fn clear_halts(&mut self) -> Result<(), Errno> {
+        let UasEndpoints {
+            command,
+            status,
+            data_in,
+            data_out,
+        } = self.endpoints;
+        clear_pipes(
+            &mut self.link,
+            &[
+                command,
+                status | ENDPOINT_ADDRESS_IN,
+                data_in | ENDPOINT_ADDRESS_IN,
+                data_out,
+            ],
+        )
     }
 
     fn scrub(&mut self) {
@@ -349,6 +457,7 @@ fn bring_up_lun<T: ScsiTransport>(
     Ok(Some(LunState {
         geometry,
         write_protected,
+        removable: inquiry.removable,
     }))
 }
 
@@ -392,13 +501,15 @@ fn expire_idle_grace_windows(luns: &mut [Option<LunServe>], now_ns: u64) {
 /// The Degraded / Recovering / Recovered edges use the **shared**
 /// [`BlkHealthTransition`] vocabulary — the same the kernel block client emits
 /// for a volume — so a driver process and the consumer cannot classify a
-/// recovery or a degrade differently. A fail-closed edge (the grace window
-/// elapsing, or a hard fault) is not part of that vocabulary and is logged as
-/// the distinct [`MSD_GRACE_EXPIRED`] event; the disk stays present and
-/// sticky-but-recoverable, so a later genuine return is a `Recovered` edge, not
-/// a surprise-removal. Surprise removal itself is the hotplug path's event and
-/// is never logged here. Edge-triggered: an unchanged state logs nothing, so a
-/// run of identical outcomes is one event, not one per request.
+/// recovery or a degrade differently. The fail-closed edges are not part of
+/// that vocabulary, and each is logged as what it is: the grace window
+/// elapsing ([`MSD_GRACE_EXPIRED`]), a unit reported gone
+/// ([`MSD_HEALTH_OFFLINE`]), or a fault nothing recovers
+/// ([`MSD_HEALTH_FAILED`]). The disk stays present and sticky-but-recoverable,
+/// so a later genuine return is a `Recovered` edge, not a surprise-removal.
+/// Surprise removal itself is the hotplug path's event and is never logged
+/// here. Edge-triggered: an unchanged state logs nothing, so a run of
+/// identical outcomes is one event, not one per request.
 fn note_health_edge(before: BlkHealthState, after: BlkHealthState, node_id: u32) {
     if before == after {
         return;
@@ -422,17 +533,22 @@ fn note_health_edge(before: BlkHealthState, after: BlkHealthState, node_id: u32)
             ),
         };
         log_hex_event(id, level, message, "node_hex", u64::from(node_id));
-    } else if matches!(
-        after,
-        BlkHealthState::Faulted | BlkHealthState::Offline | BlkHealthState::Failed
-    ) {
-        log_hex_event(
-            MSD_GRACE_EXPIRED,
-            Level::Warn,
-            "usb-msd: LUN recovery grace window elapsed, failing closed",
-            "node_hex",
-            u64::from(node_id),
-        );
+    } else if let Some(failed) = failed_closed(before, after) {
+        let (id, message) = match failed {
+            FailedClosed::GraceElapsed => (
+                MSD_GRACE_EXPIRED,
+                "usb-msd: LUN recovery grace window elapsed, failing closed",
+            ),
+            FailedClosed::Gone => (
+                MSD_HEALTH_OFFLINE,
+                "usb-msd: LUN reported gone, failing closed",
+            ),
+            FailedClosed::Unrecoverable => (
+                MSD_HEALTH_FAILED,
+                "usb-msd: LUN failed closed on an unrecoverable fault",
+            ),
+        };
+        log_hex_event(id, Level::Warn, message, "node_hex", u64::from(node_id));
     }
 }
 
@@ -585,6 +701,7 @@ fn main() -> i32 {
                 bulk_in_endpoint: bulk_in,
                 bulk_out_endpoint: bulk_out,
                 interrupt_endpoint: 0,
+                exchange: exchange_deadline(),
             };
             let scsi = ScsiDevice::new(
                 Bot::new(transport, interface.interface_number),
@@ -611,6 +728,7 @@ fn main() -> i32 {
                 bulk_in_endpoint: bulk_in,
                 bulk_out_endpoint: bulk_out,
                 interrupt_endpoint: interrupt_in,
+                exchange: exchange_deadline(),
             };
             // The accepted CBI command set is UFI (the floppy set), whose
             // completion block carries ASC/ASCQ.
@@ -637,7 +755,11 @@ fn main() -> i32 {
                     | (u64::from(endpoints.data_in) << 8)
                     | u64::from(endpoints.data_out),
             );
-            let pipes = UasUrbPipes { link, endpoints };
+            let pipes = UasUrbPipes {
+                link,
+                endpoints,
+                exchange: exchange_deadline(),
+            };
             let scsi = ScsiDevice::new(Uas::new(pipes), interface.command_set);
             run_device(scsi, endpoint, |scsi| {
                 disconnected(&scsi.transport().pipes().link)
@@ -691,13 +813,14 @@ fn publish_luns<T: ScsiTransport>(
                 "blocks_hex",
                 state.geometry.block_count,
             );
+            let class = lun_medium(&state).class();
             Ok(Some(LunServe {
                 endpoint: blk_endpoint,
                 node_id,
                 state,
                 window,
-                health: BlkHealth::new(BlkDeviceClass::Removable),
-                ladder: RecoveryLadder::new(BlkDeviceClass::Removable),
+                health: BlkHealth::new(class),
+                ladder: RecoveryLadder::new(class),
             }))
         },
         retract,
@@ -786,14 +909,19 @@ where
     F: Fn(&ScsiDevice<T>) -> bool,
 {
     // The shared BOT transport is the fault domain of this device's LUNs: a
-    // transport-wide reset (the recovery ladder's data-path scrub, a port
-    // reset, a bus blip) hits every unit at once, so it is one recovery
+    // transport-wide reset (a broken exchange's reset recovery, the ladder's,
+    // a port reset, a bus blip) hits every unit at once, so it is one recovery
     // episode across the whole device, not N independent LUN failures. The
     // owner id is this device's own URB transport grant (runtime-discovered,
-    // never a board constant); the shared grace window is the removable
-    // class's — the same the LUNs ride their own blips out under.
+    // never a board constant); the shared grace window is its most patient
+    // unit's, the longest any LUN rides its own blips out under.
     let domain_owner = u32::try_from(urb_endpoint & 0xFFFF_FFFF).unwrap_or(u32::MAX);
-    let mut domain = FaultDomain::new(domain_owner, BlkDeviceClass::Removable.budget().grace_ns);
+    let units = luns
+        .iter()
+        .flatten()
+        .map(|lun| Some(lun_medium(&lun.state)));
+    let patience = BlkDeviceClass::of(BlkMedium::of_members(units));
+    let mut domain = FaultDomain::new(domain_owner, patience.budget().grace_ns);
 
     // Event-driven service loop: park on the wait-set until a consumer's
     // request arrives, serve it (the data moves via blocking URB calls
@@ -924,31 +1052,26 @@ fn serve_ready_lun<T: ScsiTransport>(
     let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);
     note_health_edge(before_health, serve.health.state(), serve.node_id);
     note_domain_edge(domain_before, domain.state(), domain_owner);
-    // Drive the bounded recovery-escalation ladder from the unit's health.
-    // A unit that just answered normally re-arms the ladder; a `Recovering`
-    // unit escalates — a first gentle retry, then a data-path reset (this
-    // driver's one recovery mechanism: clear the bulk pipes) — to try to
-    // bring it back before its grace window is left to fail it closed. The
-    // ladder bounds how often the reset is taken, so a wedged unit is never
-    // reset forever, and the reset is only ever issued for a unit already
-    // being answered reissuably, so head-of-line freedom holds.
+    // Drive the bounded recovery ladder from the unit's health: a unit that
+    // answered re-arms it; a recovering one escalates — a retry, then a
+    // transport reset — bounded, so a wedged unit is never reset for ever,
+    // and only for a unit already answered reissuably, so no other unit
+    // waits on it.
     let health_state = serve.health.state();
     if serve.ladder.next_action(health_state) == RecoveryAction::Reset {
-        // The scrub clears the *shared* bulk pipes, so it is a
-        // transport-wide event: open (or continue) the one shared recovery
-        // window over the whole device before touching the transport, so a
-        // sibling LUN's next request is held reissuable under it rather
-        // than surfacing as an independent failure.
+        // The reset is the shared transport's, so the one recovery window
+        // opens over the whole device first: a sibling unit's next request
+        // is held reissuable under it, not failed as a fault of its own.
         let domain_before = domain.state();
         domain.quiesce(now_ns);
         note_domain_edge(domain_before, domain.state(), domain_owner);
-        scsi.scrub_window();
+        let reset = scsi.reset_transport();
         log_hex_event(
             MSD_RECOVERY_RESET,
             Level::Warn,
-            "usb-msd: escalating a data-path reset to recover a stalling LUN",
-            "lun_hex",
-            u64::from(lun),
+            "usb-msd: escalating a transport reset to recover a stalling LUN",
+            "lun_errno_hex",
+            (u64::from(lun) << 32) | reset.map_or_else(|errno| errno as u64, |()| 0),
         );
     }
 }

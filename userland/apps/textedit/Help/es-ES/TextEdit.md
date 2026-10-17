@@ -24,6 +24,18 @@ que parece contener datos binarios se abre en la vista hexadecimal, que
 muestra cada byte como dos dígitos hexadecimales junto a su carácter y edita
 los mismos bytes que la vista de texto.
 
+Un ejecutable — una imagen de programa de TAIRiX, un archivo ELF64 o un
+módulo WebAssembly — se abre en cambio en la vista de código: sus regiones y
+luego las instrucciones de cada región de código, una por línea con su
+dirección y sus bytes de codificación, rotuladas con los símbolos que inician
+y los símbolos a los que llegan sus saltos. La vista de código es de solo
+lectura; las vistas de texto y hexadecimal editan el mismo archivo. El código
+lo descodifica un segundo proceso de trabajo propio, también sin ningún
+alcance, y se lee como el juego de instrucciones que nombra el archivo o, si
+no, como el de esta máquina; «Juego de instrucciones» del menú Ver lo lee como
+otro, y el campo de vista de la línea de estado ofrece la vista de código
+junto a texto y hexadecimal.
+
 El código fuente se colorea: HTML, XML y SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python y scripts de shell. Los archivos de
 ajustes del sistema — ajustes de aplicaciones, la biblioteca de programas,

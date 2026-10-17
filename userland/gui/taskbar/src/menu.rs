@@ -23,8 +23,12 @@
 //! cannot state an identity that is not its own.
 
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
-use tairix_controls::{ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement, PlateSide};
+use tairix_abi::ProcId;
+use tairix_controls::{
+    AboutSheet, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement, PlateSide,
+};
 use tairix_geometry::Rect;
+use tairix_icon::IconKind;
 use tairix_proglib::EntryId;
 
 use crate::apps::AppIdentity;
@@ -50,11 +54,13 @@ pub(crate) type BarMenuRow = (usize, MenuItem, Option<&'static str>);
 /// keeps no copy of them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuSubject {
-    /// The menu the application at this strip index declared. A chosen row is
-    /// the application's own id, relayed straight back to it.
+    /// The menu an application declared. A chosen row is the application's
+    /// own id, relayed straight back to the process that declared it — named
+    /// by its identity, never by a strip place another application may have
+    /// taken by the time the row is chosen.
     App {
-        /// The application's strip index.
-        app: usize,
+        /// The process that declared the menu.
+        owner: ProcId,
     },
     /// The context menu on this program-library entry's row.
     Entry {
@@ -79,7 +85,10 @@ impl MenuSubject {
     #[must_use]
     pub(crate) fn chosen(&self, item: AppMenuItemId) -> Option<TaskbarResponse> {
         match self {
-            Self::App { app } => Some(TaskbarResponse::AppMenuChosen { app: *app, item }),
+            Self::App { owner } => Some(TaskbarResponse::AppMenuChosen {
+                owner: *owner,
+                item,
+            }),
             Self::Entry { entry } => match EntryRow::at(item.index())? {
                 EntryRow::Open => Some(TaskbarResponse::LibraryLaunch {
                     entry: entry.clone(),
@@ -184,7 +193,7 @@ pub(crate) fn entry_menu() -> ChainModel {
 /// field for that.
 #[must_use]
 pub(crate) fn app_menu(name: &str, declared: &AppMenu, identity: &AppIdentity) -> ChainModel {
-    ChainModel::from_app_menu(name, declared, Some(&info_facts(identity)))
+    ChainModel::from_app_menu(name, declared, Some(&about_sheet(identity)))
 }
 
 /// The title the desktop's system quick-actions plate carries.
@@ -255,22 +264,23 @@ pub(crate) const fn placement(anchor: Rect, edge: Edge, gap: u32) -> PlatePlacem
     }
 }
 
-/// The facts an application's information panel states, in a fixed order.
-///
-/// Name and version are always present (a signed manifest carries both), so
-/// the panel can never be empty; purpose and author appear only when the
-/// manifest states them, rather than as blank rows.
+/// The sheet an application's *Info* row opens: its name and version always
+/// (a signed manifest carries both), and its purpose and author only where the
+/// manifest states them rather than as blank lines. Its picture is the
+/// session's to give, at the sheet's own side
+/// ([`ChainModel::set_info_artwork`]).
 #[must_use]
-pub fn info_facts(identity: &AppIdentity) -> FactList {
-    let mut facts = alloc::vec![
-        Fact::new("Name", identity.name.clone()),
-        Fact::new("Version", identity.version.clone()),
-    ];
-    if let Some(purpose) = &identity.purpose {
-        facts.push(Fact::new("Purpose", purpose.clone()));
-    }
-    if let Some(author) = &identity.author {
-        facts.push(Fact::new("Author", author.clone()));
-    }
-    FactList::new(facts).with_separators(true)
+pub fn about_sheet(identity: &AppIdentity) -> AboutSheet {
+    let facts: alloc::vec::Vec<Fact> = identity
+        .author
+        .iter()
+        .map(|author| Fact::new("Author", author.clone()))
+        .collect();
+    AboutSheet::new(
+        identity.name.clone(),
+        identity.version.clone(),
+        identity.purpose.clone(),
+        FactList::new(facts).with_separators(true),
+        IconKind::AppBundle,
+    )
 }

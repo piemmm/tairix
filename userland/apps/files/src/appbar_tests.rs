@@ -7,9 +7,10 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use tairix_abi::blkio::BlkMedium;
 
 use tairix_abi::window_ipc::{
-    AppBar, AppMenuItemId, AppMenuRowView, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
+    AppBar, AppMenuIconView, AppMenuItemId, AppMenuRowView, APP_MENU_LABEL_MAX, APP_MENU_MAX_ROWS,
 };
 use tairix_browse::{Places, Volume};
 
@@ -126,6 +127,37 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
     assert!(
         bar.menu.rows().all(|(_, parent)| parent.is_none()),
         "the component declares no submenu"
+    );
+}
+
+/// Each row draws the picture the rail draws its place with: a folder for the
+/// user's own places, and the drive a volume is on for each volume.
+#[test]
+fn each_row_draws_its_places_own_picture() {
+    let mut usb = volume("Stick");
+    usb.medium = Some(BlkMedium::UsbFlash);
+    let places = Places::new(&home(), &[usb]);
+    let (bar, _) = component_declaration(7, &places).expect("the rows fit");
+    let pictures: Vec<(String, AppMenuIconView<'_>)> = bar
+        .menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some((item.label.to_string(), item.icon)),
+            _ => None,
+        })
+        .collect();
+    for (place, (label, icon)) in places.rows().iter().zip(&pictures) {
+        assert_eq!(place.label(), label);
+        assert_eq!(
+            *icon,
+            AppMenuIconView::Asset(place.icon().asset_id()),
+            "{label} draws the rail's picture"
+        );
+    }
+    assert_eq!(
+        pictures.last().map(|(_, icon)| *icon),
+        Some(AppMenuIconView::Asset("disk-usb")),
+        "a removable volume draws its drive"
     );
 }
 

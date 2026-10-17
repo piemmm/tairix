@@ -36,7 +36,7 @@ use tairix_display::{winframe, SERIAL};
 use tairix_raster::Surface;
 use tairix_theme::{Accessibility, ThemeRegistry};
 
-use crate::client::{retained_damage, WindowClient, WindowTransport};
+use crate::client::{refusal_alert, retained_damage, WindowClient, WindowTransport};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
 use crate::server::{LayerSpec, ToolSpec, TransientSpec};
@@ -129,6 +129,29 @@ impl fmt::Display for ShellError {
 pub fn report(name: &str, reason: impl fmt::Display) {
     use tairix_rt::io::{Stderr, Write};
     let _ = writeln!(Stderr, "{name}: {reason}");
+}
+
+/// State on `stderr` under `name`, and in an error alert holding window
+/// `owner` when it is some, that what `headline` names was not done because
+/// of `detail`: the user acted, and is owed the answer where they can see it.
+/// An alert the desktop will not put up is reported, and its id is `None`.
+pub fn refuse<T: WindowTransport>(
+    client: &mut WindowClient<T>,
+    (name, event_endpoint): (&str, u64),
+    owner: Option<u64>,
+    headline: &str,
+    detail: &str,
+) -> Option<u64> {
+    report(name, format_args!("{headline}: {detail}"));
+    let raised = refusal_alert(headline, detail)
+        .and_then(|alert| client.open_alert(event_endpoint, owner, &alert));
+    if let Err(err) = raised {
+        report(
+            name,
+            format_args!("the desktop would not show that ({err})"),
+        );
+    }
+    raised.ok()
 }
 
 /// State the abnormal-exit `reason` under `name` and hand `code` back.

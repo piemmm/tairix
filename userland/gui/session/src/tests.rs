@@ -249,6 +249,14 @@ pub(crate) fn window_owner(fill: u8) -> ProcId {
     ProcId::from_raw([fill; tairix_abi::PROC_ID_LEN])
 }
 
+/// The process a modelled bar slot stands for, apart from every window owner
+/// these tests mint, so a slot never groups a window it was not given.
+pub(crate) fn slot_owner(index: u8) -> ProcId {
+    let mut raw = [0xA5; tairix_abi::PROC_ID_LEN];
+    raw[0] = index;
+    ProcId::from_raw(raw)
+}
+
 /// A distinct attested process per `index`, for tests that need more of them
 /// than a single byte spells.
 fn window_owner_wide(index: usize) -> ProcId {
@@ -855,7 +863,11 @@ fn sweeping_the_bar_repaints_the_controls_crossed_and_never_the_strip() {
     let mut shell = shell();
     let mut comp = compositor();
     shell.session_mut().taskbar_mut().set_apps(
-        alloc::vec![tairix_taskbar::AppSlot::new("Files", IconKind::AppBundle)],
+        alloc::vec![tairix_taskbar::AppSlot::new(
+            slot_owner(0),
+            "Files",
+            IconKind::AppBundle
+        )],
         Scale::ONE,
     );
     shell.present(&mut comp);
@@ -1861,8 +1873,10 @@ fn a_press_on_an_app_slot_reaches_the_taskbar_through_the_seat() {
         .tasks_mut()
         .add(TaskId(1), "Editor");
     seat.session.taskbar_mut().set_apps(
-        vec![tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle)
-            .with_windows(vec![TaskId(1)])],
+        vec![
+            tairix_taskbar::AppSlot::new(slot_owner(1), "Editor", IconKind::AppBundle)
+                .with_windows(vec![TaskId(1)]),
+        ],
         Scale::ONE,
     );
     seat.settle();
@@ -3578,7 +3592,10 @@ fn a_minimised_window_comes_back_by_being_chosen_in_the_picker() {
     let task = shell.tasks().task_for(window).expect("tracked");
     shell.set_apps(
         &mut comp,
-        vec![tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle).with_windows(vec![task])],
+        vec![
+            tairix_taskbar::AppSlot::new(slot_owner(2), "Editor", IconKind::AppBundle)
+                .with_windows(vec![task]),
+        ],
     );
     let at = slot_point(&shell, 0);
 
@@ -3622,7 +3639,10 @@ fn a_lone_minimised_window_is_recovered_through_its_own_picker() {
     let task = shell.tasks().task_for(window).expect("tracked");
     shell.set_apps(
         &mut comp,
-        vec![tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle).with_windows(vec![task])],
+        vec![
+            tairix_taskbar::AppSlot::new(slot_owner(3), "Editor", IconKind::AppBundle)
+                .with_windows(vec![task]),
+        ],
     );
     assert!(shell.minimize_window(&mut comp, window));
     assert!(shell.session().taskbar().tasks().is_minimised(task));
@@ -5337,24 +5357,40 @@ fn a_save_over_a_file_is_asked_about_first() {
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
 
     assert_eq!(
         picker.handle_key(&enter, &mut shell, &mut comp),
         None,
         "asked, not saved"
     );
+    let question = picker.question_wm().expect("the question is up");
     assert_eq!(
-        picker.handle_key(&escape, &mut shell, &mut comp),
-        None,
-        "back to the name"
+        comp.window(question).expect("on screen").parent(),
+        picker.wm_id(),
+        "an alert of its own, holding the picker"
     );
-    assert!(picker.wm_id().is_some());
+    assert_eq!(shell.router().focused(), Some(question));
+    assert_eq!(
+        on_question(&mut picker, &escape, &mut shell, &mut comp),
+        None,
+        "Escape goes back to the name"
+    );
+    assert!(comp.window(question).is_none(), "the question is down");
+    assert_eq!(shell.router().focused(), picker.wm_id());
     assert_eq!(
         picker.handle_key(&enter, &mut shell, &mut comp),
         None,
         "asked again"
     );
-    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        on_question(&mut picker, &enter, &mut shell, &mut comp),
+        None,
+        "Enter answers the safe button the question opens on"
+    );
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    assert_eq!(on_question(&mut picker, &tab, &mut shell, &mut comp), None);
+    let (_, path, access) = asked(on_question(&mut picker, &enter, &mut shell, &mut comp));
     assert_eq!((path.as_str(), access), ("/readme.md", PickAccess::Replace));
     let flags = access.save_flags().expect("a save opens to write");
     assert!(
@@ -5365,6 +5401,17 @@ fn a_save_over_a_file_is_asked_about_first() {
         flags.contains(tairix_abi::fs::OpenFlags::NO_FOLLOW),
         "a planted link cannot redirect it"
     );
+}
+
+/// Press `key` on the picker's question once its buttons have armed.
+fn on_question<S: DirectorySource, F: FnMut() -> S>(
+    picker: &mut SessionPicker<S, F>,
+    key: &KeyInput,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) -> Option<PickStep> {
+    picker.stamp(0);
+    picker.question_key(key, ALERT_ARM_NS, shell, comp)
 }
 
 /// The row a listing shows first, at the scale and theme the picker draws.
@@ -5378,10 +5425,11 @@ fn first_picker_row(shell: &DesktopShell) -> Point {
     Point::new(4, row)
 }
 
-/// A question about replacing a file does not survive a move to another
-/// folder: a yes there would replace a file the user cannot see.
+/// While the user is asked whether to replace a file the picker answers
+/// nothing: a press on it hands the keyboard to the question, so no yes can
+/// land on a file in a folder the user has since gone to.
 #[test]
-fn a_replace_question_ends_when_the_folder_changes() {
+fn a_replace_question_holds_the_picker_until_it_is_answered() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
         SessionPicker::new(TreeSource::fixture);
@@ -5389,12 +5437,25 @@ fn a_replace_question_ends_when_the_folder_changes() {
         .begin(7, &save_as("readme.md"), &mut shell, &mut comp)
         .expect("accepted");
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
     assert_eq!(
         picker.handle_key(&enter, &mut shell, &mut comp),
         None,
         "asked about /readme.md"
     );
+    let question = picker.question_wm().expect("asked");
     let docs = first_picker_row(&shell);
+    assert_eq!(picker.handle_click(docs, &mut shell, &mut comp), None);
+    assert_eq!(
+        shell.router().focused(),
+        Some(question),
+        "the press hands the keyboard to the question"
+    );
+    assert_eq!(picker.question_wm(), Some(question), "and goes nowhere");
+    assert_eq!(
+        on_question(&mut picker, &escape, &mut shell, &mut comp),
+        None
+    );
     assert_eq!(
         picker.handle_click(docs, &mut shell, &mut comp),
         None,
@@ -5406,6 +5467,27 @@ fn a_replace_question_ends_when_the_folder_changes() {
         ("/Docs/readme.md", PickAccess::Create),
         "a new file where the user now is, not the one the question named"
     );
+}
+
+/// A question whose folder went from under it comes down with the move to
+/// the folder above: a yes there would replace a file the user cannot see.
+#[test]
+fn a_replace_question_ends_when_its_folder_goes() {
+    let tree = Rc::new(RefCell::new(TreeSource::fixture()));
+    let (mut shell, mut comp) = headless_desktop();
+    let shared = Rc::clone(&tree);
+    let mut picker = SessionPicker::new(move || SharedTree(Rc::clone(&shared)))
+        .starting_at(vec![String::from("Docs")]);
+    picker
+        .begin(7, &save_as("notes.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
+    let question = picker.question_wm().expect("asked about /Docs/notes.txt");
+    tree.borrow_mut().dirs.remove("Docs");
+    picker.follow(WatchUpdate::Gone, &mut shell, &mut comp);
+    assert_eq!(picker.question_wm(), None, "it went with the folder");
+    assert!(comp.window(question).is_none());
 }
 
 /// A name found taken only once the picker has moved to another folder is
@@ -5458,8 +5540,10 @@ fn a_refused_save_stays_up() {
         picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
         None
     );
-    assert!(picker.wm_id().is_some(), "the user is asked instead");
-    let (serial, _, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert!(picker.question_wm().is_some(), "the user is asked instead");
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
+    assert_eq!(on_question(&mut picker, &tab, &mut shell, &mut comp), None);
+    let (serial, _, access) = asked(on_question(&mut picker, &enter, &mut shell, &mut comp));
     assert_eq!(access, PickAccess::Replace);
     assert_eq!(
         picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
@@ -5536,7 +5620,9 @@ fn a_save_names_folders_files_and_nonsense_in_place() {
         None,
         "asked to replace it"
     );
-    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
+    assert_eq!(on_question(&mut picker, &tab, &mut shell, &mut comp), None);
+    let (_, path, access) = asked(on_question(&mut picker, &enter, &mut shell, &mut comp));
     assert_eq!(
         (path.as_str(), access),
         ("/Docs/notes.txt", PickAccess::Replace)
@@ -6668,9 +6754,9 @@ fn picker_cells_caption_each_window_and_refuse_below_a_choice() {
     bar.tasks_mut().add(TaskId(2), "Logs");
     bar.set_apps(
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(4), "Terminal", IconKind::AppBundle)
                 .with_windows(vec![TaskId(1), TaskId(2)]),
-            tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(5), "Editor", IconKind::AppBundle)
                 .with_windows(vec![TaskId(1)]),
         ],
         Scale::ONE,
@@ -6765,10 +6851,11 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
         AppMenuLabel::new("Quit").expect("short"),
     )))
     .expect("fits");
+    let terminal = tairix_abi::ProcId::from_raw([0x7E; 16]);
     shell.set_apps(
         &mut comp,
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(terminal, "Terminal", IconKind::AppBundle)
                 .with_declaration(menu, AppBarClick::Open),
         ],
     );
@@ -6782,7 +6869,7 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
     };
     assert_eq!(
         request.subject,
-        tairix_taskbar::MenuSubject::App { app: 0 },
+        tairix_taskbar::MenuSubject::App { owner: terminal },
         "the menu names the slot's own application"
     );
 
@@ -6791,7 +6878,7 @@ fn secondary_press_over_an_app_slot_opens_the_menu_it_declared() {
     assert_eq!(
         choose_bar_menu_row(&mut shell, &mut comp, request, "Quit"),
         Some(TaskbarResponse::AppMenuChosen {
-            app: 0,
+            owner: terminal,
             item: AppMenuItemId::new(1).expect("non-zero"),
         })
     );
@@ -6814,7 +6901,7 @@ fn hovering_a_two_window_app_shows_the_picker_as_its_own_window() {
     shell.set_apps(
         &mut comp,
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(6), "Terminal", IconKind::AppBundle)
                 .with_windows(vec![TaskId(1), TaskId(2)]),
         ],
     );
@@ -6889,7 +6976,7 @@ fn a_pickers_thumbnails_are_scaled_one_turn_at_a_time() {
     shell.set_apps(
         &mut comp,
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(7), "Terminal", IconKind::AppBundle)
                 .with_windows(windows.clone()),
         ],
     );
@@ -6965,7 +7052,7 @@ fn leaving_a_slot_drops_the_thumbnails_it_was_preparing() {
     shell.set_apps(
         &mut comp,
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(8), "Terminal", IconKind::AppBundle)
                 .with_windows(vec![task, TaskId(90)]),
         ],
     );
@@ -7006,7 +7093,7 @@ fn hover_a_two_window_slot(shell: &mut DesktopShell, comp: &mut Compositor) -> P
     shell.set_apps(
         comp,
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(9), "Terminal", IconKind::AppBundle)
                 .with_windows(vec![TaskId(1), TaskId(2)]),
         ],
     );
@@ -7138,7 +7225,7 @@ fn an_arrival_on_a_slot_opens_no_hover_surface() {
     shell.set_apps(
         &mut comp,
         vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
+            tairix_taskbar::AppSlot::new(slot_owner(10), "Terminal", IconKind::AppBundle)
                 .with_windows(vec![TaskId(1), TaskId(2)]),
         ],
     );
@@ -7268,8 +7355,8 @@ fn shell_set_apps_re_presents_and_updates_the_strip() {
     shell.set_apps(
         &mut comp,
         vec![
-            tairix_taskbar::AppSlot::new("One", IconKind::AppBundle),
-            tairix_taskbar::AppSlot::new("Two", IconKind::AppBundle),
+            tairix_taskbar::AppSlot::new(slot_owner(11), "One", IconKind::AppBundle),
+            tairix_taskbar::AppSlot::new(slot_owner(12), "Two", IconKind::AppBundle),
         ],
     );
     assert_eq!(shell.session().taskbar().apps().len(), 2);
@@ -9987,26 +10074,23 @@ fn a_pending_open_refused_by_a_full_mailbox_survives_to_the_next_publish() {
 
 // --- The system quick-actions menu's session half (T13) -----------------
 
-use crate::confirm::{build_dialog, Answer, ConfirmPrompt, WIN_HEIGHT, WIN_WIDTH};
+use crate::alert::ALERT_ARM_NS;
+use crate::confirm::{Answer, ConfirmPrompt};
 use crate::relay_power;
 use tairix_abi::PowerAction;
 
-/// The prompt-local centre of the action button at `index`, resolved through
-/// the very dialog the prompt draws, so a test presses the button rather
-/// than a re-derived guess at where it sits.
-fn prompt_action_centre(action: PowerAction, index: usize, shell: &DesktopShell) -> Point {
-    let theme = shell.session().active_theme();
-    let rects = build_dialog(action).action_rects(
-        Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT),
-        Scale::ONE,
-        theme,
-    );
-    let rect = rects[index];
-    assert!(rect.width > 0, "the button fitted the action band");
-    Point::new(
-        rect.origin.x + i32::try_from(rect.width / 2).expect("a small button width"),
-        rect.origin.y + i32::try_from(rect.height / 2).expect("a small button height"),
-    )
+/// The prompt-local centre of the showing prompt's button at `index`,
+/// resolved through the very alert the prompt draws, so a test presses the
+/// button rather than a re-derived guess at where it sits.
+fn prompt_action_centre(
+    confirm: &ConfirmPrompt,
+    index: usize,
+    shell: &DesktopShell,
+    comp: &Compositor,
+) -> Point {
+    confirm
+        .button_centre(index, shell, comp)
+        .expect("a prompt is showing")
 }
 
 /// A prompt cannot be moved, so wherever the screen is smaller or denser than
@@ -10044,16 +10128,17 @@ fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
 
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("a prompt window is showing");
+    let bounds = comp.window(wm).expect("live").bounds();
     assert_eq!(
-        comp.window(wm).expect("live").origin(),
-        crate::shell::prompt_origin(comp.screen_rect(), (WIN_WIDTH, WIN_HEIGHT))
+        bounds.origin,
+        crate::shell::prompt_origin(comp.screen_rect(), (bounds.width, bounds.height))
     );
     assert_eq!(confirm.pending(), Some(PowerAction::PowerOff));
 
     assert!(
-        !confirm.ask(PowerAction::Restart, &mut shell, &mut comp),
+        !confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp),
         "one prompt at a time"
     );
     assert_eq!(
@@ -10069,12 +10154,12 @@ fn the_confirmation_prompt_opens_once_and_refuses_a_second() {
 fn escape_declines_the_prompt_and_relays_nothing() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("showing");
 
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
     assert_eq!(
-        confirm.handle_key(&escape, &mut shell, &mut comp),
+        confirm.handle_key(&escape, ALERT_ARM_NS, &mut shell, &mut comp),
         Some(Answer::Declined)
     );
     assert_eq!(confirm.wm_id(), None, "the prompt window is closed");
@@ -10094,11 +10179,11 @@ fn escape_declines_the_prompt_and_relays_nothing() {
 fn enter_on_an_untouched_prompt_declines() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
 
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(
-        confirm.handle_key(&enter, &mut shell, &mut comp),
+        confirm.handle_key(&enter, ALERT_ARM_NS, &mut shell, &mut comp),
         Some(Answer::Declined),
         "the answer a stray Enter gives is the safe one"
     );
@@ -10111,17 +10196,17 @@ fn enter_on_an_untouched_prompt_declines() {
 fn moving_focus_then_enter_confirms_and_relays_exactly_once() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
 
     let tab = pressed(KeyValue::Named(NamedKeyCode::Tab));
     assert_eq!(
-        confirm.handle_key(&tab, &mut shell, &mut comp),
+        confirm.handle_key(&tab, ALERT_ARM_NS, &mut shell, &mut comp),
         None,
         "moving focus is not an answer"
     );
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     let answer = confirm
-        .handle_key(&enter, &mut shell, &mut comp)
+        .handle_key(&enter, ALERT_ARM_NS, &mut shell, &mut comp)
         .expect("the focused button answers");
     assert_eq!(answer, Answer::Confirmed(PowerAction::Restart));
     assert_eq!(confirm.wm_id(), None, "the prompt is already down");
@@ -10147,17 +10232,22 @@ fn prompt_clicks_answer_through_the_shared_button_geometry() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
 
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
-    let cancel = prompt_action_centre(PowerAction::PowerOff, 0, &shell);
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    let cancel = prompt_action_centre(&confirm, 0, &shell, &comp);
     assert_eq!(
-        confirm.handle_click(cancel, &mut shell, &mut comp),
+        confirm.handle_click(cancel, ALERT_ARM_NS, &mut shell, &mut comp),
         Some(Answer::Declined)
     );
 
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
-    let accept = prompt_action_centre(PowerAction::PowerOff, 1, &shell);
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
+    let accept = prompt_action_centre(&confirm, 1, &shell, &comp);
     assert_eq!(
-        confirm.handle_click(accept, &mut shell, &mut comp),
+        confirm.handle_click(accept, ALERT_ARM_NS - 1, &mut shell, &mut comp),
+        None,
+        "a press the moment it appeared was meant for what was there"
+    );
+    assert_eq!(
+        confirm.handle_click(accept, ALERT_ARM_NS, &mut shell, &mut comp),
         Some(Answer::Confirmed(PowerAction::PowerOff))
     );
 }
@@ -10168,10 +10258,10 @@ fn prompt_clicks_answer_through_the_shared_button_geometry() {
 fn a_press_off_the_prompt_buttons_answers_nothing() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
 
     assert_eq!(
-        confirm.handle_click(Point::new(4, 4), &mut shell, &mut comp),
+        confirm.handle_click(Point::new(4, 4), ALERT_ARM_NS, &mut shell, &mut comp),
         None
     );
     assert_eq!(
@@ -10187,7 +10277,7 @@ fn a_press_off_the_prompt_buttons_answers_nothing() {
 fn an_abandoned_prompt_is_not_a_confirmation() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("showing");
 
     confirm.abandon(&mut shell, &mut comp);
@@ -10241,7 +10331,7 @@ fn a_confirmation_the_holder_refuses_says_why_rather_than_passing_silently() {
 fn the_prompt_repaints_on_a_theme_switch() {
     let (mut shell, mut comp) = headless_desktop();
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
     let wm = confirm.wm_id().expect("showing");
     let before: Vec<_> = comp
         .window(wm)
@@ -13396,7 +13486,13 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
         theme: &theme,
         epoch: comp.chrome_epoch(),
     };
-    let facts = FactList::new(vec![Fact::new("Name", "App")]);
+    let sheet = tairix_controls::AboutSheet::new(
+        "App",
+        "1.0",
+        None,
+        FactList::new(vec![Fact::new("Author", "TAIRiX")]),
+        IconKind::AppBundle,
+    );
     let mut wire = app_bar(AppBarClick::Raise).menu;
     wire.push(AppMenuRow::Info)
         .expect("an information row fits");
@@ -13404,7 +13500,7 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
     chain
         .open(
             ChainOwner::Backdrop,
-            ChainModel::from_app_menu("App", &wire, Some(&facts)),
+            ChainModel::from_app_menu("App", &wire, Some(&sheet)),
             crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
             &geom,
         )
@@ -13810,22 +13906,19 @@ fn session_surfaces_adapt_to_display_scale() {
     // 1. The confirmation prompt's window grows with the density: its
     // fixed logical extents are scaled at paint time.
     let mut confirm = ConfirmPrompt::new();
-    assert!(confirm.ask(PowerAction::Restart, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::Restart, 0, &mut shell, &mut comp));
     let confirm_id = confirm.wm_id().expect("confirm window exists");
     let size_100 = window_rect(&comp, confirm_id);
 
     assert!(comp.set_scale(scale_200));
     confirm.repaint(&mut shell, &mut comp);
     let size_200 = window_rect(&comp, confirm_id);
-    assert_eq!(
-        size_200.width,
-        scale_200
-            .scale_length(crate::confirm::WIN_WIDTH)
-            .min(comp.screen_rect().width),
-        "it grows with the density, up to the screen"
+    assert!(
+        size_200.width > size_100.width && size_200.height > size_100.height,
+        "it grows with the density"
     );
-    assert!(size_200.height >= scale_200.scale_length(crate::confirm::WIN_HEIGHT));
-    assert!(size_200.width > size_100.width);
+    let screen = comp.screen_rect();
+    assert!(size_200.width <= screen.width && size_200.height <= screen.height);
 
     // 2. The picker's window grows the same way, at the browser-view
     // extent it shares with the file manager.
@@ -16088,7 +16181,7 @@ fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
         (&confirm, &elevate, &resolution)
     ));
 
-    assert!(confirm.ask(PowerAction::PowerOff, &mut shell, &mut comp));
+    assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
     assert!(crate::seat_held(
         &lock,
         &picker,

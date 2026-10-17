@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
 use tairix_colour::Rgba;
 use tairix_controls::{
-    wheel_steps, Dialog, DialogAction, Keystroke, PickerOutcome, SaveChanges, ScrollAction,
-    SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
+    wheel_steps, Keystroke, PickerOutcome, ScrollAction, SwatchAction, SwatchMark, ToolActivation,
+    ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{SpriteMode, SpriteName, SpritePalette};
@@ -192,20 +192,8 @@ impl View {
         damage: &mut Region,
     ) -> Option<Outcome> {
         let window = layout.window();
-        let answer = match self.modal.as_mut()? {
-            Modal::Close(dialog) => {
-                let bounds = close_rect(dialog, window, scale, theme);
-                dialog.on_pointer(event, bounds, scale, theme, damage).map(
-                    |DialogAction::ActionActivated { index }| {
-                        ModalAnswer::Close(SaveChanges::of(index))
-                    },
-                )
-            }
-            Modal::Form(form) => form
-                .on_pointer(event, window, scale, theme, damage)
-                .map(ModalAnswer::Form),
-        };
-        Some(match answer {
+        let Modal::Form(form) = self.modal.as_mut()?;
+        Some(match form.on_pointer(event, window, scale, theme, damage) {
             Some(answer) => self.answer_modal(answer, layout, damage),
             None => Outcome::none(),
         })
@@ -2047,7 +2035,7 @@ impl View {
             Then::Rest => Outcome::none(),
             Then::Act(action) => self.act(action, layout, damage),
             Then::Float(floating) => self.float(floating, layout, damage),
-            Then::SaveThenClose => Outcome::asking(Request::SaveThenClose),
+            Then::SaveThenClose => self.save_then_close(layout, damage),
             Then::Enter(id, text) => self.carry_out_entry(id, &text, layout, damage),
         }
     }
@@ -2233,29 +2221,37 @@ impl View {
     pub fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         self.end_gesture(layout, damage);
         self.commit_text(layout, damage);
-        if !tairix_window::document::SavedDocument::is_modified(self) {
-            return Outcome::asking(Request::Close);
+        if tairix_window::document::SavedDocument::is_modified(self) {
+            Outcome::asking(Request::AskToClose)
+        } else {
+            Outcome::asking(Request::Close)
         }
-        self.modal = Some(Modal::Close(Dialog::save_changes(&self.name)));
-        layout.damage_all(damage);
-        Outcome::none()
     }
 
-    fn answer_modal(
-        &mut self,
-        answer: ModalAnswer,
-        layout: &Layout,
-        damage: &mut Region,
-    ) -> Outcome {
+    /// The user chose to save before the window closes: an open adjustment
+    /// is applied and a floating selection put down first, as for any save,
+    /// each step coming back here once it has landed.
+    pub fn save_then_close(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+        if self.adjustment.filter().is_some() {
+            return match self.apply_adjustment(Then::SaveThenClose, layout, damage) {
+                Applying::Now(then) => {
+                    let mut outcome = self.carry_on(then, layout, damage);
+                    outcome.relayout = Relayout::Whole;
+                    outcome
+                }
+                Applying::Waiting(outcome) => outcome,
+            };
+        }
+        if self.held.is_some() {
+            return self.put_down_then(Then::SaveThenClose, layout, damage);
+        }
+        Outcome::asking(Request::SaveThenClose)
+    }
+
+    fn answer_modal(&mut self, answer: Answer, layout: &Layout, damage: &mut Region) -> Outcome {
         layout.damage_all(damage);
         match (self.modal.take(), answer) {
-            (Some(Modal::Close(_)), ModalAnswer::Close(SaveChanges::Discard)) => {
-                Outcome::asking(Request::Close)
-            }
-            (Some(Modal::Close(_)), ModalAnswer::Close(SaveChanges::Save)) => {
-                self.put_down_then(Then::SaveThenClose, layout, damage)
-            }
-            (Some(Modal::Form(form)), ModalAnswer::Form(Answer::Confirmed)) => {
+            (Some(Modal::Form(form)), Answer::Confirmed) => {
                 self.form_answered(form, layout, damage)
             }
             _ => Outcome::none(),
@@ -2621,24 +2617,8 @@ impl View {
         damage: &mut Region,
     ) -> Outcome {
         self.modifiers = stroke.modifiers;
-        if let Some(modal) = &mut self.modal {
-            let window = layout.window();
-            let answer = match modal {
-                Modal::Close(dialog) => match stroke.key {
-                    Key::Named(NamedKey::Escape) => Some(ModalAnswer::Close(SaveChanges::Cancel)),
-                    key => {
-                        damage.add(close_rect(dialog, window, scale, theme));
-                        dialog
-                            .on_key(key)
-                            .map(|DialogAction::ActionActivated { index }| {
-                                ModalAnswer::Close(SaveChanges::of(index))
-                            })
-                    }
-                },
-                Modal::Form(form) => form
-                    .on_key(stroke, window, scale, theme, damage)
-                    .map(ModalAnswer::Form),
-            };
+        if let Some(Modal::Form(form)) = &mut self.modal {
+            let answer = form.on_key(stroke, layout.window(), scale, theme, damage);
             return match answer {
                 Some(answer) => self.answer_modal(answer, layout, damage),
                 None => Outcome::none(),
@@ -3805,16 +3785,6 @@ fn activated(outcome: ToolbarOutcome) -> Option<usize> {
     }
 }
 
-/// How a modal question was answered.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ModalAnswer {
-    /// How the close question was answered.
-    Close(SaveChanges),
-    /// A form's answer.
-    Form(Answer),
-}
-
-/// Where the close question is drawn in `window`.
 /// The pixels a straight edge from `a` to `b` may cross.
 pub(super) fn segment(a: Fx, b: Fx) -> Bounds {
     let (ax, ay) = a.pixel();
@@ -3834,11 +3804,6 @@ fn path_bounds(points: &[Fx], to: Option<Fx>) -> Option<Bounds> {
         .chain(to.as_ref())
         .map(|&point| segment(point, point))
         .reduce(|a, b| a.union(&b))
-}
-
-pub(crate) fn close_rect(dialog: &Dialog, window: Rect, scale: Scale, theme: &Theme) -> Rect {
-    let width = scale.scale_length(Dialog::QUESTION_WIDTH);
-    dialog.placed_over(window, width, 0, scale, theme)
 }
 
 /// The action a key chord asks for, whatever has the keyboard.

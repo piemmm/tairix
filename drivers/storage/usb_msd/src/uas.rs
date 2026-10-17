@@ -17,7 +17,7 @@
 //! synchronous — with the tag of every returned IU checked against the
 //! command in flight. The device is hostile input: an IU with the wrong
 //! tag, id, shape, or ordering fails the exchange closed rather than
-//! trusting the frame.
+//! trusting the frame, and a broken exchange clears all four pipes.
 //!
 //! Queueing multiple commands, task-management IUs (`ABORT TASK`), and
 //! `SuperSpeed` bulk streams are deliberately not implemented yet: one
@@ -27,7 +27,7 @@
 
 use tairix_abi::Errno;
 
-use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
+use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
 
 /// The four UAS pipes (UAS §7): one logical transfer seam per pipe. The
 /// `Run` binary implements it over the URB transport client, addressing
@@ -65,6 +65,18 @@ pub trait UasPipes {
     ///
     /// As [`Self::data_in`].
     fn data_out(&mut self, buf: &[u8]) -> Result<usize, Errno>;
+
+    /// Start one command exchange: every transfer until the next begins is
+    /// bounded by what remains of the exchange's budget.
+    fn begin_exchange(&mut self);
+
+    /// Clear the halt of all four pipes, on the device and in the
+    /// controller, so each restarts empty at `DATA0`.
+    ///
+    /// # Errors
+    ///
+    /// An [`Errno`] from the transport/device.
+    fn clear_halts(&mut self) -> Result<(), Errno>;
 
     /// Zero every byte of the transport's shared data window (the
     /// zero-on-free discipline applied to the bounce window).
@@ -232,21 +244,17 @@ impl<T: UasPipes> Uas<T> {
     }
 }
 
-impl<T: UasPipes> ScsiTransport for Uas<T> {
-    /// Run one UAS command exchange: Command IU out, then the device's
-    /// status-pipe sequencing — Read/Write Ready IU gating each data pipe
-    /// (USB 2.0 non-stream operation), finished by the Sense IU.
-    fn execute(
+impl<T: UasPipes> Uas<T> {
+    /// One command exchange: Command IU out, then the device's status-pipe
+    /// sequencing — a Read/Write Ready IU gating each data pipe (USB 2.0
+    /// non-stream operation), finished by the Sense IU. Any error is the
+    /// exchange breaking, which leaves the pipes out of step.
+    fn exchange(
         &mut self,
         lun: u8,
         cb: &[u8],
         mut data: DataPhase<'_>,
     ) -> Result<CommandOutcome, Errno> {
-        if cb.is_empty() || cb.len() > 16 || lun as usize >= MAX_LUNS {
-            return Err(Errno::OutOfRange);
-        }
-        // A stale capture must never explain a later command.
-        self.sense = None;
         let tag = self.take_tag();
         let iu = Self::command_iu(tag, lun, cb);
         self.pipes.command_out(&iu)?;
@@ -306,6 +314,36 @@ impl<T: UasPipes> ScsiTransport for Uas<T> {
         Err(Errno::BadMagic)
     }
 
+    /// End an exchange that broke on `cause` by clearing all four pipes, so
+    /// the next command meets them in step, answering what the caller may do
+    /// about it. Task management, which could abort the command on the
+    /// device too, is the staged remainder (`plans/DEVICES.md` §2.7).
+    fn fail(&mut self, cause: Errno) -> Errno {
+        if cause == Errno::NotFound {
+            return cause;
+        }
+        after_reset(cause, self.pipes.clear_halts())
+    }
+}
+
+impl<T: UasPipes> ScsiTransport for Uas<T> {
+    /// Run one UAS command exchange, the transport reset when it breaks.
+    fn execute(
+        &mut self,
+        lun: u8,
+        cb: &[u8],
+        data: DataPhase<'_>,
+    ) -> Result<CommandOutcome, Errno> {
+        if cb.is_empty() || cb.len() > 16 || lun as usize >= MAX_LUNS {
+            return Err(Errno::OutOfRange);
+        }
+        // A stale capture must never explain a later command.
+        self.sense = None;
+        self.pipes.begin_exchange();
+        self.exchange(lun, cb, data)
+            .map_err(|cause| self.fail(cause))
+    }
+
     /// Number of logical units, via `REPORT LUNS` (SPC-4 §6.33; UAS
     /// mandates it). Only single-level peripheral-addressed units below
     /// [`MAX_LUNS`] are servable; the count is the highest such unit + 1
@@ -346,6 +384,10 @@ impl<T: UasPipes> ScsiTransport for Uas<T> {
     /// UAS delivers sense in-band (autosense); hand over the last capture.
     fn take_sense(&mut self) -> Option<Sense> {
         self.sense.take()
+    }
+
+    fn reset(&mut self) -> Result<(), Errno> {
+        self.pipes.clear_halts()
     }
 
     fn scrub(&mut self) {

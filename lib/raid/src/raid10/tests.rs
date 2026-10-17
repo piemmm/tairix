@@ -5,8 +5,8 @@ use super::{Raid10Array, Raid10Error};
 use crate::mirror::MirrorMember;
 use crate::superblock::ArrayProgress;
 use core::cell::Cell;
-use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, HealthSnapshot};
+use tairix_abi::blkio::{BlkDeviceClass, BlkMedium};
+use tairix_abi::driver::block::{Block, BlockClass, BlockGeometry, DeviceHealth, HealthSnapshot};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState};
 use tairix_abi::sysinfo::MountAvailability;
@@ -28,7 +28,7 @@ struct FaultBlock {
     read_fault: Cell<Option<DriverError>>,
     write_fault: Cell<Option<DriverError>>,
     health: Cell<DeviceHealth>,
-    class: Cell<BlkDeviceClass>,
+    medium: Cell<BlkMedium>,
 }
 
 impl FaultBlock {
@@ -43,13 +43,13 @@ impl FaultBlock {
             read_fault: Cell::new(None),
             write_fault: Cell::new(None),
             health: Cell::new(DeviceHealth::Unavailable),
-            class: Cell::new(BlkDeviceClass::SolidState),
+            medium: Cell::new(BlkMedium::SolidState),
         }
     }
 
-    /// A device declaring `class` as its performance/behaviour envelope.
-    fn with_class(self, class: BlkDeviceClass) -> Self {
-        self.class.set(class);
+    /// A device declaring it is `medium`, which its patience follows.
+    fn with_medium(self, medium: BlkMedium) -> Self {
+        self.medium.set(medium);
         self
     }
 
@@ -129,8 +129,8 @@ impl Block for FaultBlock {
         Ok(())
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        self.class.get()
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(self.medium.get())
     }
 
     fn device_health(&self) -> Result<DeviceHealth, DriverError> {
@@ -640,7 +640,7 @@ fn device_class_declares_the_most_patient_live_member() {
     // spinning disk earns the whole array a spinning disk's patience.
     let mut members = [
         MirrorMember::new(FaultBlock::new(0)),
-        MirrorMember::new(FaultBlock::new(0).with_class(BlkDeviceClass::Rotational)),
+        MirrorMember::new(FaultBlock::new(0).with_medium(BlkMedium::HardDisk)),
         MirrorMember::new(FaultBlock::new(0)),
         MirrorMember::new(FaultBlock::new(0)),
     ];

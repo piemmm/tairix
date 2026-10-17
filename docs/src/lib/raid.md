@@ -882,14 +882,19 @@ commutative, so member order cannot change the answer, and it is derived from
 the budgets themselves rather than a second hand-written ordering that could
 drift from them.
 
-The class fold sits beside the health fold as one shared definition
-(`aggregate_device_class`, `AGENTS.md` §2.2) and selects members through the
-*same* participation predicate, so an array can never report its health from
-one set of members and its class from another. A member that faults out stops
-buying the array its patience — the array is no longer waiting on it — and an
-array with no live member left declares the bounded unclassified envelope
-rather than the widest one, so its callers fail closed sooner instead of
-waiting out disks that are not there.
+An array declares the medium its live members compose to, through the one
+shared rule `BlkMedium::of_members`, and its patience class is derived from
+that medium as every device's is (`BlockClass`), so the two cannot disagree.
+The members are chosen by the *same* participation predicate as the health
+fold, so an array can never report its health from one set of members and its
+medium from another. The composition reads as the member it must wait on
+longest, each member waited on as its own medium is served: an undeclared
+member is waited on as a paravirtual device, so beside a solid-state member it
+is the one the array waits on, and the array then reads as unknown, which it
+is. A member that faults out stops buying the array its patience — the
+array is no longer waiting on it — and an array with no live member left
+declares nothing and is served the bounded unclassified envelope, so its
+callers fail closed sooner instead of waiting out disks that are not there.
 
 ## What the array can promise a background consumer (`backing_availability`)
 
@@ -923,7 +928,7 @@ layer once it has *discovered* an array and resolved its `RaidLevel`,
 regardless of which level composes it. `RaidArray` is that single
 composed-device abstraction (`AGENTS.md` §27), modelled on Linux md's
 per-personality dispatch: it is an enum over the six engines that forwards
-both the `Block` I/O path (`geometry`/`device_class`/`read`/`write`/`flush`/
+both the `Block` I/O path (`geometry`/`medium`/`read`/`write`/`flush`/
 the class-aware and discard/health surface) and the level-agnostic observation,
 maintenance, and reconfiguration operations, so neither the autoloaded serve
 process nor the ARXFS-native composition re-derives the level → engine mapping
@@ -1066,7 +1071,7 @@ the whole reason the pacer is shared rather than copied.
 ### Cadences come from the array's discovered class
 
 `MaintenancePolicy::for_class` derives the defaults from the class the members'
-fold declares through `Block::device_class` (see [Device class](#device-class-device_class)),
+fold declares through `BlockClass::device_class` (see [Device class](#device-class-device_class)),
 never a frozen scalar (`AGENTS.md` §24.2). Both parts come from that class's own
 shared tables rather than a second one that could drift from them
 (`AGENTS.md` §2.2):

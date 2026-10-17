@@ -83,6 +83,8 @@ pub enum WorkerExit {
     Oversize,
     /// The transport failed with an error of its own.
     Transport,
+    /// It was asked for a service its program does not serve.
+    Unserved,
 }
 
 impl WorkerExit {
@@ -95,6 +97,7 @@ impl WorkerExit {
             Self::OutOfMemory => 2,
             Self::Oversize => 3,
             Self::Transport => 4,
+            Self::Unserved => 5,
         }
     }
 
@@ -107,6 +110,7 @@ impl WorkerExit {
             2 => Some(Self::OutOfMemory),
             3 => Some(Self::Oversize),
             4 => Some(Self::Transport),
+            5 => Some(Self::Unserved),
             _ => None,
         }
     }
@@ -288,5 +292,20 @@ mod tests {
             None
         );
         assert_eq!(WorkerExit::from_code(tairix_abi::FAULT_EXIT_STATUS), None);
+    }
+
+    #[test]
+    fn every_ending_is_read_back_from_its_own_status() {
+        let endings = [
+            WorkerExit::Finished,
+            WorkerExit::PeerClosed,
+            WorkerExit::OutOfMemory,
+            WorkerExit::Oversize,
+            WorkerExit::Transport,
+            WorkerExit::Unserved,
+        ];
+        for ending in endings {
+            assert_eq!(WorkerExit::from_code(ending.code()), Some(ending));
+        }
     }
 }

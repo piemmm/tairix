@@ -74,7 +74,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
@@ -771,11 +771,11 @@ impl<B: Block> BlockCache<B> {
 }
 
 impl<B: Block> Block for BlockCache<B> {
-    /// The cached device's own class: caching changes how often the device
-    /// is reached, never what it is, so the real hardware's I/O budget
-    /// survives this layer.
-    fn device_class(&self) -> BlkDeviceClass {
-        self.device.device_class()
+    /// The cached device's own medium: caching changes how often the device
+    /// is reached, never what it is, so the real hardware survives this
+    /// layer.
+    fn medium(&self) -> Option<BlkMedium> {
+        self.device.medium()
     }
 
     fn device_name(&self) -> BlkDeviceName {

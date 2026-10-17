@@ -98,14 +98,17 @@ fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::hwtree::HW_NODE_ROOT;
-    use tairix_abi::usb_urb::{IsoNotify, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN};
+    use tairix_abi::usb_urb::{IsoNotify, UsbTransferType, USB_REPLY_MAX_LEN, USB_REQUEST_MAX_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, ProcId, RegisterWindow};
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_usb::bringup::{
         bring_up_controller_diagnostic, derive_controller_resources, BringupPhase, ControllerDevice,
     };
-    use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth, SkippedPortRetry};
+    use tairix_drv_bus_usb::domain::{
+        timer_work_due, ControllerDomainEvent, ControllerHealth, OneShot, SkippedPortRetry,
+        RECOVERY_SETTLE_NS,
+    };
     use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
     use tairix_drv_bus_usb::serve::UrbReply;
     use tairix_drvrt::exit::{end, DriverExit};
@@ -142,6 +145,10 @@ mod program {
 
     /// Diagnostic event id: a wait-set or IPC transport error happened.
     const HCD_WAIT_ERROR: EventId = EventId(27_054);
+
+    /// Diagnostic event id: a URB failed, was refused, or was abandoned at its
+    /// deadline, with the controller's verdict on the endpoint it ran on.
+    const HCD_URB_FAILED: EventId = EventId(27_153);
 
     /// Security event id: a class driver's control request reached past its
     /// own interface and was refused.
@@ -243,6 +250,11 @@ mod program {
     /// Diagnostic event id: an isochronous stream ended other than at its
     /// class driver's word.
     const HCD_STREAM_ENDED: EventId = EventId(27_151);
+
+    /// Diagnostic event id: an endpoint recovery that failed was deferred to a
+    /// retry, or a hub's failed status transfer was recovered, or the deferred
+    /// retries settled.
+    const HCD_RECOVERY: EventId = EventId(27_152);
 
     fn reply_to_urb(endpoint_id: u64, reply: UrbReply) {
         let ret = tairix_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
@@ -456,7 +468,11 @@ mod program {
                         u64::from(node),
                     );
                 }
-                Note::UrbFailed { index, errno } => log_urb_error(self.device, index, errno),
+                Note::UrbFailed {
+                    index,
+                    transfer,
+                    errno,
+                } => log_urb_error(self.device, index, transfer, errno),
                 Note::FaultDetached => {
                     log(
                         &LogSink,
@@ -543,7 +559,9 @@ mod program {
         loop {
             match live.device.next_root_change(&live.delay) {
                 Ok(HubEvent::None) => return changed,
-                Ok(HubEvent::Attached(_) | HubEvent::HubAttached(_)) => {
+                Ok(
+                    HubEvent::Attached(_) | HubEvent::HubAttached(_) | HubEvent::HubRecovered(_),
+                ) => {
                     interfaces.reconcile(live);
                     changed = true;
                     log(
@@ -650,6 +668,39 @@ mod program {
         log_skipped_ports(live.device);
     }
 
+    /// Run the deferred retry of every endpoint recovery that failed, log its
+    /// outcome, and publish or retract whatever it served or freed.
+    fn retry_owed_recoveries(
+        live: &mut Live<'_, '_>,
+        interfaces: &mut Interfaces<NodeBuffer>,
+        health: &mut ControllerHealth,
+    ) {
+        match live.device.retry_owed_recoveries(&live.delay) {
+            Err(err) => {
+                log_topology_service_failure(
+                    live.device,
+                    "usb-hcd: deferred endpoint recovery failed",
+                    err,
+                );
+            }
+            Ok(()) if !live.device.recovery_owed() => {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Info,
+                        id: HCD_RECOVERY,
+                        message: "usb-hcd: deferred endpoint recovery settled",
+                        fields: &[],
+                    },
+                );
+            }
+            Ok(()) => {}
+        }
+        interfaces.reconcile(live);
+        // A teardown the retry ran can leave the controller halted.
+        interfaces.recover(health, live);
+    }
+
     /// Bind the URB transport endpoint `id`. Binding it grant-restricted
     /// (`send_caps` carries `CAP_IPC_ENDPOINT`) makes the kernel mint this
     /// HCD the matching per-endpoint grant, which it forwards onto the
@@ -735,24 +786,31 @@ mod program {
         }
     }
 
-    /// A URB completed with an error: log the errno the class driver will
-    /// see **and** the engine's latched raw completion code for the
-    /// device's own endpoint, so a metal capture shows the controller's
-    /// verdict (transaction error, stall, babble, …) behind the coarse
-    /// errno — e.g. the keyboard's collateral fault while a sibling
-    /// port's attach was being serviced.
+    /// A URB failed: log the errno the class driver will see **and** the
+    /// engine's latched raw completion code for the endpoint it ran on — the
+    /// report endpoint's for a report poll, the bulk pipe's for a bulk
+    /// transfer — so a metal capture shows the controller's verdict
+    /// (transaction error, stall, babble, …) behind the coarse errno.
     fn log_urb_error(
         device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
         index: usize,
+        transfer: UsbTransferType,
         errno: Errno,
     ) {
         let (id, message) = if errno == Errno::PermissionDenied {
             (
                 HCD_URB_REFUSED,
-                "usb-hcd: a class driver's control request outside its interface was refused",
+                "usb-hcd: a class driver's request outside its interface was refused",
             )
         } else {
-            (HCD_WAIT_ERROR, "usb-hcd: URB completed with an error")
+            (HCD_URB_FAILED, "usb-hcd: URB failed")
+        };
+        // A transfer abandoned at its deadline ended with no completion.
+        let fault_code = match transfer {
+            _ if errno == Errno::TimedOut => 0,
+            UsbTransferType::Bulk => device.last_bulk_fault_code(index),
+            UsbTransferType::Interrupt => device.last_report_fault_code(index),
+            UsbTransferType::Control => 0,
         };
         log(
             &LogSink,
@@ -771,9 +829,7 @@ mod program {
                     },
                     Field {
                         key: "fault_code",
-                        value: tairix_log::FieldValue::UnsignedInt(u64::from(
-                            device.last_report_fault_code(index),
-                        )),
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(fault_code)),
                     },
                 ],
             },
@@ -1299,22 +1355,49 @@ mod program {
         // class driver stalled past the buffer depth; logged (once per new
         // loss) so a genuinely stuck consumer is never silent.
         let mut reported_drops = 0u64;
+        let mut recovery_retry = OneShot::default();
         loop {
             let mut token = 0u64;
-            // Park only as long as the nearest armed one-shot allows. Two can
-            // be pending: the controller's grace window — a faulted
-            // controller raises no further interrupt (xHCI §4.24.1), so it
-            // must be retried and failed closed off a timer — and the single
-            // deferred re-attach owed to a port the walk could not serve.
-            // With neither armed the loop parks unbounded (never a spin).
             let now_ns = tairix_rt::clock_get();
-            let timeout = [health.wait_timeout(now_ns), port_retry.wait_timeout(now_ns)]
-                .into_iter()
-                .flatten()
-                .min()
-                .unwrap_or(WAITSET_TIMEOUT_NONE);
+            // A controller recovery owns the devices while it runs, and its
+            // reset settles whatever their recoveries owed.
+            if !recovery_retry.is_armed()
+                && !health.is_recovering()
+                && !health.is_failed_closed()
+                && live.device.recovery_owed()
+            {
+                recovery_retry.arm(now_ns, RECOVERY_SETTLE_NS);
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Warn,
+                        id: HCD_RECOVERY,
+                        message: "usb-hcd: an endpoint recovery failed; retrying it once the path settles",
+                        fields: &[],
+                    },
+                );
+            }
+            // Park only as long as the nearest armed one-shot allows: the
+            // controller's grace window — a faulted controller raises no
+            // further interrupt (xHCI §4.24.1), so it must be retried and
+            // failed closed off a timer — the single deferred re-attach owed
+            // to a port the walk could not serve, and the deferred retry of a
+            // failed endpoint recovery. With none armed the loop parks
+            // unbounded (never a spin).
+            let timeout = [
+                health.wait_timeout(now_ns),
+                port_retry.wait_timeout(now_ns),
+                recovery_retry.wait_timeout(now_ns),
+                interfaces
+                    .next_deadline()
+                    .map(|at| at.saturating_sub(now_ns)),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(WAITSET_TIMEOUT_NONE);
             let wait_ret = tairix_rt::waitset_wait(live.set, timeout, &mut token);
-            if wait_ret >= 0 {
+            let timed_out = if wait_ret >= 0 {
                 match token {
                     TOKEN_IRQ => {
                         service_controller_interrupt(live, interfaces, health, &mut reported_drops);
@@ -1329,21 +1412,9 @@ mod program {
                         }
                     }
                 }
+                false
             } else if Errno::from_syscall(wait_ret) == Errno::TimedOut {
-                // Spend the deferred re-attach whenever its deadline has
-                // passed, even if the controller's own recovery runs instead:
-                // an overdue one-shot left armed would bound every later park
-                // at zero and spin the loop.
-                let retry_due = port_retry.take_if_due(tairix_rt::clock_get());
-                // A recovery re-runs the whole bring-up walk, which subsumes
-                // the re-attach.
-                let attempted = interfaces.recover(health, live);
-                if retry_due && !attempted && !health.is_failed_closed() {
-                    retry_skipped_ports(live, interfaces);
-                }
-                if retry_due {
-                    settle();
-                }
+                true
             } else {
                 log_hex_event(
                     HCD_WAIT_ERROR,
@@ -1354,6 +1425,36 @@ mod program {
                 );
                 interfaces.retract_all(live);
                 return end(DriverExit::ServeFailed, &[]);
+            };
+            let now_ns = tairix_rt::clock_get();
+            if timer_work_due(timed_out, now_ns, (health, port_retry, &recovery_retry)) {
+                // Spend each deferred retry whenever its deadline has passed,
+                // even if the controller's own recovery runs instead: an
+                // overdue one-shot left armed would bound every later park at
+                // zero and spin the loop.
+                let retry_due = port_retry.take_if_due(now_ns);
+                let recovery_due = recovery_retry.take_if_due(now_ns);
+                // A controller recovery re-runs the whole bring-up walk, which
+                // subsumes both retries.
+                let attempted = interfaces.recover(health, live);
+                let serving = !attempted && !health.is_failed_closed();
+                if retry_due && serving {
+                    retry_skipped_ports(live, interfaces);
+                }
+                if recovery_due && serving {
+                    retry_owed_recoveries(live, interfaces, health);
+                }
+                if retry_due {
+                    settle();
+                }
+                // What a retry or recovery above parked is delivered now,
+                // not left for an unrelated interrupt.
+                if serving {
+                    interfaces.drive_busy(health, live);
+                }
+            }
+            if interfaces.next_deadline().is_some_and(|at| at <= now_ns) {
+                interfaces.expire_overdue(now_ns, health, live);
             }
             // Nothing is retried below a controller failed closed; its reason
             // is already logged and every node retracted.
@@ -1457,6 +1558,19 @@ mod program {
                             level: Level::Info,
                             id: HCD_DISCONNECT,
                             message: "usb-hcd: device disconnected, interface retracted",
+                            fields: &[],
+                        },
+                    );
+                }
+                Ok(HubEvent::HubRecovered(_)) => {
+                    interfaces.reconcile(live);
+                    topology_changed = true;
+                    log(
+                        &LogSink,
+                        &Event {
+                            level: Level::Warn,
+                            id: HCD_RECOVERY,
+                            message: "usb-hcd: a hub's status transfer failed; its endpoint was recovered and its ports reconciled",
                             fields: &[],
                         },
                     );

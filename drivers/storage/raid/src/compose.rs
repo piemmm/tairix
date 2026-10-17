@@ -32,9 +32,9 @@
 //!   never waits: there is nothing left to wait for.
 //!
 //! The settle window is the array's own hardware's recovery grace window,
-//! taken through the shared [`RetryCadence::for_class`] and folded over the
-//! members' declared classes with
-//! [`BlkDeviceClass::most_patient`](tairix_abi::blkio::BlkDeviceClass::most_patient),
+//! taken through the shared [`RetryCadence::for_class`] of the medium its
+//! members compose to
+//! ([`BlkMedium::of_members`](tairix_abi::blkio::BlkMedium::of_members)),
 //! so a rotational array waits out a spin-up while a solid-state one does not
 //! — a policy read from the discovered hardware rather than a number chosen on
 //! a developer's machine. A mixed array is only as impatient as its slowest
@@ -64,7 +64,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkMedium};
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::SlotDisposition;
 use tairix_abi::raid_ipc::MemberOffer;
@@ -88,9 +88,9 @@ pub enum MemberStanding {
 /// What an offered device answered when the composer connected to it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ProbedDevice {
-    /// The class it declared, which sizes the patience its array is assembled
-    /// with.
-    pub class: BlkDeviceClass,
+    /// The medium it declared, which sizes the patience its array is
+    /// assembled with.
+    pub medium: Option<BlkMedium>,
     /// The geometry it reported.
     pub geometry: BlockGeometry,
 }
@@ -132,11 +132,11 @@ impl HeldMember {
         self.offer
     }
 
-    /// The device class the member declared when the composer connected to it,
+    /// The medium the member declared when the composer connected to it,
     /// which sizes the patience its array is assembled with.
     #[must_use]
-    pub const fn class(&self) -> BlkDeviceClass {
-        self.device.class
+    pub const fn medium(&self) -> Option<BlkMedium> {
+        self.device.medium
     }
 
     /// The geometry the device reported when the composer connected to it.
@@ -728,7 +728,7 @@ impl MemberRegistry {
     }
 
     /// The settle/backoff cadence for `array_uuid`: the recovery grace window
-    /// of the most patient class among its registered members, so an array of
+    /// of the registered member it must wait on longest, so an array of
     /// spinning disks is given the time one of them may legitimately take to
     /// spin up while an array of solid-state devices is not.
     ///
@@ -738,21 +738,16 @@ impl MemberRegistry {
     /// still runs from the array's first member, so a widening changes how
     /// long the array waits but never restarts the wait.
     fn array_cadence(&self, array_uuid: ArrayUuid) -> RetryCadence {
-        let mut widest: Option<BlkDeviceClass> = None;
-        for (member, meta) in self.members.iter().zip(&self.metadata) {
-            if meta
-                .as_ref()
-                .is_some_and(|superblock| superblock.array_uuid == array_uuid)
-            {
-                widest = Some(match widest {
-                    Some(held) => held.most_patient(member.class()),
-                    None => member.class(),
-                });
-            }
-        }
-        // An array with no registered member has no hardware to read a policy
-        // from, so it falls back to the unclassified default envelope.
-        RetryCadence::for_class(widest.unwrap_or_default())
+        let media = self
+            .members
+            .iter()
+            .zip(&self.metadata)
+            .filter(|(_, meta)| {
+                meta.as_ref()
+                    .is_some_and(|superblock| superblock.array_uuid == array_uuid)
+            })
+            .map(|(member, _)| member.medium());
+        RetryCadence::for_class(BlkDeviceClass::of(BlkMedium::of_members(media)))
     }
 
     /// Whether any registered member claims membership of `array_uuid`.

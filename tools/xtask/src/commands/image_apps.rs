@@ -22,11 +22,10 @@
 //! (`tairix_syshelp`), so a tampered file or a swapped capability id fails
 //! the verifier closed.
 //!
-//! Bundles are signed with the dedicated system-app seed
-//! ([`build_support::SYSTEM_APP_SIGNING_SEED`]) — a trust domain distinct
-//! from the driver-signing seed, so an app-signing authority can never
-//! admit a driver. This is host-only build glue; the production image
-//! stays Rust-only.
+//! Bundles are signed with the build key set's app-signing seed and certified
+//! by its publisher seed (`tools/signkeys`): a trust domain distinct from the
+//! driver-signing seed, so an app-signing authority can never admit a driver.
+//! This is host-only build glue; the production image stays Rust-only.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -44,10 +43,10 @@ use tairix_itest_harness::elf2rxe::elf_to_rxe;
 use tairix_itest_harness::pie::PieArch;
 use tairix_itest_harness::USER_IMAGE_BIAS;
 use tairix_mkimage::ImageProfile;
+use tairix_signkeys::{Domain, SigningKeys};
 
 use super::font_store;
 use super::host_fonts::HostFonts;
-use super::image_drivers::build_support;
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
 
@@ -113,9 +112,10 @@ pub fn build_app_bundles(
     let userland = ctx.workspace_root.join("userland");
     let discovered = discover_app_manifests(&userland)
         .map_err(|e| format!("image: app-manifest discovery: {e}"))?;
+    let keys = ctx.signing_keys().map_err(|e| format!("image: {e}"))?;
     discovered
         .iter()
-        .map(|app| build_bundle(ctx, arch, app, profile))
+        .map(|app| build_bundle(ctx, (arch, profile), app, &keys))
         .collect()
 }
 
@@ -304,7 +304,8 @@ fn fixture_store_files(
                         crate_dir.display()
                     )
                 })?;
-            let bundle = build_bundle(ctx, arch, &app, profile)?;
+            let keys = ctx.signing_keys().map_err(|e| format!("image: {e}"))?;
+            let bundle = build_bundle(ctx, (arch, profile), &app, &keys)?;
             let mut files = base.to_vec();
             files.extend(store_files(&[bundle]));
             Ok(files)
@@ -348,7 +349,8 @@ fn substituted_store_files(
                         crate_dir.display()
                     )
                 })?;
-            let bundle = build_bundle(ctx, arch, &app, profile)?;
+            let keys = ctx.signing_keys().map_err(|e| format!("image: {e}"))?;
+            let bundle = build_bundle(ctx, (arch, profile), &app, &keys)?;
             let replaced: Vec<Vec<u8>> = vec![
                 bundle.store_dir.as_bytes().to_vec(),
                 bundle.bundle_dir.as_bytes().to_vec(),
@@ -857,9 +859,9 @@ pub fn with_plant_refs<R>(
 /// the bundle's shipped contents (`Run` plus its `Help/` documents).
 fn build_bundle(
     ctx: &Context,
-    arch: PieArch,
+    (arch, profile): (PieArch, ImageProfile),
     app: &DiscoveredApp,
-    profile: ImageProfile,
+    keys: &SigningKeys,
 ) -> Result<BuiltAppBundle, String> {
     // Every program crate's `Run` binary is named `<package>-run`
     // (the kernel `build.rs` builds the same bins); the artefact is read
@@ -926,8 +928,8 @@ fn build_bundle(
         .collect();
 
     let composed = compose_signed_appinfo(
-        &build_support::SYSTEM_APP_SIGNING_SEED,
-        PublisherSource::Delegating(&build_support::SYSTEM_APP_PUBLISHER_SEED),
+        keys.seed(Domain::AppSigning),
+        PublisherSource::Delegating(keys.seed(Domain::AppPublisher)),
         &app.manifest,
         tairix_kernel_syscall::SYSCALL_TABLE_HASH,
         &digests,

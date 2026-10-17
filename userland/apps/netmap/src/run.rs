@@ -1034,6 +1034,7 @@ mod program {
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarMenu { .. }
                 | WindowEvent::TerrainChanged { .. }
+                | WindowEvent::AlertClosed { .. }
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }

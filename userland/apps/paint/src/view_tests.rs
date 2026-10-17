@@ -727,7 +727,7 @@ fn a_palette_picture_paints_in_its_entries_and_offers_them_as_wells() {
 }
 
 #[test]
-fn closing_with_changes_asks_first() {
+fn closing_with_changes_asks_the_host_to_ask_first() {
     let mut window = Window::white(10, 10);
     let outcome = window
         .view
@@ -738,26 +738,48 @@ fn closing_with_changes_asks_first() {
     let outcome = window
         .view
         .close_requested(&window.layout, &mut Region::new());
-    assert!(outcome.request.is_none());
-    assert!(window.view.asking());
-    window.key(Key::Named(NamedKey::Escape), plain());
-    assert!(!window.view.asking(), "Escape keeps the window open");
+    assert!(matches!(outcome.request, Some(Request::AskToClose)));
+    assert!(
+        !window.view.asking(),
+        "the question is the host's, not the window's"
+    );
 }
 
-/// A quit is never left waiting on a question it did not ask.
+/// A quit is never left waiting on a question that is not part of closing.
 #[test]
-fn closing_puts_the_save_question_in_place_of_another() {
+fn a_form_open_over_the_picture_does_not_hold_a_quit() {
     let mut window = Window::white(10, 10);
     window.act(Action::Tool(Tool::Pencil));
     window.drag((1, 1), (1, 1));
     window.act(Action::NewPicture);
     assert!(window.view.asking());
-    assert!(!window.view.asking_to_close());
     let outcome = window
         .view
         .close_requested(&window.layout, &mut Region::new());
-    assert!(outcome.request.is_none());
-    assert!(window.view.asking_to_close());
+    assert!(matches!(outcome.request, Some(Request::AskToClose)));
+    assert!(!window.view.asking_to_close());
+}
+
+/// Saving before the window closes puts the floating selection down first,
+/// as any save does, and a quit waits on that while it is under way.
+#[test]
+fn saving_before_closing_puts_the_floating_selection_down_first() {
+    let mut window = Window::white(60, 60);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((10, 10), (10, 10));
+    window.lift((8, 8), (12, 12), (20, 10));
+    let putting_down = window
+        .view
+        .save_then_close(&window.layout, &mut Region::new());
+    assert!(
+        window.view.asking_to_close(),
+        "a quit waits on the put-down"
+    );
+    let saving = window.run_worker(putting_down);
+    assert!(window.view.floating().is_none(), "down");
+    assert_eq!(window.colour(30, 20), [0, 0, 0, 255]);
+    assert!(matches!(saving.request, Some(Request::SaveThenClose)));
+    assert!(!window.view.asking_to_close());
 }
 
 #[test]

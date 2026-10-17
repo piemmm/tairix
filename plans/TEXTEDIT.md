@@ -20,6 +20,7 @@ address space and I/O off its loop.
 | TE10 | The editor engine: document, history, layout, highlighting cache, find, the view | done |
 | TE11 | The `Run` binary: the editor's own work and its syntax worker, over the shared document host | done |
 | TE12 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
+| TE14 | Any file opens, and an executable's code is listed in a sandboxed worker | done |
 | TE13 | A save that a crash cannot tear | blocked: no VFS primitive replaces a file's content atomically through a held descriptor |
 
 ## What it is
@@ -30,8 +31,8 @@ graphical editor for any file, text or not. The curses `edit` command is a
 separate program and stays one; neither links the other.
 
 Single instance, a window per document, resident on the icon bar. The manifest
-requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN` (the sandbox
-worker, and no other process) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
+requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN` (its two sandbox
+workers, and no other process) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
 **no filesystem capability**: every document reaches it through a
 user-mediated grant (Files, the desktop, the picker, a drop), and every write
 goes through the grant the user's act conferred.
@@ -82,6 +83,21 @@ text view shows.
   to show code other than the code that runs. A token is one caret stop.
 - **Hex.** Offset, sixteen bytes, and their ASCII, with a caret in either pane;
   typing a hex digit writes a nibble, overwrite by default, `Insert` toggles.
+- **Code.** An executable — an rxe, ELF64 or wasm container, recognised by
+  its opening magic alone (`tairix_binfmt::detect`) — opens read-only as a
+  listing of its code: a line naming the container, one per region, a note
+  when not every region or symbol made the summary, then each code region's
+  instructions with their encodings and symbolised branch targets
+  (`tairix_sandbox::listing`, the formatting `fstree` lists with). It is built
+  on an editor worker thread from the document's snapshot, and every byte it
+  lists is parsed by a decode worker of its own, so a hostile executable is
+  parsed in neither the editor nor the worker that colours text. Past
+  `MAX_LISTING_LINES`, or `LISTING_BUDGET_NS` of decoding, it stops and says
+  so. A refusal for want of memory or of a worker is asked again when Code is
+  shown afresh; any other stands until the document changes. The code is read
+  as the instruction set the user picks, else the one the container names,
+  else the system's own; picking the set already listed lists nothing again.
+  Showing Code closes the find bar, as nothing it does reaches code.
 - **Format** (orthogonal to the mode): the syntax colouring and validation
   applied in Text mode — plain text, HTML, XML/SVG, CSS, JavaScript, JSON,
   Markdown, Rust, C, Python, shell, TOML, and the TAIRiX settings formats.
@@ -100,8 +116,12 @@ on a primary press, and a refused menu is stated in the status band.
 
 ## Detection
 
-On load: a document whose head has a NUL, or invalid UTF-8 or control bytes
-past a fixed fraction, opens in Hex; otherwise Text. The format comes from a
+Every file is the editor's to open: it claims `text/plain` and
+`application/octet-stream`, the type every byte stream descends from and a name
+the registry does not know is (TE14), ranked behind any application that claims
+a type more narrowly. On load: a document whose head has a NUL, or invalid UTF-8 or control bytes
+past a fixed fraction, opens in Hex; otherwise Text. A head an executable container's magic opens in
+Code. The format comes from a
 settings store's fixed file name first (two different grammars share `.conf`,
 and the editor knows a document by its name only, never its path), then the
 extension (`lib/browse`'s media registry, the one extension table), then the

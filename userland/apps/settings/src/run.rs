@@ -1534,6 +1534,7 @@ mod program {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::Pinch { .. }

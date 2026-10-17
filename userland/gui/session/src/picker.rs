@@ -42,7 +42,7 @@ use alloc::vec::Vec;
 use tairix_abi::fs::OpenFlags;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::sound_cue::SoundEvent;
-use tairix_abi::window_ipc::{PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
+use tairix_abi::window_ipc::{AlertButtonRole, PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
 use tairix_abi::{Errno, FS_NAME_MAX};
 use tairix_browse::render::{
     entry_index_at, listing_damage, render_into, reveal_selection, scroll_pointer, scroll_wheel,
@@ -61,6 +61,7 @@ use tairix_icon::NoArtwork;
 use tairix_theme::{TextRole, Theme};
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Region, Surface, WindowId};
 
+use crate::choice::{question, Choice, ChoicePrompt};
 use crate::shell::DesktopShell;
 
 /// Fixed prefix of an open picker's title — on the taskbar and in the window
@@ -117,8 +118,8 @@ pub const PICKER_SHOWN: tairix_log::EventId = tairix_log::EventId(20_008);
 /// both sides.
 pub const PICKER_SHOWN_MESSAGE: &str = "file picker on screen";
 
-/// The save band's committing answer, and what it becomes while the user is
-/// asked whether to replace a file.
+/// The save band's committing answer, the answer to the question whether to
+/// replace a file, and the answer that declines either.
 const SAVE_LABEL: &str = "Save";
 const REPLACE_LABEL: &str = "Replace";
 const CANCEL_LABEL: &str = "Cancel";
@@ -275,10 +276,12 @@ struct Waiting {
 }
 
 /// A file the user is being asked whether to replace: the name the question
-/// shows, and the one path a yes replaces.
+/// shows, the one path a yes replaces, and the question, an alert holding the
+/// picker.
 struct Replacing {
     name: String,
     path: String,
+    question: ChoicePrompt,
 }
 
 /// A save pick's own controls, under the listing: the name to save as, and
@@ -305,7 +308,7 @@ impl SaveBand {
         Self {
             name,
             cancel: Button::labelled(CANCEL_LABEL),
-            save: save_button(false),
+            save: save_button(),
             suggested: String::from(suggested),
             endings,
             replacing: None,
@@ -337,37 +340,60 @@ impl SaveBand {
         }
     }
 
-    /// Ask whether to replace the file `name` at `path`.
-    fn ask_to_replace(&mut self, name: String, path: String) {
-        self.name
-            .set_message(Some(format!("“{name}” already exists. Replace it?")));
-        self.save = save_button(true);
-        self.replacing = Some(Replacing { name, path });
+    /// Ask, in an alert holding the picker `picker`, whether to replace the
+    /// file `name` at `path`. A question that cannot be put up refuses the
+    /// save in the band instead, so nothing is replaced unasked.
+    fn ask_to_replace(
+        &mut self,
+        (name, path): (String, String),
+        picker: WindowId,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        self.edit(None, shell, compositor);
+        let asked = question(
+            &format!("\u{201c}{name}\u{201d} already exists. Replace it?"),
+            "A file of that name is already in this folder. Replacing it \
+             overwrites what it holds.",
+            CANCEL_LABEL,
+            (REPLACE_LABEL, AlertButtonRole::Destructive),
+        )
+        .and_then(|spec| ChoicePrompt::open(&spec, Some(picker), shell, compositor));
+        match asked {
+            Some(question) => {
+                self.replacing = Some(Replacing {
+                    name,
+                    path,
+                    question,
+                });
+            }
+            None => self.name.set_message(Some(format!(
+                "Not saved: \u{201c}{name}\u{201d} already exists"
+            ))),
+        }
     }
 
-    /// Go back to editing the name, stating `message` if there is one.
-    fn edit(&mut self, message: Option<String>) {
+    /// Go back to editing the name, stating `message` if there is one: a
+    /// question about replacing a file comes down.
+    fn edit(
+        &mut self,
+        message: Option<String>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
         self.name.set_message(message);
-        if self.replacing.take().is_some() {
-            self.save = save_button(false);
+        if let Some(replacing) = self.replacing.take() {
+            replacing.question.close(shell, compositor);
         }
     }
 }
 
-/// The band's committing button: the ordinary answer, or the destructive one
-/// while a replacement is being asked about.
-fn save_button(replacing: bool) -> Button {
-    if replacing {
-        Button::new(
-            ButtonContent::Label(String::from(REPLACE_LABEL)),
-            ControlRole::Destructive,
-        )
-    } else {
-        Button::new(
-            ButtonContent::Label(String::from(SAVE_LABEL)),
-            ControlRole::Primary,
-        )
-    }
+/// The band's committing button.
+fn save_button() -> Button {
+    Button::new(
+        ButtonContent::Label(String::from(SAVE_LABEL)),
+        ControlRole::Primary,
+    )
 }
 
 /// A folder pick's own controls, under the listing: what choosing does, and
@@ -490,15 +516,99 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         self.active.as_ref().map(|active| active.wm)
     }
 
+    /// The question whether to replace a file, while it is up: an alert
+    /// holding the picker, which takes no input of its own until it is
+    /// answered.
+    #[must_use]
+    pub fn question_wm(&self) -> Option<WindowId> {
+        let replacing = self.active.as_ref()?.save.as_ref()?.replacing.as_ref()?;
+        Some(replacing.question.wm())
+    }
+
+    /// Paint what input changed in the replace question since the last paint.
+    pub fn paint_owed(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
+        if let Some(replacing) = self.replacing_mut() {
+            replacing.question.paint_owed(shell, compositor);
+        }
+    }
+
+    /// Start the question's arm delay at `now_ns`, the frame it is first on
+    /// screen.
+    pub fn stamp(&mut self, now_ns: u64) {
+        if let Some(replacing) = self.replacing_mut() {
+            replacing.question.stamp(now_ns);
+        }
+    }
+
+    /// A primary-button click at `local` in the question, at `now_ns`.
+    pub fn question_click(
+        &mut self,
+        local: Point,
+        now_ns: u64,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let replacing = self.replacing_mut()?;
+        let choice = replacing.question.click(local, now_ns, shell, compositor)?;
+        self.answer_replace(choice, shell, compositor)
+    }
+
+    /// One key press on the question, at `now_ns`: `Escape` declines.
+    pub fn question_key(
+        &mut self,
+        record: &KeyInput,
+        now_ns: u64,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let replacing = self.replacing_mut()?;
+        let choice = replacing.question.key(record, now_ns, shell, compositor)?;
+        self.answer_replace(choice, shell, compositor)
+    }
+
+    fn replacing_mut(&mut self) -> Option<&mut Replacing> {
+        self.active.as_mut()?.save.as_mut()?.replacing.as_mut()
+    }
+
+    /// The question was answered `choice`: the file is replaced, or the user
+    /// goes back to the name.
+    fn answer_replace(
+        &mut self,
+        choice: Choice,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let Replacing {
+            name,
+            path,
+            question,
+        } = self.active.as_mut()?.save.as_mut()?.replacing.take()?;
+        // The keyboard goes back to the picker with it.
+        question.close(shell, compositor);
+        match choice {
+            Choice::Accepted => self.request_at(name, path, PickAccess::Replace, shell, compositor),
+            Choice::Declined => None,
+        }
+    }
+
+    /// While the question is up the picker answers nothing: a press or a key
+    /// meant for it hands the keyboard to the question. Answers whether it
+    /// was up.
+    fn held_by_question(&self, shell: &mut DesktopShell, compositor: &mut Compositor) -> bool {
+        let Some(question) = self.question_wm() else {
+            return false;
+        };
+        shell.focus_alert_window(compositor, question);
+        true
+    }
+
     /// Apply one key press to the showing picker.
     ///
     /// An open: `Down`/`Up` move the selection, `Enter` descends into a
     /// selected directory or chooses a selected regular file, and
     /// `Backspace` climbs to the parent. A save: every key edits the name,
-    /// `Enter` saves. `Escape` cancels either — or, while the user is asked
-    /// whether to replace a file, goes back to the name. A refused
-    /// navigation changes nothing, and while an open is being answered only
-    /// `Escape` is heard.
+    /// `Enter` saves. `Escape` cancels either. A refused navigation changes
+    /// nothing, and while an open is being answered only `Escape` is heard.
     pub fn handle_key(
         &mut self,
         record: &KeyInput,
@@ -508,6 +618,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let KeyInput::Pressed { key, .. } = record else {
             return None;
         };
+        if self.held_by_question(shell, compositor) {
+            return None;
+        }
         let (saving, folder, waiting) = self.active.as_ref().map(|active| {
             (
                 active.save.is_some(),
@@ -590,7 +703,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<PickStep> {
-        if self.active.as_ref()?.waiting.is_some() {
+        if self.active.as_ref()?.waiting.is_some() || self.held_by_question(shell, compositor) {
             return None;
         }
         let press = InputEvent::PointerPressed {
@@ -664,6 +777,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
+        if self.question_wm().is_some() {
+            return true;
+        }
         let Some(active) = self.active.as_mut() else {
             return false;
         };
@@ -700,6 +816,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
+        if self.question_wm().is_some() {
+            return false;
+        }
         let Some(active) = self.active.as_mut() else {
             return false;
         };
@@ -719,6 +838,22 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         }
         repaint(active, &moved, shell, compositor);
         true
+    }
+
+    /// Redraw the showing pick, and its question, in the look and at the
+    /// scale now in use: a session window keeps the pixels it was painted in.
+    pub fn restyle(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        redraw(active, shell, compositor);
+        if let Some(replacing) = active
+            .save
+            .as_mut()
+            .and_then(|band| band.replacing.as_mut())
+        {
+            replacing.question.repaint(shell, compositor);
+        }
     }
 
     /// Ask the source again for a navigation whose listing had not arrived,
@@ -890,18 +1025,19 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 // replace the file the user can see the question is about.
                 let shown = shown_path(active.browser.components(), &waiting.name);
                 if shown.as_deref() == Some(waiting.path.as_str()) {
-                    band.ask_to_replace(waiting.name, waiting.path);
+                    band.ask_to_replace((waiting.name, waiting.path), active.wm, shell, compositor);
                 } else {
-                    band.edit(Some(format!(
-                        "Not saved: “{}” already exists",
-                        waiting.name
-                    )));
+                    band.edit(
+                        Some(format!("Not saved: “{}” already exists", waiting.name)),
+                        shell,
+                        compositor,
+                    );
                 }
                 redraw_band(active, shell, compositor);
                 None
             }
             Err(err) => {
-                band.edit(Some(format!("Not saved: {err}")));
+                band.edit(Some(format!("Not saved: {err}")), shell, compositor);
                 redraw_band(active, shell, compositor);
                 None
             }
@@ -945,16 +1081,10 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let action = band.name.on_key(key, modifiers, field, &mut drew);
         match action {
             Some(TextAction::Submitted) => return self.submit(shell, compositor),
-            Some(TextAction::Cancelled) => {
-                if band.replacing.is_none() {
-                    return self.cancel(shell, compositor);
-                }
-                band.edit(None);
-                redraw_band(active, shell, compositor);
-            }
-            // A different name is not the one the question was about.
+            Some(TextAction::Cancelled) => return self.cancel(shell, compositor),
+            // A refusal of the name before is not one of this name.
             Some(TextAction::Edited) => {
-                band.edit(None);
+                band.edit(None, shell, compositor);
                 redraw_band(active, shell, compositor);
             }
             None if !drew.is_empty() => repaint(active, &drew, shell, compositor),
@@ -988,12 +1118,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             return self.submit(shell, compositor);
         }
         if layout.cancel.contains(local) {
-            if band.replacing.is_none() {
-                return self.cancel(shell, compositor);
-            }
-            band.edit(None);
-            redraw_band(active, shell, compositor);
-            return None;
+            return self.cancel(shell, compositor);
         }
         if layout.field.contains(local) {
             let mut drew = damage::sink();
@@ -1038,7 +1163,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let name = String::from(entry.name());
         let band = active.save.as_mut()?;
         band.name.set_text(&name);
-        band.edit(None);
+        band.edit(None, shell, compositor);
         redraw_band(active, shell, compositor);
         None
     }
@@ -1052,9 +1177,6 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     ) -> Option<PickStep> {
         let active = self.active.as_mut()?;
         let band = active.save.as_mut()?;
-        if let Some(Replacing { name, path }) = band.replacing.take() {
-            return self.request_at(name, path, PickAccess::Replace, shell, compositor);
-        }
         let typed = band.name.text().to_string();
         // A name naming a folder goes into it, whatever a file must end in.
         let folder = active
@@ -1071,7 +1193,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         let name = match held {
             Ok(name) => name,
             Err(refusal) => {
-                band.edit(Some(refusal));
+                band.edit(Some(refusal), shell, compositor);
                 redraw_band(active, shell, compositor);
                 return None;
             }
@@ -1092,7 +1214,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         match kind {
             EntryKind::File => {
                 let path = shown_path(active.browser.components(), &name)?;
-                band.ask_to_replace(name, path);
+                band.ask_to_replace((name, path), active.wm, shell, compositor);
                 redraw_band(active, shell, compositor);
                 None
             }
@@ -1100,7 +1222,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             _ if kind.is_directory() => {
                 let suggested = band.suggested.clone();
                 band.name.set_text(&suggested);
-                band.edit(None);
+                band.edit(None, shell, compositor);
                 self.navigate(shell, compositor, move |browser| {
                     match browser.open_index(index) {
                         Ok(()) => NavOutcome::Redraw,
@@ -1114,7 +1236,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 } else {
                     "a shortcut"
                 };
-                band.edit(Some(format!("“{name}” is {what}; choose another name")));
+                band.edit(
+                    Some(format!("“{name}” is {what}; choose another name")),
+                    shell,
+                    compositor,
+                );
                 redraw_band(active, shell, compositor);
                 None
             }
@@ -1169,7 +1295,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         self.serial += 1;
         let serial = self.serial;
         if let Some(band) = active.save.as_mut() {
-            band.edit(Some(String::from("Saving…")));
+            band.edit(Some(String::from("Saving…")), shell, compositor);
             redraw_band(active, shell, compositor);
         }
         if let Some(band) = active.folder.as_mut() {
@@ -1227,7 +1353,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     // not one about anything showing now.
                     if let Some(band) = active.save.as_mut().filter(|band| band.replacing.is_some())
                     {
-                        band.edit(None);
+                        band.edit(None, shell, compositor);
                         redraw_band(active, shell, compositor);
                     }
                     // A refusal stated for the folder left behind is not one
@@ -1253,7 +1379,10 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<u64> {
-        let active = self.active.take()?;
+        let mut active = self.active.take()?;
+        if let Some(band) = active.save.as_mut() {
+            band.edit(None, shell, compositor);
+        }
         let _ = shell.close_window(compositor, active.wm);
         match active.requester {
             Requester::Window(for_window) => Some(for_window),
@@ -1488,11 +1617,10 @@ fn band_layout(scale: Scale, theme: &Theme) -> BandLayout {
         .saturating_add(message);
     let top = listing.bottom();
     let band = Rect::new(0, top, listing.width, height);
-    // The committing answer is as wide as its widest label, so asking to
-    // replace moves nothing, and a folder band lays out as a save's does.
-    let save_w = save_button(false)
+    // The committing answer is as wide as its widest label, so a folder band
+    // lays out as a save's does.
+    let save_w = save_button()
         .measured_width(scale, theme)
-        .max(save_button(true).measured_width(scale, theme))
         .max(FolderBand::new().open.measured_width(scale, theme));
     let cancel_w = Button::labelled(CANCEL_LABEL).measured_width(scale, theme);
     let row_top = top.saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));

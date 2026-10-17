@@ -40,7 +40,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::timing::Delay;
@@ -1052,8 +1052,8 @@ impl<H: SdhciHost> Drop for Emmc2<H> {
 impl<H: SdhciHost> Block for Emmc2<H> {
     /// An SD card in a slot: flash-quick when healthy, but pullable at any
     /// moment, so it is served the removable envelope.
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::Removable
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(BlkMedium::SdCard)
     }
 
     /// The second external mass-media controller, as the silicon names it.

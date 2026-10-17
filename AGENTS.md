@@ -798,6 +798,7 @@ tairix/
 ├── tools/
 │   ├── xtask/           # Build orchestration (cargo xtask ...).
 │   ├── mkimage/         # Image builders per platform.
+│   ├── signkeys/        # The build's secret signing key set, kept outside the tree.
 │   ├── syshelp/         # Build-discovered shipped /System payload (bundle
 │   │                    #   Help/Resources trees, desktop graphics), the
 │   │                    #   /System volume's sizing, and the boot-disk layout.
@@ -1598,7 +1599,7 @@ You are not exempt from any rule above. In addition:
     | App bundles, command apps, help, command resolution | `plans/APPS.md`; `plans/UNIVERSAL.md` (multi-arch/Wasm distribution) |
     | Which bundles are installed: the shared program-store walk (`lib/appstore`), its roots in resolution precedence and its containment bounds, and the icon bar's kernel-attested application identity | `plans/NEW-TASKBAR.md` |
     | App settings, secrets, blobs and temporary files: the per-app store keyed on bundle id, the publisher pin, the `key = value` format engine, the published scope one app reads another's values through, the sealed scope, descriptor-backed blobs and per-boot scratch | `plans/APPDATA.md` |
-    | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
+    | Default desktop apps going live: app windows, live app data channels, the file picker, and the alerts — the desktop-drawn error, warning and question windows every application raises, their 4:3 layout, owner modality and earned focus | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | The file manager's interaction and icons: marquee and modifier selection, drag-and-drop between windows and onto the desktop with its copy/move cursors, the New ▸ submenu, one window per folder and the activation that raises it, folder content cards, image thumbnails and the store that keeps them per content generation, the item-name and title type, two-line names and in-place rename, the compact tile and the ground between tiles, the `UserFiles` home tree | `plans/FILES-INTERACTION.md` |
     | The picture and document viewer (`view.app`): the formats it claims, the page-source seam every document is reached through, sequence/animation decode, the sandboxed document decode, and the shared app-side window shell | `plans/VIEW.md` |
@@ -1623,7 +1624,7 @@ You are not exempt from any rule above. In addition:
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
-    | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract | `plans/NEW-MENUS.md` |
+    | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract, artwork on rows, the *Info* sheet | `plans/NEW-MENUS.md` |
     | Tooltips: what an app declares (a window-local region and one line) versus what the seat owns (the dwell, the placement, the pixels, the lifetime), and the input-transparent overlay a plate is drawn in | `plans/TOOLTIPS.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Reaching a GPU for *render and compute* work: the device-neutral `lib/gpu` seam, the memory/submission/isolation model, the virtio-gpu, Venus and V3D backends, presentation, and why the object model is Vulkan's rather than OpenGL's | `plans/GPU.md` |
@@ -2730,8 +2731,10 @@ on untrusted input. It is as non-negotiable as §2.
 ### 19.3 Supply-chain integrity
 
 - **Reproducible builds.** Every image produced by `tools/mkimage`
-  (§12) must be bit-reproducible given the pinned toolchain and the
-  locked dependency tree. `cargo xtask build --reproducible` verifies
+  (§12) must be bit-reproducible given the pinned toolchain, the
+  locked dependency tree and the build's signing key set. The key set
+  is a secret input, never part of the source: whoever holds it can
+  sign what every kernel built from it admits. `cargo xtask build --reproducible` verifies
   this on every release tag and is part of `cargo xtask ci` (§7).
 - **SBOM.** Every image embeds a CycloneDX SBOM listing every
   workspace and external crate by version, source URL, and source

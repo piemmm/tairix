@@ -22,7 +22,7 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkOp, BlkOutcome, BlkRequest,
+    decode_outcome, BlkCompletion, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome, BlkRequest,
     BlkStatus, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
@@ -75,17 +75,17 @@ pub struct BlkClient {
     geometry: BlockGeometry,
     /// Whether the device reported itself write-protected.
     read_only: bool,
-    /// The device's declared class, as reported at
-    /// [`connect`](Self::connect). Kept so a consumer layered over this
-    /// client (a RAID composition, a cache) reports the real hardware's
-    /// envelope rather than hiding it behind the unclassified default, and so
-    /// the mount this device backs can report the medium it is really on.
+    /// The device's declared medium, as reported at
+    /// [`connect`](Self::connect). Kept so a consumer layered over this client
+    /// (a RAID composition, a cache) reports the real hardware rather than an
+    /// unknown, and so the mount this device backs can report the medium it is
+    /// really on.
     ///
-    /// `None` is a device that declared a class word this build does not
-    /// recognise. It stays distinct from every named class so the mount table
-    /// says "unknown" instead of asserting a medium nobody declared; for
-    /// patience it is served the bounded unclassified envelope.
-    declared_class: Option<BlkDeviceClass>,
+    /// `None` is a device that declared none this build recognises. It stays
+    /// distinct from every named medium so the mount table says "unknown"
+    /// instead of asserting one nobody declared; for patience it is served the
+    /// bounded unclassified envelope.
+    declared_medium: Option<BlkMedium>,
     /// This device's fold: its identity and name, the availability overlay,
     /// every counter the three per-volume queries report, and the per-device
     /// [`IoBudget`](tairix_abi::blkio::IoBudget) this client serves it with.
@@ -161,7 +161,7 @@ impl BlkClient {
             // envelope: the geometry query below is itself deadlined, so an
             // endpoint that never answers fails closed promptly rather than
             // being granted a spinning disk's patience on nothing but hope.
-            declared_class: None,
+            declared_medium: None,
             meter: DeviceIoMeter::new(endpoint_id, audit),
         };
         let completion = client.transfer(BlkRequest {
@@ -182,18 +182,20 @@ impl BlkClient {
             block_count: completion.block_count,
         };
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
-        // Adopt the device's declared class for every subsequent request, so
+        // Adopt the device's declared medium for every subsequent request, so
         // this mount's deadline, reissue count, and the driver's grace window
         // all derive from one policy for this device rather than a single
         // assumed envelope. An unrecognised claim is kept as an explicit
         // unknown and served the bounded unclassified envelope, so it cannot
         // buy patience and cannot be reported as a medium it never declared.
-        client.declared_class = completion.class;
+        client.declared_medium = completion.medium;
         // The device has now answered for itself, so the fold adopts the
-        // envelope its class earns and the name its driver declares. The name
+        // envelope its medium earns and the name its driver declares. The name
         // is validated on the way in, so an untrusted driver cannot reach a
         // reader's screen through it.
-        client.meter.adopt_device(completion.class, completion.name);
+        client
+            .meter
+            .adopt_device(completion.medium, completion.name);
         Ok(client)
     }
 
@@ -201,19 +203,6 @@ impl BlkClient {
     #[must_use]
     pub fn read_only(&self) -> bool {
         self.read_only
-    }
-
-    /// The storage medium the device declared at connect, or `None` when it
-    /// declared a class word this build does not recognise.
-    ///
-    /// This is what the device *said* it is, for a consumer that reports the
-    /// medium a volume lives on. It is deliberately not the class the client
-    /// serves the device as ([`Block::device_class`]), which collapses an
-    /// unknown onto a bounded envelope for patience: reporting that collapse
-    /// would assert a medium nobody declared.
-    #[must_use]
-    pub const fn declared_class(&self) -> Option<BlkDeviceClass> {
-        self.declared_class
     }
 
     /// The shared live-reading handles for this device — the serving endpoint
@@ -458,14 +447,6 @@ impl BlkClient {
 }
 
 impl Block for BlkClient {
-    /// The class this client *serves* the device as, from which its
-    /// [`IoBudget`](tairix_abi::blkio::IoBudget) is derived. Reported rather
-    /// than defaulted so a composition layered over this client (a RAID
-    /// array, a cache) inherits the real hardware's envelope; a device whose
-    /// declared class word this build does not recognise is served the
-    /// bounded unclassified envelope.
-    /// What the device *said* it is stays on
-    /// [`declared_class`](BlkClient::declared_class).
     /// What the served device last said it could promise, reflected from each
     /// completion's health status. A composed backing — an array short of
     /// redundancy, a device inside its recovery grace window — reaches a
@@ -488,8 +469,12 @@ impl Block for BlkClient {
         self.meter.device_name()
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::served_as(self.declared_class)
+    /// The medium the device declared, so a composition layered over this
+    /// client inherits the real hardware: its patience, and the drive a reader
+    /// is shown. One it declared none of stays unknown and is served the
+    /// bounded unclassified envelope.
+    fn medium(&self) -> Option<BlkMedium> {
+        self.declared_medium
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -567,7 +552,10 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use tairix_abi::blkio::{encode_error_completion, BlkQueueCounters, BLK_FLAG_READ_ONLY};
+    use tairix_abi::blkio::{
+        encode_error_completion, BlkDeviceClass, BlkQueueCounters, BLK_FLAG_READ_ONLY,
+    };
+    use tairix_abi::driver::block::BlockClass;
     use tairix_kernel_ipc::{CallEndpointLimits, RecvCall};
     use tairix_log::Level;
 
@@ -597,7 +585,8 @@ mod tests {
     /// trait default nor the pre-connect placeholder, so a test asserting
     /// the client's budget proves it adopted the *device's* class rather
     /// than keeping an assumed envelope.
-    const MEM_DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
+    const MEM_DEVICE_MEDIUM: BlkMedium = BlkMedium::UsbFlash;
+    const MEM_DEVICE_CLASS: BlkDeviceClass = MEM_DEVICE_MEDIUM.class();
     /// The name the scripted double declares, so a test asserting the
     /// client's reported name proves it adopted the *device's* rather than
     /// keeping the unnamed placeholder.
@@ -606,7 +595,8 @@ mod tests {
     const MEM_DEVICE_NAME: &str = "mem-blk";
     /// The class the scripted double declares: a spinning disk, whose
     /// reissue budget the bounded-reissue tests are written against.
-    const SCRIPTED_DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Rotational;
+    const SCRIPTED_DEVICE_MEDIUM: BlkMedium = BlkMedium::HardDisk;
+    const SCRIPTED_DEVICE_CLASS: BlkDeviceClass = SCRIPTED_DEVICE_MEDIUM.class();
 
     /// Mint distinct endpoint ids per test so the global registry never
     /// clashes across the parallel test threads.
@@ -673,9 +663,9 @@ mod tests {
         flushes: usize,
         read_only: bool,
         reported_block_size: u32,
-        /// `None` declares a class word this build does not recognise, which
-        /// is how a device speaking an unknown class is simulated.
-        reported_class: Option<BlkDeviceClass>,
+        /// `None` declares a medium word this build does not recognise, which
+        /// is how a device speaking an unknown medium is simulated.
+        reported_medium: Option<BlkMedium>,
     }
 
     impl MemDevice {
@@ -685,7 +675,7 @@ mod tests {
                 flushes: 0,
                 read_only: false,
                 reported_block_size: BLOCK_SIZE_U32,
-                reported_class: Some(MEM_DEVICE_CLASS),
+                reported_medium: Some(MEM_DEVICE_MEDIUM),
             }
         }
 
@@ -729,7 +719,7 @@ mod tests {
                                 } else {
                                     0
                                 },
-                                class: device.reported_class,
+                                medium: device.reported_medium,
                             }
                             .encode(&mut reply)
                             .unwrap(),
@@ -791,21 +781,21 @@ mod tests {
         blocks: u64,
         requests: usize,
     ) -> (BlkClient, StdArc<Mutex<MemDevice>>, thread::JoinHandle<()>) {
-        connected_declaring(blocks, requests, Some(MEM_DEVICE_CLASS))
+        connected_declaring(blocks, requests, Some(MEM_DEVICE_MEDIUM))
     }
 
-    /// As [`connected`], with the device declaring `class` in its geometry
-    /// reply — `None` being a class word this build does not recognise.
+    /// As [`connected`], with the device declaring `medium` in its geometry
+    /// reply — `None` being a medium word this build does not recognise.
     fn connected_declaring(
         blocks: u64,
         requests: usize,
-        class: Option<BlkDeviceClass>,
+        medium: Option<BlkMedium>,
     ) -> (BlkClient, StdArc<Mutex<MemDevice>>, thread::JoinHandle<()>) {
         let id = fresh_endpoint_id();
         let endpoint = register_endpoint(id);
         let window = leak_window();
         let mut mem = MemDevice::new(blocks);
-        mem.reported_class = class;
+        mem.reported_medium = medium;
         let device = StdArc::new(Mutex::new(mem));
         let server = serve(
             endpoint,
@@ -827,7 +817,7 @@ mod tests {
         // every device.
         let (client, _device, server) = connected(64, 1);
         assert_eq!(client.device_class(), MEM_DEVICE_CLASS);
-        assert_eq!(client.declared_class(), Some(MEM_DEVICE_CLASS));
+        assert_eq!(client.medium(), Some(MEM_DEVICE_MEDIUM));
         assert_eq!(client.meter.budget(), MEM_DEVICE_CLASS.budget());
         assert_ne!(MEM_DEVICE_CLASS, BlkDeviceClass::Virtual);
         assert_ne!(
@@ -846,7 +836,7 @@ mod tests {
         let (client, _device, server) = connected_declaring(64, 1, None);
         assert_eq!(client.meter.budget(), BlkDeviceClass::Virtual.budget());
         assert_eq!(client.device_class(), BlkDeviceClass::Virtual);
-        assert_eq!(client.declared_class(), None);
+        assert_eq!(client.medium(), None);
         server.join().unwrap();
     }
 
@@ -1106,7 +1096,7 @@ mod tests {
                             block_size: BLOCK_SIZE_U32,
                             block_count: 8,
                             flags: 0,
-                            class: Some(SCRIPTED_DEVICE_CLASS),
+                            medium: Some(SCRIPTED_DEVICE_MEDIUM),
                             name: BlkDeviceName::new(SCRIPTED_DEVICE_NAME),
                         }
                         .encode(&mut reply)

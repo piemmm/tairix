@@ -161,18 +161,22 @@ equal counts, which a single majority counter would miss entirely.
 
 ### Addresses are load-relative, or absent
 
-`pc` and every `bt` frame are offsets into the program's own PIE load base,
-carrying the `+0x` marker that distinguishes them from absolute addresses.
+`pc` and every `bt` frame are offsets from the program's load base — where its
+lowest loadable segment was placed — carrying the `+0x` marker that
+distinguishes them from absolute addresses.
 When the load base is unknown the fields are **omitted entirely** rather than
 emitted absolute, so the record is an offline `addr2line` input and never an
 ASLR oracle. The record carries no register values, no secret, and no
 capability token; a privileged debugger's full register dump remains the
 [crash record](./fault-diagnostics.md)'s business.
 
-Resolve a frame offline against the unstripped program binary:
+Resolve a frame offline against the unstripped program binary by adding the
+link address of its lowest loadable segment, the first `LOAD` that
+`readelf -lW` lists:
 
 ```sh
-addr2line -e Run -f -C -i 0x4a1c
+base=$(readelf -lW Run | awk '$1 == "LOAD" { print $3; exit }')
+addr2line -e Run -f -C -i "$(printf '%#x' $((base + 0x4a1c)))"
 ```
 
 ### One report per pause

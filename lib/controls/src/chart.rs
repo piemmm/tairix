@@ -35,6 +35,7 @@
 //! is drawn by the one shared stroke path in `lib/raster` — the same primitive
 //! a window-furniture diagonal uses — so no second stroke geometry exists here.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
@@ -268,6 +269,115 @@ fn bounded(samples: impl IntoIterator<Item = u16>) -> Vec<u16> {
         buf.drain(..drop);
     }
     buf
+}
+
+/// The least full scale a rate trace is drawn against, in units per second:
+/// below it, one metadata write on an idle device would fill the box and read
+/// as a busy one.
+pub const RATE_TRACE_FLOOR: u64 = 64 * 1024;
+
+/// A duplex rate's recent history — reads against writes, receive against
+/// send — in units per second, oldest first, holding as many points as a
+/// [`Chart`] plots.
+///
+/// Held unscaled: what a point plots at follows the window's peak, which every
+/// new point may move, so the scale is taken when the [`trace`](Self::trace)
+/// is.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DuplexRates {
+    primary: VecDeque<u64>,
+    opposing: VecDeque<u64>,
+}
+
+impl DuplexRates {
+    /// No readings yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            primary: VecDeque::new(),
+            opposing: VecDeque::new(),
+        }
+    }
+
+    /// Record one interval's rates, both directions measured over it, or
+    /// `None` for an interval that measured nothing, which adds no point: a
+    /// nought would plot as a measured idle. Taking the pair keeps the two
+    /// histories in step, point for point.
+    pub fn record(&mut self, rates: Option<(u64, u64)>) {
+        let Some((primary, opposing)) = rates else {
+            return;
+        };
+        for (history, rate) in [(&mut self.primary, primary), (&mut self.opposing, opposing)] {
+            if history.len() >= MAX_CHART_SAMPLES {
+                history.pop_front();
+            }
+            history.push_back(rate);
+        }
+    }
+
+    /// Whether neither direction holds a reading.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_empty() && self.opposing.is_empty()
+    }
+
+    /// The history drawn against the least power of two at or above both its
+    /// peak and [`RATE_TRACE_FLOOR`]: a rate has no ceiling of its own, and any
+    /// fixed one either flattens ordinary traffic to nothing or clips a fast
+    /// device's, so whatever the window holds stays visible and its busiest
+    /// point reaches at least half the box. Both directions share the scale,
+    /// so the halves of a duplex trace compare by eye.
+    #[must_use]
+    pub fn trace(&self) -> RateTrace {
+        if self.is_empty() {
+            return RateTrace::default();
+        }
+        let peak = self
+            .primary
+            .iter()
+            .chain(&self.opposing)
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let full_scale = peak
+            .max(RATE_TRACE_FLOOR)
+            .checked_next_power_of_two()
+            .unwrap_or(u64::MAX);
+        let scaled = |rates: &VecDeque<u64>| {
+            rates
+                .iter()
+                .map(|&rate| {
+                    let permille = u128::from(rate) * u128::from(FULL) / u128::from(full_scale);
+                    u16::try_from(permille.min(u128::from(FULL))).unwrap_or(FULL)
+                })
+                .collect()
+        };
+        RateTrace {
+            primary: scaled(&self.primary),
+            opposing: scaled(&self.opposing),
+            full_scale,
+        }
+    }
+}
+
+/// A [`DuplexRates`] history scaled for plotting.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RateTrace {
+    /// The primary direction's points, permille of `full_scale`, oldest first.
+    pub primary: Vec<u16>,
+    /// The opposing direction's points, likewise.
+    pub opposing: Vec<u16>,
+    /// The rate the box's top edge stands for; nought for an empty trace,
+    /// which states no scale.
+    pub full_scale: u64,
+}
+
+impl RateTrace {
+    /// Whether neither direction holds a point, so the trace draws nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_empty() && self.opposing.is_empty()
+    }
 }
 
 /// One series' own half of a chart: the pixel box its readings map into, and

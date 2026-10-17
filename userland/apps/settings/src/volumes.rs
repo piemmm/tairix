@@ -18,7 +18,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_controls::{
     stack, FieldControl, FieldGroup, FieldLayout, FieldRow, MeterValue, MetricInstrument,
@@ -86,7 +86,7 @@ pub struct VolumeReading {
     source: String,
     /// The medium it sits on, or `None` where the mount has no block
     /// backing or the table did not classify it.
-    medium: Option<BlkDeviceClass>,
+    medium: Option<BlkMedium>,
     /// Whether it is still answering.
     availability: MountAvailability,
     /// What it holds, or `None` where the format tracks no fixed capacity.
@@ -234,7 +234,7 @@ impl VolumeCard {
 /// The share is of the whole medium, which is what a capacity bar means — a
 /// `df`-style `Use%` asks a different question and divides by what a caller
 /// may allocate, so the two are never each other's default.
-fn capacity_tile(bytes: VolumeBytes, medium: Option<BlkDeviceClass>) -> MetricTile {
+fn capacity_tile(bytes: VolumeBytes, medium: Option<BlkMedium>) -> MetricTile {
     let mut used = [0u8; SIZE_TEXT_MAX];
     let mut total = [0u8; SIZE_TEXT_MAX];
     let mut available = [0u8; SIZE_TEXT_MAX];

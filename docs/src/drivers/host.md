@@ -162,13 +162,12 @@ signed manifests and the trust anchor are produced at build time by
 `build.rs` (`emit_signed_driver_manifests`): each `DriverManifest` is `kind =
 InKernel`, stamped with the kernel's `SYSCALL_TABLE_HASH`, requests
 `CAP_DRV_LOAD`, carries the driver crate's own `BIND_KEYS`, and is
-Ed25519-signed with the build's deterministic driver-signing key
-(`KERNEL_DRIVER_SIGNING_SEED`); the matching public key is embedded as the
-kernel's sole driver trust anchor. The seed has a single home in
-`kernel/tairix-kernel/src/build_support.rs`, so an image build that lays a
-kernel-trusted bundle into the driver store signs from the same definition
-(`AGENTS.md` §2.2). Secrecy of the seed buys nothing (`AGENTS.md` §19.3): it
-is committed, and the signatures stay bit-reproducible. Every other driver —
+Ed25519-signed with the driver-signing seed of the build's secret key set
+(`tools/signkeys`); the matching public key is embedded as the kernel's sole
+driver trust anchor. The image build signs every kernel-trusted driver bundle
+from the same key set. The key set lives outside the source tree, readable by
+its owner alone, so only whoever holds it can sign a driver a kernel built
+from it admits, and a build without one fails. Every other driver —
 the Pi 4's PCIe, VL805 and xHCI drivers among them — is a signed
 `/System/Drivers/` bundle the device manager autoloads into user space.
 

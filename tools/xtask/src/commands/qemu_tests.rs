@@ -13561,6 +13561,16 @@ const APPBAR_BARE_BAR_DUMP: &str = "bare-bar";
 const APPBAR_ONE_WINDOW_DUMP: &str = "one-window";
 const APPBAR_TWO_WINDOWS_DUMP: &str = "two-windows";
 
+/// The process a modelled icon-bar slot stands for. The guest's ids are the
+/// kernel's to mint, so any id serves that is distinct per slot, as each
+/// process's is.
+fn modelled_owner(slot: usize) -> tairix_abi::ProcId {
+    let index = u64::try_from(slot).unwrap_or(u64::MAX).to_le_bytes();
+    let mut raw = [0u8; tairix_abi::PROC_ID_LEN];
+    raw[..index.len()].copy_from_slice(&index);
+    tairix_abi::ProcId::from_raw(raw)
+}
+
 /// The screen rectangle of the bar's application slot at `index`,
 /// reconstructed through the production taskbar's own layout code.
 ///
@@ -13584,8 +13594,9 @@ fn appbar_slot_rect(
     );
     taskbar.set_apps(
         (0..=index)
-            .map(|_| {
+            .map(|slot| {
                 AppSlot::new(
+                    modelled_owner(slot),
                     tairix_test_appbar_qemu_aarch64::BAR_APP_NAME,
                     tairix_icon::IconKind::AppBundle,
                 )
@@ -15652,13 +15663,13 @@ fn resized_desktop_covered(
     resized: ResizedDesktop,
     output: (u32, u32),
 ) -> Vec<tairix_geometry::Rect> {
-    use tairix_desktop_session::resolution::{WIN_HEIGHT, WIN_WIDTH};
-
+    let theme = restyled_theme();
     let screen = tairix_geometry::Rect::new(0, 0, resized.size.0, resized.size.1);
-    let origin = tairix_desktop_session::shell::prompt_origin(screen, (WIN_WIDTH, WIN_HEIGHT));
-    let prompt = tairix_geometry::Rect::new(origin.x, origin.y, WIN_WIDTH, WIN_HEIGHT);
+    let prompt =
+        tairix_desktop_session::resolution::prompt_rect(screen, RECONSTRUCTION_SCALE, &theme)
+            .unwrap_or(screen);
     chrome_regions_on(
-        &restyled_theme(),
+        &theme,
         resized.size,
         resized.pointer,
         &[resized.window, prompt],
@@ -15717,6 +15728,7 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     // exercise the hover the gate is about.
     shell.session_mut().taskbar_mut().set_apps(
         vec![AppSlot::new(
+            modelled_owner(0),
             FILES_BAR_APP_NAME,
             tairix_icon::IconKind::AppBundle,
         )],
@@ -15956,11 +15968,21 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
     let declared = tairix_terminal::appbar::declaration(0)
         .map_err(|err| format!("icon-bar script: the terminal's declaration is invalid: {err}"))?;
     let mut seated = (0..APPBAR_LAUNCHED_SLOT)
-        .map(|_| AppSlot::new(FILES_LABEL, tairix_icon::IconKind::AppBundle))
+        .map(|slot| {
+            AppSlot::new(
+                modelled_owner(slot),
+                FILES_LABEL,
+                tairix_icon::IconKind::AppBundle,
+            )
+        })
         .collect::<Vec<_>>();
     seated.push(
-        AppSlot::new(BAR_APP_NAME, tairix_icon::IconKind::AppBundle)
-            .with_declaration(declared.menu, declared.click),
+        AppSlot::new(
+            modelled_owner(APPBAR_LAUNCHED_SLOT),
+            BAR_APP_NAME,
+            tairix_icon::IconKind::AppBundle,
+        )
+        .with_declaration(declared.menu, declared.click),
     );
     shell.session_mut().taskbar_mut().set_apps(seated, scale);
 
@@ -16511,16 +16533,21 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     let declared = tairix_window::info_and_quit(0, AppBarClick::RaiseOrOpen)
         .map_err(|err| format!("netmap script: the map's declaration is invalid: {err:?}"))?;
     let mut seated = (0..APPBAR_LAUNCHED_SLOT)
-        .map(|_| {
+        .map(|slot| {
             AppSlot::new(
+                modelled_owner(slot),
                 tairix_desktop_session::FILES_LABEL,
                 tairix_icon::IconKind::AppBundle,
             )
         })
         .collect::<Vec<_>>();
     seated.push(
-        AppSlot::new(NETMAP_APP_NAME, tairix_icon::IconKind::AppBundle)
-            .with_declaration(declared.menu, declared.click),
+        AppSlot::new(
+            modelled_owner(APPBAR_LAUNCHED_SLOT),
+            NETMAP_APP_NAME,
+            tairix_icon::IconKind::AppBundle,
+        )
+        .with_declaration(declared.menu, declared.click),
     );
     shell.session_mut().taskbar_mut().set_apps(seated, scale);
     let slot = rect_centre(
@@ -17346,6 +17373,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // the session resolves from the bundle's own signed manifest.
     shell.session_mut().taskbar_mut().set_apps(
         vec![tairix_taskbar::AppSlot::new(
+            modelled_owner(0),
             FILES_BAR_APP_NAME,
             tairix_icon::IconKind::AppBundle,
         )],

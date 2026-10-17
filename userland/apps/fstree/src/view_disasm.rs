@@ -26,22 +26,24 @@ use alloc::{format, vec};
 use tairix_abi::{CapabilityId, Errno};
 use tairix_log::Sink;
 use tairix_sandbox::decode::{
-    self, ContainerFormat, ContainerSummary, DecodeFailure, DisasmWindow, InsnRecord, Isa,
-    ManifestInfo, Region, RegionKind, SymbolRecord, MAX_WINDOW_INSNS,
+    self, CodeWindow, ContainerFormat, ContainerSummary, DecodeFailure, DisasmWindow, InsnRecord,
+    Isa, ManifestInfo, Region, RegionKind, SymbolRecord, MAX_WINDOW_INSNS,
 };
-use tairix_sandbox::{Launcher, ParserSandbox, SandboxError};
+use tairix_sandbox::listing::{code_lines, failure_reason, region_line, CodeLine};
+use tairix_sandbox::{Launcher, ParserSandbox};
 
 use crate::fs::Fs;
 use crate::view_text::JobOutcome;
 
-/// Code bytes fetched per disassembly request: comfortably more than the
-/// longest instruction times the tallest screen, so one read serves one
-/// window.
+/// Code bytes one disassembly request decodes from: comfortably more than the
+/// longest native instruction times the tallest screen, so one read serves a
+/// screenful. Each read takes the instruction set's longest encoding past
+/// them too, so the window's end cuts no instruction.
 const WINDOW_BYTES: usize = 4096;
 
 /// Instructions decoded per goto/search walk tick — the bound that keeps
 /// a tick's sandbox round-trip small so the key loop stays responsive.
-const WALK_CHUNK: u32 = 512;
+const WALK_CHUNK: usize = 512;
 
 /// Bytes before the current top a fixed-length ISA scroll-up walk may
 /// start from when no nearer anchor is recorded; variable-length decoding
@@ -79,7 +81,8 @@ pub trait Decode {
     /// The [`DecodeFailure`] the caller-side helper reports.
     fn manifest_summary(&mut self, manifest: &[u8]) -> Result<ManifestInfo, DecodeFailure>;
 
-    /// One disassembled window of `code` (see [`decode::disassemble`]).
+    /// Up to `max_insns` instructions of `window` (see
+    /// [`decode::disassemble`]).
     ///
     /// # Errors
     ///
@@ -87,10 +90,8 @@ pub trait Decode {
     fn disassemble(
         &mut self,
         isa: Isa,
-        address: u64,
-        depth: u32,
+        window: CodeWindow<'_>,
         max_insns: u32,
-        code: &[u8],
     ) -> Result<DisasmWindow, DecodeFailure>;
 }
 
@@ -106,12 +107,10 @@ impl<L: Launcher, S: Sink> Decode for ParserSandbox<L, S> {
     fn disassemble(
         &mut self,
         isa: Isa,
-        address: u64,
-        depth: u32,
+        window: CodeWindow<'_>,
         max_insns: u32,
-        code: &[u8],
     ) -> Result<DisasmWindow, DecodeFailure> {
-        decode::disassemble(self, isa, address, depth, max_insns, code)
+        decode::disassemble(self, isa, window, max_insns)
     }
 }
 
@@ -131,22 +130,7 @@ pub enum DisasmError {
 pub fn describe(error: DisasmError) -> String {
     match error {
         DisasmError::Fs(errno) => format!("read failed: {errno:?}"),
-        DisasmError::Decode(DecodeFailure::Refused(refusal)) => match refusal {
-            decode::DecodeRefusal::UnrecognisedContainer => {
-                String::from("not a recognised executable")
-            }
-            decode::DecodeRefusal::MalformedContainer => String::from("malformed executable"),
-            decode::DecodeRefusal::MalformedRequest => String::from("decode request refused"),
-        },
-        DisasmError::Decode(DecodeFailure::Sandbox(SandboxError::RequestTooLarge)) => {
-            String::from("too large to decode")
-        }
-        DisasmError::Decode(DecodeFailure::Sandbox(_)) => {
-            String::from("the decode sandbox is unavailable")
-        }
-        DisasmError::Decode(DecodeFailure::ReplyMalformed) => {
-            String::from("the decode worker replied nonsense")
-        }
+        DisasmError::Decode(failure) => String::from(failure_reason(failure)),
     }
 }
 
@@ -220,15 +204,6 @@ enum DisasmJob {
     Search(SearchWalk),
 }
 
-/// One display line of the code pane: a symbol label or an instruction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DisasmRow {
-    /// The rendered text.
-    pub text: String,
-    /// True for a `<symbol>:` label line (rendered emphasised).
-    pub is_label: bool,
-}
-
 /// The disassembly viewer's whole state: the decoded body, the summary
 /// cursor, the code pane's place with its visit history and
 /// resynchronisation anchors, the last rendered rows, and the live job.
@@ -262,7 +237,7 @@ pub struct DisasmView {
     /// nearest one.
     anchors: Vec<(u64, u32)>,
     /// The last refreshed display rows of the code pane.
-    pub rows: Vec<DisasmRow>,
+    pub rows: Vec<CodeLine>,
     /// The `(region, top, depth, rows)` the current `rows` were decoded
     /// for; `None` forces the next refresh to decode.
     window_key: Option<(usize, u64, u32, usize)>,
@@ -415,13 +390,9 @@ impl DisasmView {
         let mut rows = Vec::new();
         match &self.body {
             DisasmBody::Container(summary) => {
-                let format = match summary.format {
-                    ContainerFormat::Rxe => "rxe",
-                    ContainerFormat::Elf64 => "elf64",
-                    ContainerFormat::Wasm => "wasm",
-                };
+                let format = summary.format.name();
                 let isa = match self.isa() {
-                    Some(isa) => isa_name(isa),
+                    Some(isa) => isa.name(),
                     None => "system (choose on open)",
                 };
                 rows.push((
@@ -441,7 +412,7 @@ impl DisasmView {
                 };
                 rows.push((format!("regions: {}{truncated}", self.regions.len()), None));
                 for (index, region) in self.regions.iter().enumerate() {
-                    rows.push((region_row(region), Some(index)));
+                    rows.push((region_line(region), Some(index)));
                 }
                 let symbols_truncated = if summary.symbols_truncated {
                     " (list truncated)"
@@ -613,17 +584,42 @@ impl DisasmView {
             self.window_key = Some(key);
             return Ok(());
         };
-        let max = u32::try_from(self.viewport_rows.min(MAX_WINDOW_INSNS)).unwrap_or(1);
-        let window = self.decode_at(fs, decode, isa, self.place.top, self.place.depth, max)?;
-        let end = self.open_region().map_or(0, region_code_end);
+        let rows = self.viewport_rows;
+        let window = self.decode_run(fs, decode, isa, (self.place.top, self.place.depth), rows)?;
+        let end = self.open_region().map_or(0, Region::code_end);
         self.at_end = window.next_address >= end;
-        self.rows = build_rows(&window.insns, &self.symbols);
+        self.rows = code_lines(&window.insns, &self.symbols, self.viewport_rows);
         self.record_anchor(self.place.top, self.place.depth);
         if window.next_address < end {
             self.record_anchor(window.next_address, window.next_depth);
         }
         self.window_key = Some(key);
         Ok(())
+    }
+
+    /// Up to `count` instructions from `addr` at wasm `depth`, decoded over as
+    /// many windows as they take.
+    fn decode_run(
+        &self,
+        fs: &mut dyn Fs,
+        decode: &mut dyn Decode,
+        isa: Isa,
+        (addr, depth): (u64, u32),
+        count: usize,
+    ) -> Result<DisasmWindow, DisasmError> {
+        let end = self.open_region().map_or(0, Region::code_end);
+        let mut run = self.decode_at(fs, decode, isa, addr, depth, count)?;
+        while run.insns.len() < count && run.next_address < end {
+            let more = count - run.insns.len();
+            let next = self.decode_at(fs, decode, isa, run.next_address, run.next_depth, more)?;
+            if next.insns.is_empty() {
+                break;
+            }
+            run.insns.extend(next.insns);
+            run.next_address = next.next_address;
+            run.next_depth = next.next_depth;
+        }
+        Ok(run)
     }
 
     /// One sandboxed decode of up to `max_insns` instructions at `addr`,
@@ -635,7 +631,7 @@ impl DisasmView {
         isa: Isa,
         addr: u64,
         depth: u32,
-        max_insns: u32,
+        max_insns: usize,
     ) -> Result<DisasmWindow, DisasmError> {
         let Some(region) = self.open_region() else {
             // No open region: nothing to decode (fail closed, not panic).
@@ -645,7 +641,7 @@ impl DisasmView {
                 next_depth: depth,
             });
         };
-        let end = region_code_end(region);
+        let end = region.code_end();
         if addr < region.addr || addr >= end {
             return Ok(DisasmWindow {
                 insns: Vec::new(),
@@ -654,7 +650,8 @@ impl DisasmView {
             });
         }
         let offset = region.file_offset.saturating_add(addr - region.addr);
-        let len = usize::try_from((end - addr).min(WINDOW_BYTES as u64)).unwrap_or(WINDOW_BYTES);
+        let reach = WINDOW_BYTES + isa.longest_encoding();
+        let len = usize::try_from(end - addr).map_or(reach, |left| left.min(reach));
         let mut bytes = vec![0_u8; len];
         let mut filled = 0;
         while filled < len {
@@ -667,8 +664,17 @@ impl DisasmView {
             filled += read;
         }
         bytes.truncate(filled);
+        // A file shorter than its region ends the code where its bytes do.
+        let continues = filled == len && u64::try_from(len).is_ok_and(|len| len < end - addr);
+        let window = CodeWindow {
+            address: addr,
+            depth,
+            code: &bytes,
+            continues,
+        };
+        let max_insns = u32::try_from(max_insns.clamp(1, MAX_WINDOW_INSNS)).unwrap_or(1);
         decode
-            .disassemble(isa, addr, depth, max_insns, &bytes)
+            .disassemble(isa, window, max_insns)
             .map_err(DisasmError::Decode)
     }
 
@@ -730,16 +736,16 @@ impl DisasmView {
         let Some(isa) = self.isa() else {
             return Ok(());
         };
-        let end = self.open_region().map_or(0, region_code_end);
-        let max = u32::try_from(lines.clamp(1, MAX_WINDOW_INSNS)).unwrap_or(1);
-        let w = self.decode_at(fs, decode, isa, self.place.top, self.place.depth, max)?;
+        let end = self.open_region().map_or(0, Region::code_end);
+        let at = (self.place.top, self.place.depth);
+        let w = self.decode_run(fs, decode, isa, at, lines.clamp(1, MAX_WINDOW_INSNS))?;
         if w.insns.is_empty() {
             self.at_end = true;
             return Ok(());
         }
-        if w.insns.len() == max as usize && w.next_address < end {
-            // A full step: the decode's own next-window hand-off is the
-            // exact new top (with its wasm depth threaded through).
+        if w.next_address < end {
+            // A full step: the decode's own hand-off is the exact new top
+            // (with its wasm depth threaded through).
             self.record_anchor(w.next_address, w.next_depth);
             self.place.top = w.next_address;
             self.place.depth = w.next_depth;
@@ -775,8 +781,7 @@ impl DisasmView {
                 0
             });
         }
-        let max = u32::try_from(steps.min(MAX_WINDOW_INSNS)).unwrap_or(1);
-        let w = self.decode_at(fs, decode, isa, self.place.top, self.place.depth, max)?;
+        let w = self.decode_run(fs, decode, isa, (self.place.top, self.place.depth), steps)?;
         Ok(w.next_depth)
     }
 
@@ -838,8 +843,7 @@ impl DisasmView {
                     return Ok(());
                 };
                 let new_depth = if isa == Isa::Wasm && c_index > 0 {
-                    let max = u32::try_from(c_index.min(MAX_WINDOW_INSNS)).unwrap_or(1);
-                    let sub = self.decode_at(fs, decode, isa, c_at, c_depth, max)?;
+                    let sub = self.decode_run(fs, decode, isa, (c_at, c_depth), c_index)?;
                     sub.next_depth
                 } else if isa == Isa::Wasm {
                     c_depth
@@ -903,9 +907,7 @@ impl DisasmView {
     /// when no code region contains `target`.
     pub fn start_goto(&mut self, target: u64) -> bool {
         let containing = |region: &Region| {
-            region.kind == RegionKind::Code
-                && region.addr <= target
-                && target < region_code_end(region)
+            region.kind == RegionKind::Code && region.addr <= target && target < region.code_end()
         };
         let index = if self.open_region().is_some_and(containing) {
             self.place.region
@@ -927,7 +929,7 @@ impl DisasmView {
         let Some(region) = self.open_region() else {
             return;
         };
-        let end = region_code_end(region);
+        let end = region.code_end();
         let (at, depth) = self.walk_start(end);
         self.job = Some(DisasmJob::Goto(GotoWalk {
             target: u64::MAX,
@@ -1003,7 +1005,7 @@ impl DisasmView {
             self.job = None;
             return Ok(JobOutcome::NotFound);
         };
-        let end = self.open_region().map_or(0, region_code_end);
+        let end = self.open_region().map_or(0, Region::code_end);
         let outcome = match job {
             DisasmJob::Goto(walk) => self.tick_goto(fs, decode, isa, end, walk),
             DisasmJob::Search(walk) => self.tick_search(fs, decode, isa, end, walk),
@@ -1119,8 +1121,7 @@ impl DisasmView {
         if steps == 0 {
             return Ok(depth);
         }
-        let max = u32::try_from(steps.min(MAX_WINDOW_INSNS)).unwrap_or(1);
-        let w = self.decode_at(fs, decode, isa, at, depth, max)?;
+        let w = self.decode_run(fs, decode, isa, (at, depth), steps)?;
         Ok(w.next_depth)
     }
 }
@@ -1128,130 +1129,6 @@ impl DisasmView {
 /// Whether `insn`'s encoding covers `target`.
 fn covers(insn: &InsnRecord, target: u64) -> bool {
     target >= insn.address && target - insn.address < u64::from(insn.length)
-}
-
-/// First address past a region's decodable code bytes (the in-memory
-/// tail past `file_size` is zero fill, not code).
-fn region_code_end(region: &Region) -> u64 {
-    region.addr.saturating_add(region.file_size)
-}
-
-/// Build the code pane's display rows: a `<symbol>:` label line before
-/// the instruction starting a known symbol, then the instruction row
-/// with its encoding bytes and a symbolised branch target.
-fn build_rows(insns: &[InsnRecord], symbols: &[SymbolRecord]) -> Vec<DisasmRow> {
-    let mut rows = Vec::new();
-    for insn in insns {
-        let at = symbols.binary_search_by_key(&insn.address, |symbol| symbol.addr);
-        if let Ok(mut index) = at {
-            // Every symbol at this address labels the line (the search
-            // may land mid-run of equal addresses).
-            while index > 0 && symbols[index - 1].addr == insn.address {
-                index -= 1;
-            }
-            for symbol in symbols[index..]
-                .iter()
-                .take_while(|symbol| symbol.addr == insn.address)
-            {
-                rows.push(DisasmRow {
-                    text: format!("{:016x} <{}>:", symbol.addr, symbol.name),
-                    is_label: true,
-                });
-            }
-        }
-        rows.push(DisasmRow {
-            text: insn_row(insn, symbols),
-            is_label: false,
-        });
-    }
-    rows
-}
-
-/// Encoding bytes shown per instruction row; a longer encoding elides
-/// with `…` (the full length is decoded regardless).
-const SHOWN_BYTES: usize = 8;
-
-/// One instruction's display row.
-fn insn_row(insn: &InsnRecord, symbols: &[SymbolRecord]) -> String {
-    let mut bytes = String::new();
-    for byte in insn.bytes.iter().take(SHOWN_BYTES) {
-        let _ = core::fmt::Write::write_fmt(&mut bytes, format_args!("{byte:02x} "));
-    }
-    if insn.bytes.len() > SHOWN_BYTES {
-        bytes.pop();
-        bytes.push('…');
-    }
-    let target = insn
-        .branch_target
-        .and_then(|target| symbolise(target, symbols))
-        .unwrap_or_default();
-    let operands = if insn.operands.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", insn.operands)
-    };
-    format!(
-        "{:8x}:  {bytes:<width$} {}{operands}{target}",
-        insn.address,
-        insn.mnemonic,
-        width = SHOWN_BYTES * 3,
-    )
-}
-
-/// The `<name>` / `<name+0xoff>` a branch target lands in, when a symbol
-/// covers it.
-fn symbolise(target: u64, symbols: &[SymbolRecord]) -> Option<String> {
-    let index = match symbols.binary_search_by_key(&target, |symbol| symbol.addr) {
-        Ok(index) => index,
-        Err(0) => return None,
-        Err(index) => index - 1,
-    };
-    let symbol = &symbols[index];
-    let extent = symbol.size.max(1);
-    if target < symbol.addr || target - symbol.addr >= extent {
-        return None;
-    }
-    if target == symbol.addr {
-        Some(format!(" <{}>", symbol.name))
-    } else {
-        Some(format!(" <{}+{:#x}>", symbol.name, target - symbol.addr))
-    }
-}
-
-/// One region's summary line: kind, name, address, file extent, memory
-/// size, and permissions, in fixed columns.
-fn region_row(region: &Region) -> String {
-    let kind = match region.kind {
-        RegionKind::Code => "code",
-        RegionKind::Data => "data",
-    };
-    let name = if region.name.is_empty() {
-        "-"
-    } else {
-        region.name.as_str()
-    };
-    format!(
-        "  {kind}  {:<20} addr {:#010x}  file {:#x}+{:#x}  mem {:#x}  {}{}{}",
-        name,
-        region.addr,
-        region.file_offset,
-        region.file_size,
-        region.mem_size,
-        if region.read { 'r' } else { '-' },
-        if region.write { 'w' } else { '-' },
-        if region.execute { 'x' } else { '-' },
-    )
-}
-
-/// The display name of an ISA (also the chooser's vocabulary).
-#[must_use]
-pub fn isa_name(isa: Isa) -> &'static str {
-    match isa {
-        Isa::X86_64 => "x86-64",
-        Isa::Aarch64 => "aarch64",
-        Isa::Riscv64 => "riscv64",
-        Isa::Wasm => "wasm",
-    }
 }
 
 /// Whether a file head is a standalone signed manifest (`RXM1`): the

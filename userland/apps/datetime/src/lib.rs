@@ -213,11 +213,7 @@ pub enum Status {
     Rejected(Fault),
     /// The clock was stepped to the composed instant.
     Applied,
-    /// The kernel refused the set. The account running this app does not hold
-    /// the capability the request needs, so nothing was changed.
-    Denied,
-    /// The kernel refused the set for some other reason, stated verbatim
-    /// rather than guessed at.
+    /// The clock could not be read, stated verbatim rather than guessed at.
     Failed(&'static str),
 }
 
@@ -231,7 +227,6 @@ impl Status {
             Self::Unset => Some("The clock has not been set on this machine."),
             Self::Rejected(fault) => Some(fault.message()),
             Self::Applied => Some("The clock was set."),
-            Self::Denied => Some("This account may not set the clock. Nothing was changed."),
             Self::Failed(reason) => Some(reason),
         }
     }
@@ -239,10 +234,7 @@ impl Status {
     /// Whether the status reports a failure, so a surface can colour it.
     #[must_use]
     pub const fn is_fault(&self) -> bool {
-        matches!(
-            *self,
-            Self::Rejected(_) | Self::Denied | Self::Failed(_) | Self::Unset
-        )
+        matches!(*self, Self::Rejected(_) | Self::Failed(_) | Self::Unset)
     }
 }
 

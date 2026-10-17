@@ -97,6 +97,7 @@ pub fn operation_control(
         // still has to be thought about.
         // The rest is input that must not navigate behind the modal panel.
         WindowEvent::TerrainChanged { .. }
+        | WindowEvent::AlertClosed { .. }
         | WindowEvent::LayerPointer { .. }
         | WindowEvent::ToolMoved { .. }
         | WindowEvent::AlternateCloseRequested { .. }
@@ -127,14 +128,6 @@ pub fn operation_control(
 #[must_use]
 pub const fn mode_flip_allowed(writing: bool, rereading: bool) -> bool {
     !writing && !rereading
-}
-
-/// Whether `event` reaches the running operation while a notice is shown over
-/// its panel: only a close does. The notice takes the rest, where the panel
-/// would read the notice's OK as its own Cancel.
-#[must_use]
-pub const fn reaches_operation_under_notice(event: &WindowEvent) -> bool {
-    matches!(event, WindowEvent::CloseRequested { .. })
 }
 
 /// Whether a new count is shown now, at `now_ns`: once a desktop frame since

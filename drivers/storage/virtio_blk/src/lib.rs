@@ -49,7 +49,8 @@
 extern crate alloc;
 
 use core::convert::TryFrom;
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
+use tairix_abi::driver::block::BlockClass;
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
@@ -66,10 +67,9 @@ const REGISTER_HANDLE_MARKER: u64 = 0x564E_4250_0000_0001; // "VBKP"
 /// device repeats names free ones.
 const QUEUE_SIZE: u16 = 8;
 
-/// The class of device a virtio block device is: paravirtual, fast but
-/// bounded, so a wedged host backend never stalls a consumer for a spinning
-/// disk's spin-up budget.
-const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Virtual;
+/// What a virtio block device is: paravirtual, fast but bounded, so a wedged
+/// host backend never stalls a consumer for a spinning disk's spin-up budget.
+const MEDIUM: BlkMedium = BlkMedium::Virtual;
 
 /// The virtio device id of a block device (virtio 1.1 §5.2 — `virtio-blk`
 /// is device type 2). This driver's [`BIND_KEYS`] match key is built from
@@ -502,7 +502,7 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
     /// Publish `segments` on the requestq and wait for their completion.
     ///
     /// The per-request deadline is the shared per-class I/O policy every
-    /// consumer of a block device already obeys, discovered from the class
+    /// consumer of a block device already obeys, following from the medium
     /// this driver declares — not a constant of this driver's own, which a
     /// bigger machine or a slower device would outgrow. A request the device
     /// never answers fails closed rather than being reissued, since the device
@@ -635,8 +635,8 @@ impl Payload<'_> {
 }
 
 impl<T: Transport> Block for VirtioBlk<'_, T> {
-    fn device_class(&self) -> BlkDeviceClass {
-        DEVICE_CLASS
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(MEDIUM)
     }
 
     /// The virtio block device, named as its specification names it.

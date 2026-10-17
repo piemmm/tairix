@@ -12,7 +12,9 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 
 use crate::bytes::{le16, le32, put_le32, scratch};
-use crate::superblock::{RO_COMPAT_ORPHAN_PRESENT, SB_FEATURE_RO_COMPAT, SB_LAST_ORPHAN};
+use crate::superblock::{
+    make_dynamic, RO_COMPAT_ORPHAN_PRESENT, SB_FEATURE_RO_COMPAT, SB_LAST_ORPHAN,
+};
 use crate::{Ext4, INODE_DTIME, INODE_LINKS};
 
 /// `ob_magic` closing each orphan-file block.
@@ -36,6 +38,7 @@ fn orphan_file_blocks(size: u64, bs: usize, inodes: u32) -> Result<u64, DriverEr
 impl<B: Block> Ext4<B> {
     /// List inode `ino`, whose record is `raw`, on the orphan chain.
     pub(crate) fn orphan_add(&mut self, ino: u32, raw: &mut [u8]) -> Result<(), DriverError> {
+        make_dynamic(&mut self.sb);
         let head = le32(&self.sb, SB_LAST_ORPHAN);
         put_le32(raw, INODE_DTIME, head);
         self.write_inode_raw(ino, raw)?;

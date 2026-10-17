@@ -111,11 +111,30 @@ struct Script {
     takes: VecDeque<Result<Option<IsoSlotDone>, DriverError>>,
     /// The region bytes each `iso_queue` was handed, by length.
     queued_regions: Vec<usize>,
+    /// The URBs the engine was told to abandon at their deadline.
+    abandoned: Vec<UrbRequest>,
 }
 
 struct Engine<'a>(&'a mut Script);
 
 impl UrbEngine for Engine<'_> {
+    fn abandon(&mut self, urb: &UrbRequest) -> Result<(), DriverError> {
+        self.0.abandoned.push(*urb);
+        Ok(())
+    }
+
+    fn clear_halt(&mut self, endpoint: u8) -> Result<(), DriverError> {
+        self.0.operations.push(UsbRequest::ClearHalt { endpoint });
+        self.0.refusal.take().map_or(Ok(()), Err)
+    }
+
+    fn discard_reports(&mut self, endpoint: u8) -> Result<(), DriverError> {
+        self.0
+            .operations
+            .push(UsbRequest::DiscardReports { endpoint });
+        self.0.refusal.take().map_or(Ok(()), Err)
+    }
+
     fn control_in(&mut self, _setup: [u8; 8], _data: &mut [u8]) -> Result<usize, DriverError> {
         Ok(0)
     }
@@ -550,6 +569,19 @@ fn urb(transfer_type: UsbTransferType, endpoint: u8) -> Vec<u8> {
         direction: UsbDirection::In,
         length: 8,
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x08, 0x00],
+        timeout_ms: (transfer_type == UsbTransferType::Bulk).then_some(NonZeroU32::MIN),
+    }))
+}
+
+/// A report poll bounded at 100 ms, as a CBI completion wait is.
+fn bounded_report_poll() -> Vec<u8> {
+    request(UsbRequest::Transfer(UrbRequest {
+        endpoint: 1,
+        transfer_type: UsbTransferType::Interrupt,
+        direction: UsbDirection::In,
+        length: 8,
+        setup: [0; 8],
+        timeout_ms: NonZeroU32::new(100),
     }))
 }
 
@@ -1129,7 +1161,132 @@ fn a_transfer_fault_from_a_device_still_attached_reaches_its_driver() {
     );
     assert!(mock.notes.contains(&Note::UrbFailed {
         index: 0,
+        transfer: UsbTransferType::Interrupt,
         errno: Errno::DeviceFault
+    }));
+}
+
+#[test]
+fn a_held_urb_past_its_deadline_is_abandoned_answered_and_noted() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(keyboard(2))]);
+    let mut health = ControllerHealth::new(0);
+    let endpoint = emitted[0].2;
+    mock.now = 1_000;
+    mock.post(endpoint, 0x51, bounded_report_poll());
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert_eq!(interfaces.next_deadline(), Some(1_000 + 100_000_000));
+
+    interfaces.expire_overdue(1_000 + 99_999_999, &mut health, &mut mock);
+    assert!(
+        mock.script(0).abandoned.is_empty(),
+        "nothing is abandoned early"
+    );
+    interfaces.expire_overdue(1_000 + 100_000_000, &mut health, &mut mock);
+    assert!(mock
+        .steps()
+        .contains(&reply(endpoint, 0x51, Err(Errno::TimedOut))));
+    assert_eq!(mock.script(0).abandoned.len(), 1);
+    assert!(mock.notes.contains(&Note::UrbFailed {
+        index: 0,
+        transfer: UsbTransferType::Interrupt,
+        errno: Errno::TimedOut
+    }));
+    assert_eq!(interfaces.next_deadline(), None);
+}
+
+#[test]
+fn a_recovering_controller_is_not_driven_to_expire_a_held_urb() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(keyboard(2))]);
+    let mut health = ControllerHealth::new(0);
+    let endpoint = emitted[0].2;
+    mock.post(endpoint, 0x53, bounded_report_poll());
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    health.begin_recovery(0);
+    let polls = mock.script(0).interrupt_calls;
+    interfaces.expire_overdue(u64::MAX, &mut health, &mut mock);
+    assert!(mock
+        .steps()
+        .contains(&reply(endpoint, 0x53, Err(Errno::TimedOut))));
+    assert_eq!(
+        mock.script(0).interrupt_calls,
+        polls,
+        "nothing is driven against a controller its reset owns"
+    );
+    assert!(mock.script(0).abandoned.is_empty());
+}
+
+#[test]
+fn a_held_urb_the_controller_finished_in_time_is_delivered_not_abandoned() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(keyboard(2))]);
+    let mut health = ControllerHealth::new(0);
+    let endpoint = emitted[0].2;
+    mock.post(endpoint, 0x52, bounded_report_poll());
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    mock.script(0).reports.push(vec![7u8; 8]);
+    interfaces.expire_overdue(u64::MAX, &mut health, &mut mock);
+    assert!(mock.steps().contains(&reply(endpoint, 0x52, Ok(8))));
+    assert!(mock.script(0).abandoned.is_empty());
+}
+
+#[test]
+fn a_clear_halt_or_report_discard_reaches_the_engine_unless_a_urb_is_held() {
+    for operation in [
+        UsbRequest::ClearHalt { endpoint: 0x81 },
+        UsbRequest::DiscardReports { endpoint: 0x83 },
+    ] {
+        let (mut mock, mut interfaces, emitted) = published(vec![Some(stick(2))]);
+        let mut health = ControllerHealth::new(0);
+        let endpoint = emitted[0].2;
+        mock.post(endpoint, 0x61, request(operation));
+        interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+        assert!(mock.steps().contains(&reply(endpoint, 0x61, Ok(0))));
+        assert_eq!(mock.script(0).operations, [operation]);
+
+        mock.post(endpoint, 0x62, report_poll());
+        interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+        mock.post(endpoint, 0x63, request(operation));
+        interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+        assert!(mock
+            .steps()
+            .contains(&reply(endpoint, 0x63, Err(Errno::AlreadyExists))));
+        assert_eq!(
+            mock.script(0).operations.len(),
+            1,
+            "{operation:?} never runs under a held transfer"
+        );
+    }
+}
+
+#[test]
+fn a_submit_on_a_retracted_transport_is_answered_but_charged_to_no_device() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(stick(2))]);
+    let mut health = ControllerHealth::new(0);
+    let endpoint = emitted[0].2;
+    interfaces.retract_all(&mut mock);
+    let noted = mock.notes.len();
+    mock.post(endpoint, 0x72, urb(UsbTransferType::Bulk, 1));
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert!(mock
+        .steps()
+        .contains(&reply(endpoint, 0x72, Err(Errno::NotFound))));
+    assert_eq!(mock.notes.len(), noted, "no device's failure to log");
+}
+
+#[test]
+fn a_transfer_refused_at_once_is_noted_as_a_held_one_would_be() {
+    let (mut mock, mut interfaces, emitted) = published(vec![Some(stick(2))]);
+    let mut health = ControllerHealth::new(0);
+    let endpoint = emitted[0].2;
+    // A bulk transfer may never name the control endpoint.
+    mock.post(endpoint, 0x71, urb(UsbTransferType::Bulk, 0));
+    interfaces.serve_submit(slot_of(endpoint), &mut health, &mut mock);
+    assert!(mock
+        .steps()
+        .contains(&reply(endpoint, 0x71, Err(Errno::OutOfRange))));
+    assert!(mock.notes.contains(&Note::UrbFailed {
+        index: 0,
+        transfer: UsbTransferType::Bulk,
+        errno: Errno::OutOfRange
     }));
 }
 

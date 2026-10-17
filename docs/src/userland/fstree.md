@@ -197,7 +197,9 @@ what is built.
   sandboxed `lib/sandbox` decode service through the object-safe
   `Decode` seam — the app's only in-process inspection is the bounded
   magic-prefix routing. Windows are decoded per screenful from a bounded
-  region read; scrolling records `(address, depth)` resynchronisation
+  region read that carries the instruction set's longest encoding past it, so
+  no instruction is cut, and a screen or page longer than one window takes the
+  next; scrolling records `(address, depth)` resynchronisation
   anchors and walks forward from the nearest one (fixed-length ISAs may
   start from a short backscan; wasm threads its nesting depth through
   the service's window hand-off), so memory never follows the binary.

@@ -66,8 +66,8 @@
 //! `Ctrl+V` pastes it into the current directory — a same-volume move is one
 //! `fs_rename`, a cross-volume move is copy-then-delete, and a copy streams
 //! the bytes in bounded chunks, all under the user's own identity and stopping
-//! fail-loud on `stderr` at the first refusal; `Delete` opens a modal
-//! confirmation `Dialog` and, on confirm, removes the selection (recursively
+//! fail-loud on `stderr` at the first refusal; `Delete` asks first in an
+//! alert of its own and, on confirm, removes the selection (recursively
 //! for a folder) over the user's own `fs_unlink`s, stopping and stating the
 //! reason on `stderr` on the first refusal; a `CloseRequested` from the
 //! desktop closes that window, which ends an ordinary file manager cleanly
@@ -124,9 +124,9 @@ mod program {
     };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
-        DocumentName, DragAt, DragItems, DropOperation, DropSite, HandOverDocument,
-        HandOverOutcome, MenuOutcome, PointerAction, WindowEvent, WindowRegion, WindowSizeState,
-        WindowSizing,
+        AlertOutcome, AlertSpec, DocumentName, DragAt, DragItems, DropOperation, DropSite,
+        HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
+        WindowSizeState, WindowSizing,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, RenameFlags,
@@ -137,15 +137,14 @@ mod program {
     use tairix_browse::document;
     use tairix_browse::marquee::{self, report_band};
     use tairix_browse::render::{
-        build_delete_dialog, build_refusal_dialog, draw_modal_dialog, draw_open_with_chooser,
-        draw_progress_dialog, draw_properties_window, draw_rename_field, drop_folder_at,
-        manager_tool_at, modal_dialog_action_at, open_with_action_at, open_with_reveal,
+        delete_alert, draw_open_with_chooser, draw_progress_dialog, draw_properties_window,
+        draw_rename_field, drop_folder_at, manager_tool_at, open_with_action_at, open_with_reveal,
         open_with_row_at, open_with_scroll_pointer, open_with_scroll_wheel, progress_dialog_rect,
-        properties_reveal, properties_scroll_pointer, properties_scroll_wheel, render_into,
-        scroll_pointer, scroll_wheel, AttrAction, Frame, Identity, OpenWithAction, OwnerField,
-        PermsCursor, PermsPanel, PermsShown, PropertiesControls, PropertiesFrame, PropertiesTab,
-        PropertiesTarget, PropertiesView, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
-        REFUSAL_DISMISS_INDEX,
+        properties_drive_damage, properties_reveal, properties_scroll_pointer,
+        properties_scroll_wheel, render_into, scroll_pointer, scroll_wheel, AttrAction, Frame,
+        Identity, OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls,
+        PropertiesFrame, PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView,
+        SectionsShown, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_manifest, blank_documents, browser_floor,
@@ -155,22 +154,22 @@ mod program {
         Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
         ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
         CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
-        DirectorySource, Entry, EntryKind, Listing, ListingDesk, ListingJob, ManagerChrome,
-        ManagerTool, ManagerToolModel, Marquee, NewEntry, OpenWithCandidate, OpenWithChooser,
-        OwnerChange, PasteItem, PasteStrategy, PendingEntry, PendingRename, Places, Probe, Probes,
-        ProgressModel, ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn,
-        Took, ToolbarBand, ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId,
-        WatchUpdate, WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS,
-        MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
+        DirectorySource, Drive, DriveChange, DriveSample, Entry, EntryKind, Listing, ListingDesk,
+        ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NewEntry,
+        OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
+        PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
+        RowList, RtLinkReader, ScrollColumn, Took, ToolbarBand, ToolbarCommand, TrashError,
+        TrashStrategy, Volume, VolumeId, WatchUpdate, WatchedDirectory, Watches,
+        MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND,
+        WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
-    use tairix_controls::decision::Dialog;
     use tairix_controls::text::{Keystroke, TextAction, TextField};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
-        ArtworkReader, ArtworkResolver, IconRequest, InlineArtwork, Resolved, ThumbnailStore,
-        MAX_ARTWORK_BYTES,
+        ArtworkReader, ArtworkResolver, IconKind, IconRequest, InlineArtwork, Resolved,
+        ThumbnailStore, MAX_ARTWORK_BYTES,
     };
     use tairix_input::{ClickKind, DoubleClickTracker, Key, Modifiers, NamedKey, PointerButton};
     use tairix_procinfo::{IpcTransport, WalkStep};
@@ -181,6 +180,7 @@ mod program {
     use tairix_sandbox::ParserSandbox;
     use tairix_theme::{Grounds, Theme, ThemeRegistry, Timeline};
     use tairix_window::app::{self, Wake, WindowPane};
+    use tairix_window::notices::Raised;
     use tairix_window::{
         pointer_input_events, pointer_point, Desktop, EventDrain, EventError, EventMailbox,
         EventSource, Owed, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
@@ -190,7 +190,9 @@ mod program {
     use crate::appbar;
     use crate::chrome::{Accelerator, Chrome, SelectionVerb};
     use crate::command::{self, Command, Ladder, Role, UsageError, USAGE};
-    use crate::deferred::{FilesClient, FilesClients, PropertyJob, PropertyReads};
+    use crate::deferred::{
+        DriveJob, DriveReading, DriveReads, FilesClient, FilesClients, PropertyJob, PropertyReads,
+    };
     use crate::gesture::{
         self, bundle_intent, press_step, AfterHandoff, DragArm, Keyboard, NamePress, PressHit,
         PressHold, PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit, SelectHow,
@@ -199,12 +201,11 @@ mod program {
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
-    use crate::notice::{NoticeSource, Notices};
+    use crate::notice::{next_alert, NextAlert, NoticeSource, Notices};
     use crate::operation::{
         change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
-        mode_flip_allowed, move_refusal, operation_control, progress_due,
-        reaches_operation_under_notice, read_refusal, remove_refusal, trash_read_refusal,
-        OperationControl,
+        mode_flip_allowed, move_refusal, operation_control, progress_due, read_refusal,
+        remove_refusal, trash_read_refusal, OperationControl,
     };
     use crate::operations::{run_slice, Ending, Finished, OperationDesk, Refusal, Standing, Step};
     use crate::rename::RenameEdit;
@@ -508,7 +509,30 @@ mod program {
         rereading: bool,
         /// The refused changes stated in the window, one at a time.
         notices: Notices,
+        /// The sections the window offers.
+        strip: PropertiesStrip,
+        /// The drive a window opened on a volume root describes.
+        drive: Option<DriveWatch>,
     }
+
+    /// A drive window's drive, and when it is read next.
+    struct DriveWatch {
+        drive: Drive,
+        /// The reading the drive is asked for by: its mount point, parsed
+        /// once, when the window opened.
+        job: DriveJob,
+        /// The drive's own picture, which the identity band draws.
+        art: IconKind,
+        /// When the next reading is asked for: only while the Drive section
+        /// is on show and none is out.
+        due: Option<u64>,
+        /// A reading has been asked for and has not landed.
+        asked: bool,
+    }
+
+    /// How often a drive window on show reads its drive again: the trace's
+    /// one point a second, the rate a person reads a throughput at.
+    const DRIVE_SAMPLE_NS: u64 = 1_000_000_000;
 
     /// What a Properties window has to show.
     enum PropertiesState {
@@ -543,6 +567,7 @@ mod program {
         /// section's keyboard cursor rests.
         fn view(&self) -> PropertiesView {
             PropertiesView {
+                strip: self.strip,
                 tab: self.tab,
                 scroll: self.scroll.offset(),
                 cursor: self.rows.cursor(),
@@ -561,6 +586,7 @@ mod program {
                 attribute: &self.editor,
                 scrollbar: self.scroll.scrollbar(),
                 perms: &self.section,
+                drive: self.drive.as_ref().map(|watch| &watch.drive),
             }
         }
 
@@ -572,13 +598,17 @@ mod program {
         /// is resolved from the name alone — so the picture does not change
         /// under the reader when the read lands.
         fn identity(&self) -> Identity<'_> {
+            let art = self.drive.as_ref().map_or_else(
+                || {
+                    tairix_browse::media::media_for_named(path_leaf(&self.path), self.kind, false)
+                        .icon()
+                },
+                |watch| watch.art,
+            );
             Identity {
                 name: path_leaf(&self.path),
                 detail: &self.detail,
-                art: IconRequest::kind(
-                    tairix_browse::media::media_for_named(path_leaf(&self.path), self.kind, false)
-                        .icon(),
-                ),
+                art: IconRequest::kind(art),
             }
         }
 
@@ -596,14 +626,63 @@ mod program {
             }
         }
 
+        /// The identity band's line as what the window now knows says it: a
+        /// drive's medium and size, or a node's kind and size.
+        fn refresh_detail(&mut self) {
+            let drive = self.drive.as_ref().and_then(|watch| watch.drive.summary());
+            self.detail = drive.unwrap_or_else(|| Self::detail_for(self.kind, self.props()));
+        }
+
         /// The read to ask for, so a window refreshes through the same job it
         /// opened with.
-        fn job(&self, window: u64) -> PropertyJob {
+        fn job(&self) -> PropertyJob {
             PropertyJob {
-                window,
                 path: self.path.clone(),
                 kind: self.kind,
             }
+        }
+
+        /// What the sections are composed from besides the node.
+        fn sections(&self) -> SectionsShown<'_> {
+            sections_shown(
+                self.can_chown,
+                self.owner.as_ref(),
+                &self.section,
+                self.drive.as_ref(),
+            )
+        }
+
+        /// Adopt a drive reading at `now`, answering what it changed, and
+        /// ask for the next while the Drive section shows.
+        fn adopt_drive(&mut self, answer: DriveReading, now: u64) -> DriveChange {
+            let tab = self.tab;
+            let Some(watch) = &mut self.drive else {
+                return DriveChange::default();
+            };
+            watch.asked = false;
+            let change = match answer {
+                DriveReading::Read(sample) => watch.drive.adopt(&sample),
+                DriveReading::Unreadable => watch.drive.unreadable(),
+            };
+            watch.due = (tab == PropertiesTab::Drive).then(|| now.saturating_add(DRIVE_SAMPLE_NS));
+            change
+        }
+
+        /// When this window next needs the loop with no event to bring it: its
+        /// drive's next reading.
+        fn due(&self) -> Option<u64> {
+            self.drive.as_ref().and_then(|watch| watch.due)
+        }
+
+        /// The reading to ask for now, if one is due at `now` and none is out.
+        fn take_due_drive(&mut self, now: u64) -> Option<DriveJob> {
+            let watch = self.drive.as_mut()?;
+            if watch.asked || watch.due.is_none_or(|due| due > now) {
+                return None;
+            }
+            watch.due = None;
+            watch.asked = true;
+            Some(watch.job.clone())
         }
     }
 
@@ -704,8 +783,11 @@ mod program {
         /// which stays where it was. Answers whether the window changed.
         fn listing_refused(&mut self, err: tairix_browse::BrowseError) -> bool {
             report_error(&alloc::format!("listing refused ({err})"));
-            let notice = build_refusal_dialog("Not listed", command::listing_refusal(err));
-            self.overlays.notices.state(NoticeSource::Listing, notice);
+            self.overlays.notices.refuse(
+                NoticeSource::Listing,
+                "Not listed",
+                command::listing_refusal(err),
+            );
             true
         }
 
@@ -892,8 +974,9 @@ mod program {
             let Ok(moved) = self.browser.apply_changes(changes) else {
                 return self.rescan();
             };
+            let marked = self.browser.mark_volume_roots(&self.places);
             let recued = cued && resolve_visible_occupancy(&mut self.browser, &self.places, canvas);
-            if moved.is_none() && !recued {
+            if moved.is_none() && !recued && !marked {
                 return Repaint::Nothing;
             }
             if let Some(placement) = &moved {
@@ -929,6 +1012,7 @@ mod program {
                 return Repaint::Nothing;
             }
             self.lost = false;
+            self.browser.mark_volume_roots(&self.places);
             Repaint::Whole
         }
 
@@ -1073,7 +1157,6 @@ mod program {
         {
             let mut pipeline = icons.borrow_mut();
             let mut source = pipeline.source();
-            let notice = win.notices.showing();
             for part in parts.rects() {
                 surface.with_clip(part.x, part.y, part.width_px, part.height_px, |surface| {
                     draw_properties_window(
@@ -1086,9 +1169,6 @@ mod program {
                         window,
                         &mut source,
                     );
-                    if let Some(notice) = notice {
-                        draw_modal_dialog(surface, notice, scale, theme, window);
-                    }
                 });
             }
         }
@@ -1208,8 +1288,9 @@ mod program {
         let location = browser.components().to_vec();
         let mut overlays = initial_overlays();
         if let Some(reason) = ladder.moved() {
-            let notice = build_refusal_dialog(OPENED_ELSEWHERE, reason);
-            overlays.notices.state(NoticeSource::Listing, notice);
+            overlays
+                .notices
+                .refuse(NoticeSource::Listing, OPENED_ELSEWHERE, &reason);
         }
         let mut win = OpenWindow {
             pane,
@@ -1386,7 +1467,10 @@ mod program {
                     job.abandon();
                 }
             }
-            WindowKind::Properties(_) => reads.forget_properties(id),
+            WindowKind::Properties(_) => {
+                reads.forget_properties(id);
+                reads.forget_drive(id);
+            }
         }
         let _ = closed.pane.close(client);
     }
@@ -1493,8 +1577,11 @@ mod program {
                     let Some(writing) = state.overlays.writing.take() else {
                         continue;
                     };
-                    let notice = build_refusal_dialog(writing.then.refusal_title(), WRITES_WAITING);
-                    state.overlays.notices.state(NoticeSource::Write, notice);
+                    state.overlays.notices.refuse(
+                        NoticeSource::Write,
+                        writing.then.refusal_title(),
+                        WRITES_WAITING,
+                    );
                     win.owed.owe_whole();
                 }
             }
@@ -1520,7 +1607,7 @@ mod program {
                 if !state.awaits_confirmation_of(&plan) {
                     return false;
                 }
-                open_delete_dialog(&mut state.overlays, plan, moves);
+                ask_delete(&mut state.overlays, plan, moves);
                 true
             }
             BrowserWrite::Entry(pending) => {
@@ -1546,13 +1633,17 @@ mod program {
                     Ok(false) => false,
                     Err(tairix_browse::CreateError::Refused(errno)) => {
                         let reason = alloc::format!("the volume refused it: {errno}");
-                        let notice = build_refusal_dialog(NOT_MADE, reason);
-                        state.overlays.notices.state(NoticeSource::Write, notice);
+                        state
+                            .overlays
+                            .notices
+                            .refuse(NoticeSource::Write, NOT_MADE, &reason);
                         true
                     }
                     Err(err) => {
-                        let notice = build_refusal_dialog(NOT_MADE, err.message());
-                        state.overlays.notices.state(NoticeSource::Write, notice);
+                        state
+                            .overlays
+                            .notices
+                            .refuse(NoticeSource::Write, NOT_MADE, err.message());
                         true
                     }
                 }
@@ -1563,13 +1654,15 @@ mod program {
                 };
                 match planned {
                     Ok(Some(plan)) if state.awaits_empty_confirmation_of(&trash) => {
-                        open_delete_dialog(&mut state.overlays, plan, None);
+                        ask_delete(&mut state.overlays, plan, None);
                         true
                     }
                     Ok(_) => false,
                     Err(reason) => {
-                        let notice = build_refusal_dialog(NOT_EMPTIED, reason);
-                        state.overlays.notices.state(NoticeSource::Write, notice);
+                        state
+                            .overlays
+                            .notices
+                            .refuse(NoticeSource::Write, NOT_EMPTIED, reason);
                         true
                     }
                 }
@@ -1589,15 +1682,19 @@ mod program {
                     Ok(false) => false,
                     Err(_) => {
                         let reason = "the Trash folder could not be opened";
-                        let notice = build_refusal_dialog(NO_TRASH, reason);
-                        state.overlays.notices.state(NoticeSource::Write, notice);
+                        state
+                            .overlays
+                            .notices
+                            .refuse(NoticeSource::Write, NO_TRASH, reason);
                         true
                     }
                 },
                 Err(errno) => {
                     let reason = alloc::format!("the Trash folder is unavailable: {errno}");
-                    let notice = build_refusal_dialog(NO_TRASH, reason);
-                    state.overlays.notices.state(NoticeSource::Write, notice);
+                    state
+                        .overlays
+                        .notices
+                        .refuse(NoticeSource::Write, NO_TRASH, &reason);
                     true
                 }
             },
@@ -1737,26 +1834,27 @@ mod program {
         }
         if let Ending::Stopped(reason) = finished.ending {
             report_error(&reason);
-            let notice = build_refusal_dialog(operation.progress.stopped_title(), reason);
-            state
-                .overlays
-                .notices
-                .state(NoticeSource::Operation, notice);
+            state.overlays.notices.refuse(
+                NoticeSource::Operation,
+                operation.progress.stopped_title(),
+                &reason,
+            );
         }
     }
 
     /// Serve what falls due with no event to bring it, answering whether any
-    /// window moved: a band held where its listing scrolls steps it, and a
-    /// click on a chosen name whose double-click interval has run out opens
-    /// the rename it armed.
-    fn serve_due(windows: &mut [OpenWindow], theme: &Theme, scale: Scale) -> bool {
+    /// window moved: a band held where its listing scrolls steps it, a click
+    /// on a chosen name whose double-click interval has run out opens the
+    /// rename it armed, and a drive window on show asks for its next reading.
+    fn serve_due(windows: &mut [OpenWindow], reads: &Reads, theme: &Theme, scale: Scale) -> bool {
         let now = tairix_rt::clock_get();
         let mut moved = false;
         for win in windows {
             let mode = *win.pane.mode();
+            let id = win.pane.id();
             let mut damage = Region::new();
-            let repaint = match win.browser() {
-                Some(state) => {
+            let repaint = match &mut win.kind {
+                WindowKind::Browser(state) => {
                     let canvas = Canvas {
                         theme,
                         mode: &mode,
@@ -1766,7 +1864,12 @@ mod program {
                     let stepped = state.step_band(canvas, now, &mut damage);
                     stepped.merged(state.open_due_rename(canvas, now, &mut damage))
                 }
-                None => Repaint::Nothing,
+                WindowKind::Properties(props) => {
+                    if let Some(job) = props.take_due_drive(now) {
+                        reads.want_drive(id, job);
+                    }
+                    Repaint::Nothing
+                }
             };
             moved |= repaint != Repaint::Nothing;
             owe(win, repaint, &damage);
@@ -1798,11 +1901,6 @@ mod program {
         else {
             return false;
         };
-        // A notice drawn over the panel takes what is aimed at it, where the
-        // panel would read its OK as Cancel; a close still stops the run.
-        if state.overlays.notices.is_showing() && !reaches_operation_under_notice(event) {
-            return false;
-        }
         state.note_pointer(event);
         state.keyboard = state.keyboard.step(event).1;
         let canvas = Canvas {
@@ -1944,6 +2042,12 @@ mod program {
             BarRouted::Handled => return None,
             BarRouted::Ends(code) => return Some(code),
             BarRouted::NotMine => {}
+        }
+        // An alert answers the application; the window that asked is found by
+        // the alert it holds.
+        if let WindowEvent::AlertClosed { alert_id, outcome } = *event {
+            answer_alert(windows, alert_id, outcome);
+            return None;
         }
         // Where a drag is, and where it ended, may name a window other than the
         // one it began in, so both are answered where every window is.
@@ -2127,14 +2231,14 @@ mod program {
                             windows.iter().position(|win| win.pane.id() == window_id)
                         else {
                             let reason = "the window it was dropped on has closed";
-                            refuse_drop(&mut windows[source], op, String::from(reason));
+                            refuse_drop(&mut windows[source], op, reason);
                             return;
                         };
                         let Some((folder, _)) =
                             window_drop_folder(&mut windows[target], x, y, scale, theme)
                         else {
                             let reason = "nothing there takes a drop";
-                            refuse_drop(&mut windows[target], op, String::from(reason));
+                            refuse_drop(&mut windows[target], op, reason);
                             return;
                         };
                         begin_drop(&mut windows[target], carrying.sources, &folder, op);
@@ -2143,7 +2247,7 @@ mod program {
                         let op = clipboard_op(operation);
                         let Some(folder) = desktop_drop_folder(client, source_id, serial) else {
                             let reason = "the desktop folder it was dropped on is gone";
-                            refuse_drop(&mut windows[source], op, String::from(reason));
+                            refuse_drop(&mut windows[source], op, reason);
                             return;
                         };
                         begin_drop(&mut windows[source], carrying.sources, &folder, op);
@@ -2294,14 +2398,14 @@ mod program {
             Some(String::from("that folder no longer takes the drop"))
         };
         if let Some(reason) = refused {
-            refuse_drop(win, op, reason);
+            refuse_drop(win, op, &reason);
         }
     }
 
     /// State in `win` why a drop moved nothing.
-    fn refuse_drop(win: &mut OpenWindow, op: ClipboardOp, reason: String) {
+    fn refuse_drop(win: &mut OpenWindow, op: ClipboardOp, reason: &str) {
         let Some(state) = win.browser() else {
-            report_error(&reason);
+            report_error(reason);
             return;
         };
         refuse_paste(&mut state.overlays, op, reason);
@@ -3270,6 +3374,8 @@ mod program {
         /// What the open Properties windows have asked to be described and
         /// what has come back, keyed by window.
         properties: PropertyReads,
+        /// The readings the drive windows have asked for, keyed by window.
+        drives: DriveReads,
         bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
         /// The user's home components and the mounted volumes the places rail
         /// is built from, re-read when the kernel says the mount table moved.
@@ -3474,8 +3580,10 @@ mod program {
         Artwork(ArtworkJob),
         /// Probe these folders' occupancy as one batch.
         Probe(Vec<Vec<String>>),
-        /// Describe one node for a Properties window.
-        Properties(PropertyJob),
+        /// Describe one node for the Properties window named.
+        Properties(u64, PropertyJob),
+        /// Read the drive the window named describes.
+        Drive(u64, DriveJob),
         /// Walk the program stores for their declared file associations.
         Bundles,
         /// Re-read the home components and the mounted volumes.
@@ -3500,6 +3608,7 @@ mod program {
                     artwork: ArtworkDesk::new(),
                     probes: Probes::new(),
                     properties: PropertyReads::new(),
+                    drives: DriveReads::new(),
                     bundles: tairix_util::defer::JobDesk::new(),
                     places: tairix_util::defer::JobDesk::new(),
                     stopping: false,
@@ -3587,9 +3696,13 @@ mod program {
                         );
                         self.work.lock().probes.deliver(answers)
                     }
-                    Read::Properties(job) => {
+                    Read::Properties(window, job) => {
                         let described = describe_node(&job);
-                        self.work.lock().properties.deliver(job.window, described)
+                        self.work.lock().properties.deliver(window, described)
+                    }
+                    Read::Drive(window, job) => {
+                        let read = read_drive(&job);
+                        self.work.lock().drives.deliver(window, read)
                     }
                     Read::Bundles => {
                         let found = scan_bundles();
@@ -3628,8 +3741,13 @@ mod program {
             // decodes and folder cues: those are decoration a frame already
             // draws without, and a Properties window shows nothing until its
             // answer lands.
-            if let Some(job) = work.properties.next_job() {
-                return Some(Read::Properties(job));
+            if let Some((window, job)) = work.properties.next_job() {
+                return Some(Read::Properties(window, job));
+            }
+            // A drive window's reading is watched live, so it goes before the
+            // decoration below, which a frame already draws without.
+            if let Some((window, job)) = work.drives.next_job() {
+                return Some(Read::Drive(window, job));
             }
             if let Some(job) = work.artwork.next_job() {
                 return Some(Read::Artwork(job));
@@ -3879,19 +3997,58 @@ mod program {
             answer
         }
 
-        /// Ask for `job`'s node to be described, waking a worker for it.
+        /// Ask for `job`'s node to be described for `window`, waking a worker
+        /// for it, or describing it here when no reader will.
         ///
         /// The window shows that it is reading until the answer lands: a node
         /// is one `fs_stat` plus one call per attribute key, which on a
         /// contended volume is not a frame.
-        fn want_properties(&self, job: PropertyJob) {
-            let submitted = {
-                let mut work = self.work.lock();
-                work.properties.submit(job)
-            };
-            if submitted {
+        fn want_properties(&self, window: u64, job: PropertyJob) {
+            let mut work = self.work.lock();
+            if work.alone {
+                drop(work);
+                let described = describe_node(&job);
+                self.work.lock().properties.answer_here(window, described);
+                return;
+            }
+            if work.properties.submit(window, job) {
+                drop(work);
                 self.signal.notify_one();
             }
+        }
+
+        /// Ask for `window`'s drive to be read, waking a worker for it, or
+        /// reading it here when no reader will.
+        ///
+        /// A reading is two pages of the System Information service, a round
+        /// trip the loop does not wait on.
+        fn want_drive(&self, window: u64, job: DriveJob) {
+            let mut work = self.work.lock();
+            if work.alone {
+                drop(work);
+                let read = read_drive(&job);
+                self.work.lock().drives.answer_here(window, read);
+                return;
+            }
+            if work.drives.submit(window, job) {
+                drop(work);
+                self.signal.notify_one();
+            }
+        }
+
+        /// Take `window`'s landed drive reading, if one has.
+        fn take_drive(&self, window: u64) -> Option<DriveReading> {
+            self.work.lock().drives.take(window)
+        }
+
+        /// Whether a drive reading has landed since this was last asked.
+        fn take_drives_landed(&self) -> bool {
+            self.work.lock().drives.take_landed()
+        }
+
+        /// Forget a closed window's drive reading.
+        fn forget_drive(&self, window: u64) {
+            self.work.lock().drives.forget(window);
         }
 
         /// Take `window`'s landed description, if one has.
@@ -4127,6 +4284,7 @@ mod program {
             self.artwork.stop();
             self.probes.stop();
             self.properties.stop();
+            self.drives.stop();
             self.bundles.stop();
             self.places.stop();
         }
@@ -4263,6 +4421,49 @@ mod program {
             .map_err(Errno::from_syscall)?;
         Ok(Properties::from_stat(path_leaf(&job.path), job.kind, &stat)
             .with_attributes(read_attributes(&job.path)))
+    }
+
+    /// Read what is mounted at `job`'s mount point and its device's service
+    /// counters, through the ungated mount table and service list.
+    ///
+    /// The counters are joined to the mount by its volume identity, so a
+    /// volume that published none, or whose device reports no service, has
+    /// none — never another volume's.
+    fn read_drive(job: &DriveJob) -> DriveReading {
+        let mut mount = None;
+        let listed = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
+            let at = core::str::from_utf8(record.target_bytes())
+                .ok()
+                .and_then(|target| tairix_browse::vfs::components_from_absolute_path(target).ok());
+            if at.as_deref() == Some(job.mount_point.as_slice()) {
+                mount = Some(*record);
+                return Ok(WalkStep::Stop);
+            }
+            Ok(WalkStep::Continue)
+        });
+        if listed.is_err() {
+            return DriveReading::Unreadable;
+        }
+        let identity = mount
+            .map(|record| record.volume_id())
+            .filter(|id| *id != tairix_abi::sysinfo::VOLUME_ID_UNPUBLISHED);
+        let mut service = None;
+        if let Some(identity) = identity {
+            // A refused service list leaves the reading without activity
+            // rather than without the volume.
+            let _ = tairix_procinfo::for_each_volume_service(&IpcTransport, |record| {
+                if record.volume_id() == identity {
+                    service = Some(*record);
+                    return Ok(WalkStep::Stop);
+                }
+                Ok(WalkStep::Continue)
+            });
+        }
+        DriveReading::Read(Box::new(DriveSample {
+            mount,
+            service,
+            at_ns: tairix_rt::clock_get(),
+        }))
     }
 
     /// The visible extended attributes of the node at `path`.
@@ -4550,15 +4751,13 @@ mod program {
 
     /// The open delete-confirmation dialog and the plan it would carry out.
     ///
-    /// `None` unless the user pressed `Delete` on a selection; the event loop
-    /// threads it so the painted modal dialog and the pending removal stay in
-    /// step. It owns the window while open: keys and clicks either confirm or
-    /// cancel and nothing navigates the view behind it. The plan is captured
-    /// when the dialog opens, so a listing change while it is up cannot move
+    /// `None` unless the user pressed `Delete` on a selection: the question
+    /// put to them, and what answering yes removes. The plan is captured when
+    /// the question is asked, so a listing change while it is up cannot move
     /// what the confirmed delete targets.
     struct DeleteConfirm {
-        /// The modal confirmation dialog (Delete / Cancel).
-        dialog: Dialog,
+        /// The question, until it is up, and then the alert asking it.
+        ask: Ask,
         /// What the confirmed delete would remove, captured at open time.
         plan: DeletePlan,
         /// The recoverable move-to-Trash plan when the removal can be carried
@@ -4569,6 +4768,13 @@ mod program {
         /// `None` when Trash is unavailable or cross-volume, in which case the
         /// removal is the irreversible unlink and the dialog says so.
         trash_moves: Option<TrashMoves>,
+    }
+
+    /// A question a window asks: what it says until it is up, and then the
+    /// alert asking it.
+    enum Ask {
+        Waiting(Box<AlertSpec>),
+        Up(u64),
     }
 
     /// A long file operation a window asked for (`plans/NEW-FILEMANAGER.md`
@@ -4692,6 +4898,8 @@ mod program {
         kind: EntryKind,
         /// The spelling a link stores, if it is one.
         target: Option<String>,
+        /// The drive it is the root of, by its picture, for a volume root.
+        drive: Option<IconKind>,
     }
 
     /// What a popup this app opens above one of its own windows is opened
@@ -4923,8 +5131,8 @@ mod program {
             if repeats(&writing.then) {
                 return Some(false);
             }
-            let notice = build_refusal_dialog(title, STILL_WRITING);
-            self.notices.state(NoticeSource::Write, notice);
+            self.notices
+                .refuse(NoticeSource::Write, title, STILL_WRITING);
             Some(true)
         }
 
@@ -5125,21 +5333,12 @@ mod program {
                     if let Some(field) = rename {
                         draw_rename_field(surface, field, browser, scale, theme, viewport, toolbar);
                     }
-                    // The delete-confirmation dialog is modal: drawn last, on
-                    // top of the view, and never open together with the rename
-                    // editor.
-                    if let Some(confirm) = overlays.delete.as_ref() {
-                        draw_modal_dialog(surface, &confirm.dialog, scale, theme, viewport);
-                    }
-                    // The "Open With…" chooser has its own popup window and the
-                    // right-click menu is the desktop's own plates, so neither
-                    // is drawn here. A running operation's progress panel is
-                    // modal, so it is drawn last.
+                    // The "Open With…" chooser has its own popup window, and the
+                    // right-click menu and every question are the desktop's own
+                    // windows, so none is drawn here. A running operation's
+                    // progress panel is modal, so it is drawn last.
                     if let Some(operation) = overlays.operation.as_ref() {
                         draw_progress_dialog(surface, &operation.progress, scale, theme, viewport);
-                    }
-                    if let Some(notice) = overlays.notices.showing() {
-                        draw_modal_dialog(surface, notice, scale, theme, viewport);
                     }
                 });
             }
@@ -5220,20 +5419,6 @@ mod program {
         {
             overlays.drag = None;
             overlays.collapse_on_release = None;
-        }
-
-        // A refusal's notice owns the window until it is dismissed.
-        if overlays.notices.is_showing() {
-            let dismissed =
-                apply_notice_event(&mut overlays.notices, scale, theme, viewport, event);
-            return (whole_if(dismissed), false);
-        }
-
-        // The delete-confirmation dialog owns the window while it is up, so
-        // every event goes to it and none navigates the view behind it.
-        if overlays.delete.is_some() {
-            let (changed, close) = apply_delete_event(overlays, scale, theme, viewport, event);
-            return (whole_if(changed), close);
         }
 
         // Rename mode: the inline editor owns the keyboard and the presses
@@ -5574,6 +5759,7 @@ mod program {
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::CloseRequested { .. }
@@ -5608,15 +5794,20 @@ mod program {
     /// mount table through the shared System Information client.
     ///
     /// Only volumes this session can actually navigate to are offered: a mount
-    /// that is not serving I/O (a surprise-removed device) or whose target is
-    /// not valid text is left out rather than shown as a row that would fail
-    /// on the first click. A refused or failed query yields no volumes at all,
+    /// whose device vanished, or whose target is not valid text, is left out
+    /// rather than shown as a row that would fail on the first click. A
+    /// degraded, recovering or read-only conflicted volume still serves its
+    /// data, so it stays. A refused or failed query yields no volumes at all,
     /// so the rail falls back to the user's own places rather than guessing
     /// what is mounted. The rail itself then re-validates every row.
     fn mounted_volumes() -> alloc::vec::Vec<Volume> {
+        use tairix_abi::sysinfo::MountAvailability;
         let mut volumes = alloc::vec::Vec::new();
         let _ = tairix_procinfo::for_each_mount(&IpcTransport, |record| {
-            if record.availability() != tairix_abi::sysinfo::MountAvailability::Available {
+            if matches!(
+                record.availability(),
+                MountAvailability::UnavailableDirty | MountAvailability::UnavailableLost
+            ) {
                 return Ok(WalkStep::Continue);
             }
             let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
@@ -6045,21 +6236,19 @@ mod program {
         (false, false)
     }
 
-    /// Open the delete confirmation for `plan`, worded for the Trash moves it
-    /// can be carried out as, or for the irreversible unlink without them.
-    fn open_delete_dialog(
-        overlays: &mut Overlays,
-        plan: DeletePlan,
-        trash_moves: Option<TrashMoves>,
-    ) {
+    /// Ask whether to remove `plan`, worded for the Trash moves it can be
+    /// carried out as, or for the irreversible unlink without them.
+    fn ask_delete(overlays: &mut Overlays, plan: DeletePlan, trash_moves: Option<TrashMoves>) {
         let disposition = if trash_moves.is_some() {
             DeleteDisposition::Trash
         } else {
             DeleteDisposition::Permanent
         };
-        let dialog = build_delete_dialog(&plan, disposition);
+        let Some(question) = delete_alert(&plan, disposition) else {
+            return;
+        };
         overlays.delete = Some(DeleteConfirm {
-            dialog,
+            ask: Ask::Waiting(Box::new(question)),
             plan,
             trash_moves,
         });
@@ -6159,106 +6348,138 @@ mod program {
         }
     }
 
-    /// Handle one event while a refusal's notice owns the window: Enter,
-    /// Escape, or a click on OK dismisses it, answering whether it did.
-    fn apply_notice_event(
-        notices: &mut Notices,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        event: &WindowEvent,
-    ) -> bool {
-        let dismissed = match event {
-            WindowEvent::Key {
-                key: KeyInput::Pressed { key, .. },
-                ..
-            } => matches!(
-                key,
-                KeyValue::Named(NamedKeyCode::Escape | NamedKeyCode::Enter)
-            ),
-            WindowEvent::Pointer { x, y, action, .. } => {
-                press_point(*action, *x, *y).is_some_and(|point| {
-                    notices.showing().and_then(|notice| {
-                        modal_dialog_action_at(notice, viewport, scale, theme, point)
-                    }) == Some(REFUSAL_DISMISS_INDEX)
-                })
+    /// Put up every question and notice a window is waiting to ask, one alert
+    /// a window at a time, the delete question first because the user has
+    /// just asked for it. One the desktop refuses is stated on `stderr`
+    /// instead, and a delete it would not ask about is not carried out.
+    fn raise_alerts(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        endpoint: u64,
+        full: &mut bool,
+    ) {
+        for win in windows {
+            if *full {
+                return;
             }
-            _ => false,
-        };
-        if dismissed {
-            notices.dismiss();
+            let window_id = win.pane.id();
+            match &mut win.kind {
+                WindowKind::Browser(state) => {
+                    let overlays = &mut state.overlays;
+                    let question = overlays
+                        .delete
+                        .as_ref()
+                        .map(|confirm| matches!(confirm.ask, Ask::Up(_)));
+                    match next_alert(question, overlays.notices.is_up()) {
+                        NextAlert::Question => {
+                            let Some(confirm) = overlays.delete.as_mut() else {
+                                continue;
+                            };
+                            let Ask::Waiting(asked) = &confirm.ask else {
+                                continue;
+                            };
+                            match client.open_alert(endpoint, Some(window_id), asked) {
+                                Ok(alert) => confirm.ask = Ask::Up(alert),
+                                Err(Errno::LimitExceeded) => {
+                                    *full = true;
+                                    return;
+                                }
+                                Err(err) => {
+                                    report_error(&alloc::format!(
+                                        "the delete question could not be asked ({err}); \
+                                         nothing was removed"
+                                    ));
+                                    overlays.delete = None;
+                                }
+                            }
+                        }
+                        NextAlert::Notice => {
+                            *full =
+                                raise_notice(&mut overlays.notices, client, endpoint, window_id);
+                        }
+                        NextAlert::Nothing => {}
+                    }
+                }
+                WindowKind::Properties(props) => {
+                    *full = raise_notice(&mut props.notices, client, endpoint, window_id);
+                }
+            }
         }
-        dismissed
     }
 
-    /// Handle one event while the delete-confirmation dialog owns the window.
-    ///
-    /// `Escape` (or a click on Cancel) dismisses the dialog and changes
-    /// nothing; `Enter` (or a click on Delete) asks for the confirmed removal,
-    /// which the operations worker carries out while the window shows its
-    /// progress. A click that lands on neither button, and every non-decision
-    /// event, leaves the dialog open (fail closed). The removal is the user's
-    /// own capability-checked `fs_unlink`s — no new capability, no ambient
-    /// authority.
-    fn apply_delete_event(
-        overlays: &mut Overlays,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        event: &WindowEvent,
-    ) -> (bool, bool) {
-        // Resolve the decision: `Some(true)` confirms, `Some(false)` cancels,
-        // `None` leaves the dialog open.
-        let decision = match event {
-            WindowEvent::Key {
-                key: KeyInput::Pressed { key, .. },
-                ..
-            } => match key {
-                KeyValue::Named(NamedKeyCode::Escape) => Some(false),
-                KeyValue::Named(NamedKeyCode::Enter) => Some(true),
-                _ => None,
-            },
-            WindowEvent::Pointer { x, y, action, .. } => {
-                press_point(*action, *x, *y).and_then(|point| {
-                    let confirm = overlays.delete.as_ref()?;
-                    let index =
-                        modal_dialog_action_at(&confirm.dialog, viewport, scale, theme, point);
-                    if index == Some(DELETE_CONFIRM_INDEX) {
-                        Some(true)
-                    } else if index == Some(DELETE_CANCEL_INDEX) {
-                        Some(false)
-                    } else {
-                        None
-                    }
-                })
-            }
-            _ => None,
-        };
-        match decision {
-            None => (false, false),
-            Some(false) => {
-                overlays.delete = None;
-                (true, false)
-            }
-            Some(true) => {
-                let Some(confirm) = overlays.delete.take() else {
-                    return (false, false);
-                };
-                // The plan was captured when the dialog opened, so a listing
-                // change cannot move what it targets, and the Trash moves match
-                // the dialog's wording (`FM10`).
-                overlays.operation = Some(match confirm.trash_moves {
-                    Some(moves) => {
-                        Operation::new(Job::Trash(TrashRun::new(moves)), ProgressOp::Trash)
-                    }
-                    None => Operation::new(
-                        Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
-                        ProgressOp::Delete,
-                    ),
-                });
-                (true, false)
+    /// Put up `notices`' next notice for window `window_id` when none is up.
+    fn raise_notice(
+        notices: &mut Notices,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        endpoint: u64,
+        window_id: u64,
+    ) -> bool {
+        loop {
+            match notices.raise(client, endpoint, window_id) {
+                Raised::Nothing | Raised::Up => return false,
+                Raised::Full => return true,
+                Raised::Refused(err, notice) => report_error(&alloc::format!(
+                    "{}: {} (the desktop would not show this: {err})",
+                    notice.headline(),
+                    notice.detail()
+                )),
             }
         }
+    }
+
+    /// The answer to alert `alert_id`, given to whichever window asked it.
+    fn answer_alert(windows: &mut [OpenWindow], alert_id: u64, outcome: AlertOutcome) {
+        for win in windows {
+            let removal = match &mut win.kind {
+                WindowKind::Browser(state) => {
+                    let overlays = &mut state.overlays;
+                    if overlays.notices.answered(alert_id) {
+                        return;
+                    }
+                    let asked = overlays.delete.as_ref().is_some_and(
+                        |confirm| matches!(confirm.ask, Ask::Up(up) if up == alert_id),
+                    );
+                    if asked {
+                        answer_delete(overlays, outcome);
+                    }
+                    asked
+                }
+                WindowKind::Properties(props) => {
+                    if props.notices.answered(alert_id) {
+                        return;
+                    }
+                    false
+                }
+            };
+            if removal {
+                win.owed.owe_whole();
+                return;
+            }
+        }
+    }
+
+    /// The delete question's answer: the removal begins when the user chose
+    /// it, and nothing changes otherwise. The plan was captured when the
+    /// question was asked, so a listing change while it was up cannot move
+    /// what the removal targets, and the Trash moves match its wording.
+    fn answer_delete(overlays: &mut Overlays, outcome: AlertOutcome) {
+        let Some(confirm) = overlays.delete.take() else {
+            return;
+        };
+        let chosen = matches!(
+            outcome,
+            AlertOutcome::Chosen { index } if usize::from(index) == DELETE_CONFIRM_INDEX
+        );
+        if !chosen {
+            return;
+        }
+        overlays.operation = Some(match confirm.trash_moves {
+            Some(moves) => Operation::new(Job::Trash(TrashRun::new(moves)), ProgressOp::Trash),
+            None => Operation::new(
+                Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
+                ProgressOp::Delete,
+            ),
+        });
     }
 
     /// What one unit of an operation came to.
@@ -6557,7 +6778,7 @@ mod program {
             Ok(()) => overlays.clipboard = Some(clip),
             Err(reason) => {
                 overlays.clipboard = Some(clip);
-                refuse_paste(overlays, op, reason);
+                refuse_paste(overlays, op, &reason);
             }
         }
         (true, false)
@@ -6565,14 +6786,13 @@ mod program {
 
     /// State why a paste or a drop moved nothing, in the window and on
     /// `stderr` for the record.
-    fn refuse_paste(overlays: &mut Overlays, op: ClipboardOp, reason: String) {
-        report_error(&reason);
+    fn refuse_paste(overlays: &mut Overlays, op: ClipboardOp, reason: &str) {
+        report_error(reason);
         let title = match op {
             ClipboardOp::Copy => "Not copied",
             ClipboardOp::Cut => "Not moved",
         };
-        let notice = build_refusal_dialog(title, reason);
-        overlays.notices.state(NoticeSource::Paste, notice);
+        overlays.notices.refuse(NoticeSource::Paste, title, reason);
     }
 
     /// Ask for `clip` to be pasted into the folder `target` as an
@@ -8196,8 +8416,9 @@ mod program {
         }
         let Some(home) = home_components().filter(|home| !home.is_empty()) else {
             let reason = "there is no home folder, so there is no Trash";
-            let notice = build_refusal_dialog(NO_TRASH, reason);
-            overlays.notices.state(NoticeSource::Write, notice);
+            overlays
+                .notices
+                .refuse(NoticeSource::Write, NO_TRASH, reason);
             return (true, false);
         };
         let trash = trash_dir(&home);
@@ -8262,8 +8483,9 @@ mod program {
         let pending = match browser.prepare_entry(&name) {
             Ok(pending) => pending,
             Err(err) => {
-                let notice = build_refusal_dialog(NOT_MADE, err.message());
-                overlays.notices.state(NoticeSource::Write, notice);
+                overlays
+                    .notices
+                    .refuse(NoticeSource::Write, NOT_MADE, err.message());
                 return (true, false);
             }
         };
@@ -8337,11 +8559,17 @@ mod program {
         };
         let kind = entry.kind();
         let target = entry.target().map(String::from);
+        let drive = entry.drive();
         let Some(Ok(path)) = browser.chosen_target_path() else {
             report_error("that item's location could not be resolved; no window opened");
             return (false, false);
         };
-        *request = Some(PropertiesRequest { path, kind, target });
+        *request = Some(PropertiesRequest {
+            path,
+            kind,
+            target,
+            drive,
+        });
         (false, false)
     }
 
@@ -8367,13 +8595,25 @@ mod program {
         event_endpoint: u64,
         can_chown: bool,
     ) {
-        let PropertiesRequest { path, kind, target } = request;
+        let PropertiesRequest {
+            path,
+            kind,
+            target,
+            drive,
+        } = request;
         let title = alloc::format!("{} — Properties", path_leaf(&path));
+        // A mount point that does not parse names no drive: it is described
+        // as a node, never read as whatever volume an empty path would match.
+        let drive = drive.and_then(|art| Some((art, drive_job(&path)?)));
+        let strip = match drive {
+            Some(_) => PropertiesStrip::Drive,
+            None => PropertiesStrip::Node,
+        };
         // The extent is already resolved at the desktop's density (the row
         // pitch it counts is a physical one), so only the screen cap is left
         // to apply — never a window larger than the display it appears on.
         let (w, h) =
-            tairix_browse::render::properties_window_extent(desktop.scale(), grounds.popups);
+            tairix_browse::render::properties_window_extent(strip, desktop.scale(), grounds.popups);
         let screen = desktop.screen();
         let mode = app::mode_for(w.min(screen.width), h.min(screen.height));
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
@@ -8402,7 +8642,7 @@ mod program {
                 scroll: ScrollColumn::new(),
                 editor: attribute_editor(),
                 owner: None,
-                tab: PropertiesTab::default(),
+                tab: strip.first(),
                 perms: PermsCursor::default(),
                 section: PermsPanel::default(),
                 detail: PropertiesWindow::detail_for(kind, None),
@@ -8410,13 +8650,26 @@ mod program {
                 writing: None,
                 rereading: false,
                 notices: Notices::default(),
+                strip,
+                drive: drive.map(|(art, job)| DriveWatch {
+                    drive: Drive::new(),
+                    job,
+                    art,
+                    due: None,
+                    asked: true,
+                }),
             })),
         };
+        let id = win.pane.id();
         if let WindowKind::Properties(props) = &win.kind {
-            reads.want_properties(props.job(win.pane.id()));
+            reads.want_properties(id, props.job());
+            if let Some(watch) = &props.drive {
+                reads.want_drive(id, watch.job.clone());
+            }
         }
         if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
-            reads.forget_properties(win.pane.id());
+            reads.forget_properties(id);
+            reads.forget_drive(id);
             let _ = win.pane.close(client);
             report_error("the Properties window could not be painted; it was closed again");
             return;
@@ -8461,15 +8714,14 @@ mod program {
                     None => props,
                 };
                 win.rows.resize(props.attributes().visible().len());
-                win.detail = PropertiesWindow::detail_for(win.kind, Some(&props));
                 win.state = PropertiesState::Ready(props);
             }
             Err(err) => {
                 win.rows.resize(0);
-                win.detail = PropertiesWindow::detail_for(win.kind, None);
                 win.state = PropertiesState::Refused(alloc::format!("could not be read: {err}"));
             }
         }
+        win.refresh_detail();
     }
 
     /// Handle one event delivered to a Properties window.
@@ -8495,10 +8747,6 @@ mod program {
         event: &WindowEvent,
         damage: &mut Region,
     ) -> (Repaint, bool) {
-        if win.notices.is_showing() && !matches!(event, WindowEvent::CloseRequested { .. }) {
-            let dismissed = apply_notice_event(&mut win.notices, scale, theme, window, event);
-            return (whole_if(dismissed), false);
-        }
         match event {
             WindowEvent::CloseRequested { .. } => return (Repaint::Nothing, true),
             WindowEvent::Key {
@@ -8523,7 +8771,12 @@ mod program {
                         &mut win.scroll,
                         props,
                         view,
-                        perms_shown(win.can_chown, win.owner.as_ref(), &win.section),
+                        sections_shown(
+                            win.can_chown,
+                            win.owner.as_ref(),
+                            &win.section,
+                            win.drive.as_ref(),
+                        ),
                         (window, scale, theme),
                         (*dx, *dy),
                         damage,
@@ -8537,19 +8790,28 @@ mod program {
         (Repaint::Nothing, false)
     }
 
-    /// What a Properties window's Permissions section is composed from, taken
-    /// from its fields alone so it can stand beside a borrow of its scroll
-    /// column.
-    fn perms_shown<'a>(
+    /// What a Properties window's sections are composed from besides the
+    /// node, taken from its fields alone so it can stand beside a borrow of
+    /// its scroll column.
+    fn sections_shown<'a>(
         can_chown: bool,
         owner: Option<&'a OwnerEditor>,
         section: &'a PermsPanel,
-    ) -> PermsShown<'a> {
-        PermsShown {
+        drive: Option<&'a DriveWatch>,
+    ) -> SectionsShown<'a> {
+        SectionsShown {
             can_chown,
             owner: owner.map(|ed| (ed.field, &ed.editor)),
             panel: section,
+            drive: drive.map(|watch| &watch.drive),
         }
+    }
+
+    /// The reading a drive window at `path` asks for, or `None` for a path
+    /// that names no mount point.
+    fn drive_job(path: &str) -> Option<DriveJob> {
+        let mount_point = tairix_browse::vfs::components_from_absolute_path(path).ok()?;
+        Some(DriveJob { mount_point })
     }
 
     /// Scroll the section on show the least that shows its keyboard cursor,
@@ -8565,7 +8827,12 @@ mod program {
                 &mut win.scroll,
                 props,
                 view,
-                perms_shown(win.can_chown, win.owner.as_ref(), &win.section),
+                sections_shown(
+                    win.can_chown,
+                    win.owner.as_ref(),
+                    &win.section,
+                    win.drive.as_ref(),
+                ),
                 (window, scale, theme),
                 damage,
             ),
@@ -8596,7 +8863,7 @@ mod program {
                     tairix_browse::render::properties_owner_editor_rect(
                         props,
                         win.view(),
-                        win.controls().perms_shown(),
+                        win.sections(),
                         (window, scale, theme),
                         field,
                     )
@@ -8625,7 +8892,8 @@ mod program {
         }
         match route::properties_key(win.tab, win.perms.holds(), key) {
             route::PropertiesKey::Section(steps) => {
-                return (whole_if(show_section(win, win.tab.stepped(steps))), false)
+                let next = win.strip.stepped(win.tab, steps);
+                return (whole_if(show_section(win, next)), false);
             }
             route::PropertiesKey::Close => return (Repaint::Nothing, true),
             route::PropertiesKey::Ignored => return (Repaint::Nothing, false),
@@ -8752,7 +9020,12 @@ mod program {
                     &mut win.scroll,
                     props,
                     view,
-                    perms_shown(win.can_chown, win.owner.as_ref(), &win.section),
+                    sections_shown(
+                        win.can_chown,
+                        win.owner.as_ref(),
+                        &win.section,
+                        win.drive.as_ref(),
+                    ),
                     (window, scale, theme),
                     (point, &input),
                     damage,
@@ -8810,6 +9083,15 @@ mod program {
         win.owner = None;
         win.perms = PermsCursor::default();
         win.scroll.set_offset(0);
+        // A drive is read only while its section shows: coming back reads it
+        // at once and starts its trace afresh, going away lets the reading out
+        // be the last.
+        if let Some(watch) = &mut win.drive {
+            if tab != PropertiesTab::Drive {
+                watch.drive.pause();
+            }
+            watch.due = (tab == PropertiesTab::Drive && !watch.asked).then_some(0);
+        }
         true
     }
 
@@ -8930,7 +9212,7 @@ mod program {
                 PropertiesWrite::Attribute { removing: true, .. } => win.editor.set_message(None),
                 PropertiesWrite::Mode => {}
             }
-            reads.want_properties(win.job(window_id));
+            reads.want_properties(window_id, win.job());
             win.rereading = true;
             return Repaint::Whole;
         }
@@ -8967,8 +9249,8 @@ mod program {
             }
             PropertiesWrite::Attribute { .. } => win.editor.set_message(Some(String::from(reason))),
             PropertiesWrite::Mode => {
-                let notice = build_refusal_dialog(then.refusal_title(), reason);
-                win.notices.state(NoticeSource::Write, notice);
+                win.notices
+                    .refuse(NoticeSource::Write, then.refusal_title(), reason);
             }
         }
         Repaint::Whole
@@ -9264,8 +9546,10 @@ mod program {
                 continue;
             };
             if let Some(reason) = state.overlays.rename.take_refusal() {
-                let notice = build_refusal_dialog("Not renamed", reason);
-                state.overlays.notices.state(NoticeSource::Rename, notice);
+                state
+                    .overlays
+                    .notices
+                    .refuse(NoticeSource::Rename, "Not renamed", &reason);
                 win.owed.owe_whole();
             }
         }
@@ -9636,8 +9920,11 @@ mod program {
             if let Some(win) = windows.iter_mut().find(|win| win.shows(shown_at)) {
                 if raise_showing(client, win.pane.id()) {
                     if let (Some(reason), Some(state)) = (landed.ladder.moved(), win.browser()) {
-                        let notice = build_refusal_dialog(OPENED_ELSEWHERE, reason);
-                        state.overlays.notices.state(NoticeSource::Listing, notice);
+                        state.overlays.notices.refuse(
+                            NoticeSource::Listing,
+                            OPENED_ELSEWHERE,
+                            &reason,
+                        );
                         win.owed.owe_whole();
                     }
                     reads.forget_listing(listing);
@@ -9873,6 +10160,9 @@ mod program {
         });
         // The event a park woke for, served first by the turn after it.
         let mut woken = None;
+        // The application has every alert up it may, so nothing more is put
+        // up until one is answered.
+        let mut alerts_full = false;
         loop {
             // Report what the icon cache holds at the head of the turn: this
             // is the one point every path through the body passes through
@@ -9903,6 +10193,9 @@ mod program {
                         return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                     }
                 };
+                // An answered alert frees one of the application's, so what
+                // waited for the room may go up.
+                alerts_full &= !matches!(event, WindowEvent::AlertClosed { .. });
                 // The desktop belongs to the seat, not to one window, so a
                 // change is adopted once and every window owes it whole.
                 if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
@@ -9938,7 +10231,7 @@ mod program {
                 owe_desktop(&mut windows, &mut client, &desktop, grounds);
                 moved = true;
             }
-            moved |= serve_due(&mut windows, themes.active(), desktop.scale());
+            moved |= serve_due(&mut windows, &reads, themes.active(), desktop.scale());
             moved |= collect_writes(&mut windows, &reads, themes.active(), desktop.scale());
             submit_writes(&mut windows, &reads, themes.active(), desktop.scale());
             state_rename_refusals(&mut windows);
@@ -9978,6 +10271,7 @@ mod program {
                             report_error(&alloc::format!("listing refused ({err})"));
                         }
                     }
+                    state.browser.mark_volume_roots(&state.places);
                     // Only a listing draws the rail.
                     win.owed.owe_whole();
                 }
@@ -10017,6 +10311,7 @@ mod program {
                 let replaced = match state.browser.resume() {
                     Ok(true) => {
                         state.lost = false;
+                        state.browser.mark_volume_roots(&state.places);
                         state.overlays.double_click.reset();
                         state.rename_arrived(Canvas {
                             theme: themes.active(),
@@ -10077,6 +10372,46 @@ mod program {
                     moved = true;
                 }
             }
+            // A drive reading the reader has answered: each window repaints
+            // the panels it moved, and the whole of itself only when what it
+            // states moved its layout or its identity line.
+            if reads.take_drives_landed() {
+                let now = tairix_rt::clock_get();
+                let (theme, scale) = (
+                    themes.grounds(MANAGER_WINDOW_GROUND).popups,
+                    desktop.scale(),
+                );
+                for win in &mut windows {
+                    let id = win.pane.id();
+                    let mode = *win.pane.mode();
+                    let WindowKind::Properties(props) = &mut win.kind else {
+                        continue;
+                    };
+                    let Some(answer) = reads.take_drive(id) else {
+                        continue;
+                    };
+                    let detail = props.detail.clone();
+                    let change = props.adopt_drive(answer, now);
+                    props.refresh_detail();
+                    if props.detail != detail {
+                        win.owed.owe_whole();
+                        moved = true;
+                        continue;
+                    }
+                    let mut damage = Region::new();
+                    let client = Rect::new(0, 0, mode.width_px, mode.height_px);
+                    if properties_drive_damage(
+                        props.view(),
+                        props.sections(),
+                        (client, scale, theme),
+                        change,
+                        &mut damage,
+                    ) {
+                        owe(win, Repaint::Reported, &damage);
+                        moved = true;
+                    }
+                }
+            }
             // A folder-cue batch the reader has answered. The answers are
             // latched onto the entries here — the worker only produced them —
             // and a window whose icons moved owes the frame that shows them;
@@ -10114,6 +10449,7 @@ mod program {
                 moved = true;
             }
 
+            raise_alerts(&mut windows, &mut client, event_endpoint, &mut alerts_full);
             let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
             if present_owed_windows(&mut windows, &mut client, grounds, &icons, desktop.scale())
                 .is_err()
@@ -10133,7 +10469,7 @@ mod program {
                     .iter()
                     .filter_map(|win| match &win.kind {
                         WindowKind::Browser(state) => state.due(),
-                        WindowKind::Properties(_) => None,
+                        WindowKind::Properties(props) => props.due(),
                     })
                     .min(),
             );

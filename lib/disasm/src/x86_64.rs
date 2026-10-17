@@ -22,7 +22,7 @@ use alloc::string::String;
 use crate::{branch_target, sign_extend, Insn};
 
 /// A legal instruction never exceeds 15 bytes; longer prefix runs fault.
-const MAX_LENGTH: usize = 15;
+pub const MAX_INSN_LEN: usize = 15;
 
 /// 64-bit register names, indexed by the 4-bit REX-extended number.
 const REG64: [&str; 16] = [
@@ -292,7 +292,7 @@ pub fn decode(code: &[u8], address: u64) -> Option<Insn> {
     if code.is_empty() {
         return None;
     }
-    let window = &code[..code.len().min(MAX_LENGTH)];
+    let window = &code[..code.len().min(MAX_INSN_LEN)];
     let mut reader = Reader::new(window);
     let mut prefixes = Prefixes::default();
     loop {

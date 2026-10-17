@@ -61,6 +61,10 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # The one fast hash: a watch batch's merge filters the listing's names through
 # it before searching the batch for them.
 tairix-hash = { path = "../hash", version = "=0.0.0" }
+# What a mounted volume's record says, said one way: its capacity in bytes,
+# its medium and health in words, its options and its throughput, the same
+# derivations `df`, the Switchboard and Settings state a volume through.
+tairix-procinfo = { path = "../procinfo", version = "=0.0.0" }
 
 # The renderer's host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).

@@ -142,21 +142,15 @@ pub fn render_into(
         layout.pane_window(PaneKind::Colour),
         (faces, scale, theme),
     );
-    if let Some(modal) = view.modal() {
+    if let Some(form) = view.modal() {
         let window = layout.window();
-        // The question takes the whole window, its floating panes with it.
+        // The form takes the whole window, its floating panes with it.
         let veil = palette.drop_shadow.with_alpha(VEIL_ALPHA);
         blend_area(surface, window, veil);
         for slot in layout.floating() {
             blend_area(surface, slot.frame, veil);
         }
-        match modal {
-            Ok(dialog) => {
-                let bounds = crate::view::close_rect(dialog, window, scale, theme);
-                dialog.render(surface, bounds, scale, theme);
-            }
-            Err(form) => form.render(surface, window, scale, theme),
-        }
+        form.render(surface, window, scale, theme);
     }
 }
 

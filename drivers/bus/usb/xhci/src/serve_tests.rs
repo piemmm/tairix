@@ -38,6 +38,9 @@ struct MockEngine {
     bulk_in_data: Vec<Vec<u8>>,
     /// An armed bulk-IN TD's requested length, `None` when idle.
     bulk_in_armed: Option<usize>,
+    /// The URBs it was told to abandon, and whether it lets them go.
+    abandoned: Vec<UrbRequest>,
+    abandon_fault: Option<DriverError>,
 }
 
 /// The mock interface's bulk-IN endpoint number.
@@ -53,11 +56,19 @@ impl MockEngine {
             interrupt_calls: 0,
             bulk_in_data: Vec::new(),
             bulk_in_armed: None,
+            abandoned: Vec::new(),
+            abandon_fault: None,
         }
     }
 }
 
 impl UrbEngine for MockEngine {
+    fn abandon(&mut self, urb: &UrbRequest) -> Result<(), DriverError> {
+        self.abandoned.push(*urb);
+        self.bulk_in_armed = None;
+        self.abandon_fault.take().map_or(Ok(()), Err)
+    }
+
     fn control_in(&mut self, _setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
         self.control_calls += 1;
         let n = self.control_response.len().min(data.len());
@@ -139,8 +150,12 @@ fn interrupt_urb(endpoint: u8, length: u32) -> UrbRequest {
         direction: UsbDirection::In,
         length,
         setup: [0; 8],
+        timeout_ms: None,
     }
 }
+
+/// The deadline a bulk URB here carries.
+const BULK_TIMEOUT_MS: u32 = 3750;
 
 /// Decode the completion carried by a [`UrbOutcome::Reply`].
 fn reply_result(outcome: &UrbOutcome) -> Result<u32, Errno> {
@@ -158,7 +173,7 @@ fn an_interrupt_in_is_held_until_a_controller_event_completes_it() {
     let request = interrupt_urb(1, 8);
 
     // No report queued yet: the submit is held outstanding, not replied.
-    let outcome = service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x11, 0, &request, &mut shm, &mut engine);
     assert_eq!(outcome, UrbOutcome::Held);
     assert!(service.is_busy());
     assert_eq!(engine.interrupt_calls, 1);
@@ -187,6 +202,7 @@ fn bulk_in_urb(endpoint: u8, length: u32) -> UrbRequest {
         direction: UsbDirection::In,
         length,
         setup: [0; 8],
+        timeout_ms: core::num::NonZeroU32::new(BULK_TIMEOUT_MS),
     }
 }
 
@@ -200,7 +216,7 @@ fn a_bulk_in_is_held_until_a_controller_event_completes_it() {
     let mut service = UrbService::new();
     let request = bulk_in_urb(BULK_IN_ENDPOINT, 16);
 
-    let outcome = service.on_submit(Reach::Served, 0x21, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x21, 0, &request, &mut shm, &mut engine);
     assert_eq!(outcome, UrbOutcome::Held);
     assert!(service.is_busy());
 
@@ -218,6 +234,66 @@ fn a_bulk_in_is_held_until_a_controller_event_completes_it() {
     assert!(!service.is_busy());
 }
 
+#[test]
+fn a_held_bulk_urb_is_abandoned_at_its_deadline_and_answered_timed_out() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 16];
+    let mut service = UrbService::new();
+    let request = bulk_in_urb(BULK_IN_ENDPOINT, 16);
+    let submitted = 7_000;
+    assert_eq!(
+        service.on_submit(
+            Reach::Served,
+            0x41,
+            submitted,
+            &request,
+            &mut shm,
+            &mut engine
+        ),
+        UrbOutcome::Held
+    );
+    let due = submitted + u64::from(BULK_TIMEOUT_MS) * 1_000_000;
+    assert_eq!(service.deadline(), Some(due));
+    assert_eq!(service.expire(due - 1, &mut engine), UrbOutcome::Idle);
+    assert!(engine.abandoned.is_empty(), "nothing is abandoned early");
+
+    let outcome = service.expire(due, &mut engine);
+    assert_eq!(reply_result(&outcome), Err(Errno::TimedOut));
+    assert_eq!(engine.abandoned, [request]);
+    assert!(!service.is_busy());
+    assert_eq!(service.deadline(), None);
+}
+
+#[test]
+fn a_urb_the_controller_will_not_let_go_is_answered_as_a_fault() {
+    let mut engine = MockEngine::new();
+    engine.abandon_fault = Some(DriverError::DeviceFault);
+    let mut shm = vec![0u8; 16];
+    let mut service = UrbService::new();
+    let request = bulk_in_urb(BULK_IN_ENDPOINT, 16);
+    service.on_submit(Reach::Served, 0x42, 0, &request, &mut shm, &mut engine);
+    let outcome = service.expire(u64::MAX, &mut engine);
+    assert_eq!(reply_result(&outcome), Err(Errno::DeviceFault));
+}
+
+#[test]
+fn a_report_poll_with_no_deadline_waits_for_its_report_however_long() {
+    let mut engine = MockEngine::new();
+    let mut shm = vec![0u8; 8];
+    let mut service = UrbService::new();
+    service.on_submit(
+        Reach::Served,
+        0x43,
+        0,
+        &interrupt_urb(1, 8),
+        &mut shm,
+        &mut engine,
+    );
+    assert_eq!(service.deadline(), None);
+    assert_eq!(service.expire(u64::MAX, &mut engine), UrbOutcome::Idle);
+    assert!(service.is_busy());
+}
+
 /// A `GET_DESCRIPTOR(device)` control-IN URB reading `length` bytes.
 fn control_in_urb(length: u8) -> UrbRequest {
     UrbRequest {
@@ -226,6 +302,7 @@ fn control_in_urb(length: u8) -> UrbRequest {
         direction: UsbDirection::In,
         length: u32::from(length),
         setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, length, 0x00],
+        timeout_ms: None,
     }
 }
 
@@ -239,6 +316,7 @@ fn a_control_in_is_replied_synchronously() {
     let outcome = service.on_submit(
         Reach::Served,
         0x22,
+        0,
         &control_in_urb(8),
         &mut shm,
         &mut engine,
@@ -259,13 +337,13 @@ fn a_second_submit_while_one_is_outstanding_is_rejected_without_displacing_it() 
 
     // First submit is held (no report yet).
     assert_eq!(
-        service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x11, 0, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
     // A second concurrent submit is fail-closed `AlreadyExists` and does not
     // touch the engine or the in-flight URB.
     let before = engine.interrupt_calls;
-    let outcome = service.on_submit(Reach::Served, 0x22, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x22, 0, &request, &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::AlreadyExists));
     assert_eq!(engine.interrupt_calls, before);
     assert!(service.is_busy());
@@ -287,7 +365,7 @@ fn aborting_an_outstanding_urb_replies_and_unblocks_a_replugged_driver() {
     let request = interrupt_urb(1, 8);
 
     assert_eq!(
-        service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x11, 0, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
 
@@ -305,7 +383,7 @@ fn aborting_an_outstanding_urb_replies_and_unblocks_a_replugged_driver() {
     assert!(!service.is_busy());
 
     assert_eq!(
-        service.on_submit(Reach::Served, 0x22, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x22, 0, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
 }
@@ -318,7 +396,7 @@ fn disconnect_abort_wins_over_a_stale_transfer_fault() {
     let request = interrupt_urb(1, 8);
 
     assert_eq!(
-        service.on_submit(Reach::Served, 0x11, &request, &mut shm, &mut engine),
+        service.on_submit(Reach::Served, 0x11, 0, &request, &mut shm, &mut engine),
         UrbOutcome::Held
     );
     engine.interrupt_fault = Some(DriverError::DeviceFault);
@@ -340,7 +418,7 @@ fn submit_after_interface_removal_is_rejected_without_touching_the_engine() {
     let mut service = UrbService::new();
     let request = interrupt_urb(1, 8);
 
-    let outcome = service.on_submit(Reach::Retracted, 0x33, &request, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Retracted, 0x33, 0, &request, &mut shm, &mut engine);
     match outcome {
         UrbOutcome::Reply(reply) => {
             assert_eq!(reply.ticket, 0x33);
@@ -365,13 +443,10 @@ fn an_illegal_urb_is_replied_fail_closed_without_reaching_the_engine() {
     // control endpoint.
     let urb = UrbRequest {
         endpoint: 0,
-        transfer_type: UsbTransferType::Bulk,
-        direction: UsbDirection::In,
-        length: 8,
-        setup: [0; 8],
+        ..bulk_in_urb(BULK_IN_ENDPOINT, 8)
     };
 
-    let outcome = service.on_submit(Reach::Served, 0x33, &urb, &mut shm, &mut engine);
+    let outcome = service.on_submit(Reach::Served, 0x33, 0, &urb, &mut shm, &mut engine);
     assert_eq!(reply_result(&outcome), Err(Errno::OutOfRange));
     assert!(!service.is_busy());
     assert_eq!(engine.control_calls, 0);
@@ -421,6 +496,7 @@ fn a_held_submit_runs_no_synchronous_transfer_the_shared_ring_could_lose() {
     let outcome = service.on_submit(
         Reach::Served,
         0x21,
+        0,
         &interrupt_urb(1, 8),
         &mut shm,
         &mut engine,
@@ -439,6 +515,7 @@ fn a_held_submit_runs_no_synchronous_transfer_the_shared_ring_could_lose() {
     let outcome = service.on_submit(
         Reach::Served,
         0x22,
+        0,
         &control_in_urb(4),
         &mut shm,
         &mut engine,
@@ -464,6 +541,7 @@ fn a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_contro
     let outcome = service.on_submit(
         Reach::Recovering,
         0x41,
+        0,
         &interrupt_urb(1, 8),
         &mut shm,
         &mut engine,
@@ -478,6 +556,7 @@ fn a_report_poll_during_recovery_waits_for_the_reset_without_touching_the_contro
         reply_result(&service.on_submit(
             Reach::Recovering,
             0x42,
+            0,
             &interrupt_urb(1, 8),
             &mut shm,
             &mut engine,
@@ -518,7 +597,14 @@ fn a_transfer_during_recovery_is_answered_reissuably_without_touching_the_contro
         (0x51, bulk_in_urb(BULK_IN_ENDPOINT, 16)),
         (0x52, control_in_urb(8)),
     ] {
-        let outcome = service.on_submit(Reach::Recovering, ticket, &request, &mut shm, &mut engine);
+        let outcome = service.on_submit(
+            Reach::Recovering,
+            ticket,
+            0,
+            &request,
+            &mut shm,
+            &mut engine,
+        );
         assert_eq!(reply_result(&outcome), Err(Errno::WouldBlock));
         assert!(!service.is_busy(), "a reissuable answer holds nothing");
     }
@@ -538,6 +624,7 @@ fn a_failed_reset_answers_a_held_transfer_reissuably() {
         service.on_submit(
             Reach::Served,
             0x71,
+            0,
             &bulk_in_urb(BULK_IN_ENDPOINT, 16),
             &mut shm,
             &mut engine,

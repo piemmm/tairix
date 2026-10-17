@@ -23,6 +23,28 @@ UTF-8 and control bytes round-trip exactly.
   reach.
 - **Hex.** Offset, sixteen bytes and their characters, with a caret in
   either pane. A document whose head looks binary opens here.
+- **Code.** An executable — an `rxe`, an ELF64 file or a wasm module, as its
+  head's magic says (`tairix_binfmt::detect`, a bounded compare and nothing
+  more) — opens here instead: a line naming the container, its instruction set
+  and entry, one line per region, then each code region's instructions under
+  its heading, with their addresses and encoding bytes, labelled with the
+  symbols they start and the symbols their branches reach (the shared
+  `tairix_sandbox::listing`), and it says when not every region or symbol made
+  the summary. The display is read-only: what would edit or search says so,
+  showing it closes the find bar, and Text or Hex takes the document back. The
+  listing is built on an editor worker thread from the document's snapshot,
+  never on the event loop, and everything in it is parsed by a decode worker
+  of its own (`RtLauncher::serving`), so an executable's parsers never share an
+  address space with the worker that colours text. Each window it asks for
+  carries the instruction set's longest encoding past its end
+  (`CodeWindow::continues`), so no instruction is cut. It is held to
+  `MAX_LISTING_LINES` and to `LISTING_BUDGET_NS` of decoding, past either of
+  which it says where it stopped. A listing refused for want of memory or of a
+  worker is asked again when Code is shown afresh; any other refusal stands
+  until the document changes. It is read as the instruction set the user chose
+  from View ▸ Instruction set, else the one the container names, else this
+  machine's (`boot_facts`), which is what an `rxe` installed here is written
+  in; choosing the set already listed lists nothing again.
 - **Format**, orthogonal to the mode: the colouring and checking the text
   view applies (`tairix-syntax`, [its page](../lib/syntax.md)). It comes from
   the file name, then from the head (asked of the sandbox), and a format the
@@ -48,8 +70,12 @@ store's reader.
 
 ## Documents and authority
 
-The manifest requests no filesystem capability and declares
-`document-access = "read-write"`. A document is one the user handed over:
+The manifest requests no filesystem capability, declares
+`document-access = "read-write"`, and claims `text/plain` and
+`application/octet-stream`. Every file type descends at last from
+`application/octet-stream`, and a name the registry does not know is that type,
+so TextEdit opens anything — ranked behind an application that claims the type
+more narrowly. A document is one the user handed over:
 from the file manager or the desktop at launch (`--document-writable` or
 `--document` with the descriptor on standard input), to a running instance
 as a `Document` target, dropped on its icon-bar slot (the file manager opens

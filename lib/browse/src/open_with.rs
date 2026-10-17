@@ -8,7 +8,7 @@
 //!
 //! * [`applications_for`] derives a file's content type from its filename
 //!   extension through the shared content-type registry
-//!   ([`media_for_name`]) — the one bridge from a
+//!   ([`media_for_name`](crate::media::media_for_name)) — the one bridge from a
 //!   name (all the VFS listing gives us) to the media-type vocabulary a bundle
 //!   declares its associations in. Because that registry is also what the icon
 //!   classifier draws from, the applications offered and the glyph shown can
@@ -41,7 +41,8 @@ use alloc::vec::Vec;
 use tairix_abi::{mime_type_at, AppInfoHeader};
 
 use crate::column::ScrollColumn;
-use crate::media::{ancestry, media_for_name, BlankDocument, ALL};
+use crate::entry::EntryKind;
+use crate::media::{ancestry, media_for_named, BlankDocument, ALL};
 use crate::rowlist::RowList;
 
 /// One installed application and the file types its signed `AppInfo` claims to
@@ -163,7 +164,7 @@ pub fn association_from_manifest(
 /// declaration first — the "Open With…" candidate list.
 ///
 /// The file's type is derived by the shared content-type registry
-/// ([`media_for_name`]) and named by its media-type spelling
+/// ([`media_for_name`](crate::media::media_for_name)) and named by its media-type spelling
 /// ([`MediaType::as_str`](crate::media::MediaType::as_str)), so the association
 /// vocabulary is exactly the one the icon classifier draws from — the two can
 /// never drift apart.
@@ -177,14 +178,18 @@ pub fn association_from_manifest(
 /// ancestor — and bundles claiming at the same level keep `bundles`'
 /// enumeration order, so no existing ordering is disturbed.
 ///
-/// The result is empty — an honest "no application" answer — when the file's
-/// type is unrecognised or no installed bundle claims it or any of its broader
-/// types; it never falls back to a guessed default.
+/// A name the registry does not recognise is
+/// [`ApplicationOctetStream`](crate::media::MediaType::ApplicationOctetStream):
+/// bytes. The result is empty — an honest "no application" answer — for an
+/// empty name, which names no file, and when no installed bundle claims the
+/// file's type or any of its broader types; it never falls back to a guessed
+/// default.
 #[must_use]
 pub fn applications_for<'a>(name: &str, bundles: &'a [AppAssociation]) -> Vec<&'a AppAssociation> {
-    let Some(media) = media_for_name(name) else {
+    if name.is_empty() {
         return Vec::new();
-    };
+    }
+    let media = media_for_named(name, EntryKind::File, false);
     let mut ranked: Vec<(usize, &AppAssociation)> = bundles
         .iter()
         .filter_map(|bundle| {

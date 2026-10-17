@@ -45,8 +45,7 @@
 //! simply persist in the owned `Vec` for free.
 
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -706,25 +705,23 @@ impl<B: Block> OwnedRaidArray<B> {
 }
 
 impl<B: Block> Block for OwnedRaidArray<B> {
-    fn device_class(&self) -> BlkDeviceClass {
+    fn medium(&self) -> Option<BlkMedium> {
         match self {
             Self::Mirror { members, .. } | Self::Raid10 { members, .. } => {
-                crate::health::aggregate_device_class(
-                    live_devices(members).map(Block::device_class),
-                )
+                BlkMedium::of_members(live_devices(members).map(Block::medium))
             }
-            Self::Stripe { members, .. } => crate::health::aggregate_device_class(
-                stripe_live_devices(members).map(Block::device_class),
-            ),
-            Self::Parity { members, .. } => crate::health::aggregate_device_class(
-                live_devices(members).map(Block::device_class),
-            ),
-            Self::DualParity { members, .. } => crate::health::aggregate_device_class(
-                live_devices(members).map(Block::device_class),
-            ),
-            Self::TripleParity { members, .. } => crate::health::aggregate_device_class(
-                live_devices(members).map(Block::device_class),
-            ),
+            Self::Stripe { members, .. } => {
+                BlkMedium::of_members(stripe_live_devices(members).map(Block::medium))
+            }
+            Self::Parity { members, .. } => {
+                BlkMedium::of_members(live_devices(members).map(Block::medium))
+            }
+            Self::DualParity { members, .. } => {
+                BlkMedium::of_members(live_devices(members).map(Block::medium))
+            }
+            Self::TripleParity { members, .. } => {
+                BlkMedium::of_members(live_devices(members).map(Block::medium))
+            }
         }
     }
 

@@ -36,6 +36,13 @@ unjournaled volume) opens all the same and serves reads.
 mounts such a volume read-only and audits that reason, so a refused write
 reads as "read-only file system".
 
+`Ext4::generation` names the generation a volume's features make it, which
+the volume service reports as the mount's type. Writing never moves a volume
+to a later one: new files stay block-mapped without `extent`, descriptor
+fields only ext4 defines stay zero, a journal keeps its tag format, and a
+revision-0 volume is raised to the dynamic revision before a field it lacks
+is stored.
+
 ## Crash consistency
 
 Metadata changes batch into transactions, published when the host's
@@ -98,6 +105,8 @@ and e2fsprogs-made images (`tests/fixtures`, the large ones stored sparse):
 extent and block-map edits, the journal against `debugfs`-written logs,
 allocation over lazily initialised groups, ACL decoding, commit failures
 before and after the medium changes, and replay after a crash.
+`tests/generations.rs` writes real ext2, ext3 and revision-0 images and checks
+each is left the generation it was made.
 
 `tests/fuzz_ext4_mount.rs` is the fuzz harness `cargo xtask fuzz` runs: byte
 flips, random rewrites and shaped values — coordinated superblock fields and

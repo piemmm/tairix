@@ -275,6 +275,7 @@ mod program {
             // The layer-surface feeds and a tool window's moves address
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::Key { .. }

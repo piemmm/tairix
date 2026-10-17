@@ -346,14 +346,16 @@ names a sibling crate.
   each own a 4 KiB staging buffer, so several bulk TDs queue per
   direction (`queue_bulk_in`/`queue_bulk_out`, ring-full → `Busy`) and
   complete in order through the non-blocking `poll_bulk`; short packets
-  report the honest byte count from the residual. A device STALL is
-  recovered in place — Reset Endpoint → ring rebuild + Set TR Dequeue
-  Pointer → `CLEAR_FEATURE(ENDPOINT_HALT)` on the **device's own** EP0 —
-  with every abandoned TD answered, surfaced as the new distinct
-  `Errno::EndpointStalled` (29) / `DriverError::EndpointStalled` (15) so
-  the D2 BOT driver can run its own recovery (C headers regenerated;
-  the generator's DriverError table also gained the previously-omitted
-  `SEAT_REVOKED`).
+  report the honest byte count from the residual. Every completion that
+  halts a pipe — a STALL, a transaction error, babble — is recovered in
+  place — Reset Endpoint → ring rebuild + Set TR Dequeue Pointer →
+  `CLEAR_FEATURE(ENDPOINT_HALT)` on the **device's own** EP0 — with every
+  abandoned TD answered; a STALL surfaces as the distinct
+  `Errno::EndpointStalled` (29) / `DriverError::EndpointStalled` (15), a
+  failure on the wire as `DeviceFault`, so the D2 BOT driver can run its
+  own recovery. Every bulk URB carries a deadline the HCD abandons it at,
+  and `ClearHalt` clears a pipe's halt with both toggles reset
+  (`plans/USB.md` U13).
 - `UrbEngine` gained `bulk_in`/`bulk_out` (arm-then-reap, `Ok(None)`
   while in flight), `drive_urb` validates bulk fail-closed (never
   endpoint 0; the engine owns the endpoint map), and
@@ -398,8 +400,15 @@ names a sibling crate.
 - BOT + the full planned SCSI subset are implemented with every
   device-supplied field bounds-checked fail-closed: CSW
   signature/tag/residue/status validation, data-phase-stall → CSW
-  fall-through, CSW-stall single retry, tag-mismatch / corrupt-CSW /
-  phase-error → Bulk-Only Mass Storage Reset; `GET MAX LUN` (STALL means
+  fall-through, CSW-stall single retry, and the spec's reset recovery — a
+  Bulk-Only Mass Storage Reset, then both bulk pipes' halts cleared
+  (BOT 1.0 §5.3.4) — whenever an exchange breaks: a transfer that fails or
+  outruns the exchange's budget (a request's share of the class deadline,
+  halved so the reset still fits), a tag mismatch, a corrupt CSW, a phase
+  error. A command the reset ended answers reissuably (`WouldBlock`), or
+  `TimedOut` when the device would not answer its own reset, so the unit's
+  health rides it out rather than failing it at once; CBI and UAS end a
+  broken exchange the same way with their own resets; `GET MAX LUN` (STALL means
   one LUN, >15 fails closed), `INQUIRY`, bounded `TEST UNIT
   READY`/`REQUEST SENSE` ready drain, `READ CAPACITY(10)`/`(16)`
   (validated power-of-two 512–4096 block size; 16-byte form past the
@@ -941,7 +950,9 @@ nodes by their own compatible keys, which is data, not bus coupling
   preserved for the diagnostics; `control_optional` and the GET MAX LUN
   refusal ride the same semantics. (3) A non-HID interface's
   interrupt-IN endpoint (the CBI completion channel) is configured
-  beside its bulk pair and served over the existing interrupt URB path.
+  beside its bulk pair and served over the existing interrupt URB path;
+  each command first drops what it has captured (`DiscardReports`), since
+  a completion carries no tag to tell a late one from its own.
   (4) Bulk serving is **per-pipe** (`BulkPipe`): `InterfaceInfo` captures
   up to two bulk endpoints per direction, `configure_bulk_endpoints`
   configures all four for a UAS-shaped interface (two extra 9-TRB rings

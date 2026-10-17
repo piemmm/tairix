@@ -348,6 +348,7 @@ members = [
     "tools/qemu",
     "tools/cc",
     "tools/mkimage",
+    "tools/signkeys",
     "tools/syshelp",
 
     # Shared host test-support: the per-run PRNG seed / start-of-test seed

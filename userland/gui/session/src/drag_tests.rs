@@ -6,7 +6,9 @@ use tairix_theme::CursorKind;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, Point, WindowId};
 
-use crate::drag::{DragEnd, DragStep, DragSurface, OwedReport};
+use alloc::string::String;
+
+use crate::drag::{DragEnd, DragStep, DragSurface, DropRefusal, OwedReport, SlotAnswer};
 use crate::shell::DesktopShell;
 use crate::tests::{
     app_slot_point, compositor, moved, opaque_window, shell, PRIMARY_PRESS, SECONDARY_PRESS,
@@ -19,6 +21,7 @@ fn pressed() -> (DesktopShell, Compositor, WindowId) {
     shell.set_apps(
         &mut comp,
         alloc::vec![tairix_taskbar::AppSlot::new(
+            crate::tests::slot_owner(0),
             "Editor",
             tairix_icon::IconKind::AppBundle
         )],
@@ -95,7 +98,7 @@ fn the_plate_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
         slot,
         DragSurface::Slot {
             index: 0,
-            target: Some(alloc::boxed::Box::new(editor())),
+            answer: Some(SlotAnswer::Opens(alloc::boxed::Box::new(editor()))),
         },
     );
     assert_eq!(
@@ -109,6 +112,7 @@ fn the_plate_follows_and_a_slot_that_takes_the_file_is_dropped_on() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
+            refused: None,
         })
     );
 }
@@ -126,6 +130,7 @@ fn another_press_cancels_and_an_abort_is_scoped_to_the_source() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: None,
         })
     );
 
@@ -182,9 +187,10 @@ fn a_slot_that_refuses_the_file_is_never_lit() {
         .begin_drag(&mut comp, 7, window, file("notes.bin"))
         .expect("carried");
     let slot = app_slot_point(&shell, 0);
+    let refusal = DropRefusal::new("Paint", "notes.bin", true, &[String::from("image/png")]);
     let refusing = DragSurface::Slot {
         index: 0,
-        target: None,
+        answer: Some(SlotAnswer::Refuses(alloc::boxed::Box::new(refusal.clone()))),
     };
     over(&mut shell, &mut comp, slot, refusing.clone());
     shell.settle(&mut comp);
@@ -206,8 +212,10 @@ fn a_slot_that_refuses_the_file_is_never_lit() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: Some(alloc::boxed::Box::new(refusal)),
         }),
-        "nothing is dropped on an application that never took the file"
+        "nothing is dropped on an application that never took the file, and \
+         the drop is answered with why"
     );
 }
 
@@ -226,12 +234,13 @@ fn a_strip_replaced_mid_drag_forgets_its_slot() {
         slot,
         DragSurface::Slot {
             index: 0,
-            target: Some(alloc::boxed::Box::new(editor())),
+            answer: Some(SlotAnswer::Opens(alloc::boxed::Box::new(editor()))),
         },
     );
     shell.set_apps(
         &mut comp,
         alloc::vec![tairix_taskbar::AppSlot::new(
+            crate::tests::slot_owner(0),
             "Viewer",
             tairix_icon::IconKind::AppBundle
         )],
@@ -241,6 +250,7 @@ fn a_strip_replaced_mid_drag_forgets_its_slot() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: None,
         })
     );
 }
@@ -351,6 +361,7 @@ fn the_pointer_shows_the_current_answer_and_the_drop_does_what_it_showed() {
                 serial: third.serial,
                 operation: DropOperation::Copy,
             },
+            refused: None,
         })
     );
     assert_eq!(
@@ -378,6 +389,7 @@ fn an_unanswered_or_refused_place_drops_nothing() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: None,
         }),
         "no answer yet"
     );
@@ -399,6 +411,7 @@ fn an_unanswered_or_refused_place_drops_nothing() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: None,
         }),
         "refused"
     );
@@ -446,6 +459,7 @@ fn shift_asks_again_and_an_accepted_desktop_folder_is_lit() {
         DragStep::Ended(DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: None,
         })
     );
 }
@@ -484,6 +498,145 @@ fn the_answer_after_shift_changed_decides_the_drop() {
                 operation: DropOperation::Move,
                 ..
             },
+            refused: None,
         })
     ));
+}
+
+#[test]
+fn a_refused_drop_says_what_the_application_opens() {
+    let claims = [String::from("image/png"), String::from("image/jpeg")];
+    let spec = DropRefusal::new("Paint", "notes.txt", true, &claims)
+        .spec()
+        .expect("an alert");
+    assert_eq!(
+        spec.headline(),
+        "Paint cannot open \u{201c}notes.txt\u{201d}"
+    );
+    assert_eq!(
+        spec.detail(),
+        "Paint opens files ending .png, .jpg and .jpeg."
+    );
+
+    let folder = DropRefusal::new("Paint", "Holiday", false, &claims)
+        .spec()
+        .expect("an alert");
+    assert!(
+        folder.detail().contains("one file at a time"),
+        "{}",
+        folder.detail()
+    );
+
+    let none = DropRefusal::new("Clock", "notes.txt", true, &[])
+        .spec()
+        .expect("an alert");
+    assert_eq!(none.detail(), "Clock opens no files dropped on it.");
+
+    let many: alloc::vec::Vec<String> = [
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/bmp",
+        "image/webp",
+        "image/tiff",
+        "image/x-icon",
+        "image/x-riscos-sprite",
+    ]
+    .iter()
+    .map(|claim| String::from(*claim))
+    .collect();
+    let long = DropRefusal::new("Viewer", "notes.txt", true, &many)
+        .spec()
+        .expect("an alert");
+    assert!(long.detail().ends_with(" and others."), "{}", long.detail());
+}
+
+/// A window of another application takes a drop as its slot does: the file is
+/// handed to that application, or the drop is answered with why not — and the
+/// strip lights nothing, since the pointer is not over it.
+#[test]
+fn another_applications_window_takes_a_drop_as_its_slot_does() {
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("notes.txt"))
+        .expect("carried");
+    let at = Point::new(200, 200);
+    over(
+        &mut shell,
+        &mut comp,
+        at,
+        DragSurface::AppWindow {
+            index: 0,
+            answer: Some(SlotAnswer::Opens(alloc::boxed::Box::new(editor()))),
+        },
+    );
+    assert_eq!(
+        shell.session().taskbar().apps().hover(),
+        None,
+        "no slot is lit"
+    );
+    assert_eq!(
+        shell.take_drag_report(),
+        None,
+        "the window's own app is not asked"
+    );
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd {
+            source: 7,
+            ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
+            refused: None,
+        })
+    );
+
+    let (mut shell, mut comp, window) = pressed();
+    shell
+        .begin_drag(&mut comp, 7, window, file("notes.bin"))
+        .expect("carried");
+    let refusal = DropRefusal::new("Paint", "notes.bin", true, &[String::from("image/png")]);
+    over(
+        &mut shell,
+        &mut comp,
+        at,
+        DragSurface::AppWindow {
+            index: 0,
+            answer: Some(SlotAnswer::Refuses(alloc::boxed::Box::new(refusal.clone()))),
+        },
+    );
+    assert_eq!(
+        shell.drag_pointer(&mut comp, &RELEASE),
+        DragStep::Ended(DragEnd {
+            source: 7,
+            ended: DragConclusion::Nothing,
+            refused: Some(alloc::boxed::Box::new(refusal)),
+        })
+    );
+}
+
+#[test]
+fn a_window_an_alert_holds_takes_no_drop() {
+    use crate::drag::{DragPlace, WindowUnder};
+    for under in [
+        WindowUnder::Own(Some((4, 9))),
+        WindowUnder::Foreign(Some(2)),
+    ] {
+        assert_eq!(DragPlace::over_window(31, true, under), DragPlace::Nothing);
+    }
+    assert_eq!(
+        DragPlace::over_window(31, false, WindowUnder::Own(Some((4, 9)))),
+        DragPlace::Window {
+            window_id: 31,
+            x: 4,
+            y: 9
+        }
+    );
+    assert_eq!(
+        DragPlace::over_window(31, false, WindowUnder::Foreign(Some(2))),
+        DragPlace::AppWindow { index: 2 }
+    );
+    assert_eq!(
+        DragPlace::over_window(31, false, WindowUnder::Foreign(None)),
+        DragPlace::Nothing,
+        "an application the strip does not show takes nothing"
+    );
 }

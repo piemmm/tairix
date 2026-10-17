@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 393 open, 706 closed, 1099 total.
+**closed**, and a partial fix stays **open**. 392 open, 730 closed, 1122 total.
 
-### Open (393)
+### Open (392)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -32,14 +32,12 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D3 | hard-lockup watchdog parity on x86_64 and riscv64 | aarch64 is the only port wired |
 | D15 | `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage | — |
 | D17 | riscv64 loader performs no instruction-cache maintenance for loaded code | does not reproduce under QEMU; real silicon can fetch stale code |
-| D21 | a layered block device republishes an unreadable member class as `Virtual` | — |
 | D27 | ARXFS has no persistent deduplication index | correctness-safe |
 | D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
 | D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
 | D60 | the window-content release has no end-to-end vertical | — |
-| D80.1 | a window the terminal is refused is invisible to the user: the refusal reaches only its `stderr`, which a desktop app has no reader for | sub-item of the closed D80. The charter's fallback, the system log, needs `CAP_LOG_EMIT` in the terminal's manifest; a notice in the app's own UI is a `plans/GUI-TERMINAL.md` decision |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
 | D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
@@ -421,9 +419,10 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1103 | D1054's miri scheduling — whole runs started before shards — and `run_captured` printing a killed job's output have no regression test, so a later reordering would pass unnoticed | **low, tests**; noticed reviewing the merge of upstream `24321fb03`; not absorbed. `tools/xtask/src/commands/miri.rs`; `tools/xtask/src/main.rs:739` |
 | D1104 | the precomputed test password records restate the 1000-iteration cost and their salts in string literals, beside `MIN_ITERATIONS` | **nit**; noticed reviewing the merge of upstream `24321fb03`; not absorbed. Raising the minimum fails loudly, as decode refuses the records; lowering it leaves the literals stale. `kernel/core/src/useradmin_tests.rs:27-39`; `kernel/core/src/test_identity.rs:15-17` |
 | D1105 | `CLAUDE.md` gives the warm `ci` run as about 15 minutes, against `docs/src/contributing.md`'s measured 52 | **nit, docs**; noticed reviewing the merge of upstream `24321fb03`; not absorbed; predates it. `CLAUDE.md:48` |
+| D1125 | the HCD runs every control transfer on its one serve loop and waits for it there, up to `AWAIT_EVENT_BUDGET_US` (5 s): a class driver's control URB, the halt clear a bulk recovery owes, a mass-storage reset. A device that NAKs its control endpoint therefore stalls every other interface on the controller — no submit is served, no captured report delivered and no URB deadline honoured meanwhile — and a halted bulk transfer's clear with the reset that follows can hold a keyboard's input 10 s, against `plans/USB.md` §1.1's "never a per-URB blocking server" | **medium**; noticed bounding bulk transfers (D1118), which put halt clears on the recovery path; not absorbed, because the engine keeps one active control cursor (a hub-downstream device's EP0 is activated for each transfer and the hub's restored after), so an asynchronous control URB needs every device's EP0 ring resident and a control state machine in the queue-then-reap shape the bulk pipes have. `lib/usb/src/device.rs` `device_control`, `await_event_for`, `recover_bulk_endpoint`; `drivers/bus/usb/xhci/src/interfaces.rs` `serve_submit` |
 
 
-### Closed (706)
+### Closed (730)
 
 | ID | Subject |
 |---|---|
@@ -443,6 +442,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D18 | early-boot silent guest death on PID 1's fifth concurrent spawn |
 | D19 | `autoload-input-qemu-aarch64` terminal sequencing drift |
 | D20 | `autoload-input-qemu-aarch64` post-terminal sequencing drift |
+| D21 | a layered block device republished an unreadable member class as `Virtual`; a device now declares what it is, `Block::medium() -> Option<BlkMedium>`, its patience follows from that (`BlkDeviceClass::of`), and a composition takes `BlkMedium::of_members` — the medium of the member it must wait on longest, an undeclared one waited on as paravirtual and reading as unknown — so no layer publishes a medium no device declared. `a_composition_reads_as_its_most_patient_member`, `an_unknown_class_word_stays_unknown_rather_than_becoming_virtual`, `every_medium_is_served_as_what_it_is`, `completion_round_trips_every_medium`, `an_undeclared_member_is_waited_on_as_paravirtual`, `an_undeclared_copy_is_waited_on_as_paravirtual`, `unrecognised_medium_mounts_as_unknown_scenario` |
 | D22 | `netstack-dhcp-qemu-riscv64` stall on an unbounded device wait |
 | D23 | the debug FIQ self-sample corrupted the exception-return window |
 | D24 | in-kernel work had no yield boundary, so fast device bursts starved tasks |
@@ -496,6 +496,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D78 | the file manager's icon cache could not hold one frame of its own grid |
 | D79 | a decorated window's furniture was rendered through a transient |
 | D80 | the pressure soak drove a fixed window count at a relative target |
+| D80.1 | a window the terminal was refused was invisible to the user, its reason reaching only a `stderr` a desktop app has no reader for; the terminal now states it in an error alert holding no window, which the desktop draws as a window of its own (`app::refuse`), and every refusal alert an app raises is built by the one `refusal_alert`. `a_window_that_could_not_be_opened_is_stated_in_an_alert_holding_none`, `a_refusal_is_an_error_alert_stating_its_reason_as_a_sentence`, `an_application_with_no_window_may_still_raise_an_alert` |
 | D81 | a block split invalidated one page instead of the block's whole range |
 | D82 | refining a live translation was a break-before-make violation |
 | D83 | on x86_64 only a page fault reached the fatal-fault report |
@@ -1038,7 +1039,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D980 | the x86_64 scheduler-stress vertical's preemption witnesses, documented as pinned two per CPU, were queued while the APs already stepped, so an idle AP could take a CPU's witness and leave that CPU holding one: uncontended, its one-shot never armed, it never ticked, and every witness spun waiting for it (the gate's 120 s hang once dispatch stopped taking the task registry's read lock and the APs drained faster); they are now queued before any CPU steps, so each CPU keeps two and none is ever idle to steal one. `tairix-test-scheduler-stress-qemu` |
 | D979 | the desktop lock screen rendered a whole new screen-sized frame and replaced its window surface for every input event that changed it, so a key-repeat burst cost a full allocation, paint and whole-screen recomposite per key; an event now only owes the frame what it changed, `ScreenLock::advance` draws the owed rectangles once a frame into the kept frame (`Compositor::repaint_window` with `damage::paint_parts`, marking only them), and a change of look or screen redraws it whole. `a_burst_of_keys_at_the_lock_is_painted_once_at_the_frame_and_only_the_field`, `a_lock_redraws_itself_whole_in_a_changed_look` |
 | D981 | the session presented frames its screen lock did not cover: `ScreenLock::uncovered` said the embedder must then present nothing, but no present checked it, and a resume re-laid the screen and presented before the lock was redrawn, so a mode growing under a lock (or a heap refusing the redraw) could show the session around it; both paced presents and the resume present now refuse while uncovered, `relay_screen` redraws the lock over the new screen, and a refused redraw arms no wake of its own. `a_lock_refused_its_frame_over_a_grown_screen_stays_uncovered_without_spinning` |
-| D216 | desktop controls allocated per pointer event and per paint: `FlagSet` measuring its flags and the screensaver were closed earlier, and the file manager's Properties window composed its whole Permissions section (about thirty allocations, its two groups placed through two lists) on every paint of every damaged part, press, key and pointer motion; the window now keeps the composed section (`render::PermsPanel`, reached through `PermsShown`), composed again only when the node's type, mode or ids, the ownership gate, the open id editor or the cursor moved, and places its groups without a list (`stack::placements`). `a_motion_or_press_over_a_kept_permissions_section_composes_nothing`, `a_kept_permissions_section_draws_what_a_fresh_one_would` |
+| D216 | desktop controls allocated per pointer event and per paint: `FlagSet` measuring its flags and the screensaver were closed earlier, and the file manager's Properties window composed its whole Permissions section (about thirty allocations, its two groups placed through two lists) on every paint of every damaged part, press, key and pointer motion; the window now keeps the composed section (`render::PermsPanel`, reached through `SectionsShown`), composed again only when the node's type, mode or ids, the ownership gate, the open id editor or the cursor moved, and places its groups without a list (`stack::placements`). `a_motion_or_press_over_a_kept_permissions_section_composes_nothing`, `a_kept_permissions_section_draws_what_a_fresh_one_would` |
 | D913 | Paint discarded a still-valid histogram and abandoned the histogram job out on the worker whenever the adjustment changed: opening another adjustment, or closing one, reset every worked-out look; it now drops only the filter-specific preview and palette kind (`Looks::forget_adjustment`), keeps the histogram and the job out, and lands a preview only on an open adjustment of its own kind. `moving_between_adjustments_that_read_a_histogram_keeps_it`, `a_histogram_being_read_when_the_adjustment_moves_lands_on_the_next` |
 | D300 | compress-out shot down every other CPU and took the registry write lock once per page, all inside the global tier lock, so reclaiming n pages cost n synchronous IPI rounds with every other CPU's fault path waiting on the tier; `Ramzip::compress_out_batch` now unmaps up to 64 admitted cold pages, shoots their span down once and retires their runs under one hold before sealing any, admission reserving a page of cap and task share for each page held ahead so a batch admits no more than a page at a time would. `a_batch_is_shot_down_and_retired_once_for_all_its_pages`, `a_batch_admits_what_one_page_at_a_time_would` |
 | D202 | a DMA carve with an address limit searched the frame bitmap below its ceiling under the global frame-allocator lock, O(frames) on a fragmented zone, even though zones are cut at every discovered device reach; a ceiling at a zone's end now takes the block from that zone's own lists in constant time, as an ordinary draw falling to it would (`FrameAllocatorState::take_highest_under`), and only a ceiling cutting through a zone searches the bitmap. `a_ceiling_at_a_zone_end_is_served_from_the_zones_lists` |
@@ -1133,6 +1134,28 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D454 | the file manager read a later window's first listing, and the fallback ladder behind it, on its event loop | a window's first listing is asked of the reader before the window exists and the window opens, fitted to it, once it lands; a refused listing moves it down `command::Ladder`, stating why (`plans/NEW-FILEMANAGER.md` FM20) — the `command` ladder tests cover the order, a place reached twice tried once, and the move the window states |
 | D815 | the file manager wrote on its event loop: New ▸'s create, the Properties commits, the Trash folder, the `stat`s that plan a paste or a move to Trash, and every step of a delete, paste or move to Trash | every one-shot write is a `WriteJob` on the reader answered by ticket, and every operation runs on an operations worker that posts its count, takes a cancel between units, and answers only the window that asked; a copy stopped part-way removes the file it was writing — pinned by `operations_tests.rs` (`operations_run_one_at_a_time_in_the_order_asked`, `an_answer_reaches_only_the_window_that_asked`, `a_cancel_stops_a_running_operation_before_its_next_step`, `a_closed_windows_operation_stops_and_its_answer_is_dropped`, `a_window_holds_one_operation_and_a_full_desk_refuses_with_its_reason`, `a_run_of_reports_owes_one_wake_until_the_loop_looks`) |
 | D837 | a refused rename's reason was never drawn, context-menu refusals reached only stderr, and a volume refusal dropped its error | a refused rename is stated in the window's notice, with the volume's own answer and the app's full queue named as such (`a_refusal_is_kept_until_the_window_takes_it_once`, `a_refusal_dialog_states_its_reason_and_offers_one_ok`) |
+| D1106 | the window server kept whatever event mailbox a request named, without asking whose it was, so an application could have a window's input, or its icon-bar slot's events, delivered to another application's mailbox; a request naming a mailbox other than the caller's own, as the kernel attests it (`CallerIdentity::caller_mailbox`), is refused; `a_request_naming_another_applications_mailbox_is_refused` |
+| D1107 | a disassembly reply was believed beyond its instruction count, so a compromised decode worker could answer with instructions out of order or outside the bytes sent, more of them than were asked for, or a next address that did not advance, and a viewer walking windows from it could stall on one place; a reply is held to its request — contiguous from the address asked, inside the window, no more than asked, its next address where the last instruction ends — before any of it is listed (`decode_disasm_reply`); `a_disassembly_reply_is_held_to_the_request_it_answers` |
+| D1108 | a disassembly window's end cut the instruction straddling it, which listed as `(bad)` and desynchronised the rest of the window (a wasm `br_table` longer than `fstree`'s 4 KiB window never listed whole), and `fstree` read a window that ended short as the region's end, so a page down could stop early or claim the end; a window says whether the code goes on past it and then decodes no instruction from fewer bytes than the set's longest encoding (`CodeWindow::continues`, `Isa::longest_encoding`), and `fstree`'s screens and pages run on over as many windows as they take; `a_window_the_code_runs_past_cuts_no_instruction`, `a_screen_longer_than_one_window_is_decoded_whole_and_paged_by_its_length`, `the_widest_br_table_is_the_longest_instruction` |
+| D1109 | any code running as a user could be attested as a first-party application: the driver, app-signing and first-party publisher seeds were public constants in the source, so anybody could sign a bundle the load gate admits; they are a secret key set held outside the tree (`tools/signkeys`, `cargo xtask keys init`), the kernel embeds only the public anchors derived from it, a build without one fails, and a key set holding a once-published seed, lying inside the workspace or readable by others is refused; `a_key_set_holding_a_seed_once_published_in_the_tree_is_refused`, `a_key_set_inside_the_workspace_is_refused`, `a_key_set_others_can_read_is_refused` |
+| D1110 | a hub status-change transfer that failed was taken for a report and re-armed on its halted endpoint, so the watch never completed again and no later unplug or re-plug behind the hub was seen — the keyboard and mouse a glitch dropped never came back, even re-plugged; a failed transfer recovers the endpoint (stopped, its ring restarted, the hub's own `CLEAR_FEATURE(ENDPOINT_HALT)`, re-armed) and reconciles every downstream port, a hub that cannot be reached is owed deferred retries, one still failing once they are spent is reset as a whole tier, and a tier that reset brings up failing the same way is given up; `a_failed_status_report_recovers_the_hub_watch_so_later_changes_are_seen`, `a_recovered_hub_watch_reattaches_a_device_its_port_still_carries`, `a_hub_watch_that_cannot_be_recovered_at_once_is_owed_a_retry`, `a_hub_watch_still_failing_once_its_retries_are_spent_resets_the_hub_tier`, `a_hub_whose_status_transfers_keep_failing_is_reset_then_given_up` |
+| D1111 | a device whose endpoint recovery failed was freed on its completion code alone, so a transaction translator disturbed for a moment dropped a keyboard and a mouse that were never unplugged, and nothing served them again while their ports went on carrying them; a failed recovery leaves the device served, its URB parked and its endpoint unarmed, and owes deferred retries that read the settled port — vacant frees it, disabled re-enumerates it, enabled recovers it in place — and a recovery still failing once they are spent resets the port and enumerates it afresh; `a_glitch_failing_the_hub_watch_and_the_keyboard_recovers_both_in_place`, `a_gone_device_is_freed_by_its_owed_retry_once_its_port_reads_vacant`, `a_gone_device_whose_port_still_reads_connected_is_freed_once_its_retries_are_spent`, `a_device_still_failing_once_its_retries_are_spent_is_enumerated_afresh`, `a_disabled_port_is_enumerated_afresh_without_spending_its_retries` |
+| D1112 | a device whose interrupt endpoint halted on every transfer was recovered in place forever — each recovery answered, so the endpoint was re-armed and halted again at its polling interval, costing the controller a core share with no report ever delivered; a recovery counts only once a transfer next completes, so one that keeps halting climbs the same bounded ladder to a port reset, and a device that reset produces failing the same way is given up until it is re-plugged; `a_device_whose_endpoint_halts_however_often_it_is_recovered_is_reset_then_given_up`, `an_endpoint_that_halts_however_often_it_is_recovered_reaches_the_reset` |
+| D1113 | an ext2 or ext3 volume was mounted as `ext4`: the volume service named every ext-family mount after its driver, so `df`, `stat`, Settings and the file manager showed an ext2 stick as ext4; the driver classifies a volume by its features as blkid does (`Ext4::generation`) and the mount reports that; `each_volume_reports_the_generation_its_features_make_it`, `a_volume_is_ext4_once_any_feature_past_ext3s_is_on`, `an_ext2_volume_mounts_as_ext2_scenario` |
+| D1114 | writing an ext2, ext3 or `gdt_csum` volume stored crc32c bitmap checksums in descriptor bytes only `metadata_csum` defines, which ext2 and ext3 reserve; they are written only under `metadata_csum`; `writing_an_ext2_volume_leaves_it_ext2`, `writing_an_ext3_volume_commits_through_its_journal_and_leaves_it_ext3` |
+| D1115 | a file past 2 GiB, or an orphan, on a revision-0 volume set `large_file` or `s_last_orphan` in a superblock whose revision defines neither, which e2fsck reports as feature flags on a revision-0 filesystem; the volume is raised to the dynamic revision first, as Linux does (`make_dynamic`); `a_file_past_two_gibibytes_raises_a_revision_0_volume_before_marking_it`, `a_revision_0_superblock_is_raised_with_the_values_revision_0_fixes` |
+| D1116 | an attribute-block number took its high half from `i_file_acl_high` on every volume, though without `64bit` those bytes are padding and GNU Hurd keeps its high mode bits there, so such a file's security could not be read nor the file removed; the high half is read only under `64bit`; `an_attribute_block_number_has_no_high_half_without_64bit` |
+| D1117 | a bulk completion that halted its pipe other than by a STALL — a transaction error, babble — left the endpoint halted, so every later transfer on it hung and a stick whose transfer failed once never answered again; every halting completion is recovered in place; `a_bulk_transaction_error_recovers_the_pipe_in_place_so_the_next_transfer_runs` |
+| D1118 | no bulk transfer had a deadline anywhere, so a device that stopped answering held its class driver, and every LUN behind it, for ever; every bulk URB carries one the HCD abandons it at, answering `TimedOut`, and a mass-storage exchange is bounded by a share of the class deadline; `a_held_bulk_urb_is_abandoned_at_its_deadline_and_answered_timed_out`, `a_bulk_transfer_abandoned_at_its_deadline_frees_the_pipe_for_the_next`, `each_urb_of_a_split_transfer_is_bounded_by_what_its_deadline_has_left` |
+| D1119 | a mass-storage reset recovery left both bulk pipes' halts and data toggles as they were (BOT and CBI sent only the class reset, UAS none), and a failure in the data or status phase returned with no reset at all, leaving the device out of step; a broken exchange runs its transport's whole reset, through the new `ClearHalt` operation that resets both toggles; `a_data_phase_that_fails_on_the_wire_resets_the_transport_and_is_reissuable`, `a_cbw_or_csw_lost_on_the_wire_resets_the_transport`, `a_data_phase_or_completion_lost_on_the_wire_resets_the_transport`, `a_data_pipe_that_fails_on_the_wire_clears_all_four_pipes`, `clearing_the_halt_of_a_running_pipe_restarts_both_data_toggles` |
+| D1120 | the recovery ladder's "data-path reset" only zeroed the bounce buffer, though its code, `recover.rs`, `plans/FIX-IO.md` and `docs/src/drivers/block.md` said it cleared the bulk pipes; it resets the transport; `the_ladder_s_reset_is_the_full_reset_recovery` |
+| D1121 | one transient transport fault failed a LUN at once as `Fatal`, with no grace window, no ladder and no reissue, and a driver had no way to say its device had not answered in time; the failure is answered reissuably, `TransientError` after a reset that worked or `Timeout` through the new `DriverError::TimedOut`, so the unit's health rides it out; `a_broken_exchange_reaches_the_block_engine_as_a_reissuable_outcome`, `a_device_that_will_not_answer_its_own_reset_times_out_for_its_health_to_ride` |
+| D1122 | a bulk completion the ring could not account for left its TD in flight for the next transfer to take as its own, and an event for another consumer met during a bulk poll failed the transfer; the pipe is restarted and its TD failed, and the event goes to its consumer; `a_completion_the_ring_cannot_account_for_restarts_the_pipe_and_fails_its_td`, `a_bulk_poll_hands_another_consumers_event_on_rather_than_failing` |
+| D1123 | the HCD logged every URB failure with the HID report endpoint's completion code, always 0 for a bulk one, under the wait-set failure's event id, and did not log a transfer refused at once at all; and usb-msd logged every way a LUN failed closed as its grace window elapsing, which is how the RPi 4 log named an instant failure; event 27153 carries the failing endpoint's own code for every failure, and each fail-closed edge is its own event; `a_transfer_refused_at_once_is_noted_as_a_held_one_would_be`, `each_way_of_failing_closed_is_named_as_itself` |
+| D1124 | the HCD's serve loop spent its deferred retries and its paced controller recovery only on a wait that timed out, so a loop kept busy by interrupts — a mouse moving — never retried a skipped port, an owed endpoint recovery or a faulted controller; due work is spent after every wake, URB deadlines with it; `a_due_timer_is_spent_after_an_event_wake_as_after_a_quiet_one` |
+| D1126 | a CBI command took the first completion the HCD had captured for its own, though the HCD keeps the interrupt endpoint armed with no URB held and a completion carries no tag, so one an earlier command raised late — after its exchange timed out, or after its data phase failed — answered the next command and could pass a failed write; each command now first drops what the endpoint has captured, the controller's pending events included (`UsbRequest::DiscardReports`); `a_completion_an_earlier_command_raised_late_is_not_taken_for_the_next_ones`, `discarding_reports_drops_those_captured_or_still_on_the_ring_but_none_sent_later` |
+| D1127 | an endpoint's Device Context Index was computed at five sites in `lib/usb` — `UrbScope::owns_endpoint`, descriptor capture, the report and bulk pipe lookups and `EndpointDescriptor::dci` — and `owns_endpoint` restated `lib/abi`'s `is_device_endpoint_address`; `descriptor::{address_dci, endpoint_dci}` are the one mapping, the number form refusing a number no address holds; `an_endpoint_is_known_by_twice_its_number_plus_one_for_in` |
+| D1128 | the virtio PCI transport never mapped `msix_config`, which a reset leaves at `VIRTIO_MSI_NO_VECTOR`, so over MSI-X no configuration change raised an interrupt and an x86_64 NIC's link going down reached its driver only when something else made the stack service it: `netstack-bond-qemu-x86-64` failed over only when traffic on the dropped member happened to be in flight, and otherwise ran to its 480 s ceiling serving echoes over the backup without ever failing over; `negotiate` now routes configuration changes (`Transport::route_config_changes`) to the queues' entry, read back and failed closed on a refusal; `negotiation_maps_configuration_changes_to_the_msix_entry`, `configuration_changes_over_intx_leave_msix_config_unmapped`, `negotiation_fails_closed_on_a_device_that_cannot_route_its_configuration_changes` |
 
 ## Scope
 
@@ -1933,21 +1956,10 @@ The open items, in priority order:
     click-choreography artefact or a real present path issue is unresolved and
     left for a compositor/display vertical to investigate.
 
-- **D21 — a layered block device republishes an unreadable member class as
-  `Virtual`, so the mount table can report a medium nobody declared — OPEN
-  (structural fix staged).** The block-service publish site wraps the
-  *served* class in `Some(...)` (`lib/abi/src/blkio.rs` `serve`:
-  `let class = Some(device.device_class());`), and `Block::device_class()` is
-  concrete by definition — its trait default is `BlkDeviceClass::Virtual` —
-  so a layer over a device whose class word was unreadable publishes
-  `Some(Virtual)`, a fabricated identity indistinguishable from a genuine
-  paravirtual device. That now reaches userland: the mount medium threads
-  from the completion through `MountBacking` to
-  `MountRecord::medium()`, so the System Information API can assert a medium
-  no driver reported. Noticed while landing that mount-medium path (which
-  fixed the *decode* half: an undefined class word stays `None` end to end),
-  recorded here rather than fixed inline because the remaining half widens
-  the block trait across every implementor. Detail below.
+- **D21 — a layered block device republished an unreadable member class as
+  `Virtual` — DONE.** A device declares its medium, `Block::medium()`, and an
+  undeclared one stays `None` from the driver to `MountRecord::medium()`; a
+  composition reads as the member it must wait on longest. See the section.
 - **D22 — `netstack-dhcp-qemu-riscv64` intermittent stall under the full
   pipeline — DONE.** Not load: the in-kernel virtio completion wait had no
   deadline, so one unobserved completion parked the boot task inside a disk
@@ -2129,8 +2141,8 @@ readiness gate (fixed), D18 was an early-boot concurrent-spawn scare that
 proved non-reproducing once FONT-SERVICE removed the per-app font payload
 (closed), D19/D20 were the `autoload-input-qemu-aarch64` count-drift
 (closed: marker-based sequencing + file-manager choreography moved to host
-tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
-reported — D22 was an unbounded in-kernel virtio completion wait that
+tests), D21 was an ABI-honesty gap — a layer asserting a hardware fact nobody
+reported (fixed) — D22 was an unbounded in-kernel virtio completion wait that
 parked the boot task inside a disk request while holding that disk's lock
 (fixed), D23 was an observer-perturbs-the-observed defect the debug
 watchdog's own non-maskable sample exposed (fixed), D42/D86 were the x86_64
@@ -2334,18 +2346,19 @@ reaching a filesystem driver without the VFS's per-operation mapping read
     normal at t=50.8 s after ~19 windows, 22 creates against a bound of 64, no
     deepened-past-moderate record, and both frames compared under the strict
     bound.
-- **D80.1 — a refused window is invisible to the user (OPEN, and a policy
-  question).** The terminal states "screen surface refused; no window opened"
-  on `stderr`, and a graphical app's stderr in a desktop session has no reader
-  — the same argument `lib/rt`'s panic reporting already makes for a fatal exit
-  (`PANIC_REPORTED`, "a graphical session whose console is the very screen it
-  is compositing over"). The charter's refusal clause asks for the app's *own
-  UI* when it is interactive, and the terminal has no notice surface; adding
-  one is a desktop-UX decision for `plans/GUI-TERMINAL.md`, and routing the
-  refusal to the system log instead (the terminal would need `CAP_LOG_EMIT`,
-  which `files`, `fstree` and `switchboard` already declare) is the cheaper
-  half of it. D80's fix removed the *test's* dependence on this being visible;
-  it did not settle where the message should go.
+- **D80.1 — a refused window was invisible to the user — FIXED.** The
+  terminal stated "screen surface refused; no window opened" only on a
+  `stderr` a desktop app has no reader for. The desktop now draws alerts as
+  windows of their own, so an app holding no window can still be answered:
+  the terminal raises an error alert holding none (`app::refuse`) naming
+  what could not be had — memory to draw it, a pseudo-terminal, its shell —
+  and the same reason goes to `stderr` for the record. Every refusal alert an
+  app raises is built by the one `refusal_alert`, so the reason reads as a
+  sentence however it was written. Tests:
+  `a_window_that_could_not_be_opened_is_stated_in_an_alert_holding_none`,
+  `a_refusal_is_an_error_alert_stating_its_reason_as_a_sentence` and
+  `an_application_with_no_window_may_still_raise_an_alert`; the terminal's
+  two call sites are its freestanding program, which no host test reaches.
 - **D79 — a decorated window's furniture was rendered through a transient the
   size of the whole window, to keep four thin strips — FIXED.**
   `WindowChrome::render` allocated an outer-sized `Surface` (975,840 bytes for
@@ -3276,69 +3289,40 @@ concern for `plans/FIX-HARDWARE-FEATURES.md`.
 
 ---
 
-## D21 — a layered block device republishes an unreadable member class as `Virtual` (OPEN)
+## D21 — a layered block device republished an unreadable member class as `Virtual` — DONE
 
-**State:** the mount-medium path is honest end to end *except* across a
-republishing layer. Discovered while landing the storage medium on
-`MountRecord`; the decode half was fixed in that change, the trait half is
-staged here because it touches every implementor of the block trait.
+**Defect.** `Block::device_class()` was concrete, defaulting to `Virtual`, and
+`blkio::serve` published it straight back onto the wire, so a layer over a
+device whose class word was unreadable — the block-service seam, a partition
+window, the block cache, a RAID array — asserted a paravirtual medium nobody
+declared, and it reached `MountRecord::medium()` and the drive picture drawn
+from it.
 
-**Mechanism.** Three facts compose into a fabricated hardware claim:
+**Fixed by declaring the fact, not the policy.** A driver declares what its
+device *is*, `Block::medium() -> Option<BlkMedium>` (hard disk, SSD, NVMe, USB
+flash, USB disk, SD/eMMC, virtual), defaulting to `None`. The patience class
+is derived from it and cannot be declared separately (`BlockClass` is a
+blanket impl over `BlkDeviceClass::of`), so what a device is said to be and
+how it is served cannot disagree; `BlkDeviceClass::of` is the one place an unknown
+becomes the bounded paravirtual envelope. A forwarding layer forwards its
+device's medium; a composition takes `BlkMedium::of_members` — the medium of
+the member it must wait on longest, an undeclared member waited on as
+paravirtual, order-independent — and reads as unknown when that member
+declared nothing, so the array is as patient as its slowest member and no
+layer publishes a medium no device declared. The wire carries the
+`Option` both ways, so a relaying consumer cannot launder an unknown into a
+named medium.
 
-- `blkio::decode_outcome` now yields `Option<BlkDeviceClass>`, so a class
-  word the ABI does not define stays an explicit unknown rather than being
-  rewritten to `Virtual`. `BlkDeviceClass::served_as(None)` is the single
-  patience policy: an unknown is *served* `Virtual`'s bounded envelope
-  without ever being *called* `Virtual`. That half is correct.
-- `Block::device_class()` is concrete by construction — its trait default
-  returns `BlkDeviceClass::Virtual`, and both clients document their result
-  as the **served** class. There is no way for an implementor to say "the
-  device told me something I cannot read".
-- `blkio::serve` publishes that concrete value straight back onto the wire
-  (`let class = Some(device.device_class());`). So a layer over a device
-  whose class word was unreadable — the block-service seam re-serving a
-  `RemoteBlock`, a partition window, the block cache, a RAID array folding
-  members through `BlkDeviceClass::most_patient` — republishes
-  `Some(Virtual)`: an identity indistinguishable from a genuine paravirtual
-  device, asserted by a layer that was never told it.
-
-That value is no longer confined to budget sizing. It threads from the
-completion through `BlkClient::declared_class()` → `MountBacking` →
-`MountPoint::medium()` → `MountRecord::medium()`, so the System Information
-API can report a storage medium no driver ever declared. Sizing a cautious
-I/O budget from an unknown is right; *naming* the unknown is not.
-
-**Blast radius today (small, and only by luck).** The single user-visible
-consumer of `MountRecord::medium()` is the drive icon, and
-`tairix_icon::disk_icon` maps both `Some(Virtual)` and `None` to the same
-generic `Disk` glyph — so nothing is currently misdrawn. Nothing else reads
-the field yet. The gap is therefore latent, not cosmetic: the first consumer
-that distinguishes "paravirtual" from "unknown" (a medium column in `df` or
-`mount`, a volume-properties panel, a policy that treats virtual disks
-differently) reads a fabricated fact with no way to tell.
-
-**Structural fix.** Widen the accessor, keep the one patience policy:
-
-- `Block::device_class()` returns `Option<BlkDeviceClass>`, defaulting to
-  `None` (an implementor that knows nothing says nothing) rather than to a
-  class it invented.
-- Every implementor and forwarding layer carries the `Option` through: the
-  partition window, the block cache, the retained journal, `SharedBlock`,
-  the six RAID array kinds, USB mass storage, and both clients
-  (`lib/blkclient`, `kernel/core/src/fs/blkclient.rs`) with their fixtures.
-- `most_patient` folds `Option`s, so a composition with one unreadable
-  member reports its medium as unknown — which it is — while still being
-  *served* the widest envelope through `served_as`. Patience behaviour is
-  unchanged at every call site; only the published identity becomes honest.
-- `blkio::serve` then publishes what the device actually said, and the
-  unknown reaches `MountRecord::medium() == None`, where the generic drive
-  icon is the right answer *by design* instead of by coincidence.
-
-**Done when:** no layer can publish a class its device did not declare; a
-regression test composes an array over a member with an unreadable class
-word and asserts both halves — the composition is served the cautious
-envelope, and its mount reports `medium() == None`; and `served_as` remains
-the only place an unknown is turned into a concrete envelope (§2.2).
+**Tests.** `a_composition_reads_as_its_most_patient_member`,
+`an_undeclared_member_is_waited_on_as_paravirtual`,
+`an_unknown_class_word_stays_unknown_rather_than_becoming_virtual`,
+`every_medium_is_served_as_what_it_is`, `completion_round_trips_every_medium`
+(`lib/abi`), `device_class_declares_the_most_patient_live_member`
+and `an_undeclared_copy_is_waited_on_as_paravirtual` (`lib/raid`),
+`an_undeclared_member_is_waited_on_as_a_paravirtual_device` (the RAID
+composer), and `unrecognised_medium_mounts_as_unknown_scenario`, which
+mounts a volume over a device with an unreadable medium word and reads
+`medium() == None` back from its mount record.
 
 ---
 
@@ -9538,7 +9522,7 @@ wedged-drop test (`a_dropped_device_*` in `virtio_blk`, `virtio_crypto`,
 `a_live_device_with_one_engine_that_will_not_stop_still_stops_the_other_and_keeps_the_frames`;
 `a_dropped_engine_*` and `a_start_that_fails_*` in `lib/usb`;
 `a_controller_that_will_not_recover_is_handed_the_staging_no_more` in `emmc2`);
-`lib/usb`'s `split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed`,
+`lib/usb`'s `a_gone_device_is_freed_even_when_its_disable_slot_is_never_confirmed`,
 which now asserts the region withheld and the DCBAA entry kept, and
 `a_controller_reset_releases_what_unconfirmed_teardowns_withheld`,
 `a_late_disable_slot_confirmation_returns_what_the_unplug_withheld`,

@@ -2190,7 +2190,11 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   bounds-checked frame slice and a damage list, every rectangle validated
   inside the window's surface and none overlapping another. A per-client window cap bounds pinned memory, a dead
   client's windows are torn down via `client_exited`, and app-ward events
-  are validated against the live window before delivery.
+  are validated against the live window before delivery. A request naming
+  an event mailbox (a create, a popup, a tool window, a layer, an alert)
+  must name the caller's own — `event_endpoint_for` its attested pid
+  (`CallerIdentity::caller_mailbox`) — so no application's events are
+  aimed at another's mailbox; any other is refused `PermissionDenied`.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
   (`ipc_call`) and the mailbox seam (the app's own event endpoint). The
   client remembers each window's last presented frame index and extent, so
@@ -2288,6 +2292,70 @@ and whether it edits its documents, and the dragging application opens the
 file for it exactly as its own "Open With" would. So no path and no authority
 reaches the session, and nothing is opened on an application's word. Like a
 pick, a drag concludes only through `WindowServer::conclude_drag`.
+
+A **window of another application** takes a drop exactly as that
+application's slot does: the session finds the window's attested owner among
+the strip's groups and answers by the same rule, so a document dropped on an
+open editor is handed to the editor. A slot or window whose application does
+not claim the file — or is dragged several items, or a folder — is **answered**
+rather than left silent: the drop concludes on nothing, and the desktop puts up
+an error alert titled in that application's name ("Error from Paint") saying
+it cannot open the file and naming the endings it does open
+(`DropRefusal`). An application that takes the file and then finds it damaged,
+unreadable or refused by its sandbox states that in its own alert.
+
+## Alerts
+
+An **alert** — a refusal, a warning, a notice or a question — is a window of
+its own that the desktop draws, never drawn inside, clipped to or placed
+against the window that raised it, so a message is never cut to fit a window
+and an application cannot draw the chrome that names who is speaking.
+
+`WindowRequest::OpenAlert { event_endpoint, owner_window_id, alert }` carries an
+`AlertSpec` — a severity, a headline, an optional detail, and one to
+`ALERT_MAX_BUTTONS` buttons each with a role — and its reply mints the alert's
+id. The answer is one `WindowEvent::AlertClosed { alert_id, outcome }`: the
+button chosen, or `Dismissed` when it was withdrawn (`CloseAlert`), its owner
+closed, or the session took it down. The request needs no capability — its
+scope is the caller's attested identity — and an owner, when named, must be
+the caller's own window. Text, buttons and the alerts one client may have up
+(`ALERT_MAX_OPEN`) are bounded, and a spec breaking any rule is refused whole;
+`AlertSpec::fitted` shortens a quoted name rather than refusing it.
+
+The window is laid out at exactly 4:3, its frame included, the smallest such
+extent that seats the severity mark, the headline, the wrapped detail and the
+buttons along its foot, the default one warm; past the largest the screen
+holds, the detail scrolls. Its frame is the dialog frame: a title band holding
+only put-to-back, no close, minimise or size control, and no resize edge. The
+title is the session's — "Error from *App*", "Warning from *App*", "Message
+from *App*", the bundle's attested name, or its bundle path for one titled as
+the desktop. An alert with an owner holds it modal and rises with it: nothing
+but a release reaches the owner, and it takes no drop. One without is a window
+of its own. It takes the keyboard only when its owner or application holds it,
+or when it answers the user's own gesture — otherwise it opens beneath the
+window holding the keyboard — and its buttons arm `ALERT_ARM_NS` after it is
+first on screen, so a click meant for what was there cannot answer it. As it
+comes down it hands the keyboard to the alert behind it holding the same
+window, else that window, else the window it took it from. Buttons that do not
+fit across wrap to a row above; every spec offers one button that destroys
+nothing. The keyboard
+starts on the default button, else the cancel one, else the first that destroys
+nothing, so a stray `Enter` never destroys; `Enter` and `Space` press the
+focused button, `Escape` the cancel one or the only one, and `Tab`,
+`Shift+Tab` and the arrows walk the row.
+
+An application states a refusal through `lib/window`: `app::refuse` writes it
+to `stderr` and raises an error alert holding the window it concerns, or none
+when the refusal is that a window could not be opened, and a window's refusals
+from several sources wait one alert at a time behind each other
+(`notices::Notices`). Both build the alert with one `refusal_alert`, which
+states the reason as a sentence.
+
+The desktop states refusals of its own the same way: a gesture it refuses —
+a dropped file no application claims, a shortcut naming nothing — is a notice
+in the one alert list (`Alerts::notify`), answered by its one button and
+relayed to no application; at most `DESKTOP_NOTICES_MAX` stand at once, the
+oldest giving way.
 
 ## Tests
 

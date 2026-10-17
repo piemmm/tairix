@@ -26,6 +26,7 @@ use crate::document::{Document, MAX_ROW_BYTES};
 use crate::editor::{Editor, Mode};
 use crate::find::Step;
 use crate::layout::{Faces, Layout};
+use tairix_sandbox::decode::Isa;
 
 const CLICK: Duration64 = Duration64::from_millis(500);
 
@@ -61,10 +62,6 @@ impl Harness {
         };
         harness.view.settle(&harness.layout, &mut Region::new());
         harness
-    }
-
-    fn theme(&self) -> &Theme {
-        self.registry.active()
     }
 
     fn relayout(&mut self) {
@@ -384,62 +381,39 @@ fn replace_all_replaces_every_match_as_one_step_and_counts_them() {
 }
 
 #[test]
-fn closing_a_changed_document_asks_first() {
+fn closing_a_changed_document_asks_the_host_to_ask_first() {
     let mut harness = Harness::new(b"text", Format::PlainText);
     assert!(
         matches!(harness.ctrl('w', false).request, Some(Request::Close)),
         "an unchanged window just closes"
     );
     harness.type_str("x");
-    assert!(harness.ctrl('w', false).request.is_none());
-    assert!(harness.view.modal().is_some());
-    assert!(
-        harness
-            .press(Key::Named(NamedKey::Escape))
-            .request
-            .is_none(),
-        "Escape cancels"
-    );
-    assert!(harness.view.modal().is_none());
-    harness.ctrl('w', false);
-    let theme = harness.theme().clone();
-    let (dialog, _) = harness.view.modal().expect("asked again");
-    let bounds = View::modal_rect(dialog, harness.layout.window(), false, Scale::ONE, &theme);
-    let actions = dialog.action_rects(bounds, Scale::ONE, &theme);
-    let dont_save = actions[1].center();
-    harness.pointer(InputEvent::PointerMoved { to: dont_save });
-    harness.pointer(InputEvent::PointerPressed {
-        button: PointerButton::Primary,
-    });
-    let outcome = harness.pointer(InputEvent::PointerReleased {
-        button: PointerButton::Primary,
-    });
-    assert!(matches!(outcome.request, Some(Request::Close)));
+    assert!(matches!(
+        harness.ctrl('w', false).request,
+        Some(Request::AskToClose)
+    ));
+    assert!(harness.view.modal().is_none(), "the question is the host's");
 }
 
-/// A quit is never left waiting on a question it did not ask.
+/// A quit is never left waiting on a question that is not part of closing.
 #[test]
-fn closing_puts_the_save_question_in_place_of_another() {
+fn a_question_open_over_the_text_does_not_hold_a_quit() {
     let mut harness = Harness::new(b"text", Format::PlainText);
     harness.type_str("x");
     harness.ctrl('l', false);
     assert!(harness.view.modal().is_some());
-    assert!(!harness.view.asking_to_close());
     let outcome = harness
         .view
         .close_requested(&harness.layout, &mut Region::new());
-    assert!(outcome.request.is_none());
-    assert!(harness.view.asking_to_close());
+    assert!(matches!(outcome.request, Some(Request::AskToClose)));
+    assert!(!harness.view.asking_to_close());
 }
 
 #[test]
 fn go_to_line_asks_for_a_number_and_goes_there() {
     let mut harness = Harness::new(b"a\nb\nc\nd\n", Format::PlainText);
     harness.ctrl('l', false);
-    assert!(harness
-        .view
-        .modal()
-        .is_some_and(|(_, field)| field.is_some()));
+    assert!(harness.view.modal().is_some());
     harness.type_str("3");
     harness.press(Key::Named(NamedKey::Enter));
     assert!(harness.view.modal().is_none());
@@ -455,7 +429,6 @@ fn typing_a_line_number_repaints_the_question_not_the_window() {
     let question = View::modal_rect(
         dialog,
         harness.layout.window(),
-        true,
         Scale::ONE,
         harness.registry.active(),
     );
@@ -522,6 +495,7 @@ fn copy_cut_and_paste_go_through_the_clipboard_requests() {
 fn every_action_round_trips_through_its_menu_id() {
     let mut actions: Vec<Action> = PLAIN_ACTIONS.to_vec();
     actions.extend(MODES.map(Action::Mode));
+    actions.extend(Isa::ALL.map(Action::Isa));
     actions.extend(Format::ALL.map(Action::Format));
     actions.extend(TAB_WIDTHS.map(Action::TabWidth));
     actions.extend(INDENTS.map(Action::Indentation));
@@ -571,7 +545,12 @@ fn the_window_menu_holds_every_menu_whole() {
         ]
     );
 
-    let mut every: Vec<Action> = PLAIN_ACTIONS.to_vec();
+    // Only an executable's window offers its code.
+    let mut every: Vec<Action> = PLAIN_ACTIONS
+        .iter()
+        .copied()
+        .filter(|action| *action != Action::ShowCode)
+        .collect();
     every.extend(MODES.map(Action::Mode));
     every.extend(Format::ALL.map(Action::Format));
     every.extend(TAB_WIDTHS.map(Action::TabWidth));
@@ -1367,4 +1346,115 @@ fn a_one_line_document_longer_than_the_window_scrolls() {
             part: 128 - rows
         }
     );
+}
+
+// --- The Code display -----------------------------------------------------
+
+/// The opening of an ELF64 executable: enough for its magic to name it.
+const ELF_HEAD: &[u8] = b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0rest of the image";
+
+fn offered(view: &View, kind: MenuKind) -> Vec<u16> {
+    view.menu(kind)
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(item.id.get()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_executable_opens_as_code_and_its_menu_offers_every_instruction_set() {
+    let harness = Harness::new(ELF_HEAD, Format::PlainText);
+    assert!(
+        harness.view.code_shown().is_some(),
+        "an executable opens as code"
+    );
+    let ids = offered(&harness.view, MenuKind::Mode);
+    assert!(ids.contains(&Action::ShowCode.id()));
+    for isa in Isa::ALL {
+        assert!(ids.contains(&Action::Isa(isa).id()), "{isa:?}");
+    }
+
+    let text = Harness::new(b"plain words\n", Format::PlainText);
+    assert!(text.view.code_shown().is_none());
+    assert!(!offered(&text.view, MenuKind::Mode).contains(&Action::ShowCode.id()));
+}
+
+#[test]
+fn the_code_display_asks_once_and_lists_what_lands() {
+    let mut harness = Harness::new(ELF_HEAD, Format::PlainText);
+    let (id, isa) = harness.view.code_want().expect("a listing is wanted");
+    assert_eq!(isa, None);
+    assert_eq!(harness.view.code_want(), None, "asked once");
+    let listing = crate::code::CodeListing {
+        lines: alloc::vec![tairix_sandbox::listing::CodeLine {
+            text: String::from("  401000:  90  nop"),
+            is_label: false,
+        }],
+        isa: Isa::X86_64,
+        widest: 18,
+    };
+    let mut damage = Region::new();
+    harness
+        .view
+        .code_listed(id, Ok(listing), &harness.layout, &mut damage);
+    assert!(!damage.is_empty(), "the listing repaints the grid");
+    assert_eq!(
+        harness.view.code_shown().map(|code| code.lines().len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn showing_the_code_closes_the_find_bar_so_nothing_it_does_edits() {
+    let mut harness = Harness::new(ELF_HEAD, Format::PlainText);
+    let before = harness.text();
+    harness.ctrl('h', true);
+    let mut damage = Region::new();
+    harness
+        .view
+        .act(Action::Replace, &harness.layout, &mut damage);
+    harness.relayout();
+    assert!(harness.view.find_open());
+    harness.type_str("ELF");
+
+    let outcome = harness
+        .view
+        .act(Action::ShowCode, &harness.layout, &mut damage);
+    assert_eq!(outcome.relayout, Relayout::Whole);
+    harness.relayout();
+    assert!(harness.view.code_shown().is_some());
+    assert!(
+        !harness.view.find_open(),
+        "the find bar goes with the editor"
+    );
+    harness.press(Key::Named(NamedKey::Enter));
+    harness
+        .view
+        .act(Action::Replace, &harness.layout, &mut damage);
+    assert!(!harness.view.find_open(), "and is not opened over the code");
+    assert_eq!(harness.text(), before);
+}
+
+#[test]
+fn the_code_display_is_read_only_and_text_or_hex_leaves_it() {
+    let mut harness = Harness::new(ELF_HEAD, Format::PlainText);
+    let before = harness.text();
+    harness.press(Key::Char('x'));
+    assert_eq!(harness.text(), before, "typing edits nothing");
+    assert!(harness
+        .view
+        .message()
+        .is_some_and(|message| message.contains("read-only")));
+    harness.ctrl('a', false);
+    harness.ctrl('x', false);
+    assert_eq!(harness.text(), before.as_slice(), "cutting edits nothing");
+
+    harness.ctrl('h', true);
+    assert!(
+        harness.view.code_shown().is_none(),
+        "the hex shortcut leaves the code"
+    );
+    assert_eq!(harness.view.editor().mode(), Mode::Hex);
 }

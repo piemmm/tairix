@@ -16,10 +16,12 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::num::NonZeroU32;
 
 use super::{
-    control_permitted, drive_urb, frame_completion, read_configuration, ConfigurationError,
-    IsoSlotDone, IsoStreamShape, UrbCall, UrbClient, UrbEngine, UrbLink, UrbScope, CTRL_DATA_LEN,
+    control_permitted, drive_urb, frame_completion, on_own_endpoint, read_configuration,
+    ConfigurationError, Deadline, IsoSlotDone, IsoStreamShape, UrbCall, UrbClient, UrbEngine,
+    UrbLink, UrbScope, CTRL_DATA_LEN,
 };
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::usb_urb::{
@@ -28,6 +30,20 @@ use tairix_abi::usb_urb::{
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_inline::BitSet256;
+
+/// The deadline every bulk transfer here carries, long past anything a test
+/// waits.
+const TIMEOUT: NonZeroU32 = NonZeroU32::MIN.saturating_add(999);
+
+/// A clock that never moves, so a deadline from it has all of its budget left.
+fn frozen_clock() -> u64 {
+    0
+}
+
+/// A deadline a second away on [`frozen_clock`].
+fn deadline() -> Deadline {
+    Deadline::after(1_000_000_000, frozen_clock)
+}
 
 /// The scope of a node governing `interfaces` with `endpoints`.
 fn scope_of(interfaces: &[u8], endpoints: u32) -> UrbScope {
@@ -74,6 +90,12 @@ struct MockEngine {
     interrupt_requests: Vec<(usize, usize)>,
     /// The interface and stream operations it was asked to perform.
     operations: Vec<UsbRequest>,
+    /// The URBs it was told to abandon at their deadline.
+    abandoned: Vec<UrbRequest>,
+    /// The endpoint addresses whose halt it was asked to clear.
+    cleared: Vec<u8>,
+    /// The endpoint addresses whose buffered reports it was asked to drop.
+    discarded: Vec<u8>,
 }
 
 /// The interface's bulk endpoint numbers the mock serves; its interrupt-IN
@@ -103,11 +125,29 @@ impl MockEngine {
             scope: scope_of(&[0], MOCK_ENDPOINTS),
             interrupt_requests: Vec::new(),
             operations: Vec::new(),
+            abandoned: Vec::new(),
+            cleared: Vec::new(),
+            discarded: Vec::new(),
         }
     }
 }
 
 impl UrbEngine for MockEngine {
+    fn abandon(&mut self, urb: &UrbRequest) -> Result<(), DriverError> {
+        self.abandoned.push(*urb);
+        Ok(())
+    }
+
+    fn clear_halt(&mut self, endpoint: u8) -> Result<(), DriverError> {
+        self.cleared.push(endpoint);
+        Ok(())
+    }
+
+    fn discard_reports(&mut self, endpoint: u8) -> Result<(), DriverError> {
+        self.discarded.push(endpoint);
+        Ok(())
+    }
+
     fn control_in(&mut self, _setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
         self.control_calls += 1;
         let n = self.control_response.len().min(data.len());
@@ -265,6 +305,24 @@ impl UrbCall for DirectCall {
             }
             Ok(UsbRequest::IsoStop { endpoint }) => status(engine.iso_stop(endpoint), reply),
             Ok(UsbRequest::IsoStart(_)) => status(Err(DriverError::Unsupported), reply),
+            Ok(UsbRequest::ClearHalt { endpoint }) => {
+                let frame = encode_status_reply(on_own_endpoint(
+                    endpoint,
+                    &mut *engine,
+                    UrbEngine::clear_halt,
+                ));
+                reply[..frame.len()].copy_from_slice(&frame);
+                Ok(frame.len())
+            }
+            Ok(UsbRequest::DiscardReports { endpoint }) => {
+                let frame = encode_status_reply(on_own_endpoint(
+                    endpoint,
+                    &mut *engine,
+                    UrbEngine::discard_reports,
+                ));
+                reply[..frame.len()].copy_from_slice(&frame);
+                Ok(frame.len())
+            }
             Err(err) => frame_completion(reply, Err(err)),
         }
     }
@@ -319,7 +377,7 @@ fn interrupt_in_round_trips_and_then_reports_would_block() {
 
     // The first poll delivers the queued report.
     let transferred = client
-        .interrupt_in(INTERRUPT_ENDPOINT, 8)
+        .interrupt_in(INTERRUPT_ENDPOINT, 8, None)
         .expect("interrupt-IN completes");
     assert_eq!(transferred, 8);
     assert_eq!(&buffer.borrow()[..8], &report[..]);
@@ -327,7 +385,7 @@ fn interrupt_in_round_trips_and_then_reports_would_block() {
     // With nothing pending, a non-blocking poll fails closed with the
     // retryable `WouldBlock` rather than fabricating a report.
     assert_eq!(
-        client.interrupt_in(INTERRUPT_ENDPOINT, 8),
+        client.interrupt_in(INTERRUPT_ENDPOINT, 8, None),
         Err(Errno::WouldBlock)
     );
     assert_eq!(engine.borrow().interrupt_calls, 2);
@@ -343,6 +401,7 @@ fn an_interrupt_poll_names_its_length_and_receives_the_whole_buffer() {
         direction: UsbDirection::In,
         length: 9,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(
         serve_one(&urb, 64, &mut engine),
@@ -362,6 +421,7 @@ fn an_interrupt_poll_on_another_interfaces_endpoint_is_refused() {
             direction: UsbDirection::In,
             length: 8,
             setup: [0; 8],
+            timeout_ms: None,
         };
         assert_eq!(
             serve_one(&urb, 8, &mut engine),
@@ -385,6 +445,7 @@ fn control(setup: [u8; 8]) -> UrbRequest {
         },
         length,
         setup,
+        timeout_ms: None,
     }
 }
 
@@ -484,6 +545,7 @@ fn rejects_oversize_length_before_the_engine() {
         // One byte past the 8-byte shared buffer.
         length: 9,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(
         serve_one(&urb, 8, &mut engine),
@@ -502,6 +564,7 @@ fn rejects_interrupt_on_the_control_endpoint() {
         direction: UsbDirection::In,
         length: 8,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
     assert_eq!(engine.interrupt_calls, 0);
@@ -516,6 +579,7 @@ fn rejects_control_on_a_device_endpoint() {
         direction: UsbDirection::In,
         length: 8,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
     assert_eq!(engine.control_calls, 0);
@@ -531,6 +595,7 @@ fn rejects_illegal_direction() {
         direction: UsbDirection::Out,
         length: 8,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(
         serve_one(&interrupt_out, 8, &mut engine),
@@ -546,6 +611,7 @@ fn rejects_illegal_direction() {
         direction: UsbDirection::Out,
         length: 8,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(
         serve_one(&control_out_bad_endpoint, 8, &mut engine),
@@ -569,6 +635,7 @@ fn control_out_data_stage_delivers_the_shared_buffers_bytes() {
         direction: UsbDirection::Out,
         length: 12,
         setup,
+        timeout_ms: None,
     };
     let mut data = [0u8; 12];
     data[0] = 0x28;
@@ -614,9 +681,12 @@ fn bulk_in_round_trips_through_the_client() {
 
     // The first drive arms the TD (the synchronous double surfaces the held
     // URB as the retryable `WouldBlock`); the re-drive reaps its completion.
-    assert_eq!(client.bulk_in(BULK_IN_ENDPOINT, 16), Err(Errno::WouldBlock));
+    assert_eq!(
+        client.bulk_in(BULK_IN_ENDPOINT, 16, TIMEOUT),
+        Err(Errno::WouldBlock)
+    );
     let transferred = client
-        .bulk_in(BULK_IN_ENDPOINT, 16)
+        .bulk_in(BULK_IN_ENDPOINT, 16, TIMEOUT)
         .expect("bulk-IN completes");
     assert_eq!(transferred, 16);
     assert_eq!(&buffer.borrow()[..16], &payload[..]);
@@ -633,11 +703,11 @@ fn bulk_out_round_trips_through_the_client() {
     });
 
     assert_eq!(
-        client.bulk_out(BULK_OUT_ENDPOINT, 12),
+        client.bulk_out(BULK_OUT_ENDPOINT, 12, TIMEOUT),
         Err(Errno::WouldBlock)
     );
     let transferred = client
-        .bulk_out(BULK_OUT_ENDPOINT, 12)
+        .bulk_out(BULK_OUT_ENDPOINT, 12, TIMEOUT)
         .expect("bulk-OUT completes");
     assert_eq!(transferred, 12);
     // The device received exactly the shared buffer's bytes.
@@ -653,6 +723,7 @@ fn rejects_bulk_on_the_control_endpoint() {
         direction: UsbDirection::In,
         length: 8,
         setup: [0; 8],
+        timeout_ms: Some(TIMEOUT),
     };
     assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
     assert_eq!(engine.bulk_calls, 0);
@@ -670,6 +741,7 @@ fn a_wrong_bulk_endpoint_fails_closed_in_band() {
         direction: UsbDirection::In,
         length: 8,
         setup: [0; 8],
+        timeout_ms: Some(TIMEOUT),
     };
     assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
 }
@@ -687,9 +759,12 @@ fn a_stalled_bulk_transfer_surfaces_endpoint_stalled_in_band() {
 
     // Arm, then reap the STALL: the completion carries the distinct
     // `EndpointStalled` so a class driver can run its own (BOT) recovery.
-    assert_eq!(client.bulk_in(BULK_IN_ENDPOINT, 8), Err(Errno::WouldBlock));
     assert_eq!(
-        client.bulk_in(BULK_IN_ENDPOINT, 8),
+        client.bulk_in(BULK_IN_ENDPOINT, 8, TIMEOUT),
+        Err(Errno::WouldBlock)
+    );
+    assert_eq!(
+        client.bulk_in(BULK_IN_ENDPOINT, 8, TIMEOUT),
         Err(Errno::EndpointStalled)
     );
 }
@@ -788,11 +863,14 @@ fn a_link_takes_a_report_longer_than_it_asked_for_but_never_truncates_one() {
     let (mut link, sent) = scripted_link(&mut shm, vec![Ok(20), Ok(20)]);
     let mut short = [0u8; 8];
     assert_eq!(
-        link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut short),
+        link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut short, None),
         Err(Errno::BufferTooSmall)
     );
     let mut room = [0u8; 32];
-    assert_eq!(link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut room), Ok(20));
+    assert_eq!(
+        link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut room, None),
+        Ok(20)
+    );
     assert_eq!(room[..20], [5; 20]);
     assert!(sent.borrow().iter().all(|urb| urb.length == 8));
 }
@@ -802,13 +880,87 @@ fn a_link_splits_a_bulk_read_into_buffer_sized_urbs_and_stops_at_a_short_one() {
     let mut shm = vec![9u8; 16];
     let (mut link, sent) = scripted_link(&mut shm, vec![Ok(16), Ok(16), Ok(5)]);
     let mut data = [0u8; 64];
-    assert_eq!(link.bulk_in(BULK_IN_ENDPOINT, &mut data), Ok(37));
+    assert_eq!(
+        link.bulk_in(BULK_IN_ENDPOINT, &mut data, deadline()),
+        Ok(37)
+    );
     assert_eq!(
         sent.borrow().len(),
         3,
         "the short third chunk ends the transfer"
     );
     assert!(sent.borrow().iter().all(|urb| urb.length == 16));
+}
+
+#[test]
+fn each_urb_of_a_split_transfer_is_bounded_by_what_its_deadline_has_left() {
+    let mut shm = vec![9u8; 16];
+    let (mut link, sent) = scripted_link(&mut shm, vec![Ok(16), Ok(16), Ok(5)]);
+    let mut data = [0u8; 64];
+    link.bulk_in(BULK_IN_ENDPOINT, &mut data, deadline())
+        .expect("the read completes");
+    assert!(sent
+        .borrow()
+        .iter()
+        .all(|urb| urb.timeout_ms == NonZeroU32::new(1000)));
+
+    // A deadline already past refuses the transfer before any URB is sent.
+    let (mut link, sent) = scripted_link(&mut shm, vec![Ok(16)]);
+    let expired = Deadline::after(0, frozen_clock);
+    assert_eq!(
+        link.bulk_out(BULK_OUT_ENDPOINT, &data[..8], expired),
+        Err(Errno::TimedOut)
+    );
+    assert!(sent.borrow().is_empty());
+}
+
+#[test]
+fn a_deadline_rounds_a_sliver_up_and_has_nothing_left_once_reached() {
+    assert_eq!(
+        Deadline::after(1, frozen_clock).remaining_ms(),
+        NonZeroU32::new(1)
+    );
+    assert_eq!(
+        Deadline::after(2_500_000, frozen_clock).remaining_ms(),
+        NonZeroU32::new(3)
+    );
+    assert_eq!(Deadline::after(0, frozen_clock).remaining_ms(), None);
+    assert_eq!(
+        Deadline::after(u64::MAX, frozen_clock).remaining_ms(),
+        NonZeroU32::new(u32::MAX),
+        "a deadline beyond the wire's reach is bounded by it"
+    );
+}
+
+#[test]
+fn a_clear_halt_or_report_discard_reaches_only_the_interfaces_own_endpoints() {
+    let engine = Rc::new(RefCell::new(MockEngine::new()));
+    let buffer = Rc::new(RefCell::new(vec![0u8; 8]));
+    let mut client = UrbClient::new(DirectCall {
+        engine: Rc::clone(&engine),
+        buffer: Rc::clone(&buffer),
+    });
+    assert_eq!(client.clear_halt(0x81), Ok(()));
+    assert_eq!(client.clear_halt(0x02), Ok(()));
+    assert_eq!(client.discard_reports(0x83), Ok(()));
+    for refused in [0x85, 0x87] {
+        assert_eq!(
+            client.clear_halt(refused),
+            Err(Errno::PermissionDenied),
+            "another interface's endpoint"
+        );
+        assert_eq!(
+            client.discard_reports(refused),
+            Err(Errno::PermissionDenied)
+        );
+    }
+    let engine = engine.borrow();
+    assert_eq!(
+        engine.cleared,
+        [0x81, 0x02],
+        "a refusal never reaches the engine"
+    );
+    assert_eq!(engine.discarded, [0x83]);
 }
 
 #[test]
@@ -822,6 +974,7 @@ fn an_interrupt_poll_naming_a_bulk_endpoint_reads_nothing() {
         direction: UsbDirection::In,
         length: 8,
         setup: [0; 8],
+        timeout_ms: None,
     };
     assert_eq!(serve_one(&urb, 8, &mut engine), Err(Errno::OutOfRange));
     assert_eq!(engine.interrupt_calls, 0);

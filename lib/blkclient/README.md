@@ -58,17 +58,17 @@ them, so it lives here once and both consumers link it.
   shared window than the request named.
 - The bounded-reissue policy (`IoBudget::should_reissue`) is the one
   definition both a read and a write share, derived from the device's own
-  declared class rather than an assumed envelope, so a removable unit
+  declared medium rather than an assumed envelope, so a removable unit
   riding out a bus reset and a paravirtual device that has simply wedged
   are each given their own class's patience.
-- A device need not declare a class this ABI recognises, so the class on a
-  completion is an `Option`: an unrecognised class word decodes to *unknown*
-  and stays unknown instead of being renamed to a class nobody reported.
-  Patience still needs a concrete envelope, and `BlkDeviceClass::served_as`
-  is the single policy that picks one — an unknown device is served the
-  bounded unclassified envelope and no extra patience. Hence `device_class`
-  reports what the device is *served as*, while `declared_class` reports
-  what it actually said.
+- A device need not declare a medium this ABI recognises, so the medium on a
+  completion is an `Option`: an unrecognised medium word decodes to *unknown*
+  and stays unknown instead of being renamed to a medium nobody reported.
+  Patience still needs a concrete envelope, and `BlkDeviceClass::of` is the
+  single policy that picks one — an unknown device is served the bounded
+  unclassified envelope and no extra patience. Hence `device_class` reports
+  what the device is *served as*, while `medium` reports what it actually
+  said.
 - A served device may itself be a composition, so each completion's health
   status is reflected onto a `MountAvailability` reading through the one
   shared `from_block_status` mapping and reported by

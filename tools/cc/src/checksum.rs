@@ -6,6 +6,7 @@
 //! expected digest, the wrapper *verifies* it and fails closed on a mismatch; otherwise it records the computed digest for logging.
 
 use tairix_crypto::{sha256, Sha256Digest, SHA256_OUTPUT_LEN};
+use tairix_util::hex;
 
 /// Compute the SHA-256 digest of `bytes`.
 #[must_use]
@@ -16,13 +17,11 @@ pub fn digest(bytes: &[u8]) -> Sha256Digest {
 /// Lowercase hex encoding of a 32-byte digest.
 #[must_use]
 pub fn to_hex(digest: &Sha256Digest) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(SHA256_OUTPUT_LEN * 2);
-    for &byte in digest {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
+    digest
+        .iter()
+        .flat_map(|&byte| hex::digits(byte))
+        .map(char::from)
+        .collect()
 }
 
 /// Parse a 64-character lowercase/uppercase hex string into a digest.
@@ -32,27 +31,8 @@ pub fn to_hex(digest: &Sha256Digest) -> String {
 /// accident.
 #[must_use]
 pub fn parse_hex(text: &str) -> Option<Sha256Digest> {
-    let text = text.trim();
-    if text.len() != SHA256_OUTPUT_LEN * 2 {
-        return None;
-    }
     let mut out = [0u8; SHA256_OUTPUT_LEN];
-    let bytes = text.as_bytes();
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = hex_value(bytes[i * 2])?;
-        let lo = hex_value(bytes[i * 2 + 1])?;
-        *slot = (hi << 4) | lo;
-    }
-    Some(out)
-}
-
-fn hex_value(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
+    hex::decode_into(text.trim(), &mut out).then_some(out)
 }
 
 #[cfg(test)]

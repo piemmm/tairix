@@ -44,7 +44,9 @@ mod program {
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::window_ipc::{AppBarClick, MenuOutcome, WindowEvent, WindowRegion};
+    use tairix_abi::window_ipc::{
+        AlertSeverity, AlertSpec, AppBarClick, MenuOutcome, WindowEvent, WindowRegion,
+    };
     use tairix_abi::{Errno, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_appdata::{RtHost, Settings as Store};
     use tairix_audio::live::RtAudio;
@@ -83,6 +85,7 @@ mod program {
     use tairix_theme::{TextRole, Theme};
     use tairix_util::defer::JobQueue;
     use tairix_window::app::{self, Wake, WindowPane};
+    use tairix_window::notices::{Notices, Raised};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
         EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowClient,
@@ -718,6 +721,22 @@ mod program {
 
     type Workers = Worker<Workshop, Job, Answer, JobQueue<Job, Answer>>;
 
+    /// What a refusal the player states came from, each keeping at most one
+    /// alert waiting.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Spoke {
+        /// A file the user chose or handed over.
+        Chosen,
+        /// A folder the user chose.
+        Folder,
+        /// A track that would not play.
+        Track,
+        /// Playback itself.
+        Playback,
+        /// The player's settings.
+        Settings,
+    }
+
     /// Everything the window loop holds.
     struct App {
         client: WindowClient<app::RtWindowTransport>,
@@ -735,6 +754,11 @@ mod program {
         /// The open context menu's id.
         menu: Option<u64>,
         presented: bool,
+        /// The refusals stated in alerts, one up at a time.
+        notices: Notices<Spoke>,
+        /// The player has every alert up it may, so nothing more is put up
+        /// until one is answered.
+        alerts_full: bool,
     }
 
     impl App {
@@ -787,9 +811,10 @@ mod program {
             }
             if let Some(purpose) = outcome.pick {
                 if let Err(err) = self.client.pick_file(self.pane.id(), purpose) {
-                    app::report(
-                        APP_NAME,
-                        format_args!("the desktop offered no file chooser ({err})"),
+                    self.notices.refuse(
+                        Spoke::Chosen,
+                        "No file chooser could be opened",
+                        &format!("the desktop would not offer one ({err})"),
                     );
                 }
             }
@@ -885,10 +910,10 @@ mod program {
                     reported,
                 ),
                 Answer::Saved(Ok(())) => {}
-                Answer::Saved(Err(err)) => self.player.notify(
-                    format!("Your settings could not be saved: {err}"),
-                    &self.layout,
-                    reported,
+                Answer::Saved(Err(err)) => self.notices.refuse(
+                    Spoke::Settings,
+                    "Your settings could not be saved",
+                    &format!("{err}"),
                 ),
             }
         }
@@ -915,30 +940,34 @@ mod program {
                 self.act(outcome);
             }
             for note in notes {
-                let (Note::Skipped { entry, why } | Note::Cut { entry, why }) = note else {
-                    continue;
+                let (headline, entry, why) = match note {
+                    Note::Skipped { entry, why } => ("could not be played", entry, why),
+                    Note::Cut { entry, why } => ("stopped part-way through", entry, why),
+                    Note::Opened { .. } => continue,
                 };
-                let name = self
+                let named = self
                     .player
                     .playlist()
                     .get(entry)
-                    .map_or_else(String::new, |row| row.name.clone());
-                self.player
-                    .notify(format!("{name}: {why}"), &self.layout, reported);
+                    .map(|row| row.name.as_str());
+                let headline = match named {
+                    Some(name) if !name.is_empty() => {
+                        format!("\u{201c}{name}\u{201d} {headline}")
+                    }
+                    _ => format!("A track {headline}"),
+                };
+                self.notices
+                    .refuse(Spoke::Track, &headline, &format!("{why}"));
             }
             if let Some(Ended::Failed(failure)) = ended {
-                self.player.notify(
-                    format!("Playback stopped: {failure}"),
-                    &self.layout,
-                    reported,
-                );
+                self.notices
+                    .refuse(Spoke::Playback, "Playback stopped", &format!("{failure}"));
             }
             if let Some(failure) = gone {
-                app::report(APP_NAME, format_args!("playback ended: {failure}"));
-                self.player.notify(
-                    format!("Playback cannot go on: {failure}"),
-                    &self.layout,
-                    reported,
+                self.notices.refuse(
+                    Spoke::Playback,
+                    "Playback cannot go on",
+                    &format!("{failure}"),
                 );
             }
         }
@@ -975,20 +1004,24 @@ mod program {
                 }
             }
             if opened.is_empty() && left_out == 0 && refused == 0 {
-                self.player.notify(
-                    String::from("That folder holds nothing this player opens"),
-                    &self.layout,
-                    reported,
+                self.notices.refuse(
+                    Spoke::Folder,
+                    "Nothing in that folder can be played",
+                    "it holds no file of a kind this player opens",
                 );
             }
             self.add(opened, reported);
             let missed = left_out.saturating_add(refused);
             if missed > 0 {
-                self.player.notify(
-                    format!("{missed} more files in that folder were not opened"),
-                    &self.layout,
-                    reported,
+                let unit = if missed == 1 { "file" } else { "files" };
+                let notice = AlertSpec::acknowledged(
+                    AlertSeverity::Warning,
+                    "Not everything in that folder was added",
+                    &format!("{missed} more {unit} in it could not be opened."),
                 );
+                if let Ok(notice) = notice {
+                    self.notices.state(Spoke::Folder, notice);
+                }
             }
         }
 
@@ -999,11 +1032,38 @@ mod program {
                 let Target::Document { name, grant, .. } = target else {
                     continue;
                 };
-                if let Ok(file) = File::from_delegation(grant) {
-                    opened.push((name, file));
+                match File::from_delegation(grant) {
+                    Ok(file) => opened.push((name, file)),
+                    Err(raw) => self.notices.refuse(
+                        Spoke::Chosen,
+                        &not_opened(&name),
+                        &format!("it could not be taken over ({})", Errno::from_syscall(raw)),
+                    ),
                 }
             }
             self.add(opened, reported);
+        }
+
+        /// Put the next waiting refusal up, unless one is up or the player
+        /// has every alert up it may.
+        fn raise_notices(&mut self, endpoint: u64) {
+            while !self.alerts_full {
+                match self
+                    .notices
+                    .raise(&mut self.client, endpoint, self.pane.id())
+                {
+                    Raised::Nothing | Raised::Up => return,
+                    Raised::Full => self.alerts_full = true,
+                    Raised::Refused(err, notice) => app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{}: {} (the desktop would not show this: {err})",
+                            notice.headline(),
+                            notice.detail()
+                        ),
+                    ),
+                }
+            }
         }
 
         /// Paint what is owed and present it.
@@ -1097,15 +1157,16 @@ mod program {
                         .unwrap_or_default();
                     match File::from_delegation(*handle) {
                         Ok(file) => self.add(alloc::vec![(name, file)], reported),
-                        Err(ret) => self.player.notify(
-                            format!(
-                                "The chosen file could not be opened: {}",
-                                Errno::from_syscall(ret)
-                            ),
-                            &self.layout,
-                            reported,
+                        Err(ret) => self.notices.refuse(
+                            Spoke::Chosen,
+                            &not_opened(&name),
+                            &format!("it could not be taken over ({})", Errno::from_syscall(ret)),
                         ),
                     }
+                }
+                WindowEvent::AlertClosed { alert_id, .. } => {
+                    self.alerts_full = false;
+                    self.notices.answered(*alert_id);
                 }
                 WindowEvent::FolderPicked { left_out, .. } => self.take_folder(*left_out, reported),
                 WindowEvent::MenuClosed {
@@ -1177,6 +1238,15 @@ mod program {
                 _ => {}
             }
             false
+        }
+    }
+
+    /// The headline of an alert saying the file `name` could not be opened.
+    fn not_opened(name: &str) -> String {
+        if name.is_empty() {
+            String::from("The file could not be opened")
+        } else {
+            format!("\u{201c}{name}\u{201d} could not be opened")
         }
     }
 
@@ -1367,6 +1437,8 @@ mod program {
             covers,
             menu: None,
             presented: false,
+            notices: Notices::default(),
+            alerts_full: false,
         };
         app_state.player.relayout(&app_state.layout);
         app_state.player.devices_listed(devices);
@@ -1455,6 +1527,7 @@ mod program {
                     }
                 }
             }
+            app_state.raise_notices(endpoint);
             if app_state.present(repaint, &reported, theme, scale).is_err() {
                 app_state.link.leave();
                 return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
@@ -1466,6 +1539,7 @@ mod program {
                         app_state.link.leave();
                         return 0;
                     }
+                    app_state.raise_notices(endpoint);
                     if app_state
                         .present(Repaint::Reported, &reported, theme, scale)
                         .is_err()

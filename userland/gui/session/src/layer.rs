@@ -39,7 +39,7 @@ use tairix_log::EventId;
 use tairix_wm::{Compositor, Point, PointerCatch, Rect, WindowId};
 
 /// That a layer surface is too small to reproduce any surface the session
-/// draws for a trusted decision.
+/// draws for a trusted decision: the credential prompt, or any alert.
 ///
 /// The bound is the defence; this is the proof it still holds. Shrinking a
 /// trusted prompt below the bound would let a holder render it at its own
@@ -49,7 +49,7 @@ use tairix_wm::{Compositor, Point, PointerCatch, Rect, WindowId};
 /// fortiori.
 pub const LAYER_FITS_UNDER_TRUSTED_SURFACES: () = {
     assert!(DESKTOP_LAYER_MAX_SIDE_LOGICAL < crate::elevate::WIN_WIDTH);
-    assert!(DESKTOP_LAYER_MAX_SIDE_LOGICAL < crate::confirm::WIN_WIDTH);
+    assert!(DESKTOP_LAYER_MAX_SIDE_LOGICAL < tairix_controls::ALERT_MIN_WIDTH);
 };
 
 /// Event id of a desktop layer surface opening, in the desktop session's

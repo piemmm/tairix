@@ -143,30 +143,6 @@ pub enum DialogAction {
     },
 }
 
-/// How a [`Dialog::save_changes`] question was answered.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SaveChanges {
-    /// Keep the window open, changes and all.
-    Cancel,
-    /// Close the window, losing the changes.
-    Discard,
-    /// Save the changes, then close.
-    Save,
-}
-
-impl SaveChanges {
-    /// The answer the question's action `index` gives. An index the question
-    /// has no action at keeps the window open.
-    #[must_use]
-    pub const fn of(index: usize) -> Self {
-        match index {
-            1 => Self::Discard,
-            2 => Self::Save,
-            _ => Self::Cancel,
-        }
-    }
-}
-
 /// A modal decision surface (spec §11.24).
 ///
 /// A dialog is an elevated plate carrying a title, a message, and a right-
@@ -260,27 +236,6 @@ impl Dialog {
             .top()
             .saturating_add_unsigned((window.height - height) / 3);
         Rect::new(x, y, width, height)
-    }
-
-    /// The question a document window asks before it closes over changes
-    /// made to `name`, whose actions [`SaveChanges::of`] reads.
-    #[must_use]
-    pub fn save_changes(name: &str) -> Self {
-        Self::new(alloc::format!(
-            "Save the changes to \u{201c}{name}\u{201d}?"
-        ))
-        .with_message("Your changes will be lost if you do not save them.")
-        .with_actions(alloc::vec![
-            Button::labelled("Cancel"),
-            Button::new(
-                ButtonContent::Label(String::from("Don\u{2019}t Save")),
-                ControlRole::Destructive,
-            ),
-            Button::new(
-                ButtonContent::Label(String::from("Save")),
-                ControlRole::Recommended,
-            ),
-        ])
     }
 
     /// The dialog's title.

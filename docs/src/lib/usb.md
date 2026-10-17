@@ -106,8 +106,16 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   re-drives every connected-but-unserved port (a served port is left
   untouched: the re-drive resets the port, which would tear a working device
   down), so the HCD can owe a skipped port one deferred re-attach rather than
-  wait for a physical re-plug. A device
-  absent at bring-up is a first-class state, not a failure: the controller
+  wait for a physical re-plug. An endpoint recovery that fails — a device's
+  interrupt-IN endpoint, or a hub's status-change watch — is no verdict on
+  the device: it owes deferred retries (`recovery_owed`) the HCD runs once the
+  path has settled (`retry_owed_recoveries`), each reading the port to free a
+  device that left it vacant, recover one still enabled in place, or reset and
+  re-enumerate the port — a bounded ladder, so an endpoint that never works is
+  given up rather than recovered forever. A hub whose status-change transfer
+  fails is recovered by `next_hub_change` itself, which reconciles every port
+  behind it (`HubEvent::HubRecovered`). A device absent at bring-up is a
+  first-class state, not a failure: the controller
   comes up watched (each hub's status-change endpoint, and the root ports'
   latched connect changes serviced by `next_root_change`, with no controller
   reset), so a cold boot with nothing plugged in works and each device
@@ -220,9 +228,12 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
 - `transport` — the **bus-agnostic URB transport seam** the modular USB stack
   (`plans/USB.md`) is built on. The wire contract is `tairix_abi::usb_urb`: a
   `UsbRequest`, which is a URB (`UrbRequest`: endpoint, transfer type,
-  direction, length, control SETUP — its data always moves through the node's
-  shared buffer), an interface operation (select a setting, claim a sibling),
-  or a stream operation (start, queue a slot, stop); a URB is answered with a
+  direction, length, control SETUP, and the deadline the controller may hold
+  it for — its data always moves through the node's shared buffer), an
+  interface operation (select a setting, claim a sibling, clear the halt of
+  one of its own bulk endpoints, drop the reports its interrupt-IN endpoint
+  has buffered), or a stream operation (start, queue a slot, stop); a URB is
+  answered with a
   status-framed completion (bytes transferred, or an in-band `Errno`), an
   operation with a status or a stream's grant. `transport` adds the two ends
   both sides share:
@@ -235,14 +246,19 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     OUT data stage (the CBI ADSC command channel, `plans/DEVICES.md` D5),
     `interrupt_in` over the report queue — a HID report endpoint or a CBI
     interface's completion endpoint alike, read only when the URB names it —
-    and
+    `discard_reports`, which drains the controller's events and drops what
+    that queue holds, so a CBI command, whose completion carries no tag,
+    never takes an earlier command's late one for its own — and
     `bulk_in` / `bulk_out` over the interface's configured bulk endpoints:
     the IN/OUT pair a BOT/CBI interface carries, or the two pairs a UAS
     interface's four pipes need (`plans/DEVICES.md` D1/D5), addressed by
-    endpoint number and routed to the matching per-pipe ring), and the
-    interface and stream operations above (`set_interface`,
-    `claim_interface`, `iso_start` / `iso_queue` / `iso_stop` / `iso_take`),
-    which an engine serving no periodic endpoint refuses `Unsupported`.
+    endpoint number and routed to the matching per-pipe ring), `abandon` for
+    a URB held past its deadline (a bulk pipe is stopped and restarted empty,
+    so its TD can never complete late into a later transfer), `clear_halt`
+    for a bulk pipe, and the interface and stream operations above
+    (`set_interface`, `claim_interface`, `iso_start` / `iso_queue` /
+    `iso_stop` / `iso_take`), which an engine serving no periodic endpoint
+    refuses `Unsupported`.
   - `drive_urb` — the controller-side server transformation: decode a URB,
     validate it fail-closed against the interface (control ⇒ endpoint 0,
     served as IN, the zero-length no-data OUT, or the data-stage OUT
@@ -258,18 +274,24 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     its own interfaces and their endpoints, but never set the
     configuration, the address, an alternate setting, a halt or a power
     feature, which reach every interface of the device — those are refused
-    `PermissionDenied`, and the HCD logs each refusal. A not-yet-arrived interrupt-IN report — or a bulk
-    transfer still in flight — leaves the HCD's IPC ticket outstanding until
-    the controller event arrives, so the class driver parks instead of
-    retrying.
+    `PermissionDenied`, and the HCD logs each refusal. A halt is cleared
+    instead through `clear_halt`, so the controller's data toggle is reset
+    with the device's; it and `discard_reports` reach the engine through
+    `on_own_endpoint`, which refuses another interface's endpoint
+    `PermissionDenied` first. A
+    not-yet-arrived interrupt-IN report — or a bulk transfer still in flight —
+    leaves the HCD's IPC ticket outstanding until the controller event
+    arrives or the URB's deadline passes, so the class driver parks instead of
+    retrying. Every bulk URB carries a deadline; a report poll may carry none,
+    and a control transfer runs within the controller's own bound.
   - `UrbCall` / `UrbClient` — the class-side client: a class driver implements
     `UrbCall` over the kernel `ipc_call` surface (a host test routes the bytes
     straight to `drive_urb`), and
     `UrbClient::{control_in, control_no_data, control_out, interrupt_in,
     bulk_in, bulk_out}` build the URB,
     submit it, and decode the completion;
-    `UrbClient::{set_interface, claim_interface, iso_start, iso_queue,
-    iso_stop}` send the operations. A class driver speaks only
+    `UrbClient::{set_interface, claim_interface, clear_halt, discard_reports,
+    iso_start, iso_queue, iso_stop}` send the operations. A class driver speaks only
     this ABI, so the same binary works behind any controller that serves it —
     it touches no controller register and no other interface's buffer (§5.4,
     `plans/USB.md` §1.3). An interrupt-IN completion may carry more than the
@@ -277,9 +299,10 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     anywhere in the shared buffer.
   - `UrbLink` — a class driver's link to its interface: the client and its
     mapping of the shared buffer, moving each transfer's bytes in and out,
-    splitting bulk transfers into buffer-sized URBs, and refusing an
-    interrupt report too long for the caller's buffer rather than truncating
-    it. The mass-storage and HID class drivers both drive their interface
+    splitting bulk transfers into buffer-sized URBs, each given what remains
+    of one `Deadline` (an instant and the clock that measures it) so the
+    transfer as a whole never outlives its budget, and refusing an interrupt
+    report too long for the caller's buffer rather than truncating it. The mass-storage and HID class drivers both drive their interface
     through it.
   - `descriptor::descriptors` — the one walk over a configuration descriptor
     stream every reader of one shares (this crate's decoder, the
@@ -297,11 +320,23 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
     completing in order; a UAS interface's second pair shares the
     direction's staging buffers — the URB service holds one URB in flight
     per interface, so the pipes never race on them), short packets report
-    the honest byte count, and a device STALL is recovered in place —
-    Reset Endpoint → Set TR Dequeue Pointer →
-    `CLEAR_FEATURE(ENDPOINT_HALT)` on the device's own EP0 — with
-    every abandoned TD answered and the stall surfaced as the distinct
-    `EndpointStalled`, so a storage class driver can run its own recovery.
+    the honest byte count, and every completion that halts a pipe — a STALL,
+    a transaction error, babble — is recovered in place: Reset Endpoint →
+    Set TR Dequeue Pointer → `CLEAR_FEATURE(ENDPOINT_HALT)` on the device's
+    own EP0, with every abandoned TD answered. A STALL surfaces as the
+    distinct `EndpointStalled`, a failure on the wire as `DeviceFault`, so a
+    storage class driver can run its own recovery on a pipe that works.
+    Clearing the halt of a pipe that is *not* halted (`clear_halt`, the step
+    a mass-storage reset recovery owes each pipe) resets the controller's
+    toggle the one way an endpoint that is not halted allows: stopped, then
+    dropped and added back over a fresh ring by Configure Endpoint (xHCI
+    §4.6.8), copied from the controller's own output context. The Stopped
+    completion a Stop Endpoint gives the TD it interrupts is dropped as the
+    abandoned TD's, and parked completions are dropped only once the stop is
+    confirmed, since the rebuilt ring reuses the old one's addresses. A
+    completion the ring cannot account for restarts the pipe and fails its
+    TD rather than leaving the TD for a later transfer to mistake for its
+    own.
     A *control* transfer that does not complete is likewise taken back in
     place before its failure returns — Reset Endpoint from a halt (a STALL,
     babble, or transaction error), Stop Endpoint from a TD the device left

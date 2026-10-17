@@ -724,11 +724,11 @@ says its readings are facts.
 **A byte trace is drawn against the scale its own window needs.** A shared
 fixed reference flattens ordinary traffic or clips a fast device — at a
 gigabyte a second, a desktop disk's half a mebibyte a second drew under a
-pixel — so `DeviceMeters` holds each device's rates as bytes per second and
-`rate_trace` draws them against the least power of two at or above the
-window's peak across both directions, never below `TRACE_FLOOR_BYTES_PER_SEC`
-(64 KiB/s), under which one metadata write on an idle device would fill the
-box. The busiest point in view reaches at least half the box, and the scale
+pixel — so `DeviceMeters` holds each device's rates as bytes per second in a
+`lib/controls` `DuplexRates`, whose `trace` draws them against the least power
+of two at or above the window's peak across both directions, never below
+`RATE_TRACE_FLOOR` (64 KiB/s), under which one metadata write on an idle device
+would fill the box. The busiest point in view reaches at least half the box, and the scale
 comes back down once a burst scrolls out. The hero's axis row states it
 (`rate_caption`, scale first so a truncated caption keeps it); across devices,
 the figures beside the traces are what compare.

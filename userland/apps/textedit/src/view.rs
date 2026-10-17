@@ -12,12 +12,12 @@ use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape};
 use tairix_browse::vfs::write_document_title;
 use tairix_controls::{
-    Button, ButtonContent, ControlRole, Dialog, DialogAction, SaveChanges, ScrollAction, ScrollBar,
-    ScrollModel, ScrollOrientation, ScrollRange, SearchField, SelectionState, TextAction,
-    TextField,
+    Button, ButtonContent, ControlRole, Dialog, DialogAction, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollRange, SearchField, SelectionState, TextAction, TextField,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{ClickRun, InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_sandbox::decode::Isa;
 use tairix_sandbox::textsyntax::LexedBatch;
 use tairix_syntax::{Diagnostic, Format};
 use tairix_theme::Theme;
@@ -25,6 +25,7 @@ use tairix_window::docapp::DocumentView;
 use tairix_window::document::{Access, SavedDocument};
 use tairix_window::menu::{MenuBuilder, Plate};
 
+use crate::code::{CodeDisplay, CodeListing, Unlisted};
 use crate::detect::{Indent, LineEnding};
 use crate::document::Snapshot;
 use crate::editor::{Command, Editor, Effect, Mode, Motion};
@@ -150,6 +151,10 @@ pub enum Action {
     NextProblem,
     /// Show the document as text or hex.
     Mode(Mode),
+    /// Show an executable's instructions.
+    ShowCode,
+    /// Read the code as this instruction set.
+    Isa(Isa),
     /// Colour and check the document as a format.
     Format(Format),
     /// Put tab stops this far apart.
@@ -162,7 +167,7 @@ pub enum Action {
 
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 21] = [
+const PLAIN_ACTIONS: [Action; 22] = [
     Action::NewWindow,
     Action::Open,
     Action::Save,
@@ -184,6 +189,7 @@ const PLAIN_ACTIONS: [Action; 21] = [
     Action::FindPrevious,
     Action::GoToLine,
     Action::NextProblem,
+    Action::ShowCode,
 ];
 
 const MODES: [Mode; 2] = [Mode::Text, Mode::Hex];
@@ -202,6 +208,7 @@ const TAB_IDS: u16 = 200;
 const INDENT_IDS: u16 = 300;
 const ENDING_IDS: u16 = 400;
 const MODE_IDS: u16 = 500;
+const ISA_IDS: u16 = 600;
 
 impl Action {
     /// The menu id this action is chosen by.
@@ -211,6 +218,7 @@ impl Action {
             |base: u16, index: Option<usize>| base + u16::try_from(index.unwrap_or(0)).unwrap_or(0);
         match self {
             Self::Mode(mode) => at(MODE_IDS, MODES.iter().position(|&m| m == mode)),
+            Self::Isa(isa) => at(ISA_IDS, Isa::ALL.iter().position(|&i| i == isa)),
             Self::Format(format) => FORMAT_IDS + u16::from(format.index()),
             Self::TabWidth(width) => TAB_IDS + u16::from(width),
             Self::Indentation(indent) => at(INDENT_IDS, INDENTS.iter().position(|&i| i == indent)),
@@ -242,7 +250,8 @@ impl Action {
                 .get(offset(ENDING_IDS))
                 .copied()
                 .map(Self::LineEnding),
-            _ => MODES.get(offset(MODE_IDS)).copied().map(Self::Mode),
+            MODE_IDS..ISA_IDS => MODES.get(offset(MODE_IDS)).copied().map(Self::Mode),
+            _ => Isa::ALL.get(offset(ISA_IDS)).copied().map(Self::Isa),
         }
     }
 }
@@ -274,8 +283,6 @@ struct Drag {
 /// A modal question over the window.
 #[derive(Debug)]
 enum Modal {
-    /// Save the changes before closing?
-    Close(Dialog),
     /// Which line to go to?
     GoTo(Dialog, TextField),
 }
@@ -314,6 +321,10 @@ pub struct View {
     left: usize,
     /// The vertical bar's pixels past `(top, hex_top)`.
     down: Carry<(Row, usize)>,
+    /// The vertical bar's pixels past the Code display's first line.
+    code_down: Carry<usize>,
+    /// The document as code, for an executable.
+    code: Option<CodeDisplay>,
     /// The horizontal bar's pixels past `left`.
     across: Carry<usize>,
     find_open: bool,
@@ -413,10 +424,6 @@ impl DocumentView for View {
         layout.status()
     }
 
-    fn asking_to_close(&self) -> bool {
-        matches!(self.modal, Some(Modal::Close(_)))
-    }
-
     /// The I-beam over text that takes a caret, the arrow over everything
     /// else.
     fn cursor(&self, layout: &Layout, at: Point) -> CursorShape {
@@ -432,8 +439,12 @@ impl DocumentView for View {
         View::menu(self, kind)
     }
 
-    fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        View::close_requested(self, layout, damage)
+    fn close_requested(&mut self, _layout: &Layout, _damage: &mut Region) -> Outcome {
+        if self.editor.is_modified() {
+            Outcome::asking(Request::AskToClose)
+        } else {
+            Outcome::asking(Request::Close)
+        }
     }
 
     fn chosen(&mut self, item: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
@@ -473,6 +484,15 @@ impl View {
     #[must_use]
     pub fn new(editor: Editor, name: String, access: Access, double_click: Duration64) -> Self {
         let flat = || ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1);
+        let code = {
+            let document = editor.document();
+            let mut head = Vec::new();
+            // A head the allocator refuses offers no Code display.
+            document
+                .copy_range(0..document.len().min(CODE_HEAD_LEN), &mut head)
+                .ok()
+                .and_then(|()| CodeDisplay::of(&head))
+        };
         Self {
             editor,
             name,
@@ -481,6 +501,8 @@ impl View {
             hex_top: 0,
             left: 0,
             down: Carry::default(),
+            code_down: Carry::default(),
+            code,
             across: Carry::default(),
             find_open: false,
             find: SearchField::new()
@@ -515,6 +537,52 @@ impl View {
     #[must_use]
     pub const fn editor(&self) -> &Editor {
         &self.editor
+    }
+
+    /// The Code display, while the window shows its document as code.
+    #[must_use]
+    pub fn code_shown(&self) -> Option<&CodeDisplay> {
+        self.code.as_ref().filter(|code| code.showing())
+    }
+
+    /// The listing the window wants of its document now: its id and the
+    /// instruction set chosen for it.
+    pub fn code_want(&mut self) -> Option<(u64, Option<Isa>)> {
+        let generation = self.editor.generation();
+        self.code.as_mut()?.want(generation)
+    }
+
+    /// State why there is no listing in place of the one just wanted, asked
+    /// of no worker.
+    pub fn code_refused(&mut self, unlisted: Unlisted, layout: &Layout, damage: &mut Region) {
+        let generation = self.editor.generation();
+        let Some(code) = &mut self.code else {
+            return;
+        };
+        code.refuse(unlisted, generation);
+        if code.showing() {
+            damage.add(layout.grid());
+            damage.add(layout.status());
+            self.sync_bars(layout, damage);
+        }
+    }
+
+    /// Take in the listing asked as `id`, repainting what it fills.
+    pub fn code_listed(
+        &mut self,
+        id: u64,
+        listing: Result<CodeListing, Unlisted>,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let Some(code) = &mut self.code else {
+            return;
+        };
+        if code.listed(id, listing) && code.showing() {
+            damage.add(layout.grid());
+            damage.add(layout.status());
+            self.sync_bars(layout, damage);
+        }
     }
 
     /// The editor, for `Run` to feed answers to.
@@ -564,13 +632,12 @@ impl View {
         (&self.vertical, &self.horizontal)
     }
 
-    /// The modal question showing, if any: its dialog and, for a question
-    /// with an answer to type, its field.
+    /// The modal question showing, if any: its dialog and the field its
+    /// answer is typed in.
     #[must_use]
-    pub fn modal(&self) -> Option<(&Dialog, Option<&TextField>)> {
+    pub fn modal(&self) -> Option<(&Dialog, &TextField)> {
         match &self.modal {
-            Some(Modal::Close(dialog)) => Some((dialog, None)),
-            Some(Modal::GoTo(dialog, field)) => Some((dialog, Some(field))),
+            Some(Modal::GoTo(dialog, field)) => Some((dialog, field)),
             None => None,
         }
     }
@@ -604,6 +671,9 @@ impl View {
     }
 
     fn gutter_digits(&self) -> u32 {
+        if self.code_shown().is_some() {
+            return 0;
+        }
         match self.editor.mode() {
             Mode::Hex => 0,
             Mode::Text => digits(self.editor.document().line_count()).max(3),
@@ -628,7 +698,7 @@ impl View {
 
     /// The next batch worth lexing to colour what the window shows.
     pub fn lex_job(&mut self, layout: &Layout) -> Option<LexJob> {
-        if self.editor.mode() == Mode::Hex {
+        if self.editor.mode() == Mode::Hex || self.code_shown().is_some() {
             return None;
         }
         let lines = self.visible_lines(layout);
@@ -834,21 +904,29 @@ impl View {
         let rows = layout.rows() as u64;
         let columns = layout.columns();
         let document = self.editor.document();
-        let (content, first, wide) = match self.editor.mode() {
-            Mode::Text => (
+        let (content, first, wide, carried) = match (self.code_shown(), self.editor.mode()) {
+            (Some(code), _) => (
+                code.line_count(),
+                code.top(),
+                code.widest(),
+                self.code_down.at(&code.top()),
+            ),
+            (None, Mode::Text) => (
                 document.row_count(),
                 text::row_index(document, self.top),
                 self.widest.unwrap_or(0),
+                self.down.at(&(self.top, self.hex_top)),
             ),
-            Mode::Hex => (
+            (None, Mode::Hex) => (
                 hex::rows(document.len()),
                 self.hex_top,
                 HexLayout::for_len(document.len()).width(),
+                self.down.at(&(self.top, self.hex_top)),
             ),
         };
         let down = (first as u64)
             .saturating_mul(cell_h)
-            .saturating_add(self.down.at(&(self.top, self.hex_top)));
+            .saturating_add(carried);
         let vertical = ScrollModel::in_pixels(
             ScrollRange::new(
                 (content as u64).max(rows).saturating_mul(cell_h),
@@ -971,12 +1049,24 @@ impl View {
 
     /// Carry out `action`.
     pub fn act(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
+        if self.code_shown().is_some() && needs_editor_display(action) {
+            self.message = Some(String::from(CODE_READ_ONLY));
+            damage.add(layout.status());
+            return Outcome::none();
+        }
         let command = match action {
+            Action::ShowCode => return self.show_code(true),
+            Action::Isa(isa) => return self.choose_isa(isa, layout, damage),
+            Action::Mode(mode) if self.code_shown().is_some() => {
+                self.show_code(false);
+                self.command(&Command::SetMode(mode), layout, damage);
+                return Outcome::relaid();
+            }
             Action::NewWindow => return Outcome::asking(Request::Own(Own::NewWindow)),
             Action::Open => return Outcome::asking(Request::Open),
             Action::Save => return Outcome::asking(Request::Save),
             Action::SaveAs => return Outcome::asking(Request::SaveAs),
-            Action::Close => return self.close_requested(layout, damage),
+            Action::Close => return DocumentView::close_requested(self, layout, damage),
             Action::Copy => return self.copy(),
             Action::Cut => return self.cut(layout, damage),
             Action::Paste => return Outcome::asking(Request::Own(Own::Paste)),
@@ -1054,16 +1144,6 @@ impl View {
         self.report(effect, before, layout, damage)
     }
 
-    /// The user asked to close the window.
-    pub fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if !self.editor.is_modified() {
-            return Outcome::asking(Request::Close);
-        }
-        self.modal = Some(Modal::Close(Dialog::save_changes(&self.name)));
-        damage.add(layout.window());
-        Outcome::none()
-    }
-
     fn ask_go_to(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         let dialog = Dialog::new("Go to line").with_actions(alloc::vec![
             Button::labelled("Cancel"),
@@ -1081,22 +1161,12 @@ impl View {
         Outcome::none()
     }
 
-    /// Where a modal question is drawn, for a dialog in a `window`.
+    /// Where a modal question and its answer field are drawn, for a dialog
+    /// in a `window`.
     #[must_use]
-    pub fn modal_rect(
-        dialog: &Dialog,
-        window: Rect,
-        field: bool,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Rect {
-        let content = if field {
-            TextField::height(scale, theme)
-        } else {
-            0
-        };
+    pub fn modal_rect(dialog: &Dialog, window: Rect, scale: Scale, theme: &Theme) -> Rect {
         let width = scale.scale_length(Dialog::QUESTION_WIDTH);
-        dialog.placed_over(window, width, content, scale, theme)
+        dialog.placed_over(window, width, TextField::height(scale, theme), scale, theme)
     }
 
     fn modal_pointer(
@@ -1107,14 +1177,9 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        let window = layout.window();
         let answer = match &mut self.modal {
-            Some(Modal::Close(dialog)) => {
-                let bounds = Self::modal_rect(dialog, window, false, scale, theme);
-                dialog.on_pointer(event, bounds, scale, theme, damage)
-            }
             Some(Modal::GoTo(dialog, field)) => {
-                let bounds = Self::modal_rect(dialog, window, true, scale, theme);
+                let bounds = Self::modal_rect(dialog, layout.window(), scale, theme);
                 if let Some(content) = dialog.content_rect(bounds, scale, theme) {
                     field.on_pointer(event, content, scale, theme, damage);
                 }
@@ -1131,7 +1196,7 @@ impl View {
     }
 
     /// A key while a question is showing: a typed answer repaints the field,
-    /// a moved focus the dialog, and only an answer the window beneath.
+    /// and only an answer the window beneath.
     fn modal_key(
         &mut self,
         key: Key,
@@ -1141,22 +1206,15 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        let window = layout.window();
         let answer = match (&mut self.modal, key) {
             (Some(_), Key::Named(NamedKey::Escape)) => Some(0),
             (Some(Modal::GoTo(..)), Key::Named(NamedKey::Enter)) => Some(1),
             (Some(Modal::GoTo(dialog, field)), _) => {
-                let bounds = Self::modal_rect(dialog, window, true, scale, theme);
+                let bounds = Self::modal_rect(dialog, layout.window(), scale, theme);
                 if let Some(content) = dialog.content_rect(bounds, scale, theme) {
                     field.on_key(key, modifiers, content, damage);
                 }
                 None
-            }
-            (Some(Modal::Close(dialog)), _) => {
-                damage.add(Self::modal_rect(dialog, window, false, scale, theme));
-                dialog
-                    .on_key(key)
-                    .map(|DialogAction::ActionActivated { index }| index)
             }
             (None, _) => None,
         };
@@ -1169,11 +1227,6 @@ impl View {
     fn answer_modal(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
         damage.add(layout.window());
         match self.modal.take() {
-            Some(Modal::Close(_)) => match SaveChanges::of(index) {
-                SaveChanges::Discard => Outcome::asking(Request::Close),
-                SaveChanges::Save => Outcome::asking(Request::SaveThenClose),
-                SaveChanges::Cancel => Outcome::none(),
-            },
             Some(Modal::GoTo(_, field)) if index == 1 => {
                 if let Ok(line) = field.text().trim().parse::<usize>() {
                     self.command(&Command::GoToLine(line), layout, damage)
@@ -1553,6 +1606,10 @@ impl View {
         scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
+        // The Code display has no caret: only the wheel moves it.
+        if self.code_shown().is_some() && !matches!(event, InputEvent::PointerScrolled { .. }) {
+            return Outcome::none();
+        }
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
@@ -1751,6 +1808,10 @@ impl View {
     }
 
     fn nudge(&mut self, down: bool) {
+        if let Some(code) = self.code.as_mut().filter(|code| code.showing()) {
+            code.scroll(if down { 1 } else { -1 });
+            return;
+        }
         let document = self.editor.document();
         match self.editor.mode() {
             Mode::Text => {
@@ -1781,9 +1842,17 @@ impl View {
     ) -> Outcome {
         let (cell_w, cell_h) = layout.cell();
         let (cell_w, cell_h) = (u64::from(cell_w.max(1)), u64::from(cell_h.max(1)));
+        let code_before = self.code_shown().map(CodeDisplay::top);
         let before = (self.top, self.hex_top, self.left);
         let cells = |pixels: u64, cell: u64| usize::try_from(pixels / cell).unwrap_or(usize::MAX);
-        if let Some(pixels) = down {
+        if let (Some(pixels), Some(code)) = (down, self.code.as_mut().filter(|code| code.showing()))
+        {
+            code.set_top(cells(pixels, cell_h));
+            self.code_down = Carry {
+                at: code.top(),
+                pixels: pixels % cell_h,
+            };
+        } else if let Some(pixels) = down {
             let document = self.editor.document();
             let index = cells(pixels, cell_h);
             match self.editor.mode() {
@@ -1804,11 +1873,78 @@ impl View {
                 pixels: pixels % cell_w,
             };
         }
-        if before != (self.top, self.hex_top, self.left) {
+        if before != (self.top, self.hex_top, self.left)
+            || code_before != self.code_shown().map(CodeDisplay::top)
+        {
             damage.add(layout.gutter());
             damage.add(layout.grid());
         }
         self.sync_bars(layout, damage);
+        Outcome::none()
+    }
+
+    /// Feed a key to the Code display: it scrolls, and says it is read-only
+    /// to anything that would edit.
+    fn code_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> Outcome {
+        let page = isize::try_from(layout.rows().saturating_sub(1).max(1)).unwrap_or(isize::MAX);
+        let Some(code) = self.code.as_mut() else {
+            return Outcome::none();
+        };
+        let widest = code.widest();
+        let moved = match key {
+            Key::Named(NamedKey::Up) => code.scroll(-1),
+            Key::Named(NamedKey::Down) => code.scroll(1),
+            Key::Named(NamedKey::PageUp) => code.scroll(-page),
+            Key::Named(NamedKey::PageDown) => code.scroll(page),
+            Key::Named(NamedKey::Home) => code.set_top(0),
+            Key::Named(NamedKey::End) => code.set_top(usize::MAX),
+            Key::Named(NamedKey::Left) => {
+                let was = self.left;
+                self.left = self.left.saturating_sub(1);
+                was != self.left
+            }
+            Key::Named(NamedKey::Right) => {
+                let was = self.left;
+                self.left = (self.left + 1).min(widest.saturating_sub(1));
+                was != self.left
+            }
+            Key::Char(_)
+            | Key::Named(
+                NamedKey::Enter | NamedKey::Backspace | NamedKey::Delete | NamedKey::Tab,
+            ) => {
+                self.message = Some(String::from(CODE_READ_ONLY));
+                damage.add(layout.status());
+                return Outcome::none();
+            }
+            Key::Named(_) => false,
+        };
+        if moved {
+            damage.add(layout.grid());
+            self.sync_bars(layout, damage);
+        }
+        Outcome::none()
+    }
+
+    /// Show the document as code, or as the editor shows it. The find bar
+    /// goes with the editor's display: nothing it does reaches code.
+    fn show_code(&mut self, showing: bool) -> Outcome {
+        if !self.code.as_mut().is_some_and(|code| code.show(showing)) {
+            return Outcome::none();
+        }
+        if showing && self.find_open {
+            self.close_find();
+        }
+        self.left = 0;
+        Outcome::relaid()
+    }
+
+    /// Read the code as `isa`, which lists it again.
+    fn choose_isa(&mut self, isa: Isa, layout: &Layout, damage: &mut Region) -> Outcome {
+        if self.code.as_mut().is_some_and(|code| code.choose(isa)) {
+            damage.add(layout.grid());
+            damage.add(layout.status());
+            self.sync_bars(layout, damage);
+        }
         Outcome::none()
     }
 
@@ -1826,8 +1962,12 @@ impl View {
         if self.modal.is_some() {
             return self.modal_key(key, modifiers, layout, scale, theme, damage);
         }
-        if let Some(action) = shortcut(key, modifiers, self.editor.mode()) {
+        let hex_shown = self.code_shown().is_none() && self.editor.mode() == Mode::Hex;
+        if let Some(action) = shortcut(key, modifiers, hex_shown) {
             return self.run(action, layout, damage);
+        }
+        if self.code_shown().is_some() && self.focus == Focus::Grid {
+            return self.code_key(key, layout, damage);
         }
         match self.focus {
             Focus::Grid => self.grid_key(key, modifiers, layout, damage),
@@ -2131,20 +2271,31 @@ impl View {
     }
 
     fn modes(&self, menu: &mut MenuBuilder, plate: Plate) {
+        let code = self.code_shown().is_some();
         menu.radio(
             Action::Mode(Mode::Text),
             "Text",
             "",
-            self.editor.mode() == Mode::Text,
+            !code && self.editor.mode() == Mode::Text,
             plate,
         );
         menu.radio(
             Action::Mode(Mode::Hex),
             "Hex",
             "Ctrl+Shift+H",
-            self.editor.mode() == Mode::Hex,
+            !code && self.editor.mode() == Mode::Hex,
             plate,
         );
+        let Some(display) = &self.code else {
+            return;
+        };
+        menu.radio(Action::ShowCode, "Code", "", code, plate);
+        if let Some(sets) = menu.submenu("Instruction set", plate) {
+            let read_as = display.choice().or(display.isa());
+            for isa in Isa::ALL {
+                menu.radio(Action::Isa(isa), isa.name(), "", read_as == Some(isa), sets);
+            }
+        }
     }
 
     fn formats(&self, menu: &mut MenuBuilder, plate: Plate) {
@@ -2232,7 +2383,7 @@ impl From<Action> for u16 {
 }
 
 /// The action a key chord asks for, whatever has the keyboard.
-fn shortcut(key: Key, modifiers: Modifiers, mode: Mode) -> Option<Action> {
+fn shortcut(key: Key, modifiers: Modifiers, hex_shown: bool) -> Option<Action> {
     let ctrl = modifiers.ctrl && !modifiers.alt && !modifiers.meta;
     match key {
         Key::Named(NamedKey::Function { number: 3 }) if modifiers.shift => {
@@ -2253,11 +2404,7 @@ fn shortcut(key: Key, modifiers: Modifiers, mode: Mode) -> Option<Action> {
             ('v', _) => Some(Action::Paste),
             ('a', _) => Some(Action::SelectAll),
             ('f', _) => Some(Action::Find),
-            ('h', true) => Some(Action::Mode(if mode == Mode::Hex {
-                Mode::Text
-            } else {
-                Mode::Hex
-            })),
+            ('h', true) => Some(Action::Mode(if hex_shown { Mode::Text } else { Mode::Hex })),
             ('h', false) => Some(Action::Replace),
             ('l', _) => Some(Action::GoToLine),
             (']', _) => Some(Action::Indent),
@@ -2267,6 +2414,30 @@ fn shortcut(key: Key, modifiers: Modifiers, mode: Mode) -> Option<Action> {
         },
         _ => None,
     }
+}
+
+/// What the Code display says to anything that would edit or search it.
+const CODE_READ_ONLY: &str =
+    "Code is read-only: show the document as Text or Hex to edit or search it";
+
+/// Bytes of a document's head read to tell whether it is an executable: the
+/// longest container magic, with room to spare.
+const CODE_HEAD_LEN: usize = 16;
+
+/// Whether `action` works on the document as the editor shows it — editing,
+/// searching or retyping it — and so not on its Code display.
+const fn needs_editor_display(action: Action) -> bool {
+    !matches!(
+        action,
+        Action::NewWindow
+            | Action::Open
+            | Action::Save
+            | Action::SaveAs
+            | Action::Close
+            | Action::Mode(_)
+            | Action::ShowCode
+            | Action::Isa(_)
+    )
 }
 
 /// How many decimal digits `n` takes.

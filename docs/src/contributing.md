@@ -6,6 +6,14 @@ rules, it points to them.
 
 ## Workflow
 
+0. Create the build's signing key set once per machine with
+   `cargo xtask keys init`. Every build signs the kernel's drivers and the
+   system's programs with it, the kernel trusts only what it signed, and a
+   build without one fails: there is no shared fallback key. It is written
+   outside the tree, readable by its owner alone, at
+   `$XDG_DATA_HOME/tairix/signing-keys` (else
+   `~/.local/share/tairix/signing-keys`); `TAIRIX_SIGNING_KEYS` names another,
+   by absolute path. Images are reproducible given their key set.
 1. Pick a stage from [`PLAN.md`][plan]. Do not begin a stage before its
    listed dependencies are complete.
 2. Discuss non-trivial design changes in an issue first. Inventing public

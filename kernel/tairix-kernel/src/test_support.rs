@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use alloc::sync::Arc;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemRead, FilesystemSecurity, NodeId, NodeInfo, NodeKind,
@@ -98,8 +98,8 @@ impl SharedRamBlock {
 }
 
 impl Block for SharedRamBlock {
-    fn device_class(&self) -> BlkDeviceClass {
-        self.0.lock().device_class()
+    fn medium(&self) -> Option<BlkMedium> {
+        self.0.lock().medium()
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
@@ -120,8 +120,8 @@ impl Block for SharedRamBlock {
 }
 
 impl Block for RamBlock {
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::Removable
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(BlkMedium::UsbFlash)
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

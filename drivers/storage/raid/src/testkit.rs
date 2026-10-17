@@ -13,7 +13,7 @@ use core::cell::RefCell;
 
 use crate::service::write_superblock;
 
-use tairix_abi::blkio::{BlkOp, BlkRequest, BLK_REQUEST_LEN};
+use tairix_abi::blkio::{BlkMedium, BlkOp, BlkRequest, BLK_REQUEST_LEN};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_abi::raid::RaidLevel;
@@ -133,6 +133,10 @@ impl MemberDisk {
 }
 
 impl Block for MemberDisk {
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(BlkMedium::UsbDisk)
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         let state = self.0.borrow();
         if state.geometry_fails {

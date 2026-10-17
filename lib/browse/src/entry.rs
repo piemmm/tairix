@@ -18,7 +18,7 @@ use alloc::string::String;
 
 use tairix_abi::fs::{FileId, FileKind};
 use tairix_abi::time::Time64;
-use tairix_icon::{DocumentStamp, FolderSample};
+use tairix_icon::{DocumentStamp, FolderSample, IconKind};
 
 /// What a listed symbolic link's target resolves to.
 ///
@@ -279,6 +279,9 @@ pub struct Entry {
     /// The occupancy shown is from before a change to this folder: it stays
     /// drawn, so the icon does not blink, until a fresh probe replaces it.
     stale: bool,
+    /// The drive this entry is drawn as when it is the root of a mounted
+    /// volume ([`Browser::mark_volume_roots`](crate::Browser::mark_volume_roots)).
+    drive: Option<IconKind>,
 }
 
 impl Entry {
@@ -295,6 +298,7 @@ impl Entry {
             content_gen: 0,
             occupancy: Occupancy::Unprobed,
             stale: false,
+            drive: None,
         }
     }
 
@@ -444,6 +448,21 @@ impl Entry {
         self.stale = false;
     }
 
+    /// The drive this entry is drawn as, when it is the root of a mounted
+    /// volume.
+    #[must_use]
+    pub const fn drive(&self) -> Option<IconKind> {
+        self.drive
+    }
+
+    /// Draw this entry as `drive`, or as what it is when `None`, answering
+    /// whether its picture changed.
+    pub(crate) fn set_drive(&mut self, drive: Option<IconKind>) -> bool {
+        let changed = self.drive != drive;
+        self.drive = drive;
+        changed
+    }
+
     /// Whether this and `other` would be listed identically: everything but
     /// what a probe found out about them.
     #[must_use]
@@ -457,12 +476,14 @@ impl Entry {
             && self.content_gen == other.content_gen
     }
 
-    /// Carry `previous`'s occupancy over to this, its replacement after a
-    /// change, to be shown until a fresh probe replaces it.
+    /// Carry `previous`'s occupancy and drive picture over to this, its
+    /// replacement after a change, to be shown until a fresh probe or marking
+    /// replaces them.
     pub(crate) fn inherit_occupancy(&mut self, previous: &Self) {
         if self.is_directory() && previous.is_directory() {
             self.occupancy = previous.occupancy.clone();
             self.stale = true;
+            self.drive = previous.drive;
         }
     }
 

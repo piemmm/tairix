@@ -35,7 +35,7 @@ use tairix_image::{
 };
 use tairix_raster::Region;
 use tairix_sandbox::decode::{
-    container_summary, disassemble, manifest_summary, DecodeService, Isa,
+    container_summary, disassemble, manifest_summary, CodeWindow, DecodeService, Isa,
 };
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
@@ -958,16 +958,15 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = manifest_summary(&mut honest, &noise);
 
         // 3. Noise disassembled under every ISA at a random address,
-        //    depth, and window size.
+        //    depth, and window size, as the whole code or a window of it.
         let isa = *rng.pick(&ISAS);
-        let _ = disassemble(
-            &mut honest,
-            isa,
-            rng.next_u64(),
-            u32::from(rng.next_u8()),
-            u32::from(rng.next_u8()),
-            &noise,
-        );
+        let window = CodeWindow {
+            address: rng.next_u64(),
+            depth: u32::from(rng.next_u8()),
+            code: &noise,
+            continues: rng.next_u8() & 1 == 1,
+        };
+        let _ = disassemble(&mut honest, isa, window, u32::from(rng.next_u8()));
 
         // 4. Help documents through the honest worker, in their own helper
         //    to keep this loop's body a readable, bounded size. Returns the
@@ -1004,7 +1003,13 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         //    every iteration sees fresh noise.
         let _ = container_summary(&mut hostile, &rxe);
         let _ = manifest_summary(&mut hostile, &noise[..rng.at_most(noise.len())]);
-        let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
+        let nops = CodeWindow {
+            address: 0,
+            depth: 0,
+            code: b"\x90\x90",
+            continues: false,
+        };
+        let _ = disassemble(&mut hostile, isa, nops, 8);
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
         if let Ok(fitted) = render_thumbnail(&mut hostile, side, None) {

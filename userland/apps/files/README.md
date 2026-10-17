@@ -180,9 +180,9 @@ surprise-removed device is never drawn as a row that would fail on the
 first click; a refused or failed query yields no volumes at all rather than
 a fabricated list. Each offered volume carries the storage medium its
 backing device actually reports, and `tairix_icon::disk_icon` turns that
-medium into the shipped drive artwork — rotational, solid-state, and
-removable each draw their own icon, and a paravirtual or unknown class
-draws the generic drive glyph. Nothing here classifies a device by its
+medium into the shipped drive artwork — a hard disk, an SSD, an NVMe drive,
+a USB flash drive, a USB disk and an SD card each draw their own icon, and a
+paravirtual or unknown medium draws the generic drive. Nothing here classifies a device by its
 name.
 
 The rail model itself is the shared, host-tested `lib/browse` `places`

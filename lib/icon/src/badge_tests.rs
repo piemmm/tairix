@@ -42,17 +42,33 @@ fn pixel(surface: &Surface, x: u32, y: u32) -> Pixel {
     surface.get(x, y).expect("inside the surface")
 }
 
+/// The alert marks: badges on the shapes a reader knows them by.
+const ALERTS: [IconKind; 4] = [
+    IconKind::AlertError,
+    IconKind::AlertWarning,
+    IconKind::AlertInformation,
+    IconKind::AlertQuestion,
+];
+
+/// The badges standing on the square plate: the settings categories and
+/// panes.
+fn square_badges() -> impl Iterator<Item = IconKind> {
+    ICON_KINDS
+        .into_iter()
+        .filter(|kind| kind.badge().is_some() && kind.plate_shape() == PlateShape::Square)
+}
+
 #[test]
 fn every_settings_row_is_a_badge_with_its_own_symbol() {
-    let badges: alloc::vec::Vec<IconKind> = ICON_KINDS
-        .into_iter()
-        .filter(|kind| kind.badge().is_some())
-        .collect();
     assert_eq!(
-        badges.len(),
+        square_badges().count(),
         32,
-        "one badge per settings category and disclosed pane"
+        "one square badge per settings category and disclosed pane"
     );
+    for kind in ALERTS {
+        assert!(kind.badge().is_some(), "{kind:?} is a badge");
+        assert_ne!(kind.plate_shape(), PlateShape::Square, "{kind:?}");
+    }
     for kind in ICON_KINDS {
         // A symbol may also be a plain glyph with no plate (a device on the
         // network map); a badge is never drawn without one.
@@ -86,7 +102,7 @@ fn a_badge_draws_at_every_side_and_nothing_at_zero() {
 /// never a half-covered pixel.
 #[test]
 fn a_badge_plate_meets_the_pixel_grid_at_every_side() {
-    for kind in ICON_KINDS.into_iter().filter(|kind| kind.badge().is_some()) {
+    for kind in square_badges() {
         for side in SIDES {
             let drawn = picture(kind, side);
             let (mid, last) = (side / 2, side - 1);
@@ -133,8 +149,15 @@ fn a_badge_kinds_mask_is_its_symbol() {
     for kind in ICON_KINDS.into_iter().filter(|kind| kind.badge().is_some()) {
         let badge = picture(kind, 44);
         let mask = glyph_mask(kind, 44).expect("a mask");
+        // A disc touches every edge at its middle and a triangle stands on
+        // its base, so each plate's own edge pixel is solid.
+        let (x, y) = match kind.plate_shape() {
+            PlateShape::Square => (22, 0),
+            PlateShape::Round => (22, 1),
+            PlateShape::Triangle => (22, 41),
+        };
         assert_eq!(
-            pixel(&badge, 22, 0).a,
+            pixel(&badge, x, y).a,
             255,
             "{kind:?}: the plate reaches its edge"
         );
@@ -235,4 +258,29 @@ fn a_kind_without_a_symbol_stands_on_its_plate_alone() {
     assert!(marks(IconKind::AppBundle).is_none());
     let plate = badge(IconKind::AppBundle, BadgeHue::Teal, PlateShape::Round, 32).unwrap();
     assert_eq!(plate.get(16, 16).unwrap().a, 255);
+}
+
+/// A round plate is a disc and a triangular one a triangle: their corners
+/// are clear, and the triangle's apex stands over the middle of its base.
+#[test]
+fn an_alert_plate_is_cut_to_its_shape() {
+    for kind in ALERTS {
+        for side in [24, 48, 96] {
+            let drawn = picture(kind, side);
+            let last = side - 1;
+            assert_eq!(pixel(&drawn, 0, 0).a, 0, "{kind:?} at {side}: corner");
+            assert_eq!(pixel(&drawn, last, 0).a, 0, "{kind:?} at {side}: corner");
+            if kind.plate_shape() == PlateShape::Triangle {
+                assert_eq!(pixel(&drawn, 0, side / 2).a, 0, "{kind:?} at {side}");
+                assert_eq!(
+                    pixel(&drawn, side / 2, side * 9 / 10).a,
+                    255,
+                    "{kind:?} base"
+                );
+            } else {
+                assert_eq!(pixel(&drawn, last, last).a, 0, "{kind:?} at {side}: corner");
+                assert_eq!(pixel(&drawn, side / 2, side / 2).a, 255, "{kind:?} centre");
+            }
+        }
+    }
 }

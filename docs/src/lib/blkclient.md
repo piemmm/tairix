@@ -52,20 +52,21 @@ write-protected device by either side alone.
 exchange with the serving block driver. The production implementation,
 `RtBlkCall`, issues `call_post`/`call_reap` on the granted endpoint with
 the caller's own per-request deadline (derived from the device's declared
-`BlkDeviceClass`, never a value the transport chooses for itself), parking
+medium, never a value the transport chooses for itself), parking
 on a `CallReply` wait-set rather than a busy poll when a reply is not yet
 ready. A wedged device therefore fails a transfer closed at its deadline
 instead of parking the caller forever.
 
-A served device need not declare a class the ABI recognises, so what the
-completion carries is an `Option<BlkDeviceClass>`: a class word this version
-does not define decodes to *unknown* and stays unknown rather than being
-rewritten to a class nobody reported. Sizing a deadline still needs a
-concrete envelope, and `BlkDeviceClass::served_as` is the one policy that
+A served device need not declare a medium the ABI recognises, so what the
+completion carries is an `Option<BlkMedium>`: a medium word this version does
+not define decodes to *unknown* and stays unknown rather than being rewritten
+to a medium nobody reported. Sizing a deadline still needs a
+concrete envelope, and `BlkDeviceClass::of` is the one policy that
 supplies it — an unknown device is served the same bounded unclassified
-envelope a paravirtual device gets, and no extra patience. `device_class`
-therefore reports the class the device is *served as*; `declared_class` is
-what it actually said.
+envelope a paravirtual device gets. `device_class` therefore reports the class
+the device is *served as*, derived from the medium it declared, while
+`medium` reports what it actually said, which a layer over the client
+inherits.
 
 That wait-set is the **caller's**, supplied to `RtBlkCall::new(endpoint,
 waitset)`. A wait-set is reclaimed only when its owning process exits, so a

@@ -8,8 +8,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
@@ -2604,7 +2603,7 @@ fn volume(source: &[u8], target: &[u8], blocks: u64, free: u64) -> VolumeReading
                 ..VolumeStats::default()
             },
             availability: MountAvailability::Available,
-            medium: Some(BlkDeviceClass::SolidState),
+            medium: Some(BlkMedium::SolidState),
         },
         [0; 16],
     )

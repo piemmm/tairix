@@ -9,8 +9,8 @@
 //! playing the serving driver.
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkOp, BlkOutcome, BlkRequest,
-    IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkMedium, BlkOp, BlkOutcome,
+    BlkRequest, IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::sysinfo::MountAvailability;
@@ -86,17 +86,17 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     /// The shared per-device I/O budget, whose retry count bounds how many
     /// times a *reissuable* completion is reissued before failing closed —
     /// the same policy the kernel filesystem client obeys, so the two
-    /// consumers cannot drift apart. It is derived from the class the device
+    /// consumers cannot drift apart. It is derived from the medium the device
     /// itself declares in its geometry completion, so a removable unit riding
     /// out a bus reset and a paravirtual device that has simply wedged are
-    /// each given their own class's patience rather than one assumed envelope.
+    /// each given their own patience rather than one assumed envelope.
     budget: IoBudget,
-    /// The class the device declared, kept so a composition layered over this
-    /// client reports the real hardware's envelope rather than the
-    /// unclassified default. `None` is a device that declared a class word
-    /// this build does not recognise, held distinct from every named class so
-    /// nothing above reports a medium the device never declared.
-    declared_class: Option<BlkDeviceClass>,
+    /// The medium the device declared, kept so a composition layered over
+    /// this client reports the real hardware rather than an unknown. `None`
+    /// is a device that declared none this build recognises, held distinct
+    /// from every named medium so nothing above reports one the device never
+    /// declared.
+    declared_medium: Option<BlkMedium>,
     /// The name the device declared for itself, kept so a consumer that
     /// reports a storage device names the real hardware rather than the
     /// volumes on it. Validated on decode, so an untrusted driver cannot
@@ -157,10 +157,10 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             access,
             // Until the device answers there is nothing to classify it by, so
             // the geometry query itself runs on the bounded unclassified
-            // envelope; the device's own class is adopted below.
-            declared_class: None,
+            // envelope; the device's own medium is adopted below.
+            declared_medium: None,
             device_name: BlkDeviceName::UNNAMED,
-            budget: BlkDeviceClass::served_as(None).budget(),
+            budget: BlkDeviceClass::of(None).budget(),
             // Nothing has been served yet, so there is nothing to stand
             // background work down for until a completion says otherwise.
             availability: MountAvailability::Available,
@@ -191,9 +191,9 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             block_count: completion.block_count,
         };
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
-        client.declared_class = completion.class;
+        client.declared_medium = completion.medium;
         client.device_name = completion.name;
-        client.budget = BlkDeviceClass::served_as(completion.class).budget();
+        client.budget = BlkDeviceClass::of(completion.medium).budget();
         Ok(client)
     }
 
@@ -277,12 +277,12 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
 }
 
 impl<C: BlkCall> Block for RemoteBlock<'_, C> {
-    /// The class this client *serves* the device as, so a composition layered
-    /// over it inherits the real hardware's envelope. A device whose declared
-    /// class word this build does not recognise is served the bounded
-    /// unclassified envelope, which buys it no extra patience.
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::served_as(self.declared_class)
+    /// The medium the device declared, so a composition layered over this
+    /// client inherits the real hardware: its patience, and the drive a reader
+    /// is shown. One it declared none of stays unknown and is served the
+    /// bounded unclassified envelope.
+    fn medium(&self) -> Option<BlkMedium> {
+        self.declared_medium
     }
 
     /// The served device's own name, as its driver declared it at connect.

@@ -2,8 +2,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_raster::{Color, Paint};
 
 use crate::glyph::{builtin_icon, disk_icon, IconKind};
@@ -266,22 +265,19 @@ fn a_settings_category_is_never_the_reading_it_stands_beside() {
 
 #[test]
 fn disk_icon_maps_every_medium() {
+    assert_eq!(disk_icon(Some(BlkMedium::HardDisk)), IconKind::DiskHard);
     assert_eq!(
-        disk_icon(Some(BlkDeviceClass::Rotational)),
-        IconKind::DiskHard
-    );
-    assert_eq!(
-        disk_icon(Some(BlkDeviceClass::SolidState)),
+        disk_icon(Some(BlkMedium::SolidState)),
         IconKind::DiskSolidState
     );
-    assert_eq!(
-        disk_icon(Some(BlkDeviceClass::Removable)),
-        IconKind::DiskUsb
-    );
-    // A paravirtual device is not rotational, solid-state or removable, and
-    // an unclassified mount is not known to be any of them: both draw the
-    // generic drive rather than a guess.
-    assert_eq!(disk_icon(Some(BlkDeviceClass::Virtual)), IconKind::Disk);
+    assert_eq!(disk_icon(Some(BlkMedium::Nvme)), IconKind::DiskNvme);
+    assert_eq!(disk_icon(Some(BlkMedium::UsbFlash)), IconKind::DiskUsb);
+    assert_eq!(disk_icon(Some(BlkMedium::UsbDisk)), IconKind::DiskExternal);
+    assert_eq!(disk_icon(Some(BlkMedium::SdCard)), IconKind::DiskSdCard);
+    // A paravirtual device is none of these, and an unclassified mount is not
+    // known to be any of them: both draw the generic drive rather than a
+    // guess.
+    assert_eq!(disk_icon(Some(BlkMedium::Virtual)), IconKind::Disk);
     assert_eq!(disk_icon(None), IconKind::Disk);
 }
 

@@ -53,19 +53,24 @@ binary works behind any host controller that speaks the URB transport
    the window elapses without the unit returning (`plans/FIX-IO.md` IO3). A
    recovering unit also drives a per-LUN `blkio::RecoveryLadder`: after each
    reply the serve loop escalates the shared ladder from the unit's health —
-   a gentle retry first, then a bulk-pipe reset (`ScsiDevice::scrub_window`)
-   on the next attempt, bounded by the same removable-class
+   a gentle retry first, then a transport reset (`ScsiDevice::reset_transport`:
+   the transport's own reset recovery) on the next attempt, bounded by the same removable-class
    `IoBudget::max_retries` so a wedged unit is never reset forever — nudging a
    stalling unit back before the grace window is left to fail it closed:
    - **BOT** (`src/bot.rs`): CBW/CSW framing with every device field
-     validated, per-transfer stall recovery below (the HCD), CSW-stall
-     retry, and Bulk-Only Mass Storage Reset on tag mismatch / corrupt CSW /
-     phase error.
+     validated, per-transfer halt recovery below (the HCD), CSW-stall retry,
+     and the spec's reset recovery — a Bulk-Only Mass Storage Reset, then
+     the halt of each bulk pipe cleared — whenever an exchange breaks: a
+     transfer that fails or outruns its deadline, a tag mismatch, a corrupt
+     CSW, a phase error.
    - **CBI** (`src/cbi.rs`): the 12-byte command block over the ADSC
      control-OUT channel (a control STALL is the "command not accepted"
      answer), the bulk data phase, the two-byte completion interrupt (UFI
-     ASC/ASCQ or the typed status spelling), and the Command Block Reset on
-     a malformed or out-of-step completion. A UFI floppy reports the
+     ASC/ASCQ or the typed status spelling), and the Command Block Reset
+     with both bulk pipes cleared whenever an exchange breaks. A completion
+     carries no tag, so every command first drops the completions the HCD
+     has captured (`DiscardReports`): one an earlier command raised late is
+     never read as the next command's. A UFI floppy reports the
      failing command's ASC/ASCQ **in its completion interrupt** (CBI 1.1
      §3.4.3.1.1), so the sense is read in-band through `take_sense` exactly
      as UAS delivers autosense — never over a separate `REQUEST SENSE`,
@@ -75,11 +80,16 @@ binary works behind any host controller that speaks the URB transport
      round trip.
    - **UAS** (`src/uas.rs`): tag-checked Command/Read-Ready/Write-Ready/
      Sense IU sequencing over the four pipes (USB 2.0 non-stream
-     operation), with autosense delivered in-band and every hostile IU
-     refused closed.
+     operation), with autosense delivered in-band, every hostile IU
+     refused closed, and all four pipes cleared when an exchange breaks.
 
-   Every LUN behind one device shares the *same* bulk pipe pair, so that
-   bulk-pipe reset is a **transport-wide** event, not a per-LUN one. The serve
+   Every command exchange is bounded: its transfers carry what remains of a
+   budget derived from the class's per-request deadline, so a device that
+   stops answering fails the command and has its transport reset, and the
+   failure is answered reissuably for the unit's health to ride out.
+
+   Every LUN behind one device shares the *same* bulk pipe pair, so a
+   transport reset is a **transport-wide** event, not a per-LUN one. The serve
    loop therefore wraps the per-unit health in one shared-transport
    `blkio::FaultDomain` (owned by the device's own discovered URB transport
    grant, never a board constant): a reset opens a single recovery window over

@@ -17,7 +17,7 @@ use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Pixel, Surface};
 use tairix_theme::{SignalRole, Theme};
 
-use crate::chart::{Chart, MAX_CHART_SAMPLES};
+use crate::chart::{Chart, DuplexRates, MAX_CHART_SAMPLES, RATE_TRACE_FLOOR};
 use crate::state::PressureKind;
 use crate::testkit::{has_pixel, premul};
 
@@ -655,4 +655,89 @@ fn a_degenerate_box_draws_nothing_outside_itself() {
     let mut none = Surface::new(4, 4).expect("surface");
     chart.render(&mut none, Rect::new(0, 0, 0, 0), Scale::ONE, &theme);
     assert!(none.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+}
+
+// --- Rate traces -----------------------------------------------------------
+
+/// The scale a history of one `rate` is drawn against.
+fn scale_of(rate: u64) -> u64 {
+    let mut rates = DuplexRates::new();
+    rates.record(Some((rate, 0)));
+    rates.trace().full_scale
+}
+
+#[test]
+fn a_rate_trace_is_drawn_against_the_least_power_of_two_seating_its_peak() {
+    assert_eq!(
+        scale_of(0),
+        RATE_TRACE_FLOOR,
+        "idle reads against the floor"
+    );
+    assert_eq!(scale_of(4_096), RATE_TRACE_FLOOR);
+    assert_eq!(scale_of(RATE_TRACE_FLOOR), RATE_TRACE_FLOOR);
+    assert_eq!(scale_of(RATE_TRACE_FLOOR + 1), 2 * RATE_TRACE_FLOOR);
+    assert_eq!(scale_of(3_000_000_000), 1 << 32);
+    assert_eq!(
+        scale_of(u64::MAX),
+        u64::MAX,
+        "a rate past the last power of two saturates rather than wrapping"
+    );
+}
+
+#[test]
+fn a_point_is_its_exact_share_of_the_scale_and_both_halves_share_it() {
+    let mut rates = DuplexRates::new();
+    rates.record(Some((RATE_TRACE_FLOOR / 2, RATE_TRACE_FLOOR)));
+    rates.record(None);
+    rates.record(Some((0, RATE_TRACE_FLOOR / 4)));
+    let trace = rates.trace();
+    assert_eq!(trace.full_scale, RATE_TRACE_FLOOR);
+    assert_eq!(
+        trace.primary,
+        [500, 0],
+        "an unmeasured interval adds no point"
+    );
+    assert_eq!(trace.opposing, [1000, 250], "and the halves stay in step");
+
+    let mut top = DuplexRates::new();
+    top.record(Some((u64::MAX / 2, u64::MAX)));
+    let trace = top.trace();
+    assert_eq!(trace.full_scale, u64::MAX);
+    assert_eq!(
+        (trace.primary[0], trace.opposing[0]),
+        (499, 1000),
+        "no overflow at the top of the range"
+    );
+}
+
+#[test]
+fn the_scale_follows_the_window_and_comes_back_down_once_a_burst_leaves_it() {
+    let mut rates = DuplexRates::new();
+    rates.record(Some((64 << 20, 0)));
+    rates.record(Some((128 << 10, 0)));
+    let under_the_burst = rates.trace();
+    assert_eq!(under_the_burst.full_scale, 64 << 20);
+    assert_eq!(under_the_burst.primary, [1000, 1]);
+
+    for _ in 1..MAX_CHART_SAMPLES {
+        rates.record(Some((128 << 10, 0)));
+    }
+    let after = rates.trace();
+    assert_eq!(after.full_scale, 128 << 10, "the burst has left the window");
+    assert_eq!(after.primary.len(), MAX_CHART_SAMPLES);
+    assert!(after.primary.iter().all(|point| *point == 1000));
+    assert!(
+        after.opposing.iter().all(|point| *point == 0),
+        "an idle direction reads nought against the busy one's scale"
+    );
+}
+
+#[test]
+fn an_unrecorded_history_states_no_scale() {
+    let mut rates = DuplexRates::new();
+    assert!(rates.is_empty());
+    assert!(rates.trace().is_empty());
+    assert_eq!(rates.trace().full_scale, 0);
+    rates.record(None);
+    assert!(rates.is_empty(), "no interval measured, no point");
 }

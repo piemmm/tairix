@@ -534,6 +534,14 @@ pub enum DriverError {
     /// names the caller's authority over a node; this names the volume,
     /// whoever asks. Maps to [`Errno::ReadOnly`].
     ReadOnly = 25,
+    /// The device did not answer within the operation's deadline, and the
+    /// driver abandoned the operation.
+    ///
+    /// The serving driver's own verdict on a silent device, distinct from
+    /// [`DeviceFault`](Self::DeviceFault): nothing says the device is broken,
+    /// and one that was busy or briefly disturbed answers the request when it
+    /// is issued again. Maps to [`Errno::TimedOut`].
+    TimedOut = 26,
 }
 
 impl DriverError {
@@ -580,6 +588,7 @@ impl DriverError {
             23 => Ok(Self::NoBandwidth),
             24 => Ok(Self::Stale),
             25 => Ok(Self::ReadOnly),
+            26 => Ok(Self::TimedOut),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -614,6 +623,7 @@ impl DriverError {
             Self::NoBandwidth => Errno::NoBandwidth,
             Self::Stale => Errno::Stale,
             Self::ReadOnly => Errno::ReadOnly,
+            Self::TimedOut => Errno::TimedOut,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -1435,6 +1445,7 @@ mod tests {
         assert_eq!(DriverError::NoBandwidth.as_i32(), 23);
         assert_eq!(DriverError::Stale.as_i32(), 24);
         assert_eq!(DriverError::ReadOnly.as_i32(), 25);
+        assert_eq!(DriverError::TimedOut.as_i32(), 26);
     }
 
     #[test]
@@ -1478,6 +1489,7 @@ mod tests {
         assert_eq!(DriverError::NoBandwidth.as_errno(), Errno::NoBandwidth);
         assert_eq!(DriverError::Stale.as_errno(), Errno::Stale);
         assert_eq!(DriverError::ReadOnly.as_errno(), Errno::ReadOnly);
+        assert_eq!(DriverError::TimedOut.as_errno(), Errno::TimedOut);
     }
 
     #[test]
@@ -1508,12 +1520,13 @@ mod tests {
             DriverError::NoBandwidth,
             DriverError::Stale,
             DriverError::ReadOnly,
+            DriverError::TimedOut,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(26), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(27), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::filesystem::{AllocationClass, MountFlags};
 use tairix_abi::driver::DriverHandle;
 
@@ -38,7 +38,7 @@ use super::VfsError;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Attachment {
     driver: DriverHandle,
-    medium: Option<BlkDeviceClass>,
+    medium: Option<BlkMedium>,
     flags: MountFlags,
 }
 
@@ -51,11 +51,7 @@ impl Attachment {
     /// bootstrap-floor volume brought up before any classified block client
     /// exists. Unknown is recorded as unknown; a medium is never assumed.
     #[must_use]
-    pub const fn new(
-        driver: DriverHandle,
-        medium: Option<BlkDeviceClass>,
-        flags: MountFlags,
-    ) -> Self {
+    pub const fn new(driver: DriverHandle, medium: Option<BlkMedium>, flags: MountFlags) -> Self {
         Self {
             driver,
             medium,
@@ -72,7 +68,7 @@ impl Attachment {
     /// The storage medium of the block device behind the driver, or `None`
     /// when the attach path could not name one.
     #[must_use]
-    pub const fn medium(self) -> Option<BlkDeviceClass> {
+    pub const fn medium(self) -> Option<BlkMedium> {
         self.medium
     }
 
@@ -978,8 +974,8 @@ mod tests {
     fn an_attachment_records_the_medium_the_device_reported() {
         let mut table = MountTable::new(MountFlags::default());
         for (raw, medium) in [
-            (0x5ED0, Some(BlkDeviceClass::Rotational)),
-            (0x5ED1, Some(BlkDeviceClass::SolidState)),
+            (0x5ED0, Some(BlkMedium::HardDisk)),
+            (0x5ED1, Some(BlkMedium::SolidState)),
             (0x5ED2, None),
         ] {
             table
@@ -1049,7 +1045,7 @@ mod tests {
         let mut table = MountTable::new(MountFlags::default());
         let volume = Attachment::new(
             handle(0x564F),
-            Some(BlkDeviceClass::Removable),
+            Some(BlkMedium::UsbFlash),
             MountFlags::NOEXEC,
         );
         let template = Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755));

@@ -3098,6 +3098,33 @@ fn a_plate_band_seats_no_commands_and_reports_none() {
     }
 }
 
+/// An alert's band offers put-to-back and nothing else — not a disabled close
+/// or size toggle either — and centres its title on the band, not on the span
+/// the one cluster leaves.
+#[test]
+fn a_dialog_band_seats_put_to_back_alone_and_centres_its_title() {
+    let mut bar = TitleBar::dialog();
+    bar.set_title("Error from Files");
+    assert_eq!(bar.commands(), TitleBarCommands::Dialog);
+    let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &Theme::dark());
+    let seated: alloc::vec::Vec<WindowControlKind> =
+        layout.controls().iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(seated, [WindowControlKind::PutToBack]);
+    for kind in [
+        WindowControlKind::Close,
+        WindowControlKind::Minimize,
+        WindowControlKind::SizeToggle,
+    ] {
+        assert!(bar.control(kind).is_none(), "{kind:?} is not seated");
+    }
+    let title_mid = layout.title.left() + i32::try_from(layout.title.width / 2).expect("small");
+    let band_mid = TITLE_BOUNDS.left() + i32::try_from(TITLE_BOUNDS.width / 2).expect("small");
+    assert!(
+        (title_mid - band_mid).abs() <= 1,
+        "{title_mid} vs {band_mid}"
+    );
+}
+
 /// A band of `commands`, titled, rendered over a plate ground.
 fn band_over_plate(commands: TitleBarCommands, theme: &Theme) -> Surface {
     let mut bar = match commands {
@@ -3105,6 +3132,7 @@ fn band_over_plate(commands: TitleBarCommands, theme: &Theme) -> Surface {
         TitleBarCommands::Window => TitleBar::new(WindowFurnitureState::default()),
         TitleBarCommands::Tool => TitleBar::tool(),
         TitleBarCommands::Pane => TitleBar::pane(),
+        TitleBarCommands::Dialog => TitleBar::dialog(),
     };
     bar.set_title("Appearance");
     let mut surface = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");

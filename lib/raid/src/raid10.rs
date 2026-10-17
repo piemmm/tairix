@@ -48,7 +48,7 @@
 use crate::mirror::{MirrorArray, MirrorError, MirrorMember};
 use crate::stripe::StripeArray;
 use crate::superblock::ArrayProgress;
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth};
 use tairix_abi::driver::{BufferClass, DriverError};
 use tairix_abi::raid::{ArrayHealth, MemberState, RaidLevel};
@@ -645,8 +645,8 @@ impl<'a, B: Block> Raid10Array<'a, B> {
 }
 
 impl<B: Block> Block for Raid10Array<'_, B> {
-    fn device_class(&self) -> BlkDeviceClass {
-        crate::health::aggregate_device_class(self.live_devices().map(Block::device_class))
+    fn medium(&self) -> Option<BlkMedium> {
+        BlkMedium::of_members(self.live_devices().map(Block::medium))
     }
 
     fn backing_availability(&self) -> MountAvailability {

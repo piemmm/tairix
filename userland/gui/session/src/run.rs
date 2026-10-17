@@ -101,8 +101,9 @@ mod program {
         SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{
-        event_endpoint_for, BundleRunPath, DocumentName, DropTarget, MenuOutcome, PointerAction,
-        PreviewOutcome, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
+        event_endpoint_for, AlertSeverity, AlertSpec, BundleRunPath, DocumentName, DragItems,
+        DropTarget, MenuOutcome, PointerAction, PreviewOutcome, WindowEvent, WINDOW_ENDPOINT,
+        WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
         CapabilityId, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags, WaitSetOp,
@@ -118,6 +119,7 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::damage;
+    use tairix_desktop_session::alert::{alert_title, Speaker};
     use tairix_desktop_session::effects::{
         load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk,
     };
@@ -133,7 +135,7 @@ mod program {
     use tairix_desktop_session::switchuser::{
         SeatDeparture, SeatReturn, SessionAuthority, SwitchUser,
     };
-    use tairix_desktop_session::windows::window_menu_placement;
+    use tairix_desktop_session::windows::{sheet_artwork, window_menu_placement};
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
         drain_locked, drop_is_noteworthy, encode_switchboard_reply, focus_reports, land_preview,
@@ -145,31 +147,31 @@ mod program {
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
         AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop,
         DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface, ElevatePrompt, Elevator,
-        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
-        HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
-        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
-        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport,
-        OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied,
-        PinboardCall, PinboardRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone,
-        PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Requester,
-        ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaverIdentity, SaverSetup,
-        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
-        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
-        ShellWindowHost, SizedRecord, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, Trial, TrialEnd, TrialOutcome, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
-        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS,
-        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
-        LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
-        MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
-        SETTINGS_LABEL, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
-        TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE,
-        WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
-        WINDOW_SIZED_MESSAGE,
+        DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal,
+        ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
+        FrameStatsSink, GestureRefusal, HangTracker, HoldBack, IconRasteriser, IdleAction,
+        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
+        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
+        LoadedPrograms, MachineWatch, OwedReport, OwnPick, OwnerBundleGate, OwnerWindow,
+        PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall, PinboardRefusal, Prepared,
+        PresentedOwners, PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun,
+        PreviewTarget, PromptOutcome, Requester, ResizedRecord, ResolutionAsk, ResolutionPrompt,
+        Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
+        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlotAnswer, SoundCall,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd, TrialOutcome,
+        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE,
+        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,
+        LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED,
+        LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN,
+        LIBRARY_SHOWN_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
+        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SETTINGS_LABEL, SWITCHBOARD_CALL_REFUSED,
+        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE,
+        TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE,
+        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{
         preview_source, resolution_ask, ScreensaverPreview, ScreensaverServe,
@@ -595,6 +597,11 @@ mod program {
                 },
             );
             Ok(origin.proc_id())
+        }
+
+        fn caller_mailbox(&mut self, ticket: u64) -> Result<u64, Errno> {
+            let origin = tairix_rt::peer_origin(WINDOW_ENDPOINT, ticket)?;
+            Ok(tairix_abi::window_ipc::event_endpoint_for(origin.pid()))
         }
 
         fn caller_holds(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
@@ -1777,6 +1784,7 @@ mod program {
         confirm.repaint(parts.shell, parts.compositor);
         elevate.repaint(parts.shell, parts.compositor);
         resolution.repaint(parts.shell, parts.compositor);
+        parts.windows.alerts.repaint(parts.shell, parts.compositor);
         if parts.saver.dismiss(parts.compositor, None) == Ok(true) {
             parts.wallpapers.forget_slides();
             parts.idle.saver_withdrawn();
@@ -3332,6 +3340,12 @@ mod program {
             if let Some(own) = picker.take_own() {
                 conclude_own_pick(own, &mut effects, &effects_worker);
             }
+            // Input only records what it changed in an alert or prompt; the
+            // drained run is painted here, once.
+            windows.alerts.paint_owed(&shell, &mut compositor);
+            confirm.paint_owed(&shell, &mut compositor);
+            resolution.paint_owed(&shell, &mut compositor);
+            picker.paint_owed(&shell, &mut compositor);
             post_push(&mut effects, &mut cue_posts, set);
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
@@ -3453,7 +3467,13 @@ mod program {
                                     );
                                 }
                                 Some(SwitchedOff::Refused(refusal)) => {
-                                    app::report(APP_NAME, format_args!("the display would not switch off ({refusal:?}); the screensaver is kept black instead"));
+                                    app::report(
+                                        APP_NAME,
+                                        format_args!(
+                                            "the display would not switch off ({refusal:?}); \
+                                             the screensaver is kept black instead"
+                                        ),
+                                    );
                                 }
                                 _ => {}
                             }
@@ -4598,6 +4618,17 @@ mod program {
                     &programs.bundles,
                 );
                 owner_bundles.publish(switchboard_pid, &apps.strip, &mut RtSwitchboardMailbox);
+                // A menu of an application that has left the bar, and its
+                // information sheet with it, comes down: nothing is left to
+                // answer it.
+                let orphaned = matches!(
+                    menu.owner(),
+                    Some(ChainOwner::Bar(MenuSubject::App { owner }))
+                        if !apps.strip.iter().any(|group| group.owner == *owner)
+                );
+                if orphaned && menu.dismiss() {
+                    present_menu_chain(&mut menu, &mut shell, &mut compositor, &windows);
+                }
             }
             // Nothing an application opened or raised this wake may surface
             // over a locked screen: the lock goes back on top, beneath only
@@ -4612,6 +4643,8 @@ mod program {
                 confirm.repaint(&mut shell, &mut compositor);
                 elevate.repaint(&mut shell, &mut compositor);
                 resolution.repaint(&mut shell, &mut compositor);
+                windows.alerts.repaint(&shell, &mut compositor);
+                picker.restyle(&shell, &mut compositor);
             }
             // One window thumbnail per wake, so a hover picker over a
             // screenful of windows fills in across the turns the loop was
@@ -4623,6 +4656,10 @@ mod program {
             // the whole frame, as on the deadline path above: the animation
             // and the frame report's rate limit share it.
             let now_ns = tairix_rt::clock_get();
+            // An alert first shows in this frame, so its arm delay runs from
+            // now.
+            windows.alerts.stamp(now_ns);
+            picker.stamp(now_ns);
             serve_rest(&mut shell, &mut compositor, &mut menu, &windows, now_ns);
             // A lone press of Ctrl typed this wake shows where the pointer
             // is, unless a button or the wheel went with it: Ctrl-click and
@@ -6860,7 +6897,7 @@ mod program {
                     seat.compositor,
                 );
             }
-            route_desktop(
+            let refused = route_desktop(
                 &outcome,
                 self.publisher,
                 self.files,
@@ -6887,6 +6924,9 @@ mod program {
                 self.programs,
                 now_ns,
             );
+            if let Some(refusal) = refused {
+                state_refusal(&refusal, self.windows, seat.shell, seat.compositor);
+            }
             let routed = route_outcome(
                 outcome,
                 key,
@@ -6995,17 +7035,20 @@ mod program {
         fn drag_surface(&mut self, seat: &mut Seat<'_>, place: DragPlace) -> DragSurface {
             match place {
                 DragPlace::Nothing => DragSurface::Nothing,
-                DragPlace::Slot { index } => {
-                    let target = seat
+                DragPlace::Slot { index } => DragSurface::Slot {
+                    index,
+                    answer: seat
                         .shell
                         .drag_items()
-                        .filter(|(_, items)| items.openable())
-                        .and_then(|(_, items)| self.drop_target(index, items.first().as_str()));
-                    DragSurface::Slot {
-                        index,
-                        target: target.map(alloc::boxed::Box::new),
-                    }
-                }
+                        .and_then(|(_, items)| self.slot_answer(index, &items)),
+                },
+                DragPlace::AppWindow { index } => DragSurface::AppWindow {
+                    index,
+                    answer: seat
+                        .shell
+                        .drag_items()
+                        .and_then(|(_, items)| self.slot_answer(index, &items)),
+                },
                 DragPlace::Window { window_id, x, y } => DragSurface::Window { window_id, x, y },
                 DragPlace::Desktop { icon, revision } => DragSurface::Desktop {
                     folder: self.desktop.drop_folder(icon),
@@ -7019,7 +7062,9 @@ mod program {
             let at = match &report.at {
                 &DragSurface::Window { window_id, x, y } => DragReport::Window { window_id, x, y },
                 DragSurface::Desktop { folder, .. } => DragReport::Desktop { folder },
-                DragSurface::Nothing | DragSurface::Slot { .. } => DragReport::Nowhere,
+                DragSurface::Nothing | DragSurface::Slot { .. } | DragSurface::AppWindow { .. } => {
+                    DragReport::Nowhere
+                }
             };
             // A report the engine refuses — the window under the pointer has
             // just closed — draws no answer, so the pointer shows none and a
@@ -7031,6 +7076,9 @@ mod program {
         }
 
         fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd) {
+            if let Some(refusal) = &ended.refused {
+                state_drop_refusal(refusal, self.windows, seat.shell, seat.compositor);
+            }
             let Some(owner) = self.server.owner_of(ended.source) else {
                 return;
             };
@@ -7062,28 +7110,40 @@ mod program {
     }
 
     impl<S: DirectorySource, F: FnMut() -> S> SessionRoute<'_, S, F> {
-        /// What the application on icon-bar slot `slot` does with a dragged
-        /// file named `name`: open it, or `None` when it does not claim it.
-        fn drop_target(&self, slot: usize, name: &str) -> Option<DropTarget> {
+        /// What the application on icon-bar slot `slot` answers a drag of
+        /// `items` with: it opens the one file, or it refuses, said in its
+        /// name; `None` for a slot no installed bundle is attested to.
+        fn slot_answer(&self, slot: usize, items: &DragItems) -> Option<SlotAnswer> {
             // Only a slot attested to an installed bundle can be vouched for,
             // and only a bundle whose signed manifest claims the file takes
             // it — by the one matching rule "Open With" uses.
             let bundle = self.apps.strip.get(slot)?.bundle.as_deref()?;
             let association = self.programs.association(bundle)?;
-            if tairix_browse::applications_for(name, core::slice::from_ref(association)).is_empty()
-            {
-                return None;
+            let name = items.first().as_str();
+            let claimed = items.openable()
+                && !tairix_browse::applications_for(name, core::slice::from_ref(association))
+                    .is_empty();
+            if !claimed {
+                return Some(SlotAnswer::Refuses(alloc::boxed::Box::new(
+                    DropRefusal::new(
+                        association.name(),
+                        name,
+                        items.openable(),
+                        association.mime_types(),
+                    ),
+                )));
             }
-            Some(DropTarget {
+            Some(SlotAnswer::Opens(alloc::boxed::Box::new(DropTarget {
                 run_path: BundleRunPath::new(&tairix_appstore::entry_path(bundle)).ok()?,
                 writes_documents: association.writes_documents(),
-            })
+            })))
         }
 
         /// The compositor window `wm` under a carried drag at `at`: the drag's
-        /// own application's window, at a point in its content, or nothing a
-        /// drop is offered to — another application's window, the session's
-        /// own surfaces, or a window's frame.
+        /// own application's window, at a point in its content, which that
+        /// application answers; another application's, which takes the drop
+        /// as that application's slot does; or nothing a drop is offered to —
+        /// the session's own surfaces, or a window's frame.
         fn drag_window(
             &self,
             compositor: &Compositor,
@@ -7094,23 +7154,37 @@ mod program {
             let Some(window_id) = self.windows.ipc_id(wm) else {
                 return DragPlace::Nothing;
             };
-            let owner = self.server.owner_of(source);
-            if owner.is_none() || self.server.owner_of(window_id) != owner {
-                return DragPlace::Nothing;
-            }
             let Some(client) = compositor
                 .window_client_rect(wm)
                 .filter(|rect| rect.contains(at))
             else {
                 return DragPlace::Nothing;
             };
-            let (Ok(x), Ok(y)) = (
-                u32::try_from(i64::from(at.x) - i64::from(client.left())),
-                u32::try_from(i64::from(at.y) - i64::from(client.top())),
+            let (Some(source_owner), Some(owner)) = (
+                self.server.owner_of(source),
+                self.server.owner_of(window_id),
             ) else {
                 return DragPlace::Nothing;
             };
-            DragPlace::Window { window_id, x, y }
+            let under = if owner == source_owner {
+                let local = (
+                    u32::try_from(i64::from(at.x) - i64::from(client.left())),
+                    u32::try_from(i64::from(at.y) - i64::from(client.top())),
+                );
+                WindowUnder::Own(match local {
+                    (Ok(x), Ok(y)) => Some((x, y)),
+                    _ => None,
+                })
+            } else {
+                WindowUnder::Foreign(
+                    self.apps
+                        .strip
+                        .iter()
+                        .position(|group| group.owner == owner),
+                )
+            };
+            let held = self.windows.alerts.holding(window_id).is_some();
+            DragPlace::over_window(window_id, held, under)
         }
     }
 
@@ -7240,7 +7314,7 @@ mod program {
             let (window_id, open_id) = match owner {
                 ChainOwner::Window { window_id, open_id } => (window_id, open_id),
                 ChainOwner::Backdrop => {
-                    answer_backdrop_menu(
+                    let refused = answer_backdrop_menu(
                         &outcome,
                         shell,
                         compositor,
@@ -7254,6 +7328,9 @@ mod program {
                         },
                         now_ns,
                     );
+                    if let Some(refusal) = refused {
+                        state_refusal(&refusal, windows, shell, compositor);
+                    }
                     continue;
                 }
                 ChainOwner::Bar(subject) => {
@@ -7341,15 +7418,25 @@ mod program {
         request: MenuRequest,
         seat_held: bool,
         menu: &mut MenuChain,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
+        (shell, compositor): (&mut DesktopShell, &mut Compositor),
         windows: &SessionWindows,
+        apps: &AppBarService,
     ) {
+        let mut model = request.model;
+        if let MenuSubject::App { owner } = request.subject {
+            let scale = compositor.scale();
+            let art = apps
+                .attested_bundle(owner)
+                .and_then(|bundle| sheet_artwork(shell, bundle, scale));
+            if let Some(art) = art {
+                model.set_info_artwork(&art);
+            }
+        }
         let geom = chain_geometry(shell.session(), compositor);
         match open_desktop_menu(
             menu,
             ChainOwner::Bar(request.subject),
-            request.model,
+            model,
             request.placement,
             seat_held,
             &geom,
@@ -7375,7 +7462,7 @@ mod program {
         desk: &mut DesktopMenuDesk<'_, S>,
         reach: &mut LaunchReach<'_>,
         now_ns: u64,
-    ) {
+    ) -> Option<GestureRefusal> {
         let command = match outcome {
             ChainOutcome::Chosen(item) => PinboardCommand::from_item(*item),
             // The backdrop's menu declares no quick-entry field, so a
@@ -7386,40 +7473,38 @@ mod program {
                 None
             }
         };
-        let Some(command) = command else {
-            return;
-        };
+        let command = command?;
         let refresh = command == PinboardCommand::Refresh;
         let acted = desk.desktop.command(command, &desk.programs.associations);
-        let whole = acted.relisted
-            | apply_desktop_action(
-                acted.action,
-                desk.publisher,
-                desk.files,
-                desk.pinboard,
-                desk.wallpapers,
-                desk.desktop,
-                shell,
-                compositor,
-                &mut LaunchCtx {
-                    launched: desk.launched,
-                    apps: reach.apps,
-                    server: reach.server,
-                    sink: reach.sink,
-                    windows: reach.windows,
-                    identity: reach.identity,
-                },
-                now_ns,
-            );
+        let applied = apply_desktop_action(
+            acted.action,
+            desk.publisher,
+            desk.files,
+            desk.pinboard,
+            desk.wallpapers,
+            desk.desktop,
+            shell,
+            compositor,
+            &mut LaunchCtx {
+                launched: desk.launched,
+                apps: reach.apps,
+                server: reach.server,
+                sink: reach.sink,
+                windows: reach.windows,
+                identity: reach.identity,
+            },
+            now_ns,
+        );
         // Asking to look again is the honest moment to re-read what is
         // installed too, so a program installed since bring-up can open a
         // document from here without the library popup being opened first.
         if refresh {
             request_programs(desk.catalogs, shell, compositor, desk.programs);
         }
-        if whole {
+        if acted.relisted || applied == Ok(true) {
             shell.present_desktop(compositor, desk.desktop);
         }
+        applied.err()
     }
 
     /// Reconcile the compositor against the chain, resolving the owner's and
@@ -7780,6 +7865,41 @@ mod program {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
             ShellOutcome::WindowManager(response) => match response {
+                InputResponse::Activated { window, local }
+                | InputResponse::SecondaryActivated { window, local }
+                    if windows.alerts.owns(window)
+                        || held_by_alert(windows, window).is_some() =>
+                {
+                    // An alert takes the press, and so does the window it
+                    // holds: that press hands the keyboard to the alert and
+                    // reaches no application.
+                    let mut answer = None;
+                    if let Some(alert) = held_by_alert(windows, window) {
+                        shell.focus_alert_window(compositor, alert);
+                    } else if matches!(response, InputResponse::Activated { .. }) {
+                        answer = windows.alerts.click(
+                            window,
+                            local,
+                            tairix_rt::clock_get(),
+                            shell,
+                            compositor,
+                        );
+                    }
+                    reconcile_focus(
+                        focused,
+                        server,
+                        sink,
+                        shell,
+                        compositor,
+                        windows,
+                        picker,
+                        &mut apps.service,
+                        menu,
+                    );
+                    if let Some(answer) = answer {
+                        relay_alert_answer(answer, server, sink, shell, windows);
+                    }
+                }
                 InputResponse::Activated { window, local } => {
                     let target = windows.ipc_id(window);
                     // The focus change reaches the apps before the press.
@@ -7841,18 +7961,40 @@ mod program {
                             menu,
                         );
                     }
+                    // A press on the picker's question whether to replace a
+                    // file answers it, and a yes saves over the file.
+                    if picker.question_wm() == Some(window) {
+                        let now = tairix_rt::clock_get();
+                        let step = picker.question_click(local, now, shell, compositor);
+                        step_pick(
+                            step,
+                            &Openers { identity, programs },
+                            files,
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            apps,
+                            menu,
+                        );
+                    }
                     // A press on the showing confirmation prompt answers it:
                     // only the confirming button relays the transition, and
                     // the prompt window is already gone by then.
                     if confirm.wm_id() == Some(window) {
-                        if let Some(answer) = confirm.handle_click(local, shell, compositor) {
+                        let now_ns = tairix_rt::clock_get();
+                        let answer = confirm.handle_click(local, now_ns, shell, compositor);
+                        if let Some(answer) = answer {
                             report_power_relay(answer, *switchboard);
                         }
                     }
                     // A press on the resolution prompt answers it; the serve
                     // loop puts the answer into effect.
                     if resolution.wm_id() == Some(window) {
-                        let _ = resolution.handle_click(local, shell, compositor);
+                        let now_ns = tairix_rt::clock_get();
+                        let _ = resolution.handle_click(local, now_ns, shell, compositor);
                     }
                     // A press on the showing credential prompt answers it the
                     // same way: only the continuing button offers what was
@@ -7931,6 +8073,30 @@ mod program {
                         menu,
                     );
                 }
+                InputResponse::Key { window, .. } if windows.alerts.owns(window) => {
+                    if let Some(record) = key {
+                        if let Some(answer) = windows.alerts.key(
+                            window,
+                            &record,
+                            tairix_rt::clock_get(),
+                            shell,
+                            compositor,
+                        ) {
+                            reconcile_focus(
+                                focused,
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                picker,
+                                &mut apps.service,
+                                menu,
+                            );
+                            relay_alert_answer(answer, server, sink, shell, windows);
+                        }
+                    }
+                }
                 InputResponse::Key { window, .. } => {
                     if picker.wm_id() == Some(window) {
                         // The focused picker consumes its own keys; a
@@ -7952,18 +8118,39 @@ mod program {
                                 menu,
                             );
                         }
+                    } else if picker.question_wm() == Some(window) {
+                        if let Some(record) = key {
+                            let now = tairix_rt::clock_get();
+                            let step = picker.question_key(&record, now, shell, compositor);
+                            step_pick(
+                                step,
+                                &Openers { identity, programs },
+                                files,
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                picker,
+                                apps,
+                                menu,
+                            );
+                        }
                     } else if confirm.wm_id() == Some(window) {
                         // The focused prompt consumes its own keys the same
                         // way, so `Escape` declines and no key reaches an app
                         // while the question is unanswered.
                         if let Some(record) = key {
-                            if let Some(answer) = confirm.handle_key(&record, shell, compositor) {
+                            let now_ns = tairix_rt::clock_get();
+                            let answer = confirm.handle_key(&record, now_ns, shell, compositor);
+                            if let Some(answer) = answer {
                                 report_power_relay(answer, *switchboard);
                             }
                         }
                     } else if resolution.wm_id() == Some(window) {
                         if let Some(record) = key {
-                            let _ = resolution.handle_key(&record, shell, compositor);
+                            let now_ns = tairix_rt::clock_get();
+                            let _ = resolution.handle_key(&record, now_ns, shell, compositor);
                         }
                     } else if elevate.wm_id() == Some(window) {
                         // The credential prompt consumes its own keys, so a
@@ -8010,6 +8197,8 @@ mod program {
                 } => {
                     if picker.wm_id() == Some(window) {
                         picker.scroll((dx, dy), shell, compositor);
+                    } else if windows.alerts.owns(window) {
+                        windows.alerts.scroll(window, dy, shell, compositor);
                     } else if let (Some(window_id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
@@ -8291,9 +8480,9 @@ mod program {
                     request,
                     seat_held(lock, picker, (confirm, elevate, resolution)),
                     menu,
-                    shell,
-                    compositor,
+                    (shell, compositor),
                     windows,
+                    &apps.service,
                 );
             }
             ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary) => {
@@ -8312,18 +8501,20 @@ mod program {
                 // The application declared that it handles the primary click
                 // itself, so the click is relayed to it and the session does
                 // nothing else — one click, one actor.
-                relay_app_bar(
-                    apps,
-                    app,
-                    shell,
-                    compositor,
-                    server,
-                    sink,
-                    windows,
-                    picker,
-                    menu,
-                    &WindowEvent::AppBarDefault,
-                );
+                if let Some(owner) = apps.strip.get(app).map(|group| group.owner) {
+                    relay_app_bar(
+                        apps,
+                        owner,
+                        shell,
+                        compositor,
+                        server,
+                        sink,
+                        windows,
+                        picker,
+                        menu,
+                        &WindowEvent::AppBarDefault,
+                    );
+                }
             }
             ShellOutcome::Taskbar(TaskbarResponse::AppRaise { app }) => {
                 // No declared default action: raise the application's most
@@ -8335,13 +8526,13 @@ mod program {
                     shell.raise_window(compositor, window);
                 }
             }
-            ShellOutcome::Taskbar(TaskbarResponse::AppMenuChosen { app, item }) => {
+            ShellOutcome::Taskbar(TaskbarResponse::AppMenuChosen { owner, item }) => {
                 // The row id is the application's own and the session never
                 // interprets one: it is relayed straight back to the process
                 // that declared the menu.
                 relay_app_bar(
                     apps,
-                    app,
+                    owner,
                     shell,
                     compositor,
                     server,
@@ -8416,7 +8607,7 @@ mod program {
                 // Never on the strength of the click alone: put the
                 // consequence to the user first. A prompt that cannot be
                 // shown asks nothing and relays nothing.
-                if !confirm.ask(action, shell, compositor) {
+                if !confirm.ask(action, tairix_rt::clock_get(), shell, compositor) {
                     io::write_stderr_line(
                         "desktop: could not ask for confirmation; nothing was done",
                     );
@@ -8955,7 +9146,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The delivery path's whole mutable state, threaded explicitly.
     fn relay_app_bar<S: DirectorySource, F: FnMut() -> S>(
         apps: &mut AppBarPanel,
-        app: usize,
+        owner: ProcId,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         server: &mut WindowServer<RtShmMapper>,
@@ -8965,9 +9156,6 @@ mod program {
         menu: &mut MenuChain,
         event: &WindowEvent,
     ) {
-        let Some(owner) = apps.strip.get(app).map(|group| group.owner) else {
-            return;
-        };
         let mut owner_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
         log_info(
             tairix_desktop_session::APP_BAR_RELAYED,
@@ -9105,7 +9293,7 @@ mod program {
         launch: &mut LaunchCtx<'_>,
         programs: &mut Programs,
         now_ns: u64,
-    ) {
+    ) -> Option<GestureRefusal> {
         let pointer = shell.router().pointer();
         let layout = shell.desktop_layout(compositor, desktop);
         // Every gesture reports the icon cells it changed here, and only
@@ -9169,15 +9357,16 @@ mod program {
         let action = shortcut_asked(outcome, shell, desktop).or(acted.action);
         // The settings and folder edits `apply_desktop_action` performs are
         // the changes that genuinely repaint the whole layer.
-        let whole = apply_desktop_action(
+        let applied = apply_desktop_action(
             action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
             now_ns,
         );
-        if whole {
+        if applied == Ok(true) {
             shell.present_desktop(compositor, desktop);
         } else if !damage.is_empty() {
             shell.present_desktop_area(compositor, desktop, &damage);
         }
+        applied.err()
     }
 
     /// Resolve the desktop layer surface's feeds for this frame: hide or show
@@ -9352,8 +9541,8 @@ mod program {
         compositor: &mut Compositor,
         launch: &mut LaunchCtx<'_>,
         now_ns: u64,
-    ) -> bool {
-        match action {
+    ) -> Result<bool, GestureRefusal> {
+        Ok(match action {
             Some(DesktopAction::Activate(DesktopActivation::OpenFolder { path })) => {
                 let _ = launch.launch(
                     shell,
@@ -9424,11 +9613,48 @@ mod program {
                 );
                 false
             }
-            Some(DesktopAction::Refuse(reason)) => {
-                let _ = write!(Stderr, "{reason}");
-                false
-            }
+            Some(DesktopAction::Refuse(refusal)) => return Err(refusal),
             None => false,
+        })
+    }
+
+    /// State a refused desktop gesture: on `stderr` for the record, and in a
+    /// notice of the desktop's own for the user who made it.
+    fn state_refusal(
+        refusal: &GestureRefusal,
+        windows: &mut SessionWindows,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        let _ = write!(Stderr, "{}", refusal.line());
+        let Ok(spec) =
+            AlertSpec::acknowledged(AlertSeverity::Error, refusal.headline(), refusal.detail())
+        else {
+            return;
+        };
+        let title = alert_title(AlertSeverity::Error, Speaker::Desktop);
+        if !windows.alerts.notify(&spec, &title, shell, compositor) {
+            app::report(APP_NAME, format_args!("no window to state a refusal in"));
+        }
+    }
+
+    /// State that an application does not take what was dropped on its slot,
+    /// in that application's name.
+    fn state_drop_refusal(
+        refusal: &DropRefusal,
+        windows: &mut SessionWindows,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        let Some(spec) = refusal.spec() else {
+            return;
+        };
+        let title = alert_title(AlertSeverity::Error, Speaker::App(refusal.app()));
+        if !windows.alerts.notify(&spec, &title, shell, compositor) {
+            app::report(
+                APP_NAME,
+                format_args!("no window to state a refused drop in"),
+            );
         }
     }
 
@@ -10823,6 +11049,33 @@ mod program {
         modifiers_to_abi(shell.modifiers())
     }
 
+    /// Relay the user's `answer` to an application's alert. It is the
+    /// user's gesture toward that application, so it lends a raise while the
+    /// keyboard stays where the answer left it.
+    fn relay_alert_answer(
+        answer: tairix_desktop_session::alert::Answer,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &DesktopShell,
+        windows: &SessionWindows,
+    ) {
+        let activation = Activation::Granted {
+            focus: windows.focused(shell),
+        };
+        // An application gone since cannot be answered; its alert is down.
+        let _ = server.answer_alert(sink, answer.alert_id, answer.index, activation);
+    }
+
+    /// The alert holding the served window shown as `wm`, if one does.
+    fn held_by_alert(
+        windows: &SessionWindows,
+        wm: tairix_wm::WindowId,
+    ) -> Option<tairix_wm::WindowId> {
+        windows
+            .ipc_id(wm)
+            .and_then(|window_id| windows.alerts.holding(window_id))
+    }
+
     /// Deliver one app-ward event, tearing the owner's windows down when
     /// the kernel proves the owner is gone (its event port was reclaimed,
     /// so the send finds nothing).
@@ -10844,6 +11097,14 @@ mod program {
         let Some(owner) = event.window_id().and_then(|id| server.owner_of(id)) else {
             return;
         };
+        // A window an alert holds takes no new input until it is answered.
+        if !tairix_desktop_session::alert::reaches_held_window(event)
+            && event
+                .window_id()
+                .is_some_and(|id| windows.alerts.holding(id).is_some())
+        {
+            return;
+        }
         if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
             drop_departed(
                 owner, server, shell, compositor, windows, picker, apps, menu,

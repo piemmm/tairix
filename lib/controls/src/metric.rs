@@ -61,8 +61,9 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::{IconKind, IconPicture};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::{SignalRole, TextRole, Theme};
+use tairix_util::mathf;
 
 use crate::chart::Chart;
 use crate::paint::{
@@ -1060,23 +1061,27 @@ impl CompositionBar {
     /// list, and how many rows that is depends on the width it is given.
     #[must_use]
     pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        let font = role_font(theme, scale, TextRole::Body);
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let rows = self.key_rows(width, scale, theme);
-        let key = rows
-            .saturating_mul(font.line_height())
-            .saturating_add(rows.saturating_sub(1).saturating_mul(gap));
+        let rows = self.key_rows(width, KeyFlow::Packed, scale, theme);
         composition_thickness(theme, scale)
             .saturating_add(gap)
-            .saturating_add(key)
+            .saturating_add(Self::key_height(rows, scale, theme))
     }
 
-    /// How many rows the key packs into `width`.
+    /// How many rows the key takes in `width` laid out by `flow`.
     #[must_use]
-    fn key_rows(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
-        self.key_layout(width, scale, theme)
+    fn key_rows(&self, width: u32, flow: KeyFlow, scale: Scale, theme: &Theme) -> u32 {
+        self.key_layout(width, flow, scale, theme)
             .last()
             .map_or(0, |entry| entry.row.saturating_add(1))
+    }
+
+    /// The height of `rows` key rows.
+    fn key_height(rows: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        rows.saturating_mul(font.line_height())
+            .saturating_add(rows.saturating_sub(1).saturating_mul(gap))
     }
 
     /// Paint the bar and its key into `surface` at `bounds` for the active
@@ -1101,7 +1106,15 @@ impl CompositionBar {
             return;
         };
         self.paint_segments(surface, band, scale, theme);
-        self.paint_key(surface, (x, y, w, h), band.height(), scale, theme);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let below = band.height().saturating_add(gap);
+        self.paint_key(
+            surface,
+            (x, y.saturating_add(below), w, h.saturating_sub(below)),
+            &self.key_layout(w, KeyFlow::Packed, scale, theme),
+            scale,
+            theme,
+        );
     }
 
     /// The tint part `index` wears: its own step of the hue rotation, or the
@@ -1147,25 +1160,24 @@ impl CompositionBar {
         }
     }
 
-    /// Paint the key beneath the bar: one bead per part in its own tint, then
-    /// the part's label and its amount, packed across the width and wrapped.
+    /// Paint the key into `rect`: one bead per part in its own tint, then the
+    /// part's label and its amount, where `entries` place them.
     fn paint_key(
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
-        band_h: u32,
+        entries: &[KeyEntry],
         scale: Scale,
         theme: &Theme,
     ) {
-        let (x, y, w, h) = rect;
+        let (x, top, w, h) = rect;
         let font = role_font(theme, scale, TextRole::Body);
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
         let bead = scale.scale_length(theme.metrics().bead_size).max(3);
         let line_h = font.line_height();
-        let bottom = y.saturating_add(h);
-        let top = y.saturating_add(band_h).saturating_add(gap);
+        let bottom = top.saturating_add(h);
         let palette = theme.palette();
-        for entry in self.key_layout(w, scale, theme) {
+        for entry in entries {
             let row_y = top.saturating_add(entry.row.saturating_mul(line_h.saturating_add(gap)));
             if row_y.saturating_add(line_h) > bottom {
                 return;
@@ -1219,12 +1231,12 @@ impl CompositionBar {
     }
 
     /// Where every key entry sits: packed leading to trailing across `width`,
-    /// wrapping to the next row when the next entry would not fit whole.
+    /// wrapping to the next row when the next entry would not fit whole, or
+    /// one to a row as a column.
     ///
-    /// The one layout both [`measured_height`](Self::measured_height) and
-    /// [`paint_key`](Self::paint_key) read, so the height an owner reserves is
-    /// the height the key draws in.
-    fn key_layout(&self, width: u32, scale: Scale, theme: &Theme) -> Vec<KeyEntry> {
+    /// The one layout both the measurement and [`paint_key`](Self::paint_key)
+    /// read, so the height an owner reserves is the height the key draws in.
+    fn key_layout(&self, width: u32, flow: KeyFlow, scale: Scale, theme: &Theme) -> Vec<KeyEntry> {
         let font = role_font(theme, scale, TextRole::Body);
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
         let bead = scale.scale_length(theme.metrics().bead_size).max(3);
@@ -1237,7 +1249,11 @@ impl CompositionBar {
                 .saturating_add(font.text_width(&segment.label))
                 .saturating_add(font.advance(' '))
                 .saturating_add(font.text_width(&segment.amount));
-            if offset > 0 && offset.saturating_add(entry_w) > width {
+            let wraps = match flow {
+                KeyFlow::Packed => offset > 0 && offset.saturating_add(entry_w) > width,
+                KeyFlow::Column => index > 0,
+            };
+            if wraps {
                 row = row.saturating_add(1);
                 offset = 0;
             }
@@ -1254,6 +1270,334 @@ impl CompositionBar {
         entries
     }
 }
+
+/// How a composition's key lays its entries out.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum KeyFlow {
+    /// Across the width, wrapping: beneath a bar.
+    Packed,
+    /// One entry to a row: beside a ring.
+    Column,
+}
+
+/// A measured whole drawn as a ring: a [`CompositionBar`]'s parts laid
+/// clockwise from the top, the reading it is built around stated in the
+/// middle, and the same key beside it.
+///
+/// One model for both shapes, so a composition validated for a bar is the one
+/// a ring draws and the two keys cannot disagree. Like the bar it is an
+/// instrument: no input, no plate of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompositionRing {
+    composition: CompositionBar,
+    centre: String,
+    caption: String,
+}
+
+impl CompositionRing {
+    /// `composition` as a ring stating `centre` — the one figure a glance
+    /// wants, such as how full a disk is — over `caption`, the word that says
+    /// what the figure is.
+    #[must_use]
+    pub fn new(
+        composition: CompositionBar,
+        centre: impl Into<String>,
+        caption: impl Into<String>,
+    ) -> Self {
+        Self {
+            composition,
+            centre: centre.into(),
+            caption: caption.into(),
+        }
+    }
+
+    /// The ring's diameter at `scale`, in physical pixels.
+    #[must_use]
+    pub fn ring_side(scale: Scale) -> u32 {
+        scale.scale_length(RING_SIDE).max(RING_MIN_SIDE)
+    }
+
+    /// The height the ring and its key need beside each other within `width`.
+    #[must_use]
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let rows = self.composition.key_rows(
+            Self::key_width(width, scale, theme),
+            KeyFlow::Column,
+            scale,
+            theme,
+        );
+        Self::ring_side(scale).max(CompositionBar::key_height(rows, scale, theme))
+    }
+
+    /// The width left for the key beside the ring.
+    fn key_width(width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        width
+            .saturating_sub(Self::ring_side(scale))
+            .saturating_sub(gap.saturating_mul(3))
+    }
+
+    /// Paint the ring at the leading edge of `bounds`, its middle stated, and
+    /// the key centred beside it. A `bounds` too small to seat the ring draws
+    /// nothing at all (fail closed).
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        let side = Self::ring_side(scale);
+        if w < side || h < side {
+            return;
+        }
+        let ring_top = y.saturating_add(h.saturating_sub(side) / 2);
+        self.paint_ring(surface, (x, ring_top), side, scale, theme);
+        self.paint_middle(surface, (x, ring_top), side, scale, theme);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let key_x = x.saturating_add(side).saturating_add(gap.saturating_mul(3));
+        let key_w = Self::key_width(w, scale, theme);
+        let entries = self
+            .composition
+            .key_layout(key_w, KeyFlow::Column, scale, theme);
+        let rows = entries
+            .last()
+            .map_or(0, |entry| entry.row.saturating_add(1));
+        let key_h = CompositionBar::key_height(rows, scale, theme).min(h);
+        let key_y = y.saturating_add(h.saturating_sub(key_h) / 2);
+        self.composition.paint_key(
+            surface,
+            (key_x, key_y, key_w, key_h),
+            &entries,
+            scale,
+            theme,
+        );
+    }
+
+    /// Fill each part's sector of the band, then rule the joins between them
+    /// in the surface colour, so the parts stay countable where hue carries
+    /// nothing.
+    fn paint_ring(
+        &self,
+        surface: &mut Surface,
+        origin: (u32, u32),
+        side: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let radius = sub_px(side) / 2;
+        let band = sub_px(Self::band_thickness(side, scale));
+        let centre = (
+            sub_px(origin.0).saturating_add(radius),
+            sub_px(origin.1).saturating_add(radius),
+        );
+        let annulus = Annulus {
+            centre,
+            outer: radius,
+            inner: radius.saturating_sub(band),
+        };
+        let segments = self.composition.segments();
+        let rule = sub_px(plate_border(theme, scale)).max(1);
+        let shares: Vec<u16> = segments.iter().map(CompositionSegment::share).collect();
+        let shown = shown_shares(&shares, least_visible_share(annulus.inner, rule));
+        let mut start = 0u16;
+        let mut joins = Vec::with_capacity(segments.len());
+        for (index, share) in shown.into_iter().enumerate() {
+            let end = clamp_permille(start.saturating_add(share));
+            if end > start {
+                surface.fill_polygon_subpixel(
+                    &annulus.sector(start, end),
+                    self.composition.tint(index, theme),
+                );
+                joins.push(start);
+            }
+            start = end;
+        }
+        // A ring closes on itself, so every part — the first included — meets
+        // the one before it; a whole held by one part has no join at all.
+        if joins.len() < 2 {
+            return;
+        }
+        let ground = Color::from(theme.palette().surface);
+        for at in joins {
+            surface.fill_polygon_subpixel(&annulus.join(at, rule), ground);
+        }
+    }
+
+    /// State the centre figure over its caption in the ring's middle.
+    fn paint_middle(
+        &self,
+        surface: &mut Surface,
+        origin: (u32, u32),
+        side: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let hole = side.saturating_sub(Self::band_thickness(side, scale).saturating_mul(2));
+        let figure = role_font(theme, scale, TextRole::Heading);
+        let words = role_font(theme, scale, TextRole::Caption);
+        let palette = theme.palette();
+        let room = hole.saturating_sub(scale.scale_length(theme.metrics().control_gap));
+        let centre = figure.elide_to_width(&self.centre, room);
+        let caption = words.elide_to_width(&self.caption, room);
+        let stack = figure.line_height().saturating_add(words.line_height());
+        let top = origin.1.saturating_add(side.saturating_sub(stack) / 2);
+        let middle = origin.0.saturating_add(side / 2);
+        paint_run(
+            surface,
+            figure,
+            centre,
+            (
+                to_i32(middle.saturating_sub(run_width(figure, centre) / 2)),
+                to_i32(top),
+            ),
+            Color::from(palette.on_surface),
+            None,
+        );
+        paint_run(
+            surface,
+            words,
+            caption,
+            (
+                to_i32(middle.saturating_sub(run_width(words, caption) / 2)),
+                to_i32(top.saturating_add(figure.line_height())),
+            ),
+            Color::from(palette.on_surface_muted),
+            None,
+        );
+    }
+
+    /// How thick the ring's band is for a ring `side` across.
+    fn band_thickness(side: u32, scale: Scale) -> u32 {
+        (side / RING_BAND_DIVISOR).max(scale.scale_length(RING_MIN_BAND))
+    }
+}
+
+/// A ring's diameter at the reference density.
+const RING_SIDE: u32 = 112;
+
+/// The least diameter a ring is drawn at, whatever the scale: below it the
+/// middle cannot seat its figure.
+const RING_MIN_SIDE: u32 = 48;
+
+/// A ring's band is this fraction of its diameter: heavy enough to carry hue,
+/// light enough to leave the middle room for its figure.
+const RING_BAND_DIVISOR: u32 = 6;
+
+/// The thinnest band a ring is drawn with, at the reference density.
+const RING_MIN_BAND: u32 = 8;
+
+/// `px` in sub-pixel units.
+/// The least share, in permille, a part can hold and still show between the
+/// rules at its joins, measured where the band is narrowest: its inner edge,
+/// `inner` sub-pixels from the centre, with joins `rule` sub-pixels wide.
+fn least_visible_share(inner: i32, rule: i32) -> u16 {
+    let circumference = core::f64::consts::TAU * f64::from(inner.max(1));
+    let needed = f64::from(rule.saturating_add(sub_px(1)));
+    let share = mathf::round_i32(mathf::ceil(needed * f64::from(FULL) / circumference));
+    u16::try_from(share.clamp(1, i32::from(FULL))).unwrap_or(FULL)
+}
+
+/// `shares` as drawn: every part that holds anything lifted to at least
+/// `least`, the lift taken from the largest part, so a sliver of a whole stays
+/// a part a reader can see and count.
+pub(crate) fn shown_shares(shares: &[u16], least: u16) -> Vec<u16> {
+    let mut shown: Vec<u16> = shares
+        .iter()
+        .map(|&share| if share > 0 { share.max(least) } else { 0 })
+        .collect();
+    let lifted = shown.iter().zip(shares).fold(0u16, |sum, (drawn, share)| {
+        sum.saturating_add(drawn - share)
+    });
+    let largest = shares
+        .iter()
+        .enumerate()
+        .max_by_key(|&(index, share)| (*share, core::cmp::Reverse(index)))
+        .map(|(index, _)| index);
+    if let Some(largest) = largest {
+        let floor = least.min(shares[largest]);
+        shown[largest] = shares[largest].saturating_sub(lifted).max(floor);
+    }
+    shown
+}
+
+fn sub_px(px: u32) -> i32 {
+    to_i32(px).saturating_mul(SUBPIXEL)
+}
+
+/// The band between two concentric circles, in device sub-pixel units.
+struct Annulus {
+    centre: (i32, i32),
+    outer: i32,
+    inner: i32,
+}
+
+impl Annulus {
+    /// The point `radius` out from the centre at `permille` of a turn,
+    /// clockwise from the top.
+    fn at(&self, permille: f64, radius: i32) -> (i32, i32) {
+        let angle = permille / f64::from(FULL) * core::f64::consts::TAU;
+        let r = f64::from(radius);
+        (
+            self.centre
+                .0
+                .saturating_add(mathf::round_i32(mathf::sin(angle) * r)),
+            self.centre
+                .1
+                .saturating_sub(mathf::round_i32(mathf::cos(angle) * r)),
+        )
+    }
+
+    /// The outline of the band from `start` to `end` permille of a turn: the
+    /// outer arc one way, the inner arc back. Arcs are flattened finely enough
+    /// that no chord strays a sub-pixel's worth from the true circle.
+    fn sector(&self, start: u16, end: u16) -> Vec<(i32, i32)> {
+        let span = f64::from(end.saturating_sub(start));
+        let arc = span / f64::from(FULL) * core::f64::consts::TAU * f64::from(self.outer);
+        let steps = (arc / f64::from(SECTOR_CHORD)).clamp(2.0, f64::from(SECTOR_MAX_STEPS));
+        let steps = u32::try_from(mathf::round_i32(mathf::ceil(steps))).unwrap_or(2);
+        let mut outline = Vec::with_capacity(usize::try_from(steps).unwrap_or(0) * 2 + 2);
+        for i in 0..=steps {
+            let at = f64::from(start) + span * f64::from(i) / f64::from(steps);
+            outline.push(self.at(at, self.outer));
+        }
+        for i in (0..=steps).rev() {
+            let at = f64::from(start) + span * f64::from(i) / f64::from(steps);
+            outline.push(self.at(at, self.inner));
+        }
+        outline
+    }
+
+    /// A radial rule `weight` sub-pixels wide across the band at `at`
+    /// permille of a turn.
+    fn join(&self, at: u16, weight: i32) -> Vec<(i32, i32)> {
+        let half = f64::from(weight) / 2.0;
+        let angle = f64::from(at) / f64::from(FULL) * core::f64::consts::TAU;
+        let (dx, dy) = (mathf::cos(angle) * half, mathf::sin(angle) * half);
+        let ends = [
+            self.at(f64::from(at), self.inner),
+            self.at(f64::from(at), self.outer),
+        ];
+        let off = |(x, y): (i32, i32), sign: f64| {
+            (
+                x.saturating_add(mathf::round_i32(dx * sign)),
+                y.saturating_add(mathf::round_i32(dy * sign)),
+            )
+        };
+        alloc::vec![
+            off(ends[0], 1.0),
+            off(ends[1], 1.0),
+            off(ends[1], -1.0),
+            off(ends[0], -1.0)
+        ]
+    }
+}
+
+/// The longest chord a sector's arc is flattened into, in sub-pixel units.
+const SECTOR_CHORD: i32 = 3 * SUBPIXEL;
+
+/// The most chords one sector's arc is flattened into.
+const SECTOR_MAX_STEPS: u32 = 256;
 
 /// Where one key entry sits within the key's own packed rows.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

@@ -150,6 +150,27 @@ impl PciTransport {
             .write_u32(common::DRIVER_FEATURE_SELECT, select);
         let _ = self.windows.common.write_u32(common::DRIVER_FEATURE, value);
     }
+
+    /// Map the vector register at `register` to MSI-X table entry `entry`.
+    /// A device that cannot honour the mapping reads back
+    /// [`VIRTIO_MSI_NO_VECTOR`] (virtio 1.1 §4.1.5.1.2), which fails closed
+    /// so no driver parks on an interrupt the device will never raise.
+    fn map_vector(&self, register: usize, entry: u16) -> Result<(), VirtioError> {
+        self.windows
+            .common
+            .write_u16(register, entry)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        let echoed = self
+            .windows
+            .common
+            .read_u16(register)
+            .map_err(|_| VirtioError::DeviceFault)?;
+        if echoed == entry {
+            Ok(())
+        } else {
+            Err(VirtioError::DeviceFault)
+        }
+    }
 }
 
 impl Transport for PciTransport {
@@ -237,23 +258,9 @@ impl Transport for PciTransport {
         write_u64_halves(&self.windows.common, common::QUEUE_DESC, desc)?;
         write_u64_halves(&self.windows.common, common::QUEUE_DRIVER, avail)?;
         write_u64_halves(&self.windows.common, common::QUEUE_DEVICE, used)?;
-        // Program the queue's MSI-X vector before enabling it. A device
-        // that cannot honour the request reflects `VIRTIO_MSI_NO_VECTOR`
-        // back on read (virtio 1.1 §4.1.4.3); fail closed so the driver
-        // never parks on an interrupt the device will not raise.
+        // Program the queue's MSI-X vector before enabling it.
         if let Some(entry) = self.msix_entry {
-            self.windows
-                .common
-                .write_u16(common::QUEUE_MSIX_VECTOR, entry)
-                .map_err(|_| VirtioError::DeviceFault)?;
-            let echoed = self
-                .windows
-                .common
-                .read_u16(common::QUEUE_MSIX_VECTOR)
-                .map_err(|_| VirtioError::DeviceFault)?;
-            if echoed != entry {
-                return Err(VirtioError::DeviceFault);
-            }
+            self.map_vector(common::QUEUE_MSIX_VECTOR, entry)?;
         }
         // Resolve and validate the notify address for this queue
         // before it is ever used by the infallible `notify`.
@@ -276,6 +283,16 @@ impl Transport for PciTransport {
             .common
             .write_u16(common::QUEUE_ENABLE, 1)
             .map_err(|_| VirtioError::DeviceFault)
+    }
+
+    fn route_config_changes(&mut self) -> Result<(), VirtioError> {
+        // Over INTx a configuration change raises the function's line; over
+        // MSI-X nothing at all until `msix_config` names an entry (virtio 1.1
+        // §4.1.5.3).
+        match self.msix_entry {
+            Some(entry) => self.map_vector(common::MSIX_CONFIG, entry),
+            None => Ok(()),
+        }
     }
 
     fn notify(&mut self, queue: u16) {
@@ -605,6 +622,34 @@ mod tests {
         t.queue_set(8, 1, 2, 3).unwrap();
         assert_eq!(c.read_u16(common::QUEUE_MSIX_VECTOR).unwrap(), 0);
         assert_eq!(c.read_u16(common::QUEUE_ENABLE).unwrap(), 1);
+    }
+
+    #[test]
+    fn negotiation_maps_configuration_changes_to_the_msix_entry() {
+        // A reset leaves `msix_config` unmapped, so over MSI-X a link going
+        // down raised nothing and the driver learnt of it only by chance.
+        let dev = FakeDevice::new(64, 8, 4);
+        let c = dev.dev_common();
+        c.write_u16(common::MSIX_CONFIG, VIRTIO_MSI_NO_VECTOR)
+            .unwrap();
+        let mut t = PciTransport::new(dev.windows(), Some(2)).expect("valid windows");
+        crate::negotiate::<_, VirtioError>(&mut t, || {}, |_| Ok(0)).expect("negotiates");
+        assert_eq!(c.read_u16(common::MSIX_CONFIG).unwrap(), 2);
+    }
+
+    #[test]
+    fn configuration_changes_over_intx_leave_msix_config_unmapped() {
+        let dev = FakeDevice::new(64, 8, 4);
+        let c = dev.dev_common();
+        c.write_u16(common::MSIX_CONFIG, VIRTIO_MSI_NO_VECTOR)
+            .unwrap();
+        let mut t = dev.transport();
+        crate::negotiate::<_, VirtioError>(&mut t, || {}, |_| Ok(0)).expect("negotiates");
+        assert_eq!(
+            c.read_u16(common::MSIX_CONFIG).unwrap(),
+            VIRTIO_MSI_NO_VECTOR,
+            "a configuration change raises the function's line"
+        );
     }
 
     #[test]

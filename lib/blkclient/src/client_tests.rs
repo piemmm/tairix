@@ -2,6 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::*;
+use tairix_abi::driver::block::BlockClass;
 
 /// A scripted serving driver: a device whose block content is a
 /// deterministic function of the byte address for reads, filled straight
@@ -12,7 +13,7 @@ struct MemDevice {
     block_size: u32,
     block_count: u64,
     flags: u32,
-    class: BlkDeviceClass,
+    medium: Option<BlkMedium>,
     calls: Vec<BlkRequest>,
     /// The per-request deadline each exchange was given, so a test can
     /// prove the wait bound follows the device's own class rather than a
@@ -24,10 +25,13 @@ struct MemDevice {
     written: Vec<(u64, Vec<u8>)>,
 }
 
-/// The class the scripted device declares. Deliberately not the
+/// The medium the scripted device declares. Deliberately not the
 /// unclassified default, so a test asserting the client's budget proves
 /// the device was asked rather than assumed.
-const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
+const DEVICE_MEDIUM: BlkMedium = BlkMedium::UsbFlash;
+
+/// The class [`DEVICE_MEDIUM`] is served as.
+const DEVICE_CLASS: BlkDeviceClass = DEVICE_MEDIUM.class();
 /// The name the doubles declare, so a test asserting what the client reports
 /// proves it adopted the *device's* name rather than the unnamed placeholder.
 const DEVICE_NAME: &str = "fixture-blk";
@@ -54,7 +58,7 @@ impl BlkCall for MemDevice {
                 block_size: self.block_size,
                 block_count: self.block_count,
                 flags: self.flags,
-                class: Some(self.class),
+                medium: self.medium,
                 name: BlkDeviceName::new(DEVICE_NAME),
             }
             .encode(reply),
@@ -93,7 +97,7 @@ fn device(block_size: u32, block_count: u64, flags: u32) -> MemDevice {
         block_size,
         block_count,
         flags,
-        class: DEVICE_CLASS,
+        medium: Some(DEVICE_MEDIUM),
         calls: Vec::new(),
         deadlines: Vec::new(),
         written: Vec::new(),
@@ -107,9 +111,23 @@ fn connect_adopts_the_devices_declared_class_and_budget() {
     // the same class re-reported so a composition above inherits it.
     let mut window = vec![0u8; BLK_DATA_LEN];
     let client = RemoteBlock::connect_read_only(device(512, 64, 0), &mut window).expect("connects");
+    assert_eq!(client.medium(), Some(DEVICE_MEDIUM));
     assert_eq!(client.device_class(), DEVICE_CLASS);
     assert_eq!(client.budget, DEVICE_CLASS.budget());
     assert_ne!(DEVICE_CLASS.budget(), BlkDeviceClass::Virtual.budget());
+}
+
+#[test]
+fn a_device_that_declares_no_medium_is_unknown_and_bounded() {
+    let mut window = vec![0u8; BLK_DATA_LEN];
+    let undeclared = MemDevice {
+        medium: None,
+        ..device(512, 64, 0)
+    };
+    let client = RemoteBlock::connect_read_only(undeclared, &mut window).expect("connects");
+    assert_eq!(client.medium(), None);
+    assert_eq!(client.device_class(), BlkDeviceClass::Virtual);
+    assert_eq!(client.budget, BlkDeviceClass::Virtual.budget());
 }
 
 #[test]
@@ -279,7 +297,7 @@ fn an_error_completion_surfaces_as_a_typed_fault() {
                     block_size: 512,
                     block_count: 8,
                     flags: 0,
-                    class: Some(DEVICE_CLASS),
+                    medium: Some(DEVICE_MEDIUM),
                     name: BlkDeviceName::new(DEVICE_NAME),
                 }
                 .encode(reply)
@@ -314,7 +332,7 @@ fn a_truncated_or_corrupt_reply_fails_closed() {
                     block_size: 512,
                     block_count: 8,
                     flags: 0,
-                    class: Some(DEVICE_CLASS),
+                    medium: Some(DEVICE_MEDIUM),
                     name: BlkDeviceName::new(DEVICE_NAME),
                 }
                 .encode(reply)
@@ -351,7 +369,7 @@ fn a_truncated_or_corrupt_completion_on_a_write_fails_closed() {
                     block_size: 512,
                     block_count: 8,
                     flags: 0,
-                    class: Some(DEVICE_CLASS),
+                    medium: Some(DEVICE_MEDIUM),
                     name: BlkDeviceName::new(DEVICE_NAME),
                 }
                 .encode(reply)
@@ -388,7 +406,7 @@ impl BlkCall for FaultingDevice {
                 block_size: 512,
                 block_count: 64,
                 flags: 0,
-                class: Some(DEVICE_CLASS),
+                medium: Some(DEVICE_MEDIUM),
                 name: BlkDeviceName::new(DEVICE_NAME),
             }
             .encode(reply)
@@ -417,7 +435,7 @@ impl BlkCall for PromisingDevice {
                 block_size: 512,
                 block_count: 64,
                 flags: 0,
-                class: Some(DEVICE_CLASS),
+                medium: Some(DEVICE_MEDIUM),
                 name: BlkDeviceName::new(DEVICE_NAME),
             }
         } else {

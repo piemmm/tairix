@@ -13,20 +13,22 @@
 //! `tairix_util::defer::JobDesk`, the last linked into the target build
 //! alone); what is here is the one policy none covers.
 //!
-//! # The Properties read
+//! # The window reads
 //!
 //! A Properties window describes one node, which is one `fs_stat` plus one
 //! call per extended-attribute key — thirty-odd round trips for a node
-//! carrying a full set. [`PropertyReads`] is keyed by *window*, because
-//! several Properties windows are open at once and one window's read must not
-//! displace another's; a re-read of the same window supersedes its own
-//! outstanding one, since only the latest answer describes the node now.
+//! carrying a full set — and a drive's window reads the mount table and its
+//! device's counters once a second. [`WindowReads`] is keyed by *window*,
+//! because several are open at once and one window's read must not displace
+//! another's; a re-read of the same window supersedes its own outstanding one,
+//! since only the latest answer describes what it shows now.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::{EntryKind, Properties};
+use tairix_browse::{DriveSample, EntryKind, Properties};
 
 /// One browser window's directory-listing consumer.
 ///
@@ -65,11 +67,9 @@ impl FilesClient {
     }
 }
 
-/// One Properties window's read: the node to describe and which window asked.
+/// One Properties window's read: the node to describe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PropertyJob {
-    /// The window the answer belongs to.
-    pub window: u64,
     /// The node's absolute path, by the one spelling every read and write of
     /// it uses.
     pub path: String,
@@ -78,26 +78,53 @@ pub struct PropertyJob {
     pub kind: EntryKind,
 }
 
-/// What the Properties windows have asked to be read and what has come back.
+/// The reads the Properties windows have asked for, and their answers.
+pub type PropertyReads = WindowReads<PropertyJob, Result<Properties, Errno>>;
+
+/// One drive window's reading: the mount point it describes, by path
+/// components, so it is matched to the mount table however that spells it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DriveJob {
+    /// The mount point's root-first components.
+    pub mount_point: Vec<String>,
+}
+
+/// What reading a drive found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DriveReading {
+    /// The mount table answered. Boxed: a reading carries two records, and
+    /// a refusal nothing.
+    Read(Box<DriveSample>),
+    /// The mount table could not be read.
+    Unreadable,
+}
+
+/// The readings the drive windows have asked for, and their answers.
+pub type DriveReads = WindowReads<DriveJob, DriveReading>;
+
+/// What a set of windows have asked to be read off the loop and what has come
+/// back, one outstanding read and one answer per window.
 ///
-/// Free of locks, threads, and syscalls: the embedder supplies the exclusion
-/// and the blocking, so every rule here is a host test.
-#[derive(Debug, Default)]
-pub struct PropertyReads {
+/// Keyed by *window*, because several windows are open at once and one
+/// window's read must not displace another's; a window asking again
+/// supersedes its own outstanding read, since only the latest answer
+/// describes what it shows now.
+#[derive(Debug)]
+pub struct WindowReads<J, A> {
     /// Reads asked for and not yet started, in the order asked.
-    wanted: Vec<PropertyJob>,
+    wanted: Vec<(u64, J)>,
     /// Windows whose read is running, so a window closed mid-read is not
     /// answered into a slot nobody owns.
     reading: Vec<u64>,
     /// Answers waiting to be collected, one per window.
-    answers: Vec<(u64, Result<Properties, Errno>)>,
+    answers: Vec<(u64, A)>,
     /// Whether an answer has landed since the embedder last asked.
     landed: bool,
-    /// Set once the embedder is tearing down.
+    /// Set once the embedder is tearing down, or has no worker to answer.
     stopping: bool,
 }
 
-impl PropertyReads {
+impl<J, A> WindowReads<J, A> {
     /// A desk with nothing asked for and nothing answered.
     #[must_use]
     pub const fn new() -> Self {
@@ -110,20 +137,19 @@ impl PropertyReads {
         }
     }
 
-    /// Ask for `job`, answering whether a worker should be woken.
+    /// Ask for `job` on `window`'s behalf, answering whether a worker should
+    /// be woken.
     ///
-    /// A window's outstanding request is *replaced*: a re-read follows a write
-    /// the window just made, so the older answer describes a node that has
-    /// since changed and showing it would undo what the user did. Any answer
-    /// the window had not collected goes with it, for the same reason.
-    pub fn submit(&mut self, job: PropertyJob) -> bool {
+    /// A window's outstanding request is *replaced*, and any answer it had
+    /// not collected goes with it: the older answer describes what the window
+    /// has since moved past, and showing it would undo what the user did.
+    pub fn submit(&mut self, window: u64, job: J) -> bool {
         if self.stopping {
             return false;
         }
-        let window = job.window;
-        self.wanted.retain(|held| held.window != window);
+        self.wanted.retain(|(held, _)| *held != window);
         self.answers.retain(|(id, _)| *id != window);
-        self.wanted.push(job);
+        self.wanted.push((window, job));
         true
     }
 
@@ -133,23 +159,24 @@ impl PropertyReads {
         !self.stopping && !self.wanted.is_empty()
     }
 
-    /// Take the next read to run, or `None` when there is nothing to do.
-    pub fn next_job(&mut self) -> Option<PropertyJob> {
+    /// Take the next read to run and the window it is for, or `None` when
+    /// there is nothing to do.
+    pub fn next_job(&mut self) -> Option<(u64, J)> {
         if self.stopping || self.wanted.is_empty() {
             return None;
         }
-        let job = self.wanted.remove(0);
-        self.reading.push(job.window);
-        Some(job)
+        let (window, job) = self.wanted.remove(0);
+        self.reading.push(window);
+        Some((window, job))
     }
 
-    /// Record what reading `window`'s node produced, answering whether the
-    /// embedder's loop is owed a wake.
+    /// Record what `window`'s read produced, answering whether the embedder's
+    /// loop is owed a wake.
     ///
     /// An answer for a window that is no longer reading — it was closed, or
     /// asked again — is dropped: nothing owns the slot, and holding it would
-    /// leave a stale summary for the next window to be given that id.
-    pub fn deliver(&mut self, window: u64, answer: Result<Properties, Errno>) -> bool {
+    /// leave a stale answer for the next window to be given that id.
+    pub fn deliver(&mut self, window: u64, answer: A) -> bool {
         let Some(index) = self.reading.iter().position(|id| *id == window) else {
             return false;
         };
@@ -157,14 +184,27 @@ impl PropertyReads {
         if self.stopping {
             return false;
         }
-        self.answers.retain(|(id, _)| *id != window);
-        self.answers.push((window, answer));
-        self.landed = true;
+        self.keep(window, answer);
         true
     }
 
+    /// Record an answer read on the asking thread because no worker will:
+    /// collected exactly as a worker's is, so a machine that grants no worker
+    /// shows the same window, later, rather than one that waits for ever.
+    pub fn answer_here(&mut self, window: u64, answer: A) {
+        self.wanted.retain(|(held, _)| *held != window);
+        self.reading.retain(|id| *id != window);
+        self.keep(window, answer);
+    }
+
+    fn keep(&mut self, window: u64, answer: A) {
+        self.answers.retain(|(id, _)| *id != window);
+        self.answers.push((window, answer));
+        self.landed = true;
+    }
+
     /// Take `window`'s answer, if one has landed.
-    pub fn take(&mut self, window: u64) -> Option<Result<Properties, Errno>> {
+    pub fn take(&mut self, window: u64) -> Option<A> {
         let index = self.answers.iter().position(|(id, _)| *id == window)?;
         Some(self.answers.remove(index).1)
     }
@@ -178,11 +218,11 @@ impl PropertyReads {
     /// Forget everything `window` asked for, because it has closed.
     ///
     /// A read already running is left to finish and its answer dropped on
-    /// delivery: a worker mid-`fs_stat` cannot be recalled, and the alternative
-    /// is a window id that could be reused while an answer for it is still in
+    /// delivery: a worker mid-read cannot be recalled, and the alternative is
+    /// a window id that could be reused while an answer for it is still in
     /// flight.
     pub fn forget(&mut self, window: u64) {
-        self.wanted.retain(|job| job.window != window);
+        self.wanted.retain(|(held, _)| *held != window);
         self.answers.retain(|(id, _)| *id != window);
         self.reading.retain(|id| *id != window);
     }
@@ -193,6 +233,12 @@ impl PropertyReads {
         self.wanted.clear();
         self.answers.clear();
         self.landed = false;
+    }
+}
+
+impl<J, A> Default for WindowReads<J, A> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

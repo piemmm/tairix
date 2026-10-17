@@ -345,15 +345,12 @@ can never diverge in navigation semantics, listing policy, or look.
   indicator shows; the total is unknown until the reads reveal it, so no
   fabricated percentage. This is the browser engine's own component-path
   traversal, distinct from `rm`'s coreutils removal engine — two consumers with
-  two data models, not one algorithm copied twice. The drawn verb is the
-  renderer's `build_delete_dialog` (a `lib/controls` `Dialog` naming the honest
-  target count and warning about folders, with the Action Warmth on the safe
-  Cancel, never the destructive Delete), `modal_dialog_rect` (centred/clamped
-  bounds), `draw_modal_dialog`, and the mirror `modal_dialog_action_at`
-  hit-test resolving a press to the Delete or Cancel button (`DELETE_CONFIRM_INDEX`
-  / `DELETE_CANCEL_INDEX`); the files app opens it on `Delete`, confirms with
-  `Enter`/Delete and cancels with `Escape`/Cancel, then drives the `DeleteWalk`
-  to completion over the user's own `fs_readdir`/`fs_unlink`. Only the write-capable
+  two data models, not one algorithm copied twice. The question asked first is
+  the renderer's `delete_alert`, a desktop alert naming the honest target count
+  and warning about folders; its answers are indexed by `DELETE_CONFIRM_INDEX`
+  and `DELETE_CANCEL_INDEX`. The files app asks it on `Delete` and, on the
+  removal's answer, drives the `DeleteWalk` to completion over the user's own
+  `fs_readdir`/`fs_unlink`. Only the write-capable
   file manager builds and drives it — the read-only picker never deletes.
 - **Move to Trash** (`trash`, `plans/NEW-FILEMANAGER.md` FM10): the pure model
   of a *recoverable* delete — a delete is reversible when that costs nothing.
@@ -373,11 +370,11 @@ can never diverge in navigation semantics, listing policy, or look.
   performs the `fs_stat`/`fs_rename` under the user's own identity), so the
   read-only picker never runs it. `trash_dir` spells the fixed `Library/Trash`
   subtree of the user's home — the one definition the app and its QEMU witness
-  share so where a trashed item lands cannot drift. The confirmation dialog is
-  disposition-aware: `DeleteDisposition` (threaded into `build_delete_dialog`)
-  picks a safe, recoverable *Move to Trash* wording or the destructive *Delete
-  Permanently* wording, so what the dialog promises always matches what the
-  confirmed delete does (the app decides the disposition from the targets' and
+  share so where a trashed item lands cannot drift. The delete question is
+  disposition-aware: `DeleteDisposition` (passed to `delete_alert`) asks a
+  recoverable *Move to Trash*, its default answer, or warns of a destructive
+  *Delete Permanently*, which `Enter` never chooses, so what the question
+  promises always matches what the confirmed delete does (the app decides the disposition from the targets' and
   Trash's `VolumeId`s via `trash_strategy`, FM10b). `empty_trash_plan`
   (`plans/NEW-FILEMANAGER.md` FM11) models the irreversible counterpart —
   emptying the Trash: it turns the Trash directory's listing into a
@@ -455,10 +452,11 @@ can never diverge in navigation semantics, listing policy, or look.
     guessed at into a row that would navigate somewhere else, and no stale
     volume row is ever fabricated.
   - **The medium is real data.** Each volume carries the storage medium its
-    backing device actually reports (the mount record's `BlkDeviceClass`), and
-    `tairix_icon::disk_icon` maps it to the shipped artwork — rotational,
-    solid-state, and removable each draw their own drive icon, while a
-    paravirtual or absent class draws the generic drive glyph. A USB stick can
+    backing device actually declares (the mount record's `BlkMedium`), and
+    `tairix_icon::disk_icon` maps it to the shipped artwork — a hard disk, an
+    SSD, an NVMe drive, a USB flash drive, a USB disk and an SD card each draw
+    their own drive icon, while a paravirtual or unknown medium draws the
+    generic drive. A USB stick can
     never masquerade as an internal disk, and nothing here classifies a device
     by its name or by guesswork.
   - **Below the toolbar, on the listing's row grid.** The command toolbar is

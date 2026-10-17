@@ -48,7 +48,7 @@
 use alloc::sync::Arc;
 use core::ops::Deref;
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
@@ -75,13 +75,13 @@ pub struct SharedBlock<B: Block> {
     /// The device geometry, queried once at construction. Immutable for the
     /// life of a disk, so it is served lock-free.
     geometry: BlockGeometry,
-    /// The device's declared class, read once at construction. A pure
+    /// The device's declared medium, read once at construction. A pure
     /// property of the hardware, so it is served lock-free like the
     /// geometry, and forwarded rather than defaulted so a consumer above
     /// this sharing boundary still derives the real device's I/O budget.
-    class: BlkDeviceClass,
+    medium: Option<BlkMedium>,
     /// The device's own name, read once at construction and served lock-free
-    /// like the class, so a consumer above this boundary reports the disk
+    /// like the medium, so a consumer above this boundary reports the disk
     /// rather than whatever sits on it.
     name: BlkDeviceName,
 }
@@ -96,12 +96,12 @@ impl<B: Block> SharedBlock<B> {
     /// no handle can be handed out for an unusable device (fail closed).
     pub fn new(device: B) -> Result<Self, DriverError> {
         let geometry = device.geometry()?;
-        let class = device.device_class();
+        let medium = device.medium();
         let name = device.device_name();
         Ok(Self {
             device: SleepLock::new(device),
             geometry,
-            class,
+            medium,
             name,
         })
     }
@@ -112,10 +112,10 @@ impl<B: Block> SharedBlock<B> {
         self.geometry
     }
 
-    /// The device's declared class (lock-free; see the module docs).
+    /// The device's declared medium (lock-free; see the module docs).
     #[must_use]
-    pub fn device_class(&self) -> BlkDeviceClass {
-        self.class
+    pub fn medium(&self) -> Option<BlkMedium> {
+        self.medium
     }
 
     /// The device's own name (lock-free; see the module docs).
@@ -171,7 +171,7 @@ impl<B: Block> SharedBlock<B> {
 // `Send + Sync` here is sound because:
 //   1. **Exclusive access.** Every byte-moving operation on the contained
 //      device goes through `self.device.lock()` (the cached `geometry` and
-//      `class` are the only lock-free fields, and both are immutable `Copy`
+//      `medium` are the only lock-free fields, and both are immutable `Copy`
 //      values), so `B` is never touched by two tasks at once — there is no
 //      data race on `B`'s interior, including any non-atomic bookkeeping it
 //      keeps. The `SleepLock` grants exclusive ownership for the whole
@@ -254,14 +254,14 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> SharedBlockHandle<R> {
 }
 
 impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R> {
-    /// The shared device's own class, so a consumer reached through this
+    /// The shared device's own medium, so a consumer reached through this
     /// window serves the real hardware's I/O budget rather than the
     /// unclassified default. Served from the cache, like the geometry.
-    fn device_class(&self) -> BlkDeviceClass {
-        self.shared.class
+    fn medium(&self) -> Option<BlkMedium> {
+        self.shared.medium
     }
 
-    /// The shared device's own name, served from the cache like the class:
+    /// The shared device's own name, served from the cache like the medium:
     /// a window is not a device of its own.
     fn device_name(&self) -> BlkDeviceName {
         self.shared.name
@@ -456,6 +456,10 @@ mod tests {
     }
 
     impl Block for MemBlock {
+        fn medium(&self) -> Option<BlkMedium> {
+            Some(BlkMedium::Nvme)
+        }
+
         fn geometry(&self) -> Result<BlockGeometry, DriverError> {
             Ok(self.geo)
         }
@@ -696,7 +700,8 @@ mod tests {
         // budget rather than the unclassified default.
         let shared = Arc::new(SharedBlock::new(MemBlock::new()).unwrap());
         let window = shared.owned_handle();
-        assert_eq!(window.device_class(), shared.device_class());
+        assert_eq!(shared.medium(), Some(BlkMedium::Nvme));
+        assert_eq!(window.medium(), Some(BlkMedium::Nvme));
         assert_eq!(window.geometry().unwrap(), shared.geometry());
     }
 

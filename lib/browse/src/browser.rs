@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use core::mem;
 
 use tairix_abi::Errno;
+use tairix_icon::IconKind;
 
 use crate::activate::{Activation, BundleIntent};
 use crate::clipboard::{Clipboard, ClipboardOp};
@@ -27,6 +28,7 @@ use crate::delete::DeletePlan;
 use crate::entry::{resolve_target, Entry, EntryKind, LinkTarget};
 use crate::error::BrowseError;
 use crate::layout::{BandMarks, ViewMode};
+use crate::places::{PlaceKind, Places};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
@@ -136,6 +138,10 @@ pub struct Browser<S: DirectorySource> {
     /// The ancestor a [`climb`](Self::climb) is waiting on, so a refusal that
     /// lands later climbs on from it rather than from the gone directory.
     climbing: Option<Vec<String>>,
+    /// Whether any entry may be drawn as a drive. Only marking sets a drive
+    /// and only carrying one across a re-read copies it, so while this is
+    /// clear a directory holding no volume root has nothing to unmark.
+    drives_shown: bool,
 }
 
 /// A navigation whose listing has not arrived yet: where it is going, and which
@@ -223,6 +229,7 @@ impl<S: DirectorySource> Browser<S> {
             pending,
             focus_intent: None,
             climbing: None,
+            drives_shown: false,
         })
     }
 
@@ -345,6 +352,46 @@ impl<S: DirectorySource> Browser<S> {
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Draw each listed entry that is the root of one of `places`' mounted
+    /// volumes as the drive that volume is on, and every other entry as what
+    /// it is, answering whether any entry's picture changed.
+    ///
+    /// Only a directory holding a volume root, or one just left by its last,
+    /// has anything to mark: any other costs one comparison per place. One
+    /// that does is a lookup per entry, so `/Storage` costs its entries times
+    /// the logarithm of its volumes, never their product.
+    pub fn mark_volume_roots(&mut self, places: &Places) -> bool {
+        let here = self.components.as_slice();
+        let mut roots: Vec<(&str, IconKind)> = places
+            .rows()
+            .iter()
+            .filter(|place| place.kind() == PlaceKind::Volume)
+            .filter_map(|place| match place.components().split_last() {
+                Some((leaf, parent)) if parent == here => Some((leaf.as_str(), place.icon())),
+                _ => None,
+            })
+            .collect();
+        if roots.is_empty() && !self.drives_shown {
+            return false;
+        }
+        roots.sort_unstable_by_key(|&(leaf, _)| leaf);
+        let (mut changed, mut shown) = (false, false);
+        for entry in &mut self.entries {
+            let drive = if entry.is_directory() {
+                roots
+                    .binary_search_by_key(&entry.name(), |&(leaf, _)| leaf)
+                    .ok()
+                    .map(|at| roots[at].1)
+            } else {
+                None
+            };
+            shown |= drive.is_some();
+            changed |= entry.set_drive(drive);
+        }
+        self.drives_shown = shown;
+        changed
     }
 
     /// Learn whether each plain directory in `range` holds anything, so the

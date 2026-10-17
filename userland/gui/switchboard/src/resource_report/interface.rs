@@ -19,13 +19,14 @@ use tairix_procinfo::{render_if_addr, render_server};
 use tairix_theme::SignalRole;
 
 use super::reading;
-use crate::model::{display_name, RateTrace, RollingMeters};
+use crate::model::{display_name, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice, Trace,
 };
+use tairix_controls::RateTrace;
 
 /// One interface's rail entry and pane.
 pub(super) fn device(

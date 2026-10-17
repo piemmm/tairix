@@ -1463,8 +1463,8 @@ both landed; `plans/SHELL.md` command execution):
    per-increment status and the load-bearing invariants, lives in
    `PLAN.md` ("Self-contained bundles"). Increments 1–4 are **done**: the
    canonical bundle content-hash framing (`lib/abi`), the per-crate
-   `AppInfo.toml` discovery walk + composer signing under the dedicated
-   `SYSTEM_APP_SIGNING_SEED`, the image/fixture planting of every signed
+   `AppInfo.toml` discovery walk + composer signing under the build key set's
+   app-signing seed (`tools/signkeys`), the image/fixture planting of every signed
    bundle, the shared `lib/appload` verification engine, and the `spawn` syscall loading + verifying store
    bundles from the mounted volume through `tairix_appload` — deriving the
    child's capability request from the on-disk manifest, parking a

@@ -1156,6 +1156,7 @@ dependencies = [
  "tairix-input",
  "tairix-log",
  "tairix-path",
+ "tairix-procinfo",
  "tairix-raster",
  "tairix-reclaim",
  "tairix-rt",
@@ -1194,6 +1195,7 @@ name = "tairix-cc"
 version = "0.0.0"
 dependencies = [
  "tairix-crypto",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2888,6 +2890,7 @@ dependencies = [
  "tairix-partition",
  "tairix-pci",
  "tairix-reclaim",
+ "tairix-signkeys",
  "tairix-supervisor",
  "tairix-sync",
  "tairix-sysconfig",
@@ -3364,6 +3367,7 @@ dependencies = [
  "tairix-syshelp",
  "tairix-timesync",
  "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3970,6 +3974,13 @@ dependencies = [
  "tairix-vt",
  "tairix-wallpaper",
  "tairix-window",
+]
+
+[[package]]
+name = "tairix-signkeys"
+version = "0.0.0"
+dependencies = [
+ "tairix-util",
 ]
 
 [[package]]
@@ -7781,6 +7792,7 @@ name = "tairix-textedit"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-binfmt",
  "tairix-browse",
  "tairix-buildcfg",
  "tairix-colour",
@@ -7789,6 +7801,7 @@ dependencies = [
  "tairix-geometry",
  "tairix-help",
  "tairix-input",
+ "tairix-log",
  "tairix-raster",
  "tairix-reclaim",
  "tairix-rng",
@@ -8307,7 +8320,6 @@ dependencies = [
  "tairix-appstore",
  "tairix-arch-api",
  "tairix-browse",
- "tairix-buildcfg",
  "tairix-cc",
  "tairix-colour",
  "tairix-controls",
@@ -8386,6 +8398,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-sandbox",
  "tairix-settings",
+ "tairix-signkeys",
  "tairix-sound",
  "tairix-soundd",
  "tairix-soundtheme",

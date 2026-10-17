@@ -3,6 +3,7 @@
 use super::{MemberDevice, MemberWindow};
 use crate::testkit::{MemberDisk, DEVICE_BLOCKS};
 
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::DriverError;
 
@@ -18,6 +19,14 @@ fn a_window_is_lent_to_one_client_at_a_time() {
     drop(lease);
     assert!(!window.is_lent(), "dropping the loan returns the window");
     assert!(window.lend().is_some());
+}
+
+#[test]
+fn a_member_device_reports_the_medium_of_the_disk_it_holds() {
+    let window = MemberWindow::new();
+    let lease = window.lend().expect("a free window is lent");
+    let device = MemberDevice::new(MemberDisk::new(DEVICE_BLOCKS), lease);
+    assert_eq!(device.medium(), Some(BlkMedium::UsbDisk));
 }
 
 #[test]

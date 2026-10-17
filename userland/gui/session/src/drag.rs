@@ -20,9 +20,11 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{DragItems, DropOperation, DropTarget};
+use tairix_abi::window_ipc::{AlertSeverity, AlertSpec, DragItems, DropOperation, DropTarget};
 use tairix_abi::Errno;
+use tairix_browse::media::{name_endings, MediaType};
 use tairix_controls::Tooltip;
 use tairix_geometry::{Point, Rect};
 use tairix_theme::{CursorKind, Theme};
@@ -37,13 +39,113 @@ use crate::shell::DesktopShell;
 /// *logical* pixels: clear of the cursor it follows.
 const PLATE_OFFSET: u32 = 14;
 
-/// How a carried drag ended: the window it began in, and where it was dropped.
+/// How a carried drag ended: the window it began in, where it was dropped,
+/// and why the slot it was dropped on refused it, when one did.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DragEnd {
     /// The window-channel id of the window the drag began in.
     pub source: u64,
     /// Where it was dropped.
     pub ended: DragConclusion,
+    /// Why the application whose slot it was dropped on does not open it,
+    /// for the desktop to say in that application's name.
+    pub refused: Option<Box<DropRefusal>>,
+}
+
+/// What a slot's application answers a drag with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SlotAnswer {
+    /// It opens the one file dragged. Boxed: a target carries a whole bundle
+    /// path, wider than every other surface.
+    Opens(Box<DropTarget>),
+    /// It does not, for the reason a drop there is answered with.
+    Refuses(Box<DropRefusal>),
+}
+
+/// Why an application does not take what was dropped on its slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DropRefusal {
+    app: String,
+    item: String,
+    one_file: bool,
+    opens: Vec<&'static str>,
+    more: bool,
+}
+
+/// The most file endings a refusal names before it says there are others.
+const OPENS_NAMED: usize = 8;
+
+impl DropRefusal {
+    /// `app`, which claims the media types `claims`, refusing what is led by
+    /// `item`: one file of a type it does not claim when `one_file`, else
+    /// several items or a folder.
+    #[must_use]
+    pub fn new(app: &str, item: &str, one_file: bool, claims: &[String]) -> Self {
+        let mut opens: Vec<&'static str> = Vec::new();
+        let mut more = false;
+        let endings = claims
+            .iter()
+            .filter_map(|claim| MediaType::from_media_str(claim))
+            .flat_map(name_endings)
+            .filter(|(mark, _)| *mark == '.')
+            .map(|(_, ending)| ending);
+        for ending in endings {
+            if opens.contains(&ending) {
+                continue;
+            }
+            if opens.len() == OPENS_NAMED {
+                more = true;
+                break;
+            }
+            opens.push(ending);
+        }
+        Self {
+            app: String::from(app),
+            item: String::from(item),
+            one_file,
+            opens,
+            more,
+        }
+    }
+
+    /// The application refusing, by its attested name.
+    #[must_use]
+    pub fn app(&self) -> &str {
+        &self.app
+    }
+
+    /// The alert the desktop states the refusal in, or `None` for a label no
+    /// alert can carry — a compiled-in word, so a defect the tests catch.
+    #[must_use]
+    pub fn spec(&self) -> Option<AlertSpec> {
+        let headline = format!("{} cannot open \u{201c}{}\u{201d}", self.app, self.item);
+        let detail = if !self.one_file {
+            format!(
+                "{} opens one file at a time, never a folder or several items at once.",
+                self.app
+            )
+        } else if self.opens.is_empty() {
+            format!("{} opens no files dropped on it.", self.app)
+        } else {
+            format!("{} opens files ending {}.", self.app, self.endings())
+        };
+        AlertSpec::acknowledged(AlertSeverity::Error, &headline, &detail).ok()
+    }
+
+    /// The endings the application opens, as a phrase.
+    fn endings(&self) -> String {
+        let named: Vec<String> = self
+            .opens
+            .iter()
+            .map(|ending| format!(".{ending}"))
+            .collect();
+        match (named.split_last(), self.more) {
+            (Some((last, [])), false) => last.clone(),
+            (Some((last, rest)), false) => format!("{} and {last}", rest.join(", ")),
+            (Some(_), true) => format!("{} and others", named.join(", ")),
+            (None, _) => String::new(),
+        }
+    }
 }
 
 /// What the pointer is over while a drag is carried, as the session resolves
@@ -57,9 +159,9 @@ pub enum DragSurface {
     Slot {
         /// The slot's index in the strip.
         index: usize,
-        /// What the slot's application does with the file. Boxed: a target
-        /// carries a whole bundle path, wider than every other surface.
-        target: Option<Box<DropTarget>>,
+        /// What the slot's application answers the drag with, or `None` for
+        /// a slot the desktop cannot vouch for.
+        answer: Option<SlotAnswer>,
     },
     /// One of the dragging application's own windows, at a point in it.
     Window {
@@ -69,6 +171,15 @@ pub enum DragSurface {
         x: u32,
         /// Window-local y.
         y: u32,
+    },
+    /// A window of another application: what it answers is what its slot at
+    /// `index` answers, since a window takes a drop as its application does.
+    AppWindow {
+        /// The application's slot in the strip.
+        index: usize,
+        /// What the application answers the drag with, or `None` when the
+        /// desktop cannot vouch for it.
+        answer: Option<SlotAnswer>,
     },
     /// The desktop, on the folder at `folder`; `icon` is the pinboard icon
     /// standing for that folder, if one does.
@@ -93,6 +204,12 @@ pub enum DragPlace {
         /// The slot's index in the strip.
         index: usize,
     },
+    /// A window of the application at slot `index`, which is not the one
+    /// dragging.
+    AppWindow {
+        /// The application's slot in the strip.
+        index: usize,
+    },
     /// One of the dragging application's own windows, at a point in it.
     Window {
         /// The window under the pointer.
@@ -112,6 +229,35 @@ pub enum DragPlace {
     },
 }
 
+/// What a carried drag finds over a window: who owns it, and whether an
+/// alert holds it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WindowUnder {
+    /// The dragging application's own window, at a window-local point in its
+    /// client, or `None` over its furniture.
+    Own(Option<(u32, u32)>),
+    /// Another application's window, that application at slot `index` when
+    /// the strip shows it.
+    Foreign(Option<usize>),
+}
+
+impl DragPlace {
+    /// Where a drag over window-channel window `window_id` lands: nothing
+    /// while an alert holds the window — it takes nothing until answered —
+    /// else the window itself for the dragging application's own, else the
+    /// other application's slot.
+    #[must_use]
+    pub const fn over_window(window_id: u64, held: bool, under: WindowUnder) -> Self {
+        match (held, under) {
+            (true, _) | (false, WindowUnder::Own(None) | WindowUnder::Foreign(None)) => {
+                Self::Nothing
+            }
+            (false, WindowUnder::Own(Some((x, y)))) => Self::Window { window_id, x, y },
+            (false, WindowUnder::Foreign(Some(index))) => Self::AppWindow { index },
+        }
+    }
+}
+
 impl DragSurface {
     /// The place this is what is over.
     #[must_use]
@@ -119,6 +265,7 @@ impl DragSurface {
         match *self {
             Self::Nothing => DragPlace::Nothing,
             Self::Slot { index, .. } => DragPlace::Slot { index },
+            Self::AppWindow { index, .. } => DragPlace::AppWindow { index },
             Self::Window { window_id, x, y } => DragPlace::Window { window_id, x, y },
             Self::Desktop { icon, revision, .. } => DragPlace::Desktop { icon, revision },
         }
@@ -129,7 +276,8 @@ impl DragSurface {
     fn same_place(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Nothing, Self::Nothing) => true,
-            (Self::Slot { index: a, .. }, Self::Slot { index: b, .. }) => a == b,
+            (Self::Slot { index: a, .. }, Self::Slot { index: b, .. })
+            | (Self::AppWindow { index: a, .. }, Self::AppWindow { index: b, .. }) => a == b,
             (Self::Window { window_id: a, .. }, Self::Window { window_id: b, .. }) => a == b,
             (Self::Desktop { folder: a, .. }, Self::Desktop { folder: b, .. }) => a == b,
             _ => false,
@@ -332,7 +480,7 @@ impl DesktopShell {
         let lit = match &next {
             DragSurface::Slot {
                 index,
-                target: Some(_),
+                answer: Some(SlotAnswer::Opens(_)),
             } => Some(*index),
             _ => None,
         };
@@ -442,7 +590,10 @@ impl DesktopShell {
         let Some(carried) = self.drag.carried.as_mut() else {
             return;
         };
-        if matches!(carried.over, DragSurface::Slot { .. }) {
+        if matches!(
+            carried.over,
+            DragSurface::Slot { .. } | DragSurface::AppWindow { .. }
+        ) {
             carried.over = DragSurface::Nothing;
         }
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
@@ -474,16 +625,21 @@ impl DesktopShell {
         self.session_mut().taskbar_mut().set_drop_slot(None, scale);
         self.cursor_mut().hold(None);
         self.refresh_cursor(compositor);
-        let ended = match (dropped, &carried.over, carried.shown) {
-            (
-                true,
-                DragSurface::Slot {
-                    target: Some(target),
-                    ..
-                },
-                _,
-            ) => DragConclusion::Application(target.clone()),
-            (true, &DragSurface::Window { window_id, x, y }, Some(operation)) => {
+        let answer = match &carried.over {
+            DragSurface::Slot { answer, .. } | DragSurface::AppWindow { answer, .. } => {
+                answer.as_ref()
+            }
+            _ => None,
+        };
+        let refused = match (dropped, answer) {
+            (true, Some(SlotAnswer::Refuses(refusal))) => Some(refusal.clone()),
+            _ => None,
+        };
+        let ended = match (dropped, answer, &carried.over, carried.shown) {
+            (true, Some(SlotAnswer::Opens(target)), _, _) => {
+                DragConclusion::Application(target.clone())
+            }
+            (true, _, &DragSurface::Window { window_id, x, y }, Some(operation)) => {
                 DragConclusion::Window {
                     window_id,
                     x,
@@ -491,15 +647,18 @@ impl DesktopShell {
                     operation,
                 }
             }
-            (true, DragSurface::Desktop { .. }, Some(operation)) => match carried.desktop_serial {
-                Some(serial) => DragConclusion::Desktop { serial, operation },
-                None => DragConclusion::Nothing,
-            },
+            (true, _, DragSurface::Desktop { .. }, Some(operation)) => {
+                match carried.desktop_serial {
+                    Some(serial) => DragConclusion::Desktop { serial, operation },
+                    None => DragConclusion::Nothing,
+                }
+            }
             _ => DragConclusion::Nothing,
         };
         Some(DragEnd {
             source: carried.source,
             ended,
+            refused,
         })
     }
 

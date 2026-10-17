@@ -214,6 +214,57 @@ impl ControllerHealth {
 /// recovery delay, not a capacity or a poll interval.
 const SKIPPED_PORT_RETRY_NS: u64 = 1_000_000_000;
 
+/// How long a path whose endpoint recovery failed is left to settle before
+/// its recovery is retried (`UsbDevice::retry_owed_recoveries`).
+///
+/// A transaction translator disturbed for a moment recovers within
+/// milliseconds; half a second covers that and a device riding out a brownout,
+/// while a keyboard's pause still reads as a hiccup. A one-shot recovery
+/// delay, not a capacity or a poll interval.
+pub const RECOVERY_SETTLE_NS: u64 = 500_000_000;
+
+/// A deadline armed once and taken once, read against the caller's monotonic
+/// clock, so every schedule built on it is proven host-side.
+#[derive(Default)]
+pub struct OneShot {
+    due_ns: Option<u64>,
+}
+
+impl OneShot {
+    /// Arm the deadline `after_ns` past `now_ns`, unless one is armed already:
+    /// a second arm never postpones the first.
+    pub fn arm(&mut self, now_ns: u64, after_ns: u64) {
+        if self.due_ns.is_none() {
+            self.due_ns = Some(now_ns.saturating_add(after_ns));
+        }
+    }
+
+    /// The **relative** one-shot timeout (nanoseconds from `now_ns`) the
+    /// serve loop should bound its park by, or [`None`] while unarmed.
+    /// Saturates at zero once due, so an already-elapsed deadline wakes the
+    /// loop immediately rather than parking it again.
+    #[must_use]
+    pub fn wait_timeout(&self, now_ns: u64) -> Option<u64> {
+        self.due_ns.map(|due| due.saturating_sub(now_ns))
+    }
+
+    /// Whether a deadline is armed.
+    #[must_use]
+    pub const fn is_armed(&self) -> bool {
+        self.due_ns.is_some()
+    }
+
+    /// Whether the deadline is due at `now_ns`, disarming it if so, so the
+    /// caller acts on it exactly once.
+    pub fn take_if_due(&mut self, now_ns: u64) -> bool {
+        if self.due_ns.is_some_and(|due| now_ns >= due) {
+            self.due_ns = None;
+            return true;
+        }
+        false
+    }
+}
+
 /// The **single** deferred re-attach the driver owes a port the bring-up walk
 /// could not serve.
 ///
@@ -228,8 +279,8 @@ const SKIPPED_PORT_RETRY_NS: u64 = 1_000_000_000;
 /// the schedule is proven host-side.
 #[derive(Default)]
 pub struct SkippedPortRetry {
-    /// The monotonic deadline, once armed and while still pending.
-    due_ns: Option<u64>,
+    /// The deadline, once armed and while still pending.
+    due: OneShot,
     /// Whether the one attempt has been spent, so it is never armed again.
     spent: bool,
 }
@@ -238,42 +289,78 @@ impl SkippedPortRetry {
     /// Arm the retry to come due a second or so after `now_ns`, unless it
     /// has already been armed or spent.
     pub fn arm(&mut self, now_ns: u64) {
-        if self.spent || self.due_ns.is_some() {
-            return;
+        if !self.spent {
+            self.due.arm(now_ns, SKIPPED_PORT_RETRY_NS);
         }
-        self.due_ns = Some(now_ns.saturating_add(SKIPPED_PORT_RETRY_NS));
     }
 
-    /// The **relative** one-shot timeout (nanoseconds from `now_ns`) the
-    /// serve loop should bound its park by, or [`None`] when nothing is
-    /// pending. Saturates at zero once due, so an already-elapsed deadline
-    /// wakes the loop immediately rather than parking it again.
+    /// As [`OneShot::wait_timeout`].
     #[must_use]
     pub fn wait_timeout(&self, now_ns: u64) -> Option<u64> {
-        self.due_ns.map(|due| due.saturating_sub(now_ns))
+        self.due.wait_timeout(now_ns)
     }
 
     /// Whether the re-attach is still owed: armed and not yet spent.
     #[must_use]
     pub const fn is_pending(&self) -> bool {
-        self.due_ns.is_some()
+        self.due.is_armed()
     }
 
     /// Whether the retry is due at `now_ns`, spending it if so — so the
     /// caller performs the re-attach exactly once.
     pub fn take_if_due(&mut self, now_ns: u64) -> bool {
-        if self.due_ns.is_some_and(|due| now_ns >= due) {
-            self.due_ns = None;
-            self.spent = true;
-            return true;
-        }
-        false
+        let due = self.due.take_if_due(now_ns);
+        self.spent |= due;
+        due
     }
+}
+
+/// Whether the serve loop owes its timer work after a wake: the wait timed
+/// out, or one of the timers is due though an event woke the loop. A loop
+/// kept busy by interrupts never times out, so timers left for a quiet wake
+/// would never be spent under load.
+#[must_use]
+pub fn timer_work_due(
+    timed_out: bool,
+    now_ns: u64,
+    (health, port_retry, recovery_retry): (&ControllerHealth, &SkippedPortRetry, &OneShot),
+) -> bool {
+    timed_out
+        || [
+            health.wait_timeout(now_ns),
+            port_retry.wait_timeout(now_ns),
+            recovery_retry.wait_timeout(now_ns),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|left| left == 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_due_timer_is_spent_after_an_event_wake_as_after_a_quiet_one() {
+        let health = ControllerHealth::new(0);
+        let port_retry = SkippedPortRetry::default();
+        let mut recovery_retry = OneShot::default();
+        let timers = |retry: &OneShot| timer_work_due(false, 1_000, (&health, &port_retry, retry));
+        assert!(!timers(&recovery_retry), "nothing armed, nothing owed");
+        recovery_retry.arm(0, 2_000);
+        assert!(!timers(&recovery_retry), "armed, not yet due");
+        let mut due = OneShot::default();
+        due.arm(0, 500);
+        assert!(
+            timers(&due),
+            "an event wake past the deadline still spends the timer"
+        );
+        assert!(timer_work_due(
+            true,
+            0,
+            (&health, &port_retry, &recovery_retry)
+        ));
+    }
 
     /// The grace window's midpoint and just past its end, for driving the
     /// window in tests.
@@ -431,6 +518,32 @@ mod tests {
         retry.arm(0);
         retry.arm(SKIPPED_PORT_RETRY_NS);
         assert_eq!(retry.wait_timeout(0), Some(SKIPPED_PORT_RETRY_NS));
+    }
+
+    #[test]
+    fn a_one_shot_is_taken_once_and_can_then_be_armed_again() {
+        // The recovery retry runs a round per owed recovery, so unlike the
+        // skipped-port retry its deadline is armed afresh once taken.
+        let mut shot = OneShot::default();
+        assert!(!shot.is_armed());
+        assert_eq!(shot.wait_timeout(0), None);
+        shot.arm(10, RECOVERY_SETTLE_NS);
+        shot.arm(20, RECOVERY_SETTLE_NS);
+        assert_eq!(
+            shot.wait_timeout(10),
+            Some(RECOVERY_SETTLE_NS),
+            "a second arm keeps the first deadline"
+        );
+        assert!(!shot.take_if_due(10 + RECOVERY_SETTLE_NS - 1));
+        assert!(shot.take_if_due(10 + RECOVERY_SETTLE_NS));
+        assert!(!shot.is_armed());
+        assert!(!shot.take_if_due(u64::MAX), "taken once");
+        shot.arm(u64::MAX, RECOVERY_SETTLE_NS);
+        assert_eq!(
+            shot.wait_timeout(u64::MAX),
+            Some(0),
+            "armed again, saturating rather than wrapping"
+        );
     }
 
     #[test]

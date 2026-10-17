@@ -72,6 +72,7 @@ pub mod frames;
 #[cfg(feature = "rt")]
 pub mod mailbox;
 pub mod menu;
+pub mod notices;
 pub mod park;
 pub mod server;
 
@@ -91,7 +92,7 @@ pub use frames::WindowFrames;
 #[cfg(feature = "rt")]
 pub use mailbox::EventMailbox;
 pub use server::{
-    client_frame_budget_bytes, Activation, CallerIdentity, ClientRegion, CursorSetName,
+    client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
     DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry, PickedFile,
     PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizing,
     WINDOW_REPLY_MAX,

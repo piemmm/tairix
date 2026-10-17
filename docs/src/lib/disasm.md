@@ -15,9 +15,13 @@ them).
 ## The shared vocabulary
 
 Every ISA module produces the same output type, `Insn`: the instruction's
-address, its encoding bytes (capped at `MAX_INSN_BYTES`), its exact byte
-`length`, mnemonic and operand text, and the resolved absolute target of a
-direct branch/call. A decoder is a **pure function of a byte slice and a
+address, its encoding bytes (capped at `MAX_INSN_BYTES`, the longest native
+encoding), its exact byte `length`, mnemonic and operand text, and the
+resolved absolute target of a direct branch/call. Each module states the most
+bytes one of its instructions can take (`MAX_INSN_LEN`: 15 on x86_64, 4 on
+A64, 8 on riscv64, a `br_table` of `MAX_BR_TABLE_TARGETS` labels on wasm), so a
+caller decoding a window knows how much of its end could hold a cut
+instruction. A decoder is a **pure function of a byte slice and a
 start address** — no state, no I/O — and it always makes forward progress
 (length ≥ 1 unit), so a walk over arbitrary bytes terminates and never reads
 past the slice.

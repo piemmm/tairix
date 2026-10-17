@@ -8,6 +8,7 @@ use super::*;
 use crate::gpt::{self, ENTRY_LEN, TYPE_GUID_ARXFS_ROOT, TYPE_GUID_EFI_SYSTEM};
 use crate::mbr::{self, MbrError, MBR_SECTOR_LEN};
 use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::driver::block::BlockClass;
 use tairix_abi::driver::block::{
     Block, BlockGeometry, DeviceHealth, DiscardCapability, HealthSnapshot,
 };
@@ -510,8 +511,8 @@ impl Block for TelemetryBlock {
         self.inner.flush()
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::Rotational
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(BlkMedium::HardDisk)
     }
 
     fn backing_availability(&self) -> MountAvailability {
@@ -650,6 +651,7 @@ fn window_reports_the_underlying_disks_class_and_health() {
     };
     let win = PartitionBlock::new(dev, 10, 4).expect("window fits");
 
+    assert_eq!(win.medium(), Some(BlkMedium::HardDisk));
     assert_eq!(win.device_class(), BlkDeviceClass::Rotational);
     let DeviceHealth::Available(snapshot) = win.device_health().expect("health forwards") else {
         panic!("the window must not swallow the disk's telemetry");

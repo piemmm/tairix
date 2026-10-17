@@ -1649,7 +1649,20 @@ impl Compositor {
         origin: Point,
         surface: Surface,
     ) -> Option<WindowId> {
-        self.add_transient(parent, origin, surface, false)
+        self.add_transient(parent, origin, surface, false, true)
+    }
+
+    /// Add `surface` as a transient of `parent` at `origin`, stacked directly
+    /// above its family **where that family stands**: an alert raised by a
+    /// window the user is not working in waits with it rather than lifting it
+    /// over the work they are doing. `None` for an unknown `parent`.
+    pub fn add_transient_window_in_place(
+        &mut self,
+        parent: WindowId,
+        origin: Point,
+        surface: Surface,
+    ) -> Option<WindowId> {
+        self.add_transient(parent, origin, surface, false, false)
     }
 
     /// Add `surface` as a *floating* transient of `parent` — a tool window —
@@ -1664,10 +1677,11 @@ impl Compositor {
         origin: Point,
         surface: Surface,
     ) -> Option<WindowId> {
-        self.add_transient(parent, origin, surface, true)
+        self.add_transient(parent, origin, surface, true, true)
     }
 
-    /// Add a transient of `parent`, floating beside it when `floating`.
+    /// Add a transient of `parent`, floating beside it when `floating`, and
+    /// bring the family to the front when `raise`.
     ///
     /// A transient of a transient — a tooltip or a menu over a tool window —
     /// joins its owner's family, so every family stays one level deep and
@@ -1678,6 +1692,7 @@ impl Compositor {
         origin: Point,
         surface: Surface,
         floating: bool,
+        raise: bool,
     ) -> Option<WindowId> {
         let parent = self.family_root(parent);
         let above = self.family_top(parent)?;
@@ -1695,7 +1710,9 @@ impl Compositor {
         let footprint = window.footprint(self.shadow.reach());
         self.windows.insert(above, window);
         self.mark_layer(id, footprint);
-        self.restack_family(parent, StackTarget::Front);
+        if raise {
+            self.restack_family(parent, StackTarget::Front);
+        }
         Some(id)
     }
 

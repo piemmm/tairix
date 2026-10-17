@@ -8,11 +8,10 @@
 //! converts the linked PIE ELF to an `rxe` image (relocated for the
 //! production user-image bias and stamped with the kernel's compiled-in
 //! syscall CFI tag), and wraps that `rxe` as the signed payload of a
-//! `kind = UserSpace` [`DriverManifest`]. The bundle is signed with the
-//! kernel's own driver-signing seed
-//! ([`build_support::KERNEL_DRIVER_SIGNING_SEED`], the single source the
-//! kernel derives its embedded trust anchor from), so the
-//! booted kernel admits it through the signed load gate.
+//! `kind = UserSpace` [`DriverManifest`]. The bundle is signed with the build
+//! key set's driver-signing seed (`tools/signkeys`), the key the kernel's
+//! build derives its embedded trust anchor from, so the booted kernel admits
+//! it through the signed load gate.
 //!
 //! The signed-bundle composer and the ELF->rxe converter are the shared
 //! definitions the kernel `build.rs` and the autoload fixtures also use
@@ -29,26 +28,11 @@ use tairix_itest_harness::pie::PieArch;
 use tairix_itest_harness::USER_IMAGE_BIAS;
 
 use tairix_mkimage::ImageProfile;
+use tairix_signkeys::Domain;
 
 use super::image_apps::{memo_slot, AppStoreFile, MEMO_SLOTS};
 use super::pie_build::cross_compile_pie_elf;
 use crate::Context;
-
-/// The single source of the kernel's driver-signing seed:
-/// the kernel build signs its embedded in-kernel manifests with it and derives
-/// the `KERNEL_DRIVER_SIGNER_PUBKEY` trust anchor from it, so a bundle signed
-/// here with the same seed is admitted by the booted kernel's load gate. The
-/// `#[path]` include carries the build script's target-selection helpers too,
-/// which this module does not use.
-//
-// `broken_intra_doc_links` is allowed because this is a foreign shared source
-// file authored to live in the `tairix-kernel` crate (the single source of the
-// seed); its own `//!`/item doc links resolve in that crate,
-// not when it is re-included here as a submodule. Suppressing the check is
-// scoped to this included file and silences none of this module's own docs.
-#[allow(dead_code, rustdoc::broken_intra_doc_links)]
-#[path = "../../../../kernel/tairix-kernel/src/build_support.rs"]
-pub(crate) mod build_support;
 
 /// Store path of the `VideoCore` mailbox service-driver bundle, **relative to
 /// the `/System` volume root** (whose root *is* `/System`, design B). The
@@ -244,8 +228,9 @@ fn build_bundle(
     )
     .map_err(|e| format!("image: convert {package} driver ELF to rxe: {e}"))?;
 
+    let keys = ctx.signing_keys().map_err(|e| format!("image: {e}"))?;
     let signed = build_signed_driver_image(
-        &build_support::KERNEL_DRIVER_SIGNING_SEED,
+        keys.seed(Domain::DriverSigning),
         DriverKind::UserSpace,
         caps,
         bind_keys,
@@ -1595,9 +1580,9 @@ fn store_file(path: &[&[u8]], bytes: Vec<u8>) -> AppStoreFile {
 /// broken cross-compile/sign step fails the image build loudly instead of
 /// emitting an image whose driver the kernel would reject at boot. The
 /// signature *verifies* against the kernel's embedded anchor by construction
-/// (it is signed with the same `KERNEL_DRIVER_SIGNING_SEED` the kernel
-/// derives that anchor from); the end-to-end signed-gate→spawn path is proven
-/// by the `-M virt` autoload vertical.
+/// (it is signed with the key set the kernel's build derives that anchor
+/// from); the end-to-end signed-gate→spawn path is proven by the `-M virt`
+/// autoload vertical.
 ///
 /// # Errors
 ///
@@ -1648,6 +1633,9 @@ mod tests {
     /// table, so its exact bytes are irrelevant to these tests.
     const STUB_PAYLOAD: &[u8] = b"payload-stub";
 
+    /// Any key: neither the store scan nor the match checks a signature.
+    const STUB_SIGNING_SEED: [u8; 32] = [0x5a; 32];
+
     /// The `/`-joined string the store scanner addresses a bundle by,
     /// derived from its single store-path definition so the scan address and
     /// the plant path cannot drift.
@@ -1664,7 +1652,7 @@ mod tests {
     /// the matching autoload builder signs into the shipped bundle.
     fn sign(bind_keys: &[DriverBindKey]) -> Vec<u8> {
         build_signed_driver_image(
-            &build_support::KERNEL_DRIVER_SIGNING_SEED,
+            &STUB_SIGNING_SEED,
             DriverKind::UserSpace,
             &[],
             bind_keys,

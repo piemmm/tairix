@@ -920,19 +920,24 @@ fn a_dragged_plate_keeps_its_position_when_the_chain_re_places() {
     );
 }
 
-// --- the information panel -----------------------------------------------
+// --- the information sheet -----------------------------------------------
 
-/// A model whose second row opens the desktop's own information panel.
+/// The sheet an attested application named `App` states.
+fn about_app() -> tairix_controls::AboutSheet {
+    tairix_controls::AboutSheet::new(
+        "App",
+        "1.0",
+        Some(String::from("Does one thing well.")),
+        FactList::new(alloc::vec![Fact::new("Author", "TAIRiX")]),
+        tairix_icon::IconKind::AppBundle,
+    )
+}
+
+/// A model whose second row opens the desktop's own information sheet.
 fn info_model() -> ChainModel {
     let mut model = ChainModel::new("Attested");
     model.push(ChainRow::item(id(1), MenuItem::new("One")));
-    model.push(ChainRow::info(
-        MenuItem::new("Info"),
-        FactList::new(alloc::vec![
-            Fact::new("Name", "App"),
-            Fact::new("Version", "1.0"),
-        ]),
-    ));
+    model.push(ChainRow::info(MenuItem::new("Info"), about_app()));
     model
 }
 
@@ -1263,8 +1268,7 @@ fn an_information_row_without_an_attested_identity_is_left_out() {
     let bare = ChainModel::from_app_menu("App", &wire, None);
     assert_eq!(bare.rows().len(), 1, "no identity, no panel to open");
 
-    let facts = FactList::new(alloc::vec![Fact::new("Name", "App")]);
-    let attested = ChainModel::from_app_menu("App", &wire, Some(&facts));
+    let attested = ChainModel::from_app_menu("App", &wire, Some(&about_app()));
     assert_eq!(attested.rows().len(), 2);
     assert!(
         matches!(attested.rows()[1].child(), ChainChild::Info(_),),

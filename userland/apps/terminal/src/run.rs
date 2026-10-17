@@ -732,6 +732,9 @@ mod program {
         client: &'a mut WindowClient<app::RtWindowTransport>,
         /// The one event mailbox every window reports through.
         event_endpoint: u64,
+        /// The session the desktop query named, the one sender a window
+        /// create's reply may come from.
+        server: ProcId,
         /// The wait-set the process parks on.
         set: u64,
         /// The slot this window takes, naming its two tokens.
@@ -770,18 +773,16 @@ mod program {
     ///
     /// The grid is allocated *before* the spawn, so a refused allocation costs
     /// no process load and leaves no shell behind to reap. Every refusal
-    /// states its reason and closes what it had opened, so the caller has only
+    /// answers its reason and closes what it had opened, so the caller has only
     /// its window to take back down.
-    fn open_shell(cols: u16, rows: u16, env: &[Vec<u8>]) -> Option<HostedShell> {
+    fn open_shell(cols: u16, rows: u16, env: &[Vec<u8>]) -> Result<HostedShell, &'static str> {
         let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
-            app::report(OWN_WORD, "pty refused; no window opened");
-            return None;
+            return Err("no pseudo-terminal could be had for its shell");
         };
         let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
             let _ = tairix_rt::fs_close(pty_master);
             let _ = tairix_rt::fs_close(pty_slave);
-            app::report(OWN_WORD, "screen grid refused; no window opened");
-            return None;
+            return Err("there is not enough memory for its screen");
         };
         let attach = shell_wires(pty_slave);
         let env: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
@@ -791,10 +792,9 @@ mod program {
         let _ = tairix_rt::fs_close(pty_slave);
         if pid < 0 {
             let _ = tairix_rt::fs_close(pty_master);
-            app::report(OWN_WORD, "shell spawn refused; no window opened");
-            return None;
+            return Err("its shell could not be started");
         }
-        Some(HostedShell {
+        Ok(HostedShell {
             terminal,
             pty_master,
             pid,
@@ -809,13 +809,13 @@ mod program {
     /// session that refuses one costs a single round trip rather than a pty
     /// and a whole shell process brought up and torn straight back down.
     ///
-    /// Returns the window and the session identity the create reply named, or
-    /// `None` with the reason already on `stderr`. Every refusal unwinds what
-    /// it had allocated, so a window that could not be opened leaves nothing
-    /// mapped and no member of its own on the wait-set, and a shell already
-    /// spawned for it is ended and reaped as a closed window's is.
+    /// Returns the window, or why it could not be opened. Every refusal
+    /// unwinds what it had allocated, so a window that could not be opened
+    /// leaves nothing mapped and no member of its own on the wait-set, and a
+    /// shell already spawned for it is ended and reaped as a closed window's
+    /// is.
     #[allow(clippy::needless_pass_by_value)] // The context is a bundle of borrows, moved so the caller cannot reuse a stale one.
-    fn open_window(ctx: WindowContext<'_>) -> Option<(TerminalWindow, ProcId)> {
+    fn open_window(ctx: WindowContext<'_>) -> Result<TerminalWindow, &'static str> {
         let look = Look::resolve(ctx.profile, ctx.theme, ctx.desktop);
         let output = (
             ctx.desktop.screen_width_px(),
@@ -825,8 +825,7 @@ mod program {
         let (cols, rows) = grid_dims(w, h, look.font);
 
         let Some(screen) = Screen::new(w, h) else {
-            app::report(OWN_WORD, "screen surface refused; no window opened");
-            return None;
+            return Err("there is not enough memory to draw it");
         };
 
         let mode = app::mode_for(w, h);
@@ -842,23 +841,35 @@ mod program {
         // that is where the terminal's own snap to whole cells bottoms out,
         // so one cell of the face it opens in is its declared floor.
         let (min_width_px, min_height_px) = grid_size(1, 1, look.font);
-        let (pane, server) = match WindowPane::open(
+        let pane = match WindowPane::open(
             ctx.client,
             ctx.event_endpoint,
             &mode,
             "Terminal",
             win_sizing(min_width_px, min_height_px),
         ) {
-            Ok(opened) => opened,
+            Ok((pane, replied)) if replied == ctx.server => pane,
+            // Something else answering for the window endpoint: the window it
+            // named is closed rather than drawn into.
+            Ok((pane, _)) => {
+                let _ = pane.close(ctx.client);
+                return Err("a window reply came from another sender");
+            }
             Err(err) => {
-                app::report(OWN_WORD, format_args!("{err}; no window opened"));
-                return None;
+                app::report(
+                    OWN_WORD,
+                    format_args!("the desktop refused a window: {err}"),
+                );
+                return Err("the desktop would not open it");
             }
         };
 
-        let Some(shell) = open_shell(cols, rows, ctx.env) else {
-            let _ = pane.close(ctx.client);
-            return None;
+        let shell = match open_shell(cols, rows, ctx.env) {
+            Ok(shell) => shell,
+            Err(why) => {
+                let _ = pane.close(ctx.client);
+                return Err(why);
+            }
         };
 
         let mut opened = TerminalWindow {
@@ -891,19 +902,20 @@ mod program {
         ];
         for (watched, (kind, id, token)) in members.into_iter().enumerate() {
             if tairix_rt::waitset_ctl(ctx.set, WaitSetOp::Add, kind, id, token) != 0 {
-                app::report(OWN_WORD, "wait-set member refused; no window opened");
                 opened.abandon(ctx.client, ctx.set, ctx.ending, watched > 0);
-                return None;
+                return Err("its shell could not be watched");
             }
         }
         apply_blur(ctx.client, opened.pane.id(), ctx.profile);
         if opened.present(ctx.client).is_err() {
-            app::report(OWN_WORD, "first present refused; no window opened");
             opened.abandon(ctx.client, ctx.set, ctx.ending, true);
-            return None;
+            return Err("the desktop would not show it");
         }
-        Some((opened, server))
+        Ok(opened)
     }
+
+    /// The headline of an alert saying a terminal window could not be opened.
+    const NO_WINDOW: &str = "No terminal window could be opened";
 
     /// Bring the retained screen up to date, copy what changed into `frame`,
     /// and present that rectangle.
@@ -1047,6 +1059,16 @@ mod program {
             Ok(brought_up) => brought_up,
             Err(err) => return app::fail(OWN_WORD, err.code(), err),
         };
+        // The serving session's own identity, learned by the desktop query:
+        // what authenticates its events and its window replies, with or
+        // without a window open (fail closed).
+        let Some(server) = client.session() else {
+            return app::fail(
+                OWN_WORD,
+                app::EXIT_NO_WINDOW,
+                "the desktop did not identify itself",
+            );
+        };
 
         // --- The one event mailbox and the wait-set the process parks on. One
         // mailbox serves every window and the icon bar.
@@ -1102,11 +1124,14 @@ mod program {
         // Shells whose windows have closed, each reaped once it has exited.
         let mut ending = EndingShells::new();
 
-        // --- The first window.
+        // --- The first window. One refused is stated in an alert and the
+        // terminal stays on its icon-bar slot, where a click asks again.
         let mut next_slot: u64 = 0;
-        let Some((first, server)) = open_window(WindowContext {
+        let mut windows: Vec<TerminalWindow> = Vec::new();
+        match open_window(WindowContext {
             client: &mut client,
             event_endpoint,
+            server,
             set,
             slot: next_slot,
             profile: publication.live(),
@@ -1114,15 +1139,21 @@ mod program {
             desktop: &desktop,
             env: &env,
             ending: &mut ending,
-        }) else {
-            return app::fail(
-                OWN_WORD,
-                app::EXIT_NO_WINDOW,
-                "no terminal window could be opened",
-            );
-        };
-        next_slot += 1;
-        let mut windows: Vec<TerminalWindow> = alloc::vec![first];
+        }) {
+            Ok(first) => {
+                next_slot += 1;
+                windows.push(first);
+            }
+            Err(why) => {
+                let _ = app::refuse(
+                    &mut client,
+                    (OWN_WORD, event_endpoint),
+                    None,
+                    NO_WINDOW,
+                    why,
+                );
+            }
+        }
 
         // The one event stream for the whole process. It is held across
         // wakes because it owns the frame it reads ahead while folding a run
@@ -1568,7 +1599,8 @@ mod program {
         set: u64,
         /// The one event mailbox.
         event_endpoint: u64,
-        /// The session identity every window's create reply named.
+        /// The session the desktop query named: every event and every window
+        /// reply must come from it.
         server: ProcId,
         /// The next window slot to mint.
         next_slot: &'a mut u64,
@@ -1648,9 +1680,10 @@ mod program {
                 // hand-picked ceiling in front of those would only refuse
                 // windows the machine could have given.
                 let slot = *ctx.next_slot;
-                if let Some((opened, _)) = open_window(WindowContext {
+                match open_window(WindowContext {
                     client,
                     event_endpoint: ctx.event_endpoint,
+                    server: ctx.server,
                     set: ctx.set,
                     slot,
                     profile: ctx.publication.live(),
@@ -1659,8 +1692,19 @@ mod program {
                     env: ctx.env,
                     ending: ctx.ending,
                 }) {
-                    *ctx.next_slot = slot.saturating_add(1);
-                    windows.push(opened);
+                    Ok(opened) => {
+                        *ctx.next_slot = slot.saturating_add(1);
+                        windows.push(opened);
+                    }
+                    Err(why) => {
+                        let _ = app::refuse(
+                            client,
+                            (OWN_WORD, ctx.event_endpoint),
+                            None,
+                            NO_WINDOW,
+                            why,
+                        );
+                    }
                 }
                 Applied::Running
             }
@@ -2332,6 +2376,7 @@ mod program {
                 // surfaces this application never opens, so none can arrive
                 // here.
                 | WindowEvent::TerrainChanged { .. }
+                | WindowEvent::AlertClosed { .. }
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }

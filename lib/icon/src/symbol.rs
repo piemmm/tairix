@@ -273,6 +273,10 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::OsWindows => PANED_WINDOW,
         IconKind::OsApple => LOOPED_SQUARE,
         IconKind::OsAndroid => ROBOT_HEAD,
+        IconKind::AlertError => CROSS,
+        IconKind::AlertWarning => EXCLAMATION,
+        IconKind::AlertInformation => LETTER_I,
+        IconKind::AlertQuestion => QUESTION,
         _ => return None,
     })
 }
@@ -579,6 +583,36 @@ const ABOUT: &[Mark] = &[
     stroke(&[circle(12.0, 12.0, 9.1)], 1.9),
     fill(&[circle(12.0, 7.3, 1.45)]),
     stroke(&[Outline::Path("M12 11.2V17")], 2.4),
+];
+
+/// A bold cross: the error mark.
+const CROSS: &[Mark] = &[stroke(
+    &[Outline::Path("M6.6 6.6L17.4 17.4M17.4 6.6L6.6 17.4")],
+    3.4,
+)];
+
+/// A bold exclamation mark: the warning mark.
+const EXCLAMATION: &[Mark] = &[
+    stroke(&[Outline::Path("M12 3.6V14")], 3.6),
+    fill(&[circle(12.0, 19.5, 2.1)]),
+];
+
+/// A bold lower-case `i`: the information mark.
+const LETTER_I: &[Mark] = &[
+    fill(&[circle(12.0, 4.6, 2.1)]),
+    stroke(&[Outline::Path("M12 10.2V20.2")], 3.6),
+];
+
+/// A bold question mark.
+const QUESTION: &[Mark] = &[
+    stroke(
+        &[Outline::Path(
+            "M7.4 8.2C7.4 5.3 9.5 3.4 12.2 3.4C15 3.4 17 5.2 17 7.8C17 10.1 15.6 11.2 14.2 12.2\
+             C13 13.1 12.2 13.9 12.2 15.2",
+        )],
+        3.2,
+    ),
+    fill(&[circle(12.2, 20.0, 2.0)]),
 ];
 
 /// An arrow passing into a door frame.

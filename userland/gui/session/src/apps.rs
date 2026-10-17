@@ -551,6 +551,13 @@ impl AppBarService {
             .map(|facts| &facts.identity)
     }
 
+    /// The bundle `owner` was launched from, as the kernel attests it: a path
+    /// no other program shares.
+    #[must_use]
+    pub fn attested_bundle(&self, owner: ProcId) -> Option<&str> {
+        self.bundles.get(&owner).map(String::as_str)
+    }
+
     /// Build the taskbar's slots from `groups`, the strip [`strip`](Self::strip)
     /// answered, stating each application's manifest-attested identity and its
     /// icon artwork.
@@ -572,9 +579,10 @@ impl AppBarService {
             .iter()
             .map(|group| {
                 let identity = self.identity(group.bundle.as_deref());
-                let mut slot = AppSlot::new(identity.name.clone(), IconKind::AppBundle)
-                    .with_windows(group.windows.clone())
-                    .with_identity(identity);
+                let mut slot =
+                    AppSlot::new(group.owner, identity.name.clone(), IconKind::AppBundle)
+                        .with_windows(group.windows.clone())
+                        .with_identity(identity);
                 if let Some(bundle) = group.bundle.as_deref() {
                     let request = IconRequest::bundle(IconKind::AppBundle, bundle);
                     // A slot *stores* its picture, so this is the storing
@@ -996,6 +1004,9 @@ pub trait AppBarBridge {
     /// filesystem.
     fn attested_identity(&self, owner: ProcId) -> Option<AppIdentity>;
 
+    /// The bundle `owner` was launched from, as the kernel attests it.
+    fn attested_bundle(&self, owner: ProcId) -> Option<String>;
+
     /// Whether the bundle *directory* `bundle` runs one instance per user, as
     /// its signed manifest attests. Cache-only for the same reason
     /// [`attested_identity`](Self::attested_identity) is: a launch gesture
@@ -1018,6 +1029,10 @@ impl AppBarBridge for AppBarService {
 
     fn attested_identity(&self, owner: ProcId) -> Option<AppIdentity> {
         Self::attested_identity(self, owner).cloned()
+    }
+
+    fn attested_bundle(&self, owner: ProcId) -> Option<String> {
+        Self::attested_bundle(self, owner).map(ToString::to_string)
     }
 
     fn runs_one_instance(&self, bundle: &str) -> bool {

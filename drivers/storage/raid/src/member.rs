@@ -11,7 +11,7 @@
 use alloc::rc::Rc;
 use core::cell::Cell;
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
 use tairix_abi::sysinfo::MountAvailability;
@@ -126,8 +126,8 @@ impl<B: Block> Block for MemberDevice<B> {
         self.device.flush()
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        self.device.device_class()
+    fn medium(&self) -> Option<BlkMedium> {
+        self.device.medium()
     }
 
     fn device_name(&self) -> BlkDeviceName {

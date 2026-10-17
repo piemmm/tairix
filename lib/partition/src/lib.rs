@@ -37,7 +37,7 @@ extern crate alloc;
 pub mod gpt;
 pub mod mbr;
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
@@ -378,10 +378,10 @@ impl<B: Block> PartitionBlock<B> {
 
 impl<B: Block> Block for PartitionBlock<B> {
     /// A window onto a device is the same hardware: the underlying device's
-    /// class, so a filesystem on a partition is served the real disk's I/O
-    /// budget rather than the unclassified default.
-    fn device_class(&self) -> BlkDeviceClass {
-        self.inner.device_class()
+    /// medium, so a filesystem on a partition is served the real disk's I/O
+    /// budget and shown its drive, rather than an unknown one.
+    fn medium(&self) -> Option<BlkMedium> {
+        self.inner.medium()
     }
 
     /// A window onto a disk is not a device of its own, so it is named by

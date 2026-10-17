@@ -25,6 +25,18 @@ des données binaires s'ouvre dans la vue hexadécimale, qui montre chaque octet
 en deux chiffres hexadécimaux à côté de son caractère et modifie les mêmes
 octets que la vue texte.
 
+Un exécutable — une image de programme TAIRiX, un fichier ELF64 ou un module
+WebAssembly — s'ouvre plutôt dans la vue code : ses régions, puis les
+instructions de chaque région de code, une par ligne avec son adresse et ses
+octets d'encodage, étiquetées des symboles qu'elles commencent et des
+symboles que leurs branchements atteignent. La vue code est en lecture
+seule ; les vues texte et hexadécimale modifient le même fichier. Le code est
+décodé par un second processus de travail qui lui est propre, sans aucun
+accès lui non plus, et lu dans le jeu d'instructions que nomme le fichier,
+sinon dans celui de cette machine ; « Jeu d'instructions » dans le menu
+Affichage le lit dans un autre, et le champ de vue de la ligne d'état propose
+la vue code à côté du texte et de l'hexadécimal.
+
 Le code source est coloré : HTML, XML et SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python et scripts shell. Les fichiers de
 réglages du système — réglages d'application, bibliothèque de programmes,

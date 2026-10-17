@@ -24,6 +24,7 @@
 | T18 | The pointer's focus: the bar reacts only to input aimed at it | done |
 | T19 | A slot's application is the kernel's attestation, not the launch record | done |
 | T20 | A file dropped on an application's slot | done |
+| T21 | A drop the application does not take is answered, and its windows take a drop as its slot does | done |
 
 Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
 (`userland/gui/taskbar`, `tairix-taskbar`), a floating **icon bar** with:
@@ -2023,6 +2024,23 @@ application that opens it (`plans/TEXTEDIT.md`, the drag carrier in
 - **Only a slot the index attributes can take a drop**: its application is the
   kernel-attested bundle T19 resolves, so a process no signed bundle vouches
   for is never offered a file.
+
+## T21 — A drop is answered
+
+- **A drop the application does not claim is refused in its name.** A release
+  over a slot whose application claims nothing of the item ends the drag
+  refused (`DragEnd::refused`, a `DropRefusal`), and the desktop states it in an
+  error notice titled "Error from *App*", with *App* that application's attested
+  name, saying what it opens: one file at a time, or the endings it claims.
+- **An application's windows take a drop as its slot does.** A release over
+  another application's window resolves to that application's slot
+  (`DragSurface::AppWindow`) and is answered, opened or refused, exactly as a
+  release over the slot would be.
+- **An accepted document that will not open is the application's own alert**:
+  damaged, unreadable, or refused by its sandbox, it is stated by the
+  application (`plans/APPWIN.md` AW8), never dropped silently.
+- **A refused desktop gesture** (`GestureRefusal`) is stated on `stderr` and in
+  a notice of the desktop's own.
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 

@@ -28,14 +28,8 @@
 //! tested by the crate's host test build); this script only reads the
 //! Cargo-provided target strings and emits the directives.
 
-// The pure, unit-tested selection logic, shared with the crate's host
-// test build. Pulled in as a module (not a crate dependency) so the
-// build script stays dependency-free. `dead_code` is allowed because the
-// shared file also defines single-source values this build script does
-// not itself consume (the app-signing seed, signed by the image builds
-// and pinned by the crate's host tests); an unused copy here is the cost
-// of keeping one definition, not dead surface.
-#[allow(dead_code)]
+// The pure, unit-tested selection logic: the same file the crate's host test
+// build compiles, so what the build script decides is what the tests cover.
 #[path = "src/build_support.rs"]
 mod build_support;
 
@@ -44,13 +38,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use build_support::{
-    is_freestanding, kernel_isa, linker_script_for, KERNEL_DRIVER_SIGNING_SEED,
-    SYSTEM_APP_SIGNING_SEED,
-};
+use build_support::{is_freestanding, kernel_isa, linker_script_for};
 use tairix_itest_harness::pie::{self, PieArch};
 use tairix_itest_harness::program_fixture::{format_grouped_hex, GROUPED_HEX_LEN};
 use tairix_itest_harness::USER_IMAGE_BIAS;
+use tairix_signkeys::{Domain, SigningKeys};
 
 /// One embedded `Run` program the boot path builds into an `rxe` image: the
 /// crate package, its `Run` bin, the generated fixture file name, and the
@@ -277,11 +269,33 @@ fn main() {
     // their explicitly-justified boot floor until their storage floors land.
     let embed_spawn_rows = !(is_freestanding(&target_os, &target_arch) && target_arch == "aarch64");
 
+    let keys = signing_keys();
     emit_build_id();
     emit_program_rxes(&target, embed_spawn_rows);
     emit_user_bias();
-    emit_signed_driver_manifests(kernel_isa(&target_arch));
-    emit_app_trust_anchor();
+    emit_signed_driver_manifests(kernel_isa(&target_arch), &keys);
+    emit_app_trust_anchor(&keys);
+}
+
+/// The build's secret signing key set, which the kernel's trust anchors are
+/// derived from. A build without one stops here rather than trusting a key
+/// anybody could read.
+fn signing_keys() -> SigningKeys {
+    for var in tairix_signkeys::LOCATION_VARS {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let workspace = Path::new(&manifest_dir).join("../..");
+    match tairix_signkeys::load(&workspace) {
+        Ok((path, keys)) => {
+            println!("cargo:rerun-if-changed={}", path.display());
+            keys
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Emit the shared child-image relocation bias (`user_bias.rs`) the
@@ -309,14 +323,14 @@ fn emit_user_bias() {
 }
 
 /// Emit the build's application-signing trust anchor (`app_trust.rs`): the
-/// Ed25519 public key derived from the dedicated app-signing seed, a trust
-/// domain distinct from the driver-signing anchor. The `spawn` syscall's
-/// store-bundle path refuses any `AppInfo` not signed by this key.
-fn emit_app_trust_anchor() {
+/// Ed25519 public key of the key set's app-signing seed, a trust domain
+/// distinct from the driver-signing anchor. The `spawn` syscall's store-bundle
+/// path refuses any `AppInfo` not signed by this key.
+fn emit_app_trust_anchor(keys: &SigningKeys) {
     use tairix_crypto::Ed25519SecretKey;
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let signing_key = Ed25519SecretKey::from_seed(&SYSTEM_APP_SIGNING_SEED);
+    let signing_key = Ed25519SecretKey::from_seed(keys.seed(Domain::AppSigning));
     let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
 
     let mut out = String::new();
@@ -362,11 +376,11 @@ struct DriverImage {
 /// invokes their `register()` directly rather than loading a program image,
 /// and covering an empty payload is a no-op (a user-space driver's non-empty
 /// payload, by contrast, is authenticated).
-fn emit_signed_driver_manifests(isa: Option<&str>) {
+fn emit_signed_driver_manifests(isa: Option<&str>, keys: &SigningKeys) {
     use tairix_crypto::Ed25519SecretKey;
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let signing_key = Ed25519SecretKey::from_seed(&KERNEL_DRIVER_SIGNING_SEED);
+    let signing_key = Ed25519SecretKey::from_seed(keys.seed(Domain::DriverSigning));
     let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();
 
     // The compiled-in floor is storage-only: the block

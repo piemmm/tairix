@@ -151,9 +151,10 @@ instruction carries the same record as one killed by a bad access.
 ### Offline symbolication
 
 Because the `pc` and every frame are load-relative offsets, a developer
-resolves them offline against the **unstripped** binary with the same
-`addr2line` workflow [panic diagnostics](./panic-diagnostics.md) documents
-— no on-target symbol table is needed in a production image. Debug images
+resolves them offline against the **unstripped** binary, adding the link
+address of its lowest loadable segment as the
+[latency diagnostics](./latency-diagnostics.md) recipe shows — no on-target
+symbol table is needed in a production image. Debug images
 may additionally carry the symbol table for on-target `fn+0x40` rendering
 (a size cost, not a CPU cost). The record ships in every image at zero
 running-program cost; only the debug symbol table is image-conditional.

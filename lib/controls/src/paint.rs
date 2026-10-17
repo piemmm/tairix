@@ -698,6 +698,36 @@ impl TextBlock {
         })
     }
 
+    /// Draw lines `skip..skip + take` of `text` from `(x, top)` down: the
+    /// part of a scrolled block in view.
+    pub(crate) fn paint_window(
+        &self,
+        surface: &mut Surface,
+        text: &str,
+        at: (u32, u32),
+        skip: usize,
+        take: usize,
+    ) {
+        let (x, top) = at;
+        let mut y = top;
+        for line in self
+            .font
+            .wrap_with_cut(text, self.width, self.lines, self.cut)
+            .skip(skip)
+            .take(take)
+        {
+            paint_run(
+                surface,
+                self.font,
+                Run::from(line),
+                (to_i32(x), to_i32(y)),
+                self.color,
+                None,
+            );
+            y = y.saturating_add(self.font.line_height());
+        }
+    }
+
     /// Hand each line of `text` laid out from `(x, top)` down to `each` with
     /// the pen it starts at, and answer the `y` just past the last line.
     fn lay_out<'t>(

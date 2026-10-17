@@ -24,11 +24,12 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use tairix_abi::usb_urb::{
-    iso_notify_endpoint_for, IsoGrant, IsoNotify, IsoStartParams, UsbRequest, USB_REQUEST_MAX_LEN,
+    iso_notify_endpoint_for, IsoGrant, IsoNotify, IsoStartParams, UsbRequest, UsbTransferType,
+    USB_REQUEST_MAX_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwNode, ProcId};
 use tairix_usb::device::{DeviceIdentity, HubEvent, BULK_BUF_LEN};
-use tairix_usb::transport::UrbEngine;
+use tairix_usb::transport::{on_own_endpoint, UrbEngine};
 
 use crate::domain::{ControllerDomainEvent, ControllerHealth};
 use crate::serve::{attach_transport_grants, Reach, UrbOutcome, UrbReply, UrbService};
@@ -60,10 +61,12 @@ pub enum Note {
         /// The id the kernel assigned it.
         node: u32,
     },
-    /// A URB completed with an error.
+    /// A URB completed with an error, or was abandoned at its deadline.
     UrbFailed {
         /// The device-table index of the device it was for.
         index: usize,
+        /// Its transfer type, which names the endpoint whose fault it was.
+        transfer: UsbTransferType,
         /// What its class driver is answered.
         errno: Errno,
     },
@@ -419,17 +422,35 @@ impl<B: UrbBuffer> Interfaces<B> {
             Some(_) => Reach::Served,
         };
         let reply = if let UsbRequest::Transfer(urb) = request {
+            let served = transport.node.as_ref().map(|node| node.index);
             let (index, shm): (usize, &mut [u8]) = match transport.node.as_mut() {
                 None => (0, &mut []),
                 Some(node) => (node.index, node.buffer.bytes()),
             };
-            match transport
-                .service
-                .on_submit(reach, ticket, &urb, shm, &mut seam.engine(index))
-            {
+            let now_ns = seam.now_ns();
+            let reply = match transport.service.on_submit(
+                reach,
+                ticket,
+                now_ns,
+                &urb,
+                shm,
+                &mut seam.engine(index),
+            ) {
                 UrbOutcome::Reply(reply) => reply,
                 UrbOutcome::Held | UrbOutcome::Idle => return,
+            };
+            // The reissuable answer a recovering controller gives is no
+            // failure; anything else refused or faulted at once is noted as
+            // a held URB's failure would be.
+            let failed = reply.errno().filter(|&errno| errno != Errno::WouldBlock);
+            if let (Some(errno), Some(index)) = (failed, served) {
+                seam.note(Note::UrbFailed {
+                    index,
+                    transfer: urb.transfer_type,
+                    errno,
+                });
             }
+            reply
         } else {
             transport.operate(reach, ticket, request, seam)
         };
@@ -451,6 +472,58 @@ impl<B: UrbBuffer> Interfaces<B> {
         }
     }
 
+    /// The soonest instant a held URB is abandoned at, if any is bounded.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.transports
+            .iter()
+            .filter_map(|transport| transport.service.deadline())
+            .min()
+    }
+
+    /// Answer every held URB whose deadline has passed at `now_ns`
+    /// [`Errno::TimedOut`], abandoning its transfer so it can never complete
+    /// late into a later one. Every held URB is driven first, so one the
+    /// controller finished in time is delivered rather than abandoned. A
+    /// recovering controller is neither driven nor asked to abandon anything:
+    /// its reset discards what the URBs had queued.
+    pub fn expire_overdue<S: Seam<Buffer = B>>(
+        &mut self,
+        now_ns: u64,
+        health: &mut ControllerHealth,
+        seam: &mut S,
+    ) {
+        let serving = !(health.is_recovering() || health.is_failed_closed());
+        if serving {
+            self.drive_busy(health, seam);
+        }
+        for transport in &mut self.transports {
+            let Some(node) = transport.node.as_ref() else {
+                continue;
+            };
+            let index = node.index;
+            let Some(transfer) = transport.service.held_transfer() else {
+                continue;
+            };
+            let outcome = if serving {
+                transport.service.expire(now_ns, &mut seam.engine(index))
+            } else {
+                transport.service.expire_unserved(now_ns)
+            };
+            let UrbOutcome::Reply(reply) = outcome else {
+                continue;
+            };
+            if let Some(errno) = reply.errno() {
+                seam.note(Note::UrbFailed {
+                    index,
+                    transfer,
+                    errno,
+                });
+            }
+            seam.reply(transport.endpoint, reply);
+        }
+    }
+
     /// Drive every held URB against what the controller has buffered, then
     /// recover the controller if a device's departure left it faulted.
     pub fn drive_busy<S: Seam<Buffer = B>>(&mut self, health: &mut ControllerHealth, seam: &mut S) {
@@ -467,6 +540,7 @@ impl<B: UrbBuffer> Interfaces<B> {
                 continue;
             };
             let index = node.index;
+            let transfer = transport.service.held_transfer();
             let outcome = transport
                 .service
                 .on_event(node.buffer.bytes(), &mut seam.engine(index));
@@ -475,8 +549,12 @@ impl<B: UrbBuffer> Interfaces<B> {
             };
             let endpoint = transport.endpoint;
             let errno = reply.errno();
-            if let Some(errno) = errno {
-                seam.note(Note::UrbFailed { index, errno });
+            if let (Some(errno), Some(transfer)) = (errno, transfer) {
+                seam.note(Note::UrbFailed {
+                    index,
+                    transfer,
+                    errno,
+                });
             }
             if errno == Some(Errno::DeviceFault)
                 && self.fault_detach(slot, index, reply.ticket, seam)
@@ -650,6 +728,24 @@ impl<B: UrbBuffer> Transport<B> {
             }
             UsbRequest::IsoQueue { endpoint, slot } => node.queue(endpoint, slot, seam),
             UsbRequest::IsoStop { endpoint } => node.stop(endpoint, seam),
+            // Clearing a pipe or its reports under a held transfer would
+            // strand or starve it; a class driver holds one URB at a time, so
+            // this is no driver's own call.
+            UsbRequest::ClearHalt { .. } | UsbRequest::DiscardReports { .. }
+                if self.service.is_busy() =>
+            {
+                return UrbReply::status(ticket, Err(Errno::AlreadyExists));
+            }
+            UsbRequest::ClearHalt { endpoint } => {
+                let engine = &mut seam.engine(index);
+                let cleared = on_own_endpoint(endpoint, engine, UrbEngine::clear_halt);
+                return UrbReply::status(ticket, cleared);
+            }
+            UsbRequest::DiscardReports { endpoint } => {
+                let engine = &mut seam.engine(index);
+                let discarded = on_own_endpoint(endpoint, engine, UrbEngine::discard_reports);
+                return UrbReply::status(ticket, discarded);
+            }
             UsbRequest::Transfer(_) => Err(DriverError::OutOfRange),
         };
         UrbReply::status(ticket, result.map_err(DriverError::as_errno))

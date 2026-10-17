@@ -429,7 +429,7 @@ fn probe_member(
         return Probed::Unusable;
     };
     let probed = ProbedDevice {
-        class: device.device_class(),
+        medium: device.medium(),
         geometry,
     };
     match read_superblock(&mut device) {

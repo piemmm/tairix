@@ -275,9 +275,14 @@ fn declared_menu() -> AppMenu {
 }
 
 /// An application slot for `label`, no windows and no declaration — what
-/// the session resolves for a process that put nothing on the bar itself.
+/// the session resolves for a process that put nothing on the bar itself —
+/// standing for a process of its own, named after the label.
 fn app(label: &str) -> AppSlot {
-    AppSlot::new(label, IconKind::AppBundle)
+    let mut owner = [0u8; 16];
+    for (byte, from) in owner.iter_mut().zip(label.bytes()) {
+        *byte = from;
+    }
+    AppSlot::new(ProcId::from_raw(owner), label, IconKind::AppBundle)
 }
 
 /// The identity a signed manifest states for `name`, with both optional
@@ -1800,6 +1805,9 @@ fn ask_app_menu(input: &mut TaskbarInput, bar: &mut Taskbar) -> Option<MenuReque
     ask_menu(input, bar, slot)
 }
 
+/// The process [`app`] names `Terminal` after.
+const TERMINAL: ProcId = ProcId::from_raw(*b"Terminal\0\0\0\0\0\0\0\0");
+
 /// A bar with one application whose declared menu is [`declared_menu`].
 fn bar_with_declared_app() -> Taskbar {
     let mut bar = bottom_bar();
@@ -1845,12 +1853,42 @@ fn secondary_press_on_an_app_slot_asks_for_the_menu_it_declared() {
     let mut bar = bar_with_declared_app();
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
-    assert_eq!(request.subject, MenuSubject::App { app: 0 });
+    assert_eq!(
+        request.subject,
+        MenuSubject::App { owner: TERMINAL },
+        "named by the process, so a choice reaches it wherever its slot has moved"
+    );
     assert_eq!(
         request.model.title(),
         "Terminal",
         "the plate is titled from the bundle's signed manifest"
     );
+}
+
+/// A row chosen once another application has taken the slot's place in the
+/// strip still answers the process whose menu it was.
+#[test]
+fn a_menu_chosen_after_the_strip_moved_answers_its_own_application() {
+    let mut bar = bar_with_declared_app();
+    let mut input = TaskbarInput::new();
+    let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
+    let paint = ProcId::from_raw([0x50; 16]);
+    bar.set_apps(
+        alloc::vec![
+            AppSlot::new(paint, "Paint", IconKind::AppBundle)
+                .with_declaration(declared_menu(), AppBarClick::Open)
+                .with_identity(identity("Paint")),
+            app("Terminal")
+                .with_declaration(declared_menu(), AppBarClick::Open)
+                .with_identity(identity("Terminal")),
+        ],
+        Scale::ONE,
+    );
+    let Some(TaskbarResponse::AppMenuChosen { owner, .. }) = choose_row(&mut bar, &request, "Quit")
+    else {
+        panic!("the row is the application's own");
+    };
+    assert_eq!(owner, TERMINAL, "not whoever is first in the strip now");
 }
 
 #[test]
@@ -1982,7 +2020,10 @@ fn a_menu_at_the_row_cap_states_every_row_it_declared() {
     );
     assert_eq!(
         bar.menu_chosen(&request.subject, last),
-        Some(TaskbarResponse::AppMenuChosen { app: 0, item: last })
+        Some(TaskbarResponse::AppMenuChosen {
+            owner: ProcId::from_raw(*b"Busy\0\0\0\0\0\0\0\0\0\0\0\0"),
+            item: last
+        })
     );
 }
 
@@ -2028,7 +2069,10 @@ fn choosing_a_declared_row_relays_the_applications_own_id() {
         assert_eq!(row_named(&request.model, label).id(), Some(item));
         assert_eq!(
             choose_row(&mut bar, &request, label),
-            Some(TaskbarResponse::AppMenuChosen { app: 0, item })
+            Some(TaskbarResponse::AppMenuChosen {
+                owner: TERMINAL,
+                item
+            })
         );
     }
 }
@@ -2067,7 +2111,7 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
     assert_eq!(
         choose_row(&mut bar, &request, "Green"),
         Some(TaskbarResponse::AppMenuChosen {
-            app: 0,
+            owner: TERMINAL,
             item: AppMenuItemId::new(8).expect("non-zero"),
         })
     );
@@ -2118,22 +2162,22 @@ fn the_information_row_states_the_manifest_attested_identity() {
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
 
-    let ChainChild::Info(facts) = row_named(&request.model, INFO_ROW_LABEL).child() else {
-        panic!("the information row's child is the desktop's own panel");
+    let ChainChild::Info(sheet) = row_named(&request.model, INFO_ROW_LABEL).child() else {
+        panic!("the information row's child is the desktop's own sheet");
     };
     assert_eq!(
-        facts
+        (sheet.name(), sheet.version(), sheet.purpose()),
+        ("Terminal", "1.2.3", Some("Does one thing well")),
+        "the sheet states the signed manifest, never what the process claims"
+    );
+    assert_eq!(
+        sheet
+            .facts()
             .facts()
             .iter()
             .map(|fact| (fact.label(), fact.value()))
             .collect::<Vec<_>>(),
-        alloc::vec![
-            ("Name", "Terminal"),
-            ("Version", "1.2.3"),
-            ("Purpose", "Does one thing well"),
-            ("Author", "TAIRiX"),
-        ],
-        "the panel states the signed manifest, never what the process claims"
+        alloc::vec![("Author", "TAIRiX")],
     );
     assert_eq!(
         row_named(&request.model, INFO_ROW_LABEL).id(),
@@ -2158,18 +2202,16 @@ fn a_manifest_without_purpose_or_author_states_only_what_it_has() {
     );
     let mut input = TaskbarInput::new();
     let request = ask_app_menu(&mut input, &mut bar).expect("the slot asks for its menu");
-    let ChainChild::Info(facts) = row_named(&request.model, INFO_ROW_LABEL).child() else {
-        panic!("the information row's child is the desktop's own panel");
+    let ChainChild::Info(sheet) = row_named(&request.model, INFO_ROW_LABEL).child() else {
+        panic!("the information row's child is the desktop's own sheet");
     };
+    assert_eq!((sheet.name(), sheet.version()), ("Sparse", "0.1"));
     assert_eq!(
-        facts
-            .facts()
-            .iter()
-            .map(|fact| (fact.label(), fact.value()))
-            .collect::<Vec<_>>(),
-        alloc::vec![("Name", "Sparse"), ("Version", "0.1")],
-        "an omitted field is absent, never a blank row"
+        sheet.purpose(),
+        None,
+        "an omitted field is absent, never a blank line"
     );
+    assert!(sheet.facts().is_empty());
 }
 
 #[test]

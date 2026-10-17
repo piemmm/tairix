@@ -22,9 +22,10 @@ use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
+use tairix_controls::RateTrace;
 use tairix_procinfo::display::{format_bytes, format_duration, format_rate};
 
-use crate::model::{display_name, OwnerBundles, RateTrace, RollingMeters, SessionReport};
+use crate::model::{display_name, OwnerBundles, RollingMeters, SessionReport};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact as SystemFact, Unmeasured};
 use crate::view::resources::{DeviceId, ResourceReport};

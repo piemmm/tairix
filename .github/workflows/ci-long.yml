@@ -141,6 +141,11 @@ jobs:
       - name: Install pinned QEMU
         run: tools/ci/install-qemu.sh
 
+      # Every build signs with a secret key set and the kernels it builds trust
+      # only that set. A runner draws its own once and keeps it in its home.
+      - name: cargo xtask keys init
+        run: cargo xtask keys init
+
       # Start every run from a clean slate: the self-hosted runner persists
       # `CARGO_TARGET_DIR` across runs, so wipe prior build artefacts before
       # building so `cargo xtask ci-long` compiles from scratch and stale

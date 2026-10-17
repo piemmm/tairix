@@ -45,7 +45,8 @@ use tairix_abi::account::{
     MAX_DISPLAY_NAME_LEN, MAX_GROUPNAME_LEN, MAX_PASSWORD_LEN, MAX_PATH_LEN,
     MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
 };
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
+
 use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
@@ -92,6 +93,22 @@ use tairix_abi::{
     SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
     THREAD_STACK_DEFAULT, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
 };
+
+/// The mount-medium constants the sysinfo header publishes, each one's value
+/// read off the `lib/abi` encoder rather than re-typed.
+const MOUNT_MEDIA: [(&str, Option<BlkMedium>); 8] = [
+    ("TAIRIX_MOUNT_MEDIUM_UNKNOWN", None),
+    ("TAIRIX_MOUNT_MEDIUM_HARD_DISK", Some(BlkMedium::HardDisk)),
+    (
+        "TAIRIX_MOUNT_MEDIUM_SOLID_STATE",
+        Some(BlkMedium::SolidState),
+    ),
+    ("TAIRIX_MOUNT_MEDIUM_NVME", Some(BlkMedium::Nvme)),
+    ("TAIRIX_MOUNT_MEDIUM_USB_FLASH", Some(BlkMedium::UsbFlash)),
+    ("TAIRIX_MOUNT_MEDIUM_USB_DISK", Some(BlkMedium::UsbDisk)),
+    ("TAIRIX_MOUNT_MEDIUM_SD_CARD", Some(BlkMedium::SdCard)),
+    ("TAIRIX_MOUNT_MEDIUM_VIRTUAL", Some(BlkMedium::Virtual)),
+];
 
 /// Default on-disk location of the generated C ABI header set, relative to
 /// the workspace root. The umbrella header is `tairix_abi.h` inside it.
@@ -198,6 +215,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("NO_BANDWIDTH", DriverError::NoBandwidth),
     ("STALE", DriverError::Stale),
     ("READ_ONLY", DriverError::ReadOnly),
+    ("TIMED_OUT", DriverError::TimedOut),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -1860,26 +1878,10 @@ fn sysinfo_emit_mount_media(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str(
         "/* Storage medium of the block device backing a mount (uint8_t).\n\
-         \x20  UNKNOWN covers both a mount with no block backing and a class this\n\
-         \x20  ABI does not define: the record never guesses a medium. */\n",
+         \x20  UNKNOWN covers both a mount with no declared medium and a medium\n\
+         \x20  this ABI does not define: the record never guesses one. */\n",
     );
-    let mount_media = [
-        ("TAIRIX_MOUNT_MEDIUM_UNKNOWN", None),
-        (
-            "TAIRIX_MOUNT_MEDIUM_ROTATIONAL",
-            Some(BlkDeviceClass::Rotational),
-        ),
-        (
-            "TAIRIX_MOUNT_MEDIUM_SOLID_STATE",
-            Some(BlkDeviceClass::SolidState),
-        ),
-        (
-            "TAIRIX_MOUNT_MEDIUM_REMOVABLE",
-            Some(BlkDeviceClass::Removable),
-        ),
-        ("TAIRIX_MOUNT_MEDIUM_VIRTUAL", Some(BlkDeviceClass::Virtual)),
-    ];
-    for (name, medium) in mount_media {
+    for (name, medium) in MOUNT_MEDIA {
         let _ = writeln!(
             out,
             "#define {name} ((uint8_t){}u)",
@@ -2194,7 +2196,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).\n\
          * `medium` is the storage medium of the block device backing the mount, a\n\
          * TAIRIX_MOUNT_MEDIUM_* value; TAIRIX_MOUNT_MEDIUM_UNKNOWN means no block\n\
-         * device backs it or its class was not recognised -- never a guess.\n\
+         * device backs it or its medium was not recognised -- never a guess.\n\
          * `usage` is the backing volume's space accounting (all-zero when none is\n\
          * known). `volume_id` is the volume's stable published identity (all-zero\n\
          * when the mount has none), the identity a volume_detach request names.\n\
@@ -5369,33 +5371,47 @@ mod tests {
     /// A mount record's storage-medium byte is only readable from C if the
     /// header publishes its encoding, so every value is pinned against the
     /// `lib/abi` encoder the generator reads — including the unknown a
-    /// backing-less mount and an unrecognised class both take — and the byte
+    /// backing-less mount and an unrecognised medium both take — and the byte
     /// is pinned to its place between the availability state and the usage
     /// block.
+    /// `camel` as a C macro word: an underscore before each later capital,
+    /// all in upper case (`UsbFlash` is `USB_FLASH`).
+    fn screaming(camel: &str) -> String {
+        let mut word = String::new();
+        for (at, letter) in camel.char_indices() {
+            if at > 0 && letter.is_ascii_uppercase() {
+                word.push('_');
+            }
+            word.push(letter.to_ascii_uppercase());
+        }
+        word
+    }
+
     #[test]
     fn sysinfo_header_publishes_the_mount_medium_encoding() {
         let h = body("tairix_sysinfo.h");
-        for (macro_name, medium) in [
-            ("TAIRIX_MOUNT_MEDIUM_UNKNOWN", None),
-            (
-                "TAIRIX_MOUNT_MEDIUM_ROTATIONAL",
-                Some(BlkDeviceClass::Rotational),
-            ),
-            (
-                "TAIRIX_MOUNT_MEDIUM_SOLID_STATE",
-                Some(BlkDeviceClass::SolidState),
-            ),
-            (
-                "TAIRIX_MOUNT_MEDIUM_REMOVABLE",
-                Some(BlkDeviceClass::Removable),
-            ),
-            ("TAIRIX_MOUNT_MEDIUM_VIRTUAL", Some(BlkDeviceClass::Virtual)),
-        ] {
+        for (macro_name, medium) in MOUNT_MEDIA {
             let line = format!(
                 "#define {macro_name} ((uint8_t){}u)",
                 MountRecord::medium_to_wire(medium)
             );
             assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+            let spelled =
+                medium.map_or_else(|| String::from("UNKNOWN"), |m| screaming(&format!("{m:?}")));
+            assert_eq!(
+                macro_name,
+                format!("TAIRIX_MOUNT_MEDIUM_{spelled}"),
+                "{medium:?}"
+            );
+        }
+        let every = (0..=u8::MAX).filter_map(|word| BlkMedium::from_u32(u32::from(word)).ok());
+        for medium in every {
+            assert!(
+                MOUNT_MEDIA
+                    .iter()
+                    .any(|(_, published)| *published == Some(medium)),
+                "{medium:?} has no TAIRIX_MOUNT_MEDIUM_* constant"
+            );
         }
         assert!(
             h.contains(concat!(

@@ -119,12 +119,18 @@ fn a_mismatched_csw_tag_runs_reset_recovery_and_fails() {
     let mut scsi = ScsiDevice::new(Bot::new(dev, 3), CommandSet::Transparent);
 
     let mut buf = [0u8; 512];
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::BadMagic));
-    // Exactly one Bulk-Only Mass Storage Reset, addressed to interface 3.
+    assert_eq!(
+        scsi.read(0, 0, 512, &mut buf),
+        Err(Errno::WouldBlock),
+        "the command never completed, and the transport is back in step"
+    );
+    // Exactly one Bulk-Only Mass Storage Reset, addressed to interface 3,
+    // then both bulk pipes cleared (BOT 1.0 §5.3.4).
     assert_eq!(
         scsi.transport().transport().resets,
         vec![[0x21, 0xFF, 0, 0, 3, 0, 0, 0]]
     );
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
 }
 
 #[test]
@@ -138,16 +144,16 @@ fn a_corrupt_csw_signature_or_residue_fails_closed() {
     dev.in_steps.push_back(InStep::Data(csw));
     let mut scsi = scsi(dev);
     let mut buf = [0u8; 512];
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::BadMagic));
-    assert_eq!(device(&scsi).resets.len(), 1);
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
 
     // Residue larger than the transfer it describes.
     let mut dev = ScriptedDevice::new();
     dev.in_steps.push_back(InStep::Data(vec![0u8; 512]));
     dev.queue_csw(FIRST_TAG, 0, 513);
     let mut scsi = self::scsi(dev);
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::BadMagic));
-    assert_eq!(device(&scsi).resets.len(), 1);
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
 }
 
 #[test]
@@ -157,8 +163,85 @@ fn a_phase_error_runs_reset_recovery() {
     dev.queue_csw(FIRST_TAG, 2, 0); // phase error
     let mut scsi = scsi(dev);
     let mut buf = [0u8; 512];
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::NotImplemented));
-    assert_eq!(device(&scsi).resets.len(), 1);
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+}
+
+#[test]
+fn a_data_phase_that_fails_on_the_wire_resets_the_transport_and_is_reissuable() {
+    for failure in [Errno::DeviceFault, Errno::TimedOut] {
+        let mut dev = ScriptedDevice::new();
+        dev.in_steps.push_back(InStep::Fail(failure));
+        let mut scsi = scsi(dev);
+        let mut buf = [0u8; 512];
+        assert_eq!(
+            scsi.read(0, 0, 512, &mut buf),
+            Err(Errno::WouldBlock),
+            "{failure:?} left the device mid-command"
+        );
+        assert_eq!(device(&scsi).trail, ["reset", "clear"], "{failure:?}");
+        assert_eq!(device(&scsi).exchanges, 1);
+    }
+}
+
+#[test]
+fn a_cbw_or_csw_lost_on_the_wire_resets_the_transport() {
+    let mut dev = ScriptedDevice::new();
+    dev.fail_next_out = Some(Errno::DeviceFault);
+    let mut scsi = scsi(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Data(vec![0u8; 512]));
+    dev.in_steps.push_back(InStep::Fail(Errno::TimedOut));
+    let mut scsi = self::scsi(dev);
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+}
+
+#[test]
+fn a_device_that_will_not_answer_its_own_reset_times_out_for_its_health_to_ride() {
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Fail(Errno::TimedOut));
+    dev.reset_failure = Some(Errno::DeviceFault);
+    let mut scsi = scsi(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::TimedOut));
+    assert_eq!(
+        device(&scsi).trail,
+        ["reset"],
+        "nothing is cleared after the reset itself failed"
+    );
+}
+
+#[test]
+fn a_reset_the_host_controller_cannot_take_yet_leaves_the_command_reissuable() {
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Fail(Errno::DeviceFault));
+    dev.reset_failure = Some(Errno::WouldBlock);
+    let mut scsi = scsi(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+}
+
+#[test]
+fn a_device_gone_is_not_reset() {
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Fail(Errno::NotFound));
+    let mut scsi = scsi(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::NotFound));
+    assert!(device(&scsi).trail.is_empty());
+}
+
+#[test]
+fn the_ladder_s_reset_is_the_full_reset_recovery() {
+    let mut scsi = scsi(ScriptedDevice::new());
+    scsi.reset_transport().expect("the reset runs");
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+    assert_eq!(device(&scsi).scrubs, 0, "a reset is no buffer scrub");
 }
 
 #[test]

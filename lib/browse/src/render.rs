@@ -34,7 +34,6 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use tairix_controls::button::{Button, ButtonContent, ContentAlign};
-use tairix_controls::decision::Dialog;
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use tairix_controls::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, SelectionState,
@@ -42,17 +41,20 @@ use tairix_controls::state::{
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    ground_fill, paint_icon_slot, stack, withheld, Checkbox, ChromeLayer, Fact, FactList,
-    FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
-    IconButton, IconTile, ListRow, Panel, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout,
-    Toolbar, FULL_COLOUR,
+    ground_fill, paint_icon_slot, stack, withheld, Chart, Checkbox, ChromeLayer, CompositionBar,
+    CompositionRing, CompositionSegment, Fact, FactList, FieldAction, FieldControl, FieldGroup,
+    FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow, Panel,
+    PressureKind, ScrollBar, Tab, TableCell, TableRow, Tabs, TileLayout, Toolbar, FULL_COLOUR,
+    FULL_PERMILLE,
 };
 use tairix_font::{BitmapFont, Cut, ELLIPSIS};
 use tairix_geometry::{to_i32, GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey};
+use tairix_procinfo::display::{format_bytes, format_rate, percent};
+use tairix_procinfo::VolumeBytes;
 use tairix_raster::Surface;
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::browser::Browser;
 use crate::chrome::{
@@ -60,6 +62,7 @@ use crate::chrome::{
 };
 use crate::column::ScrollColumn;
 use crate::delete::DeletePlan;
+use crate::drive::{Drive, DriveChange, DRIVE_FACTS_MAX};
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
 use crate::layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
@@ -71,6 +74,7 @@ use crate::properties::{Attributes, Properties};
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 use tairix_abi::fs::FileKind;
+use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 
 /// Padding between a panel's edge and its label text, in logical pixels.
 const LABEL_PADDING: u32 = 4;
@@ -2122,6 +2126,9 @@ impl OwnerField {
 /// at.
 #[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PropertiesTab {
+    /// The volume mounted at a drive: what it is, how full, how busy, how it
+    /// is faring. Offered only by a window opened on a drive.
+    Drive,
     /// The node's metadata: what it is, how big, and when it changed.
     #[default]
     General,
@@ -2131,40 +2138,80 @@ pub enum PropertiesTab {
     Attributes,
 }
 
+/// Which sections a Properties window offers: a node's own three, or a
+/// drive's, which leads with the volume and keeps the node's three after it,
+/// since a drive's mount point is a directory with an owner and a mode too.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum PropertiesStrip {
+    /// A node: General, Permissions, Attributes.
+    #[default]
+    Node,
+    /// A drive: Drive, then a node's sections.
+    Drive,
+}
+
+impl PropertiesStrip {
+    /// The sections, in the order the strip draws them.
+    #[must_use]
+    pub fn tabs(self) -> &'static [PropertiesTab] {
+        match self {
+            Self::Node => &PropertiesTab::ALL[1..],
+            Self::Drive => &PropertiesTab::ALL,
+        }
+    }
+
+    /// The section a window offering this strip opens on: its first.
+    #[must_use]
+    pub fn first(self) -> PropertiesTab {
+        self.tabs().first().copied().unwrap_or_default()
+    }
+
+    /// The section at `index` in the strip, or `None` past its end.
+    #[must_use]
+    pub fn at(self, index: usize) -> Option<PropertiesTab> {
+        self.tabs().get(index).copied()
+    }
+
+    /// `tab`'s index in the strip, or the first's for one it does not offer.
+    #[must_use]
+    pub fn index_of(self, tab: PropertiesTab) -> usize {
+        self.tabs()
+            .iter()
+            .position(|offered| *offered == tab)
+            .unwrap_or(0)
+    }
+
+    /// The section `steps` from `tab` along the strip, clamped at either end
+    /// so a keyboard walk never wraps past it.
+    #[must_use]
+    pub fn stepped(self, tab: PropertiesTab, steps: i32) -> PropertiesTab {
+        let last = self.tabs().len().saturating_sub(1);
+        let target = i64::try_from(self.index_of(tab)).unwrap_or(0) + i64::from(steps);
+        let clamped = target.clamp(0, i64::try_from(last).unwrap_or(0));
+        self.at(usize::try_from(clamped).unwrap_or(0))
+            .unwrap_or_else(|| self.first())
+    }
+}
+
 impl PropertiesTab {
-    /// Every section, in the order the tab strip draws them.
-    pub const ALL: [Self; 3] = [Self::General, Self::Permissions, Self::Attributes];
+    /// Every section, in the order a drive's strip draws them; a node's strip
+    /// is all but the first.
+    pub const ALL: [Self; 4] = [
+        Self::Drive,
+        Self::General,
+        Self::Permissions,
+        Self::Attributes,
+    ];
 
     /// The section's tab label.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Drive => "Drive",
             Self::General => "General",
             Self::Permissions => "Permissions",
             Self::Attributes => "Attributes",
         }
-    }
-
-    /// The section at `index` in [`Self::ALL`], or `None` past the end.
-    #[must_use]
-    pub fn at(index: usize) -> Option<Self> {
-        Self::ALL.get(index).copied()
-    }
-
-    /// This section's own index in the tab strip.
-    #[must_use]
-    pub fn index(self) -> usize {
-        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
-    }
-
-    /// The section `steps` away from this one, clamped at either end so a
-    /// keyboard walk never wraps past the strip.
-    #[must_use]
-    pub fn stepped(self, steps: i32) -> Self {
-        let last = Self::ALL.len().saturating_sub(1);
-        let target = i64::from(i32::try_from(self.index()).unwrap_or(0)) + i64::from(steps);
-        let clamped = target.clamp(0, i64::try_from(last).unwrap_or(0));
-        Self::at(usize::try_from(clamped).unwrap_or(0)).unwrap_or(Self::General)
     }
 }
 
@@ -2295,11 +2342,11 @@ type PermsPlaced = [(usize, FieldLayout); PERMS_GROUPS];
 /// Whether the session may reassign an owner, and the id editor it has open.
 type OwnerGate<'a> = (bool, Option<(OwnerField, &'a TextField)>);
 
-/// What a window's Permissions section is composed from besides the node —
-/// the ownership gate and any id editor open over it — with the section the
-/// window keeps.
+/// What a window's sections are composed from besides the node: the
+/// ownership gate and any id editor open over it, the Permissions section the
+/// window keeps, and the drive a drive's window describes.
 #[derive(Copy, Clone)]
-pub struct PermsShown<'a> {
+pub struct SectionsShown<'a> {
     /// Whether the launching user holds `CAP_FS_CHOWN`, the one gate on
     /// offering an editable ownership control at all.
     pub can_chown: bool,
@@ -2307,9 +2354,11 @@ pub struct PermsShown<'a> {
     pub owner: Option<(OwnerField, &'a TextField)>,
     /// The section the window keeps between events.
     pub panel: &'a PermsPanel,
+    /// The drive, for a window offering the Drive section.
+    pub drive: Option<&'a Drive>,
 }
 
-impl<'a> PermsShown<'a> {
+impl<'a> SectionsShown<'a> {
     const fn gate(self) -> OwnerGate<'a> {
         (self.can_chown, self.owner)
     }
@@ -2940,15 +2989,17 @@ fn tab_strip_height(scale: Scale, theme: &Theme) -> u32 {
     .measured_height(scale, theme)
 }
 
-/// The tab strip a Properties window draws, with `selected` current.
-fn properties_tabs(selected: PropertiesTab) -> Tabs {
+/// The tab strip a Properties window offering `strip` draws, with `selected`
+/// current.
+fn properties_tabs(strip: PropertiesStrip, selected: PropertiesTab) -> Tabs {
     let mut tabs = Tabs::new(
-        PropertiesTab::ALL
+        strip
+            .tabs()
             .iter()
             .map(|tab| Tab::new(tab.label()))
             .collect(),
     );
-    tabs.adopt_selected(selected.index());
+    tabs.adopt_selected(strip.index_of(selected));
     tabs
 }
 
@@ -3000,6 +3051,8 @@ impl PermsCursor {
 /// scroll it was painted at.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PropertiesView {
+    /// The sections the window offers.
+    pub strip: PropertiesStrip,
     /// The selected section.
     pub tab: PropertiesTab,
     /// How far the selected section's scrolling column is scrolled, in
@@ -3012,17 +3065,18 @@ pub struct PropertiesView {
     pub perms: PermsCursor,
 }
 
-/// The Properties window's default extent in physical pixels at `scale`: wide
-/// enough for the label and value columns and for every access flag whole,
-/// and tall enough to show the identity band, the tab strip, and the tallest
-/// section's whole content.
+/// The default extent in physical pixels at `scale` of a Properties window
+/// offering `strip`: wide enough for the label and value columns and for every
+/// access flag whole, and tall enough to show the identity band, the tab
+/// strip, and the tallest section it offers whole — a drive's tallest reading
+/// among them.
 ///
 /// A window, so the user may resize it; this is only what it opens at. The
 /// Permissions section's share is measured from its own composition, so a
 /// wider type ladder is seated rather than cut, and no section opens already
 /// clipped.
 #[must_use]
-pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
+pub fn properties_window_extent(strip: PropertiesStrip, scale: Scale, theme: &Theme) -> (u32, u32) {
     let line = control_height(scale, theme).max(1);
     let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
     let perms = PermsSection::shape();
@@ -3037,9 +3091,14 @@ pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
         .saturating_mul(PROPERTIES_OPEN_ATTR_ROWS)
         .saturating_add(line)
         .saturating_add(pad.saturating_mul(4));
+    let drive = match strip {
+        PropertiesStrip::Drive => drive_extent(None, width, scale, theme),
+        PropertiesStrip::Node => 0,
+    };
     let body = general
         .max(perms.measured_height(width, scale, theme))
-        .max(attributes);
+        .max(attributes)
+        .max(drive);
     (
         width,
         identity_height(scale, theme)
@@ -3058,6 +3117,30 @@ const PROPERTIES_WINDOW_WIDTH: u32 = 460;
 /// scrolls, so this is a starting size and not a bound on what a node may
 /// carry.
 const PROPERTIES_OPEN_ATTR_ROWS: u32 = 5;
+
+/// The Drive section's body: the drive as read, or what the reading found.
+fn draw_drive_body(
+    surface: &mut Surface,
+    (layout, body): (&PropertiesLayout, Rect),
+    view: PropertiesView,
+    controls: PropertiesControls<'_>,
+    (scale, theme, font): (Scale, &Theme, BitmapFont),
+) {
+    match controls.drive.filter(|drive| drive.is_read()) {
+        Some(drive) if drive.record().is_some() => {
+            let (scrolled, frame) = drive_column(drive, body, view.scroll, scale, theme);
+            scrolled.view.paint(surface, |surface| {
+                draw_drive_section(surface, drive, frame, scale, theme);
+            });
+            scrolled.draw_bar(surface, controls.scrollbar, scale, theme);
+        }
+        Some(drive) if drive.is_unreadable() => {
+            draw_body_note(surface, layout, DRIVE_UNREADABLE, scale, theme, font);
+        }
+        Some(_) => draw_body_note(surface, layout, DRIVE_GONE, scale, theme, font),
+        None => draw_body_note(surface, layout, PROPERTIES_READING, scale, theme, font),
+    }
+}
 
 /// Draw a Properties window's whole client area for `frame`.
 ///
@@ -3104,24 +3187,50 @@ pub fn draw_properties_window(
         artwork,
     );
 
-    // A window that has nothing to describe yet says so where its body would
-    // be, and draws no tab strip: there is nothing to choose between.
+    // A node not yet read, or refused, leaves a node window nothing to choose
+    // between, so it says so where its body would be and draws no tab strip.
+    // A drive is described by the mount table alone, so a drive window keeps
+    // its strip and its Drive section whatever became of the node.
     let props = match frame {
-        PropertiesFrame::Reading => {
-            draw_body_note(surface, &layout, PROPERTIES_READING, scale, theme, font);
-            return;
-        }
-        PropertiesFrame::Refused(reason) => {
-            draw_body_note(surface, &layout, reason, scale, theme, font);
-            return;
-        }
-        PropertiesFrame::Ready(props) => props,
+        PropertiesFrame::Ready(props) => Ok(props),
+        PropertiesFrame::Reading => Err(PROPERTIES_READING),
+        PropertiesFrame::Refused(reason) => Err(reason),
     };
-    properties_tabs(view.tab).render(surface, layout.tabs, scale, theme, artwork);
+    if let (Err(note), PropertiesStrip::Node) = (props, view.strip) {
+        draw_body_note(surface, &layout, note, scale, theme, font);
+        return;
+    }
+    properties_tabs(view.strip, view.tab).render(surface, layout.tabs, scale, theme, artwork);
     let Some(body) = layout.body else {
         return;
     };
+    let props = match (props, view.tab) {
+        (Ok(props), _) => props,
+        (Err(_), PropertiesTab::Drive) => {
+            draw_drive_body(
+                surface,
+                (&layout, body),
+                view,
+                controls,
+                (scale, theme, font),
+            );
+            return;
+        }
+        (Err(note), _) => {
+            draw_body_note(surface, &layout, note, scale, theme, font);
+            return;
+        }
+    };
     match view.tab {
+        PropertiesTab::Drive => {
+            draw_drive_body(
+                surface,
+                (&layout, body),
+                view,
+                controls,
+                (scale, theme, font),
+            );
+        }
         PropertiesTab::General => {
             let (scrolled, frame) = general_column(props, body, view.scroll, scale, theme);
             scrolled.view.paint(surface, |surface| {
@@ -3130,7 +3239,7 @@ pub fn draw_properties_window(
             scrolled.draw_bar(surface, controls.scrollbar, scale, theme);
         }
         PropertiesTab::Permissions => {
-            controls.perms_shown().with(props, view.perms, |section| {
+            controls.sections().with(props, view.perms, |section| {
                 section.render(
                     surface,
                     (body, view.scroll),
@@ -3172,6 +3281,12 @@ fn draw_body_note(
 /// What the window says while its read is in flight.
 const PROPERTIES_READING: &str = "Reading…";
 
+/// What the Drive section says once its volume is no longer mounted.
+const DRIVE_GONE: &str = "Nothing is mounted here now.";
+
+/// What the Drive section says when the mount table could not be read.
+const DRIVE_UNREADABLE: &str = "The system could not say what is mounted here.";
+
 /// The live editors and identity a Properties window draws over its rows.
 #[derive(Copy, Clone)]
 pub struct PropertiesControls<'a> {
@@ -3190,16 +3305,19 @@ pub struct PropertiesControls<'a> {
     pub scrollbar: &'a ScrollBar,
     /// The Permissions section the window keeps.
     pub perms: &'a PermsPanel,
+    /// The drive, for a window offering the Drive section.
+    pub drive: Option<&'a Drive>,
 }
 
 impl<'a> PropertiesControls<'a> {
-    /// What the Permissions section is composed from, and where it is kept.
+    /// What the sections are composed from besides the node.
     #[must_use]
-    pub const fn perms_shown(self) -> PermsShown<'a> {
-        PermsShown {
+    pub const fn sections(self) -> SectionsShown<'a> {
+        SectionsShown {
             can_chown: self.can_chown,
             owner: self.owner,
             panel: self.perms,
+            drive: self.drive,
         }
     }
 }
@@ -3235,6 +3353,324 @@ fn fact_rows_height(facts: usize, scale: Scale, theme: &Theme) -> u32 {
     FactList::row_height(scale, theme)
         .saturating_mul(u32::try_from(facts).unwrap_or(u32::MAX))
         .saturating_add(pad.saturating_mul(2))
+}
+
+/// Where the Drive section's three panels sit down its column, from the
+/// column's top, and the height they take together.
+///
+/// The one layout the paint, the scroll and the damage a sample owes all read,
+/// so a repaint scoped to a panel covers exactly the pixels that panel drew.
+struct DriveLayout {
+    /// The capacity ring, its key, and the line stating the whole.
+    capacity: Rect,
+    /// The activity caption and its trace.
+    activity: Rect,
+    /// The facts.
+    facts: Rect,
+    /// Everything, padded.
+    extent: u32,
+}
+
+impl DriveLayout {
+    /// Lay `drive`'s panels down a column whose content starts at `frame`'s
+    /// top-left and spans its width. `None` lays out the tallest a drive can
+    /// be, which a window opens tall enough to show.
+    fn resolve(drive: Option<&Drive>, frame: Rect, scale: Scale, theme: &Theme) -> Self {
+        let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+        let gap = pad.saturating_mul(2);
+        let width = frame.width.saturating_sub(pad.saturating_mul(2));
+        let line = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale).line_height();
+        let header =
+            BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale).line_height();
+        let ring = match drive.map(Drive::capacity) {
+            Some(None) => None,
+            Some(Some(bytes)) => capacity_ring(&bytes),
+            None => capacity_ring(&VolumeBytes::default()),
+        };
+        let capacity_h = ring.map_or(line, |ring| {
+            ring.measured_height(width, scale, theme)
+                .saturating_add(pad)
+                .saturating_add(line)
+        });
+        let served = drive.is_none_or(Drive::is_served);
+        let activity_h = header.saturating_add(pad).saturating_add(if served {
+            scale.scale_length(DRIVE_CHART_HEIGHT)
+        } else {
+            line
+        });
+        let facts = drive.map_or(DRIVE_FACTS_MAX, |drive| drive.facts().len());
+        let facts_h = FactList::row_height(scale, theme)
+            .saturating_mul(u32::try_from(facts).unwrap_or(u32::MAX));
+        let x = frame.left().saturating_add(to_i32(pad));
+        let mut y = frame.top().saturating_add(to_i32(pad));
+        let mut next = |height: u32| {
+            let rect = Rect::new(x, y, width, height);
+            y = y.saturating_add(to_i32(height)).saturating_add(to_i32(gap));
+            rect
+        };
+        let capacity = next(capacity_h);
+        let activity = next(activity_h);
+        let facts = next(facts_h);
+        Self {
+            capacity,
+            activity,
+            facts,
+            extent: pad
+                .saturating_mul(2)
+                .saturating_add(capacity_h)
+                .saturating_add(activity_h)
+                .saturating_add(facts_h)
+                .saturating_add(gap.saturating_mul(2)),
+        }
+    }
+}
+
+/// The activity trace's height at the reference density.
+const DRIVE_CHART_HEIGHT: u32 = 64;
+
+/// The height the Drive section takes at `width`: `drive`'s own, or the
+/// tallest a drive can be.
+fn drive_extent(drive: Option<&Drive>, width: u32, scale: Scale, theme: &Theme) -> u32 {
+    DriveLayout::resolve(drive, Rect::new(0, 0, width, 0), scale, theme).extent
+}
+
+/// The Drive section's column: `drive`'s panels at their natural height down
+/// `body`, scrolled `offset` pixels, and the frame they are laid out in.
+fn drive_column(
+    drive: &Drive,
+    body: Rect,
+    offset: u64,
+    scale: Scale,
+    theme: &Theme,
+) -> (Scrolled, Rect) {
+    Scrolled::measured(
+        body,
+        gutter_width(scale, theme, body.width),
+        (offset, FactList::row_height(scale, theme)),
+        |width| drive_extent(Some(drive), width, scale, theme),
+    )
+}
+
+/// Paint the Drive section into its laid-out `frame`: capacity as a ring of
+/// used and free, activity as a duplex read and write trace, then the facts,
+/// the health first and toned by it.
+fn draw_drive_section(
+    surface: &mut Surface,
+    drive: &Drive,
+    frame: Rect,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let layout = DriveLayout::resolve(Some(drive), frame, scale, theme);
+    let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let muted = theme.palette().on_surface_muted.into();
+    match drive.capacity() {
+        Some(bytes) => {
+            if let Some(ring) = capacity_ring(&bytes) {
+                let ring_h = ring.measured_height(layout.capacity.width, scale, theme);
+                let at = Rect::new(
+                    layout.capacity.left(),
+                    layout.capacity.top(),
+                    layout.capacity.width,
+                    ring_h,
+                );
+                ring.render(surface, at, scale, theme);
+            }
+            let whole = alloc::format!(
+                "{} in all · {} available",
+                format_bytes(bytes.total),
+                format_bytes(bytes.available)
+            );
+            body.draw_text(
+                surface,
+                layout.capacity.left(),
+                layout
+                    .capacity
+                    .bottom()
+                    .saturating_sub(to_i32(body.line_height())),
+                body.truncate_to_width(&whole, layout.capacity.width),
+                muted,
+            );
+        }
+        None => {
+            body.draw_text(
+                surface,
+                layout.capacity.left(),
+                layout.capacity.top(),
+                body.truncate_to_width(DRIVE_NO_CAPACITY, layout.capacity.width),
+                muted,
+            );
+        }
+    }
+    draw_drive_activity(surface, drive, layout.activity, scale, theme);
+    let tone = drive.health().map(SignalRole::for_volume_health);
+    FactList::new(
+        drive
+            .facts()
+            .iter()
+            .enumerate()
+            .map(|(index, (label, value))| {
+                let fact = Fact::new(*label, value.as_str());
+                match tone {
+                    Some(tone) if index == 0 => fact.with_tone(tone),
+                    _ => fact,
+                }
+            })
+            .collect(),
+    )
+    .with_separators(true)
+    .render(surface, layout.facts, scale, theme);
+}
+
+/// Paint the activity panel into `rect`: its caption with the latest rates
+/// beside it, and the trace beneath.
+fn draw_drive_activity(
+    surface: &mut Surface,
+    drive: &Drive,
+    rect: Rect,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let header = BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale);
+    let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+    let palette = theme.palette();
+    header.draw_text(
+        surface,
+        rect.left(),
+        rect.top(),
+        DRIVE_ACTIVITY,
+        palette.on_surface.into(),
+    );
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let below = rect
+        .top()
+        .saturating_add(to_i32(header.line_height().saturating_add(pad)));
+    if !drive.is_served() {
+        body.draw_text(
+            surface,
+            rect.left(),
+            below,
+            body.truncate_to_width(DRIVE_UNSERVED, rect.width),
+            palette.on_surface_muted.into(),
+        );
+        return;
+    }
+    let rates = match drive.rates() {
+        (None, None) => String::from(DRIVE_MEASURING),
+        (read, write) => alloc::format!(
+            "Read {} · Write {}",
+            read.map_or_else(|| String::from("—"), format_rate),
+            write.map_or_else(|| String::from("—"), format_rate)
+        ),
+    };
+    let rates = body.truncate_to_width(
+        &rates,
+        rect.width.saturating_sub(header.text_width(DRIVE_ACTIVITY)),
+    );
+    body.draw_text(
+        surface,
+        rect.right().saturating_sub(to_i32(body.text_width(rates))),
+        rect.top(),
+        rates,
+        palette.on_surface_muted.into(),
+    );
+    let trace = drive.trace();
+    if trace.is_empty() {
+        return;
+    }
+    let chart = Rect::new(
+        rect.left(),
+        below,
+        rect.width,
+        u32::try_from(rect.bottom().saturating_sub(below)).unwrap_or(0),
+    );
+    Chart::new(SignalRole::DiskRead)
+        .with_samples(trace.primary)
+        .with_opposing(SignalRole::DiskWrite, trace.opposing)
+        .render(surface, chart, scale, theme);
+}
+
+/// What the activity panel's caption reads.
+const DRIVE_ACTIVITY: &str = "Activity";
+
+/// What the activity panel says until two readings have measured a rate.
+const DRIVE_MEASURING: &str = "Measuring…";
+
+/// What the activity panel says for a volume whose device reports no service.
+const DRIVE_UNSERVED: &str = "This volume's device reports no activity.";
+
+/// The ring the capacity panel draws for a volume holding `bytes`: used and
+/// free, the share used in its middle.
+fn capacity_ring(bytes: &VolumeBytes) -> Option<CompositionRing> {
+    let used = bytes.used_permille();
+    let parts = alloc::vec![
+        CompositionSegment::new("Used", format_bytes(bytes.used()), used),
+        CompositionSegment::remainder(
+            "Free",
+            format_bytes(bytes.free),
+            FULL_PERMILLE.saturating_sub(used),
+        ),
+    ];
+    let composition = CompositionBar::new(PressureKind::Disk, parts).ok()?;
+    Some(CompositionRing::new(composition, percent(used), "used"))
+}
+
+/// What the capacity panel says for a format that tracks no fixed capacity.
+const DRIVE_NO_CAPACITY: &str = "This format tracks no fixed capacity.";
+
+/// Report into `damage` what adopting a drive reading that made `change`
+/// repaints on a window showing `view`: nothing unless the Drive section is
+/// on show, the capacity or activity panel alone for a change to either where
+/// it shows, and the whole body when the facts moved, since the layout follows
+/// them. Answers whether anything is owed.
+///
+/// `sections` are what the draw takes, so the panels reported are the ones
+/// drawn; `frame` is the window's client, its scale and its theme.
+#[must_use]
+pub fn properties_drive_damage(
+    view: PropertiesView,
+    sections: SectionsShown<'_>,
+    (window, scale, theme): (Rect, Scale, &Theme),
+    change: DriveChange,
+    damage: &mut Region,
+) -> bool {
+    if view.tab != PropertiesTab::Drive || !change.any() {
+        return false;
+    }
+    let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
+        return false;
+    };
+    let shown = sections.drive.filter(|drive| drive.record().is_some());
+    let (Some(drive), DriveChange::Panels(panels)) = (shown, change) else {
+        damage.add(body);
+        return true;
+    };
+    let (scrolled, frame) = drive_column(drive, body, view.scroll, scale, theme);
+    let layout = DriveLayout::resolve(Some(drive), frame, scale, theme);
+    let viewport = scrolled.view.viewport();
+    let offset = to_i32(u32::try_from(scrolled.model.offset()).unwrap_or(u32::MAX));
+    let mut owed = false;
+    for (moved, panel) in [
+        (panels.capacity, layout.capacity),
+        (panels.activity, layout.activity),
+        (panels.figures, layout.facts),
+    ] {
+        if !moved {
+            continue;
+        }
+        let on_screen = Rect::new(
+            panel.left(),
+            panel.top().saturating_sub(offset),
+            panel.width,
+            panel.height,
+        );
+        let visible = on_screen.intersection(&viewport);
+        if !visible.is_empty() {
+            damage.add(visible);
+            owed = true;
+        }
+    }
+    owed
 }
 
 /// Draw the extended-attribute section: the node's attributes as selectable
@@ -3331,13 +3767,15 @@ pub fn properties_hit(
 ) -> Option<PropertiesTarget> {
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let layout = PropertiesLayout::resolve(window, scale, theme);
-    if let Some(index) = properties_tabs(view.tab).tab_at(layout.tabs, scale, theme, point) {
-        return PropertiesTab::at(index).map(PropertiesTarget::Tab);
+    if let Some(index) =
+        properties_tabs(view.strip, view.tab).tab_at(layout.tabs, scale, theme, point)
+    {
+        return view.strip.at(index).map(PropertiesTarget::Tab);
     }
     let body = layout.body.filter(|body| body.contains(point))?;
     match view.tab {
-        PropertiesTab::General => None,
-        PropertiesTab::Permissions => controls.perms_shown().with(props, view.perms, |section| {
+        PropertiesTab::Drive | PropertiesTab::General => None,
+        PropertiesTab::Permissions => controls.sections().with(props, view.perms, |section| {
             let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
             let at = scrolled.view.to_content(point)?;
             section.target_at(&placed, scale, theme, at)
@@ -3377,11 +3815,15 @@ fn contains(rect: Rect, point: Point) -> bool {
 fn section_column(
     props: &Properties,
     view: PropertiesView,
-    perms: PermsShown<'_>,
+    perms: SectionsShown<'_>,
     (window, scale, theme): (Rect, Scale, &Theme),
 ) -> Option<(Scrolled, Option<Rect>)> {
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
     match view.tab {
+        PropertiesTab::Drive => {
+            let drive = perms.drive.filter(|drive| drive.record().is_some())?;
+            Some((drive_column(drive, body, view.scroll, scale, theme).0, None))
+        }
         PropertiesTab::General => Some((
             general_column(props, body, view.scroll, scale, theme).0,
             None,
@@ -3421,7 +3863,7 @@ pub fn properties_scroll_wheel(
     scroll: &mut ScrollColumn,
     props: &Properties,
     view: PropertiesView,
-    perms: PermsShown<'_>,
+    perms: SectionsShown<'_>,
     frame: (Rect, Scale, &Theme),
     delta: (i32, i32),
     damage: &mut Region,
@@ -3452,7 +3894,7 @@ pub fn properties_scroll_pointer(
     scroll: &mut ScrollColumn,
     props: &Properties,
     view: PropertiesView,
-    perms: PermsShown<'_>,
+    perms: SectionsShown<'_>,
     frame: (Rect, Scale, &Theme),
     pointer: (Point, &InputEvent),
     damage: &mut Region,
@@ -3480,7 +3922,7 @@ pub fn properties_reveal(
     scroll: &mut ScrollColumn,
     props: &Properties,
     view: PropertiesView,
-    perms: PermsShown<'_>,
+    perms: SectionsShown<'_>,
     frame: (Rect, Scale, &Theme),
     damage: &mut Region,
 ) -> bool {
@@ -3511,7 +3953,7 @@ pub fn properties_reveal(
 pub fn properties_owner_editor_rect(
     props: &Properties,
     view: PropertiesView,
-    perms: PermsShown<'_>,
+    perms: SectionsShown<'_>,
     (window, scale, theme): (Rect, Scale, &Theme),
     field: OwnerField,
 ) -> Option<Rect> {
@@ -3580,7 +4022,7 @@ pub fn properties_permissions_key(
     let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
         return unchanged;
     };
-    let perms = controls.perms_shown();
+    let perms = controls.sections();
     let keyed = perms.with(props, view.perms, |section| {
         let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
         let mut drew = tairix_controls::damage::sink();
@@ -3601,147 +4043,70 @@ pub fn properties_attr_editor_rect(window: Rect, scale: Scale, theme: &Theme) ->
     AttrsLayout::resolve(body, scale, theme, font).map(|attrs| attrs.editor)
 }
 
-/// The action-button index of the destructive **Delete** action in the
-/// delete-confirmation [`Dialog`] [`build_delete_dialog`] produces.
-pub const DELETE_CONFIRM_INDEX: usize = 0;
+/// The button index of **Cancel** in the delete question [`delete_alert`]
+/// builds.
+pub const DELETE_CANCEL_INDEX: usize = 0;
 
-/// The action-button index of the safe **Cancel** action in the
-/// delete-confirmation [`Dialog`] [`build_delete_dialog`] produces.
-pub const DELETE_CANCEL_INDEX: usize = 1;
+/// The button index of the removal itself — **Move to Trash** or **Delete
+/// Permanently** — in the delete question [`delete_alert`] builds.
+pub const DELETE_CONFIRM_INDEX: usize = 1;
 
-/// Build the modal delete-confirmation [`Dialog`] for `plan`, worded honestly
-/// for the `disposition` the caller will actually carry out: a recoverable
-/// **Move to Trash** or an irreversible **Delete Permanently**.
+/// The question put before removing `plan`, worded honestly for the
+/// `disposition` the caller will carry out: a recoverable **Move to Trash**,
+/// the default answer, or an irreversible **Delete Permanently**, which
+/// destroys and so is never the answer `Enter` gives.
 ///
-/// The [`DeleteTarget`](crate::DeleteTarget) count and
-/// [`has_directories`](DeletePlan::has_directories) come straight from the
-/// already-captured [`DeletePlan`], so the confirmation reports the true scope
-/// of the removal rather than a fabricated figure. `disposition`
-/// ([`DeleteDisposition`]) is the caller's own decision — computed from the
-/// targets' and the user's Trash directory's volume ids — so the dialog never
-/// promises a wording its execution will not honour: a
-/// [`Trash`](DeleteDisposition::Trash) confirmation offers a safe, recoverable
-/// **Move to Trash**, a [`Permanent`](DeleteDisposition::Permanent) one the
-/// destructive **Delete Permanently** with the honest warmth on the safe
-/// Cancel. The dialog performs nothing itself — the caller drives the removal
-/// in its own capability-checked tail once the user confirms — so composing it
-/// grants no authority. Both the file manager (which builds one) and, in
-/// principle, any other write-capable consumer share this one definition; the
-/// read-only picker never deletes, so it never builds one.
+/// The count and the folder warning come from the captured plan, so the
+/// question states the true scope of the removal. It performs nothing
+/// itself; the caller removes in its own capability-checked tail once the
+/// user answers. `None` only if the compiled-in button labels were not ones
+/// an alert can carry.
 #[must_use]
-pub fn build_delete_dialog(plan: &DeletePlan, disposition: DeleteDisposition) -> Dialog {
-    match disposition {
-        DeleteDisposition::Trash => build_trash_dialog(plan),
-        DeleteDisposition::Permanent => build_permanent_delete_dialog(plan),
-    }
+pub fn delete_alert(plan: &DeletePlan, disposition: DeleteDisposition) -> Option<AlertSpec> {
+    let named = |verb: &str, after: &str| {
+        if plan.len() == 1 {
+            alloc::format!("{verb} \u{201c}{}\u{201d}{after}", plan.targets()[0].name())
+        } else {
+            alloc::format!("{verb} {} items{after}", plan.len())
+        }
+    };
+    let (severity, headline, detail, confirm) = match disposition {
+        DeleteDisposition::Trash => (
+            AlertSeverity::Question,
+            named("Move", " to Trash?"),
+            "Items stay in the Trash until you empty it, so you can restore them.",
+            AlertButton::new("Move to Trash", AlertButtonRole::Default).ok()?,
+        ),
+        DeleteDisposition::Permanent => (
+            AlertSeverity::Warning,
+            named("Delete", " permanently?"),
+            if plan.has_directories() {
+                "Folders and everything inside them will be removed. This cannot be undone."
+            } else {
+                "This cannot be undone."
+            },
+            AlertButton::new("Delete Permanently", AlertButtonRole::Destructive).ok()?,
+        ),
+    };
+    let cancel = AlertButton::new("Cancel", AlertButtonRole::Cancel).ok()?;
+    AlertSpec::fitted(severity, &headline, detail, &[cancel, confirm]).ok()
 }
 
-/// The recoverable **Move to Trash** confirmation: nothing is destroyed, so the
-/// confirm action is the recommended (safe) primary rather than a destructive
-/// one, and the message states that trashed items can be restored.
-fn build_trash_dialog(plan: &DeletePlan) -> Dialog {
-    let title = if plan.len() == 1 {
-        alloc::format!(
-            "Move \u{201c}{}\u{201d} to Trash?",
-            plan.targets()[0].name()
-        )
-    } else {
-        alloc::format!("Move {} items to Trash?", plan.len())
-    };
-    // Recoverable: the honest warmth sits on the confirm action because the
-    // move can be undone by restoring from Trash — it is not destructive.
-    let confirm = Button::new(
-        ButtonContent::Label(String::from("Move to Trash")),
-        ControlRole::Recommended,
-    );
-    let cancel = Button::new(
-        ButtonContent::Label(String::from("Cancel")),
-        ControlRole::Neutral,
-    );
-    Dialog::new(title)
-        .with_message("Items stay in the Trash until you empty it, so you can restore them.")
-        .with_actions(vec![confirm, cancel])
-}
-
-/// The irreversible **Delete Permanently** confirmation: the destructive action
-/// carries the Destructive role and the confirmation posture, and Cancel is the
-/// recommended (safe, trailing) action so the honest warmth sits on the safe
-/// choice, never on the delete.
-fn build_permanent_delete_dialog(plan: &DeletePlan) -> Dialog {
-    let title = if plan.len() == 1 {
-        alloc::format!(
-            "Delete \u{201c}{}\u{201d} permanently?",
-            plan.targets()[0].name()
-        )
-    } else {
-        alloc::format!("Delete {} items permanently?", plan.len())
-    };
-    let message = if plan.has_directories() {
-        "Folders and everything inside them will be removed. This cannot be undone."
-    } else {
-        "This cannot be undone."
-    };
-    let mut delete = Button::new(
-        ButtonContent::Label(String::from("Delete Permanently")),
-        ControlRole::Destructive,
-    );
-    delete.set_state(ControlState::idle().with_authority(AuthorityState::NeedsConfirmation));
-    let cancel = Button::new(
-        ButtonContent::Label(String::from("Cancel")),
-        ControlRole::Recommended,
-    );
-    Dialog::new(title)
-        .with_message(message)
-        .with_actions(vec![delete, cancel])
-}
-
-/// The action-button index of the one **OK** a refusal [`Dialog`]
-/// [`build_refusal_dialog`] produces.
-pub const REFUSAL_DISMISS_INDEX: usize = 0;
-
-/// A modal dialog stating why something the user asked for was not done:
-/// `title` names what stopped, `reason` says why, and OK dismisses it.
+/// The centered, clamped bounds of the long-operation progress panel within
+/// `viewport`: a title bar and six rows high and four-fifths of the window
+/// wide, clamped so a small window still yields a drawable — if clipped —
+/// panel rather than a panic.
 ///
-/// It reports a refusal in the window that asked rather than only on a log
-/// the user never reads, and performs nothing itself.
+/// One definition so [`draw_progress_dialog`] and [`progress_cancel_at`] place
+/// and hit-test the same rectangle.
 #[must_use]
-pub fn build_refusal_dialog(title: impl Into<String>, reason: impl Into<String>) -> Dialog {
-    let ok = Button::new(
-        ButtonContent::Label(String::from("OK")),
-        ControlRole::Recommended,
-    );
-    Dialog::new(title)
-        .with_message(reason)
-        .with_actions(vec![ok])
-}
-
-/// The centered, clamped bounds of a modal dialog — the delete confirmation,
-/// a refusal — within `viewport`.
-///
-/// Sized to comfortably show the title, the warning message, and the action
-/// button band, and clamped to the window so a small window still yields a
-/// drawable — if clipped — dialog rather than a panic. One definition so
-/// [`draw_modal_dialog`] and [`modal_dialog_action_at`] place and hit-test
-/// the same rectangle.
-#[must_use]
-pub fn modal_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    // Title bar, up to two message lines, and the action-button band, with
-    // margins — generous so the buttons are not clipped at a normal size.
-    centered_overlay_rect(viewport, scale, theme, 6)
-}
-
-/// A centered, clamped modal-overlay rectangle within `viewport`, sized to a
-/// title bar plus `content_lines` text rows and four-fifths of the window
-/// width, clamped so a small window still yields a drawable — if clipped —
-/// rectangle rather than a panic.
-///
-/// The one sizing definition the delete-confirmation dialog and the progress
-/// panel share, so their placement stays consistent and cannot drift.
-fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_lines: u32) -> Rect {
+pub fn progress_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+    const ROWS: u32 = 6;
     let line = row_height(scale, theme);
     let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
-    let content = line.saturating_mul(content_lines);
-    let height = title.saturating_add(content).min(viewport.height.max(1));
+    let height = title
+        .saturating_add(line.saturating_mul(ROWS))
+        .min(viewport.height.max(1));
     let width = viewport
         .width
         .saturating_mul(4)
@@ -3757,65 +4122,6 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
         .y
         .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
     Rect::new(x, y, width, height)
-}
-
-/// Draw the modal `dialog` centered in `viewport`, on top of the current view.
-///
-/// Every blit clips, so a window too small for the whole dialog simply shows
-/// what fits rather than panicking. It reads only the passed-in dialog and
-/// draws — it performs no I/O and holds no authority.
-pub fn draw_modal_dialog(
-    surface: &mut Surface,
-    dialog: &Dialog,
-    scale: Scale,
-    theme: &Theme,
-    viewport: Rect,
-) {
-    let bounds = modal_dialog_rect(viewport, scale, theme);
-    dialog.render(surface, bounds, scale, theme);
-}
-
-/// The action-button index the modal `dialog` draws at window-local pixel
-/// `point`, or `None` when the click is not on a button.
-///
-/// This mirrors [`draw_modal_dialog`]'s placement through the shared
-/// [`modal_dialog_rect`] and the dialog's own
-/// [`action_rects`](Dialog::action_rects) geometry, so a click resolves to
-/// exactly the button the user pressed — [`DELETE_CONFIRM_INDEX`] for Delete,
-/// [`DELETE_CANCEL_INDEX`] for Cancel. A click anywhere but a button returns
-/// `None`, changing nothing (fail closed).
-#[must_use]
-pub fn modal_dialog_action_at(
-    dialog: &Dialog,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-) -> Option<usize> {
-    let bounds = modal_dialog_rect(viewport, scale, theme);
-    let rects = dialog.action_rects(bounds, scale, theme);
-    for (i, rect) in rects.iter().enumerate() {
-        if rect.width == 0 {
-            continue;
-        }
-        let right = rect.left().saturating_add(to_i32(rect.width));
-        let bottom = rect.top().saturating_add(to_i32(rect.height));
-        if point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// The centered, clamped bounds of the long-operation progress panel within
-/// `viewport`.
-///
-/// One definition so [`draw_progress_dialog`] and [`progress_cancel_at`] place
-/// and hit-test the same rectangle, sized like the delete-confirmation dialog
-/// so the two modal surfaces sit consistently.
-#[must_use]
-pub fn progress_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    centered_overlay_rect(viewport, scale, theme, 6)
 }
 
 /// The Cancel-button rectangle within the progress panel's `content` area —

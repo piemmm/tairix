@@ -176,6 +176,7 @@
 extern crate alloc;
 
 pub mod aids;
+pub mod alert;
 pub mod apps;
 pub mod assets;
 mod choice;
@@ -256,10 +257,12 @@ pub use confirm::{Answer, ConfirmPrompt};
 pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-    LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
+    GestureRefusal, LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
-pub use drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
+pub use drag::{
+    DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, OwedReport, SlotAnswer, WindowUnder,
+};
 pub use drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
 pub use elevate::{
     ElevatePrompt, Elevator, PromptOutcome, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE,

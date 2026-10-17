@@ -19,45 +19,16 @@
 // the width-narrowing casts are exact for these fixtures.
 #![allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
 
-use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::DriverError;
 use tairix_drv_fs_ext4::Ext4;
 
+#[path = "support/mem_block.rs"]
+mod mem_block;
+use mem_block::MemBlock;
+
 const META_CSUM: &[u8] = include_bytes!("fixtures/metadata_csum.img");
 const GDT_CSUM: &[u8] = include_bytes!("fixtures/gdt_csum.img");
-
-const SECTOR: usize = 512;
-
-/// In-memory [`Block`] device over an ext4 image with a 512-byte logical
-/// sector distinct from the 1024-byte filesystem block.
-struct MemBlock {
-    data: Vec<u8>,
-}
-
-impl Block for MemBlock {
-    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        Ok(BlockGeometry {
-            block_size: SECTOR as u32,
-            block_count: (self.data.len() / SECTOR) as u64,
-        })
-    }
-    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let start = lba as usize * SECTOR;
-        let end = start + buf.len();
-        buf.copy_from_slice(&self.data[start..end]);
-        Ok(())
-    }
-    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let start = lba as usize * SECTOR;
-        let end = start + buf.len();
-        self.data[start..end].copy_from_slice(buf);
-        Ok(())
-    }
-    fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
-    }
-}
 
 // --- Independent reference checksums (NOT the driver's). ---
 

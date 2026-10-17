@@ -17,6 +17,9 @@ use alloc::string::String;
 
 use crate::{branch_target, sign_extend, Insn};
 
+/// Every instruction is one 32-bit word.
+pub const MAX_INSN_LEN: usize = 4;
+
 /// 64-bit general register name (`sp_or_zero` picks the x31 meaning).
 fn xreg(field: u32, sp: bool) -> String {
     let field = field & 31;
@@ -81,10 +84,10 @@ pub fn decode(code: &[u8], address: u64) -> Option<Insn> {
     if code.is_empty() {
         return None;
     }
-    if code.len() < 4 {
+    if code.len() < MAX_INSN_LEN {
         return Some(Insn::bad(address, code));
     }
-    let consumed = &code[..4];
+    let consumed = &code[..MAX_INSN_LEN];
     let word = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
     Some(decode_word(word, address, consumed))
 }

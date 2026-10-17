@@ -377,3 +377,76 @@ fn a_meta_group_cut_short_has_no_third_descriptor_copy() {
     assert_eq!(layout.group_overhead(33), 1);
     assert_eq!(layout.group_overhead(39), 0, "the volume's last group");
 }
+
+#[test]
+fn a_volume_is_ext4_once_any_feature_past_ext3s_is_on() {
+    let ext3_ro = RO_COMPAT_SPARSE_SUPER | RO_COMPAT_LARGE_FILE | RO_COMPAT_BTREE_DIR;
+    let ext3_incompat = INCOMPAT_FILETYPE | INCOMPAT_RECOVER | INCOMPAT_META_BG;
+    assert_eq!(
+        Generation::of(COMPAT_DIR_INDEX, INCOMPAT_FILETYPE, ext3_ro),
+        Generation::Ext2
+    );
+    assert_eq!(
+        Generation::of(COMPAT_HAS_JOURNAL, ext3_incompat, ext3_ro),
+        Generation::Ext3
+    );
+    assert_eq!(
+        Generation::of(COMPAT_SPARSE_SUPER2 | COMPAT_ORPHAN_FILE, 0, 0),
+        Generation::Ext2,
+        "a compatible feature leaves an older driver mounting the volume"
+    );
+    for compat in [0, COMPAT_HAS_JOURNAL] {
+        for incompat in [
+            INCOMPAT_COMPRESSION,
+            INCOMPAT_JOURNAL_DEV,
+            INCOMPAT_EXTENTS,
+            INCOMPAT_64BIT,
+            INCOMPAT_FLEX_BG,
+            INCOMPAT_INLINE_DATA,
+        ] {
+            assert_eq!(
+                Generation::of(compat, INCOMPAT_FILETYPE | incompat, 0),
+                Generation::Ext4,
+                "{incompat:#x}"
+            );
+        }
+        for ro in [
+            RO_COMPAT_HUGE_FILE,
+            RO_COMPAT_GDT_CSUM,
+            RO_COMPAT_DIR_NLINK,
+            RO_COMPAT_EXTRA_ISIZE,
+            RO_COMPAT_METADATA_CSUM,
+        ] {
+            assert_eq!(
+                Generation::of(compat, 0, RO_COMPAT_SPARSE_SUPER | ro),
+                Generation::Ext4,
+                "{ro:#x}"
+            );
+        }
+    }
+    assert_eq!(
+        [Generation::Ext2, Generation::Ext3, Generation::Ext4].map(Generation::name),
+        ["ext2", "ext3", "ext4"]
+    );
+}
+
+#[test]
+fn a_revision_0_superblock_is_raised_with_the_values_revision_0_fixes() {
+    let mut sb = superblock(1);
+    put_le32(&mut sb, SB_REV_LEVEL, 0);
+    put_le32(&mut sb, SB_FEATURE_INCOMPAT, 0);
+    put_le32(&mut sb, SB_FEATURE_RO_COMPAT, 0);
+    sb[SB_FIRST_INO..SB_INODE_SIZE + 2].fill(0);
+    let layout = parse(&sb, BIG).expect("a revision-0 volume parses");
+    assert_eq!((layout.inode_size, layout.first_ino), (128, 11));
+    assert_eq!(layout.generation, Generation::Ext2);
+    make_dynamic(&mut sb);
+    assert_eq!(le32(&sb, SB_REV_LEVEL), 1);
+    assert_eq!(le32(&sb, SB_FIRST_INO), 11);
+    assert_eq!(le16(&sb, SB_INODE_SIZE), 128);
+    let raised = parse(&sb, BIG).expect("the raised volume parses");
+    assert_eq!((raised.inode_size, raised.first_ino), (128, 11));
+    let before = sb;
+    make_dynamic(&mut sb);
+    assert_eq!(sb, before, "a dynamic superblock is left as it is");
+}

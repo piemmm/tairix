@@ -131,6 +131,7 @@ pub mod create;
 pub mod delete;
 pub mod desk;
 pub mod document;
+pub mod drive;
 pub mod entry;
 pub mod error;
 pub mod execute;
@@ -171,6 +172,7 @@ pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
 pub use desk::{ListingDesk, ListingJob};
+pub use drive::{Drive, DriveChange, DrivePanels, DriveSample};
 pub use entry::{
     is_bundle_name, resolve_target, Entry, EntryKind, LinkResolution, LinkTarget, Occupancy,
 };

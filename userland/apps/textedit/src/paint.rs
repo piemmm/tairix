@@ -16,6 +16,7 @@ use tairix_raster::{Color, Surface};
 use tairix_syntax::{Severity, Span};
 use tairix_theme::{Palette, SyntaxRole, Theme};
 
+use crate::code::CodeDisplay;
 use crate::document::Document;
 use crate::editor::Mode;
 use crate::hex::{self, HexCaret, HexLayout, Nibble, Pane, BYTES_PER_ROW};
@@ -55,9 +56,12 @@ pub fn render_into(
     }
     if !withheld(surface, layout.grid()) {
         fill_area(surface, layout.grid(), Color::from(palette.document));
-        match view.editor().mode() {
-            Mode::Text => text_grid(surface, view, layout, theme, faces.grid, focused, scale),
-            Mode::Hex => hex_grid(surface, view, layout, theme, faces.grid, focused),
+        match (view.code_shown(), view.editor().mode()) {
+            (Some(code), _) => code_grid(surface, code, view, layout, theme, faces.grid),
+            (None, Mode::Text) => {
+                text_grid(surface, view, layout, theme, faces.grid, focused, scale);
+            }
+            (None, Mode::Hex) => hex_grid(surface, view, layout, theme, faces.grid, focused),
         }
     }
     let (vertical, horizontal) = view.scrollbars();
@@ -74,9 +78,9 @@ pub fn render_into(
     if let Some((dialog, field)) = view.modal() {
         let window = layout.window();
         blend_area(surface, window, palette.drop_shadow.with_alpha(VEIL_ALPHA));
-        let bounds = View::modal_rect(dialog, window, field.is_some(), scale, theme);
+        let bounds = View::modal_rect(dialog, window, scale, theme);
         dialog.render(surface, bounds, scale, theme);
-        if let (Some(field), Some(content)) = (field, dialog.content_rect(bounds, scale, theme)) {
+        if let Some(content) = dialog.content_rect(bounds, scale, theme) {
             field.render(surface, content, scale, theme);
         }
     }
@@ -432,6 +436,59 @@ fn gutter_cell(
     }
 }
 
+/// The Code display's lines in view, a symbol's label in the accent, or the
+/// one line saying why there are none yet.
+fn code_grid(
+    surface: &mut Surface,
+    code: &CodeDisplay,
+    view: &View,
+    layout: &Layout,
+    theme: &Theme,
+    font: BitmapFont,
+) {
+    let palette = theme.palette();
+    let (_, cell_h) = layout.cell();
+    let grid = layout.grid();
+    let (_, _, left) = view.scroll();
+    if let Some(note) = code.note() {
+        let rect = layout.row_rect(0);
+        let y = font.centred_top(rect.top(), cell_h);
+        font.draw_text(
+            surface,
+            grid.left(),
+            y,
+            font.truncate_to_width(note, grid.width),
+            Color::from(palette.on_surface_muted),
+        );
+        return;
+    }
+    let lines = code.lines().iter().skip(code.top()).take(layout.rows());
+    for (index, line) in lines.enumerate() {
+        let rect = layout.row_rect(index);
+        if withheld(surface, rect) {
+            continue;
+        }
+        let shown = line
+            .text
+            .char_indices()
+            .nth(left)
+            .map_or("", |(at, _)| &line.text[at..]);
+        let ink = if line.is_label {
+            palette.accent
+        } else {
+            palette.on_surface
+        };
+        let y = font.centred_top(rect.top(), cell_h);
+        font.draw_text(
+            surface,
+            grid.left(),
+            y,
+            font.truncate_to_width(shown, grid.width),
+            Color::from(ink),
+        );
+    }
+}
+
 fn hex_grid(
     surface: &mut Surface,
     view: &View,
@@ -631,18 +688,30 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
     let document = editor.document();
     let selection = editor.selection();
     let mut text = String::new();
-    match editor.mode() {
-        Mode::Text => {
+    match (view.code_shown(), editor.mode()) {
+        (Some(code), _) => match code.isa() {
+            Some(isa) => {
+                let _ = write!(
+                    text,
+                    "{} \u{b7} {} lines from line {}",
+                    isa.name(),
+                    code.lines().len(),
+                    code.top() + 1
+                );
+            }
+            None => text.push_str("Code"),
+        },
+        (None, Mode::Text) => {
             let row = text::row_of(document, selection.head);
             let bounds = text::row_bounds(document, row);
             let column = text::column_of(document, bounds, selection.head, editor.tab_width());
             let _ = write!(text, "Ln {}, Col {}", row.line + 1, column + 1);
         }
-        Mode::Hex => {
+        (None, Mode::Hex) => {
             let _ = write!(text, "Offset 0x{:X} ({})", selection.head, selection.head);
         }
     }
-    if !selection.is_empty() {
+    if !selection.is_empty() && view.code_shown().is_none() {
         let _ = write!(text, ", {} selected", selection.range().len());
     }
     let muted = Color::from(palette.on_surface_muted);
@@ -699,9 +768,10 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
         if editor.overwrite() { "OVR" } else { "INS" },
         &indent,
         editor.line_ending().label(),
-        match editor.mode() {
-            Mode::Text => "Text",
-            Mode::Hex => "Hex",
+        match (view.code_shown(), editor.mode()) {
+            (Some(_), _) => "Code",
+            (None, Mode::Text) => "Text",
+            (None, Mode::Hex) => "Hex",
         },
         editor.format().label(),
     ];

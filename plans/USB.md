@@ -33,7 +33,9 @@ type today is allowed; it requires regenerating the C header
 | U9 | Multi-tier hubs (a hub plugged into a hub) | done |
 | U10 | Each node gets a fresh shared buffer; a reused endpoint refuses the previous node's driver | done |
 | U11 | The host controller is class-neutral: raw interrupt-IN reports sized by the class driver, a one-page control data stage, a control-request policy scoped to the node's own interface, and the interface number on the node (`plans/HID.md` H4) | done |
-| UM | Live metal acceptance of attach, detach, re-attach, cold boot unplugged, and a controller reset under a live keyboard, with `usb_hid` serving a keyboard, a mouse and a touchpad | blocked: the operator's Pi 4 run (QEMU models no Pi USB) |
+| U12 | A failed endpoint recovery — a device's interrupt-IN endpoint, or a hub's status-change watch — is decided by its settled port: recovered in place where the device is only disturbed, freed where the port is vacant, and the port reset and enumerated afresh where neither holds | done |
+| U13 | A bulk transfer is bounded and its pipe always recovered: every bulk URB carries a deadline the HCD abandons it at, every halting completion is recovered in place, and a class driver clears a pipe's halt through `ClearHalt` with both data toggles reset | done |
+| UM | Live metal acceptance of attach, detach, re-attach, cold boot unplugged, a controller reset under a live keyboard, a transaction-translator glitch ridden out in place, and a stick whose transfer fails mid-command recovering in place, with `usb_hid` serving a keyboard, a mouse and a touchpad | blocked: the operator's Pi 4 run (QEMU models no Pi USB) |
 
 ---
 
@@ -573,9 +575,9 @@ nothing of the VL805's own behaviour.
     `a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost`,
     `a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth`.
   - **A halting interrupt-IN completion is only *flagged* where it is observed;
-    the endpoint is recovered later, at a top-level, non-re-entrant point. A
-    *failed* recovery — not the completion code — is what confirms a
-    hot-removal.** Any error completion code — a STALL, babble, data-buffer or
+    the endpoint is recovered later, at a top-level, non-re-entrant point.
+    Neither the completion code nor a failed recovery is a verdict on the
+    device: its settled port is.** Any error completion code — a STALL, babble, data-buffer or
     TRB error, **and a USB or split transaction error** — leaves the endpoint
     **halted**: the xHCI controller runs no further transfers on it until it is
     reset (§4.8.3), so re-arming a halted endpoint re-faults every transfer. A
@@ -610,25 +612,50 @@ nothing of the VL805's own behaviour.
       ring, so recovery can never re-enter itself. Recovered, the endpoint is
       re-armed and the URB stays parked (`Ok(None)`), so a transient fault
       never reaches — and kills — the class driver.
-    - **The recovery is the authoritative liveness test.** A present device
-      answers its own `CLEAR_FEATURE` handshake and keeps serving (the captured
-      fault code is cleared); a genuinely vanished device cannot, so recovery
-      faults — and *that* failure records the fatal report fault surfaced
-      through `next_report` (as `Errno::DeviceFault`, the reply the HCD's
-      `retract_after_fault_if_gone` acts on), so the HCD confirms the port and
-      detaches. The rejected completion code stays captured in
-      `last_report_fault_code`, so when it is a device-unreachable
-      transaction/split error `detach_if_device_gone` still frees a gone
-      low/full-speed device behind a hub whose downstream port (unreliably)
-      still reads connected — without a hub `GET_PORT_STATUS` confirmation. A
-      malformed mapping over a *successful* completion (a forged residual or
-      TRB pointer) still fails closed without recovery — the endpoint is not
-      halted. Regressions:
+    - **A failed recovery owes deferred retries that read the settled
+      port.** A present device answers its own `CLEAR_FEATURE` handshake and
+      keeps serving (the captured fault code is cleared). One that does not
+      may be gone or only disturbed: a hub's transaction translator glitching
+      for a moment fails the handshake as surely as an unplug does — the
+      on-metal capture where a keyboard and a mouse that were never touched
+      were dropped. So a failed recovery leaves the device served, its URB
+      parked and its endpoint unarmed, and owes `RECOVERY_RETRIES` (2)
+      retries, which the HCD runs `RECOVERY_SETTLE_NS` (500 ms) apart
+      (`UsbDevice::retry_owed_recoveries`, armed off one `OneShot`). Each
+      reads the port the device hangs off: a vacant port frees the device; a
+      port its hub disabled is reset and enumerated afresh; on an enabled one
+      the endpoint is recovered again in place, so a device that was only
+      disturbed keeps its slot, index, node and class driver. A recovery
+      still failing once the retries are spent frees the device, and its port
+      is reset and enumerated in the next round — which a vacant port never
+      answers — so the HCD retracts the device's node before whatever answers
+      there is published, and no node is carried across a reset on an equal
+      identity it has not proved (a storage device's serial). The ladder is
+      one pure state machine (`device_recovery.rs`,
+      `Ladder`) shared with the hub watch: an incident opens at a halt and
+      closes only when a transfer next completes, so a recovery the device
+      answers but that halts again before any report counts as failed, and a
+      device the reset produced that fails the same way is given up, its port
+      left unserved until a re-plug, rather than reset forever.
+      `detach_if_device_gone` leaves a device whose recovery is owed to the
+      retry, and otherwise frees one only on a port read that comes back
+      vacant. Every endpoint kind stops through the one idempotent
+      `stop_endpoint` (the command its likely state needs first, the other on
+      Context State Error) and restarts through `restart_ring`, so a recovery
+      that failed part-way runs again. A malformed mapping over a
+      *successful* completion (a forged residual or TRB pointer) still fails
+      closed without recovery — the endpoint is not halted. Regressions:
     `report_source_recovers_a_halted_endpoint_without_faulting_the_class_driver`,
     `report_source_recovers_a_babble_halt_the_same_way`,
     `a_transient_transaction_error_during_bringup_recovers_and_keeps_the_keyboard`,
     `a_keystroke_landing_during_recovery_is_deferred_and_never_recurses`,
-    `split_transaction_fault_detaches_without_a_hub_status_confirmation`,
+    `a_glitch_failing_the_hub_watch_and_the_keyboard_recovers_both_in_place`,
+    `a_gone_device_is_freed_by_its_owed_retry_once_its_port_reads_vacant`,
+    `a_device_still_failing_once_its_retries_are_spent_is_enumerated_afresh`,
+    `a_disabled_port_is_enumerated_afresh_without_spending_its_retries`,
+    `a_device_whose_endpoint_halts_however_often_it_is_recovered_is_reset_then_given_up`,
+    `an_owed_re_enumeration_leaves_a_port_attached_meanwhile_alone`,
+    `an_owed_re_enumeration_leaves_with_the_hub_its_port_was_on`,
     `live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device`,
     `forged_report_residual_fails_closed`. (QEMU models no Pi USB, so the exact
     on-metal ring corruption from the old recursion is not host-reproducible;
@@ -820,25 +847,19 @@ nothing of the VL805's own behaviour.
     reconciles its nodes; the later re-plug is attached afresh by the same
     scan — hub reinstalled, descended, watched — with no controller reset,
     so sibling ports' devices are untouched.
-  - **Downstream keyboard unplug behind a *persistent* hub is detected on the
-    device's own fault code.** The Pi 4 keyboard hangs off a hub that stays
-    plugged in, so on unplug the root port keeps reading connected
-    (`root_conn=1`, the root-port check above is correctly inert) and the
-    disconnect surfaces *only* as the keyboard's own interrupt-IN transfer
-    faulting. The metal capture identified that fault as completion code `0x24`
-    (xHCI Split Transaction Error) — the hub's transaction translator can no
-    longer reach the gone low/full-speed device — while the hub
-    `GET_PORT_STATUS` confirmation is unreliable there (it times out,
-    `reject_hex=4`). A code that means *the device failed to answer a
-    transaction* (`CompletionCode::indicates_device_unreachable`:
-    `UsbTransactionError` or `SplitTransactionError`, excluding a stall/babble
-    where the device is responding) is conclusive on its own, so
-    `UsbDevice::detach_if_device_gone` frees the device slot
-    **directly** on that code — captured in `last_report_fault_code` by
-    `decode_transfer_report` and read before any hub control transfer — instead
-    of depending on the confirmation the vanished device's hub often cannot
-    answer. A non-conclusive fault code still falls back to the hub
-    `GET_PORT_STATUS` port read.
+  - **Downstream keyboard unplug behind a *persistent* hub.** The Pi 4
+    keyboard hangs off a hub that stays plugged in, so on unplug the root
+    port keeps reading connected (`root_conn=1`, the root-port check above
+    is correctly inert) and the disconnect surfaces as the keyboard's own
+    interrupt-IN transfer faulting — completion code `0x24` (xHCI Split
+    Transaction Error) on the metal capture — while the hub's
+    `GET_PORT_STATUS` straight after can time out (`reject_hex=4`) or go on
+    reading connected. No single early read is trusted: the hub's
+    status-change report of the vacant port frees the device, and failing
+    that its owed recovery retries do, bounded — a vacant port frees it, and
+    once the retries are spent a port reset finds the port vacant. The
+    completion code stays captured in `last_report_fault_code` for the
+    diagnostics.
   - **The teardown is best-effort and never blocks on the controller.** The
     metal capture then showed the *teardown itself* timing out (`reject_hex=4`):
     `detach_downstream_device` issued a Disable Slot command and waited for its
@@ -854,12 +875,10 @@ nothing of the VL805's own behaviour.
     by the event-ring consumers (`UsbDevice::settle_awaited_disable`) rather
     than faulting the hub watch: a confirmation clears the slot's DCBAA entry
     and returns the region withheld behind it, a refusal leaves it withheld
-    until a controller reset. The acted-on fault code is cleared on
-    teardown and on a fresh enumeration so a re-plugged device is never
-    immediately re-detached; the HCD then re-arms the hub watch, and the hub's
-    connect change re-enumerates a fresh keyboard. Host regressions:
-    `split_transaction_fault_detaches_without_a_hub_status_confirmation`,
-    `split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed`,
+    until a controller reset. The hub's connect change then re-enumerates a
+    fresh keyboard. Host regressions:
+    `a_gone_device_whose_port_still_reads_connected_is_freed_once_its_retries_are_spent`,
+    `a_gone_device_is_freed_even_when_its_disable_slot_is_never_confirmed`,
     `rejected_report_records_its_completion_code_surviving_a_later_control_transfer`.
   - **A failed status-change service never silences the watch.**
     `UsbDevice::next_hub_change` re-arms the hub's status-change interrupt-IN
@@ -874,6 +893,26 @@ nothing of the VL805's own behaviour.
     symptom). Re-arming first keeps the watch live so the next genuine report
     (the reconnect) still wakes the loop. Host regression:
     `a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen`.
+  - **A failed status-change *transfer* recovers the watch.** A status
+    transfer that completes with an error — a USB Transaction Error in the
+    metal capture — halts the hub's status-change endpoint. Taken for a
+    report and re-armed, it never completed again, so no later unplug or
+    re-plug behind the hub was seen, which is how a keyboard dropped by a
+    glitch stayed gone even when re-plugged. `next_hub_change` recovers the
+    endpoint instead — stopped, its ring restarted, the hub's own
+    `CLEAR_FEATURE(ENDPOINT_HALT)`, a fresh transfer armed — and reconciles
+    every downstream port, since the lost report may have carried any change
+    (`HubEvent::HubRecovered`). A hub that cannot be reached is owed the same
+    deferred retries as a device, on the same ladder; one still failing once
+    they are spent is reset as a whole tier — freed with everything behind
+    it, its upstream port reset, and enumerated afresh — and a tier that
+    reset brings up failing the same way is given up. Host regressions:
+    `a_failed_status_report_recovers_the_hub_watch_so_later_changes_are_seen`,
+    `a_recovered_hub_watch_reattaches_a_device_its_port_still_carries`,
+    `a_hub_watch_that_cannot_be_recovered_at_once_is_owed_a_retry`,
+    `a_hub_watch_still_failing_once_its_retries_are_spent_resets_the_hub_tier`,
+    `a_hub_whose_status_transfers_keep_failing_is_reset_then_given_up`,
+    `a_stashed_hub_report_frees_a_gone_device_owed_a_recovery`.
   - **Every engine wait parks, and downstream hot-plug is interrupt-driven
     only — no periodic port sweep.** The engine's synchronous completion
     waits (`await_event_for`) and the boot-time root-connect debounce park
@@ -1394,6 +1433,50 @@ nothing of the VL805's own behaviour.
     `no_transfer_buffer_crosses_a_page_so_none_crosses_64_kib`,
     `a_class_driver_reaches_its_own_interface_and_never_the_device`,
     `a_configuration_longer_than_512_bytes_is_read_whole`.
+- **U13 — a bulk transfer is bounded, and its pipe always recovered.**
+  - **Every bulk URB carries a deadline** (`UrbRequest::timeout_ms`, refused at
+    decode when absent; a control transfer carries none and runs within the
+    controller's own bound; a report poll may carry one). The HCD holds a URB
+    no longer than it (`UrbService::expire`): its pipe is stopped and
+    restarted empty (`UsbDevice::abort_bulk`) and the URB answered
+    `TimedOut`. The serve loop's park includes the soonest deadline, and a
+    timer wake drives every held URB before expiring any, so a completion the
+    controller already has is delivered rather than abandoned.
+  - **Every halting completion is recovered in place**, not only a STALL: a
+    transaction error or babble halts the endpoint just the same, and a pipe
+    left halted runs nothing again. A STALL surfaces as `EndpointStalled`,
+    anything else as `DeviceFault`, on a pipe that works.
+  - **`ClearHalt`** (`UsbRequest`, op 7) clears the halt of one of the
+    interface's own bulk endpoints on the device and in the controller; the
+    controller's toggle of an endpoint that is not halted resets only by a
+    Configure Endpoint that drops and re-adds it (xHCI §4.6.8). A raw
+    `CLEAR_FEATURE` stays refused: it would reset the device's toggle alone.
+  - **`DiscardReports`** (op 8) drops what the interface's interrupt-IN
+    endpoint has captured and not yet delivered, the controller's pending
+    events included. The endpoint stays armed whatever URB is held, so a CBI
+    completion, which carries no tag, raised late by an earlier command would
+    otherwise answer the next command's poll; CBI discards before each ADSC.
+  - **Abandoned TDs never complete into a later transfer.** A Stop Endpoint's
+    Stopped completion is dropped as the abandoned TD's, parked completions
+    are dropped only once the stop is confirmed (the rebuilt ring reuses the
+    old one's addresses), and a completion the ring cannot account for
+    restarts the pipe and fails its TD.
+  - **Diagnostics name the endpoint that failed**: event 27153 carries the
+    completion code of the transfer's own endpoint, and a transfer refused at
+    once is logged as a held one would be.
+  - The class side: every mass-storage exchange is bounded, and a broken one
+    runs its transport's own reset recovery (`plans/DEVICES.md` D2).
+  - Regressions:
+    `a_bulk_transaction_error_recovers_the_pipe_in_place_so_the_next_transfer_runs`,
+    `a_bulk_transfer_abandoned_at_its_deadline_frees_the_pipe_for_the_next`,
+    `clearing_the_halt_of_a_running_pipe_restarts_both_data_toggles`,
+    `a_completion_the_ring_cannot_account_for_restarts_the_pipe_and_fails_its_td`,
+    `a_bulk_poll_hands_another_consumers_event_on_rather_than_failing`,
+    `a_held_bulk_urb_is_abandoned_at_its_deadline_and_answered_timed_out`,
+    `a_held_urb_the_controller_finished_in_time_is_delivered_not_abandoned`,
+    `a_clear_halt_or_report_discard_reaches_the_engine_unless_a_urb_is_held`,
+    `discarding_reports_drops_those_captured_or_still_on_the_ring_but_none_sent_later`,
+    `a_completion_an_earlier_command_raised_late_is_not_taken_for_the_next_ones`.
 
 The modular USB stack — bus driver → user-space HCD owning one controller and
 serving the URB transport → per-interface class drivers (HID, mass storage),

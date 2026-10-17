@@ -176,8 +176,8 @@ pub enum TaskbarResponse {
     /// relays the application's own row id back to it; the bar never
     /// interprets one.
     AppMenuChosen {
-        /// The application's strip index.
-        app: usize,
+        /// The process that declared the menu.
+        owner: ProcId,
         /// The id the application gave the chosen row.
         item: AppMenuItemId,
     },

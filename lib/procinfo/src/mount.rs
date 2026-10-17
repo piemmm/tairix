@@ -11,7 +11,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::MountFlags;
-use tairix_abi::sysinfo::{MountRecord, SysinfoQueryId, ViewBindingRecord, MOUNT_VOLUME_ID_LEN};
+use tairix_abi::sysinfo::{
+    MountRecord, SysinfoQueryId, ViewBindingRecord, VolumeIoStatsRecord, VOLUME_ID_UNPUBLISHED,
+};
 use tairix_abi::Errno;
 
 use crate::list::{field_lossy, walk_records, ListError, WalkStep};
@@ -26,8 +28,9 @@ pub const MOUNT_PAGE: u16 = tairix_abi::reply_page(MountRecord::WIRE_LEN);
 /// [`MOUNT_PAGE`] is.
 pub const VIEW_PAGE: u16 = tairix_abi::reply_page(ViewBindingRecord::WIRE_LEN);
 
-/// The identity of a volume that published none, which joins to nothing.
-const UNPUBLISHED: [u8; MOUNT_VOLUME_ID_LEN] = [0; MOUNT_VOLUME_ID_LEN];
+/// Number of [`VolumeIoStatsRecord`]s requested per page of the service
+/// counters, sized as [`MOUNT_PAGE`] is.
+pub const VOLUME_SERVICE_PAGE: u16 = tairix_abi::reply_page(VolumeIoStatsRecord::WIRE_LEN);
 
 /// Page through the attached volumes and hand each decoded [`MountRecord`]
 /// to `sink`, in the order the service lists them.
@@ -60,6 +63,27 @@ pub fn for_each_mount(
         MountRecord::WIRE_LEN,
         MOUNT_PAGE,
         MountRecord::from_bytes,
+        sink,
+    )
+}
+
+/// Page through each block-backed volume's cumulative service counters
+/// ([`SysinfoQueryId::VOLUME_IO_STATS`], ungated) and hand each to `sink`, on
+/// the terms of [`for_each_mount`]. A record joins its mount by volume id.
+///
+/// # Errors
+///
+/// As [`for_each_mount`].
+pub fn for_each_volume_service(
+    transport: &dyn Transport,
+    sink: impl FnMut(&VolumeIoStatsRecord) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_records(
+        transport,
+        SysinfoQueryId::VOLUME_IO_STATS,
+        VolumeIoStatsRecord::WIRE_LEN,
+        VOLUME_SERVICE_PAGE,
+        VolumeIoStatsRecord::from_bytes,
         sink,
     )
 }
@@ -122,7 +146,7 @@ impl Namespace {
     #[must_use]
     pub fn new(volumes: Vec<MountRecord>, views: Vec<ViewBindingRecord>) -> Self {
         let mut by_id: Vec<usize> = (0..volumes.len())
-            .filter(|&at| volumes[at].volume_id() != UNPUBLISHED)
+            .filter(|&at| volumes[at].volume_id() != VOLUME_ID_UNPUBLISHED)
             .collect();
         by_id.sort_unstable_by_key(|&at| volumes[at].volume_id());
         Self {
@@ -245,18 +269,20 @@ pub fn render_options(flags: MountFlags) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        for_each_mount, render_binding, render_options, Namespace, WalkStep, MOUNT_PAGE, VIEW_PAGE,
+        for_each_mount, for_each_volume_service, render_binding, render_options, Namespace,
+        WalkStep, MOUNT_PAGE, VIEW_PAGE, VOLUME_SERVICE_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::blkio::BlkDeviceClass;
+    use tairix_abi::blkio::BlkMedium;
+    use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters};
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
         MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
-        SysinfoRequestHeader, ViewBindingRecord,
+        SysinfoRequestHeader, ViewBindingRecord, VolumeIoStatsRecord,
     };
     use tairix_abi::Errno;
 
@@ -266,6 +292,7 @@ mod tests {
     struct Fixture {
         records: Vec<MountRecord>,
         views: Vec<ViewBindingRecord>,
+        services: Vec<VolumeIoStatsRecord>,
         malformed: bool,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -275,6 +302,7 @@ mod tests {
             Self {
                 records,
                 views: Vec::new(),
+                services: Vec::new(),
                 malformed: false,
                 seen: RefCell::new(Vec::new()),
             }
@@ -320,6 +348,11 @@ mod tests {
                 }
                 SysinfoQueryId::VIEW_LIST => {
                     page_of(&self.views, &page, ViewBindingRecord::WIRE_LEN, |r| {
+                        r.to_le_bytes().to_vec()
+                    })
+                }
+                SysinfoQueryId::VOLUME_IO_STATS => {
+                    page_of(&self.services, &page, VolumeIoStatsRecord::WIRE_LEN, |r| {
                         r.to_le_bytes().to_vec()
                     })
                 }
@@ -465,7 +498,7 @@ mod tests {
             MountVolumeState {
                 usage: VolumeStats::default(),
                 availability: MountAvailability::Available,
-                medium: Some(BlkDeviceClass::Removable),
+                medium: Some(BlkMedium::UsbFlash),
             },
             [0u8; 16],
         )
@@ -473,7 +506,7 @@ mod tests {
         let fixture = Fixture::new(alloc::vec![record]);
         let seen = collect(&fixture).expect("walk");
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].medium(), Some(BlkDeviceClass::Removable));
+        assert_eq!(seen[0].medium(), Some(BlkMedium::UsbFlash));
     }
 
     /// A machine with more mounts than one reply holds still lists them all:
@@ -632,5 +665,39 @@ mod tests {
             Some(&volume(&[0xFF, 0xFE], b"/", b"arxfs", 1)),
         );
         assert!(line.contains('\u{FFFD}'));
+    }
+
+    /// Every volume's service counters are walked, across pages, in the
+    /// service's order — and a page is never larger than one reply holds.
+    #[test]
+    fn the_service_counters_are_walked_whole_across_pages() {
+        let count = usize::from(VOLUME_SERVICE_PAGE) + 3;
+        let mut fixture = Fixture::new(Vec::new());
+        fixture.services = (0..count)
+            .map(|i| {
+                VolumeIoStatsRecord::new(
+                    [u8::try_from(i % 256).expect("byte"); 16],
+                    u64::try_from(i).expect("dev"),
+                    BlkIoCounters {
+                        read_bytes: u64::try_from(i).expect("bytes"),
+                        ..BlkIoCounters::default()
+                    },
+                    BlkDeviceName::new("disk"),
+                )
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for_each_volume_service(&fixture, |record| {
+            seen.push(record.dev());
+            Ok(WalkStep::Continue)
+        })
+        .expect("walked");
+        assert_eq!(seen.len(), count);
+        assert!(seen.iter().enumerate().all(|(i, dev)| *dev == i as u64));
+        assert!(fixture
+            .seen
+            .borrow()
+            .iter()
+            .all(|query| *query == SysinfoQueryId::VOLUME_IO_STATS));
     }
 }

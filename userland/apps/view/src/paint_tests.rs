@@ -40,6 +40,16 @@ fn still(width: u32, height: u32) -> ViewDocument {
     }
 }
 
+/// Answer `view`'s first open with `why`.
+fn refuse_open(view: &mut View, layout: &Layout, why: Refusal) {
+    let opened = Err(why);
+    view.deliver(
+        Answer::Opened { open_id: 1, opened },
+        layout,
+        &mut damage::sink(),
+    );
+}
+
 /// A viewer with `document` open and its first window drawn, plus the layout
 /// and the theme registry that produced it.
 fn drawn(document: ViewDocument, name: &str, bytes: u64) -> (View, Layout, ThemeRegistry) {
@@ -116,13 +126,13 @@ fn painting_is_a_function_of_state_alone() {
 }
 
 #[test]
-fn a_viewer_with_nothing_open_draws_its_reason_rather_than_a_blank_canvas() {
+fn a_refusal_is_drawn_rather_than_a_blank_canvas() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
-    let mut view = View::new(false);
+    let mut view = View::new(true);
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, font(theme));
     let waiting = painted(&view, &layout, theme);
-    assert!(view.no_document(Refusal::PickRefused(tairix_abi::Errno::AlreadyExists)));
+    refuse_open(&mut view, &layout, Refusal::TooLong);
     let refused = painted(&view, &layout, theme);
     assert_ne!(
         waiting.pixels(),
@@ -300,14 +310,16 @@ fn a_viewer_with_nothing_open_states_that_rather_than_inventing_facts() {
 
 #[test]
 fn the_summary_names_the_document_and_the_refusal_names_the_reason() {
-    let (view, _layout, _registry) = drawn(still(4_032, 3_024), "IMG_0001.JPG", 2_400_000);
+    let (view, _layout, registry) = drawn(still(4_032, 3_024), "IMG_0001.JPG", 2_400_000);
     let line = summary(&view);
     assert!(line.contains("IMG_0001.JPG"));
     assert!(line.contains("JPEG"));
     assert!(line.contains("4032 x 3024"));
 
-    let mut empty = View::new(false);
-    assert!(empty.no_document(Refusal::PickRefused(tairix_abi::Errno::AlreadyExists)));
+    let theme = registry.active();
+    let mut empty = View::new(true);
+    let layout = empty.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, font(theme));
+    refuse_open(&mut empty, &layout, Refusal::TooLong);
     let stated = summary(&empty);
     assert!(!stated.is_empty(), "a refusal always states something");
 }

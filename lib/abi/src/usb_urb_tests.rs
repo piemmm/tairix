@@ -9,6 +9,16 @@ fn interrupt_in() -> UrbRequest {
         direction: UsbDirection::In,
         length: 8,
         setup: [0; 8],
+        timeout_ms: None,
+    }
+}
+
+fn bulk_in() -> UrbRequest {
+    UrbRequest {
+        transfer_type: UsbTransferType::Bulk,
+        length: 4096,
+        timeout_ms: NonZeroU32::new(3750),
+        ..interrupt_in()
     }
 }
 
@@ -35,6 +45,11 @@ fn every_request_round_trips_at_its_own_length() {
         ..interrupt_in()
     }));
     round_trip(UsbRequest::Transfer(interrupt_in()));
+    round_trip(UsbRequest::Transfer(UrbRequest {
+        timeout_ms: NonZeroU32::new(250),
+        ..interrupt_in()
+    }));
+    round_trip(UsbRequest::Transfer(bulk_in()));
     round_trip(UsbRequest::SetInterface {
         interface: 1,
         alternate: 2,
@@ -49,6 +64,34 @@ fn every_request_round_trips_at_its_own_length() {
         slot: 3,
     });
     round_trip(UsbRequest::IsoStop { endpoint: 0x02 });
+    round_trip(UsbRequest::ClearHalt { endpoint: 0x81 });
+    round_trip(UsbRequest::DiscardReports { endpoint: 0x83 });
+}
+
+#[test]
+fn a_bulk_transfer_carries_a_deadline_and_a_control_transfer_none() {
+    let mut buf = [0u8; USB_REQUEST_MAX_LEN];
+    let mut frame = |urb: UrbRequest| {
+        let n = UsbRequest::Transfer(urb).encode(&mut buf).expect("encodes");
+        UsbRequest::decode(&buf[..n])
+    };
+    assert_eq!(
+        frame(UrbRequest {
+            timeout_ms: None,
+            ..bulk_in()
+        }),
+        Err(Errno::OutOfRange),
+        "no silent device may hold a bulk transfer forever"
+    );
+    assert_eq!(
+        frame(UrbRequest {
+            transfer_type: UsbTransferType::Control,
+            endpoint: 0,
+            ..bulk_in()
+        }),
+        Err(Errno::OutOfRange),
+        "a control transfer runs within the controller's own bound"
+    );
 }
 
 #[test]
@@ -121,9 +164,25 @@ fn malformed_fields_fail_closed() {
     buf[2..4].copy_from_slice(&ISO_MAX_SLOTS.to_le_bytes());
     assert_eq!(UsbRequest::decode(&buf[..n]), Err(Errno::OutOfRange));
 
+    for request in [
+        UsbRequest::ClearHalt { endpoint: 0x81 },
+        UsbRequest::DiscardReports { endpoint: 0x81 },
+    ] {
+        let n = encode(request, &mut buf);
+        for endpoint in [0x00, 0x80, 0x91] {
+            buf[1] = endpoint;
+            assert_eq!(
+                UsbRequest::decode(&buf[..n]),
+                Err(Errno::OutOfRange),
+                "{endpoint:#x} is no device endpoint"
+            );
+        }
+    }
+
+    buf[1] = 0x81;
     buf[0] = 0;
     assert_eq!(UsbRequest::decode(&buf[..2]), Err(Errno::OutOfRange));
-    buf[0] = 7;
+    buf[0] = 9;
     assert_eq!(UsbRequest::decode(&buf[..2]), Err(Errno::OutOfRange));
 }
 

@@ -13,7 +13,7 @@
 //! `MODE SENSE(10)`, USB Mass Storage UFI 1.0). [`CommandSet`] carries that
 //! per-device spelling so the logic exists once.
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
+use tairix_abi::blkio::{BlkDeviceName, BlkMedium};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{DriverError, Errno};
@@ -53,6 +53,16 @@ pub trait ScsiTransport {
     /// command, if its protocol delivers sense in-band (UAS autosense).
     /// `None` means the caller must issue `REQUEST SENSE`.
     fn take_sense(&mut self) -> Option<Sense>;
+
+    /// Reset the transport so the next command starts in step with the
+    /// device: BOT's reset recovery, CBI's Command Block Reset and bulk
+    /// clears, UAS's four pipes cleared. A failed exchange runs this itself;
+    /// it is offered for the recovery ladder's stronger rung.
+    ///
+    /// # Errors
+    ///
+    /// The transport's or device's refusal.
+    fn reset(&mut self) -> Result<(), Errno>;
 
     /// Zero every byte of the transport's shared data window, so a
     /// sensitive payload does not outlive the block operation that moved
@@ -179,7 +189,8 @@ pub struct Inquiry {
 /// Peripheral device type of a direct-access block device.
 pub const DEVICE_TYPE_DIRECT_ACCESS: u8 = 0x00;
 
-/// A logical unit's brought-up state: its geometry and write policy.
+/// A logical unit's brought-up state: its geometry, write policy and what
+/// it is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct LunState {
     /// The unit's block geometry, read from `READ CAPACITY`.
@@ -187,6 +198,9 @@ pub struct LunState {
     /// Whether the medium is write-protected (`MODE SENSE` WP bit);
     /// writes are refused driver-side before touching the device.
     pub write_protected: bool,
+    /// Whether `INQUIRY` reports the medium removable (its RMB bit): a flash
+    /// drive or a card reader, rather than a disk in an enclosure.
+    pub removable: bool,
 }
 
 /// Most logical units a served device can expose (the BOT `GET MAX LUN`
@@ -515,6 +529,16 @@ impl<T: ScsiTransport> ScsiDevice<T> {
         self.transport.scrub();
     }
 
+    /// Reset the transport ([`ScsiTransport::reset`]): the data-path reset a
+    /// recovering unit's ladder escalates to.
+    ///
+    /// # Errors
+    ///
+    /// The transport's or device's refusal.
+    pub fn reset_transport(&mut self) -> Result<(), Errno> {
+        self.transport.reset()
+    }
+
     /// Borrow the underlying transport, so the serve loop can observe
     /// transport-level state (e.g. that the interface disappeared and the
     /// per-LUN nodes must be retracted).
@@ -595,8 +619,33 @@ fn driver_error(err: Errno) -> DriverError {
         Errno::EndpointStalled => DriverError::EndpointStalled,
         Errno::NotFound => DriverError::NotFound,
         Errno::WouldBlock => DriverError::Busy,
+        Errno::TimedOut => DriverError::TimedOut,
         Errno::BadMagic => DriverError::BadMagic,
         _ => DriverError::DeviceFault,
+    }
+}
+
+/// What a command a transport reset ended answers its caller, given how the
+/// reset went. The command never completed either way: a transport back in
+/// step, or a reset the host controller could not take yet, makes it the
+/// reissuable [`Errno::WouldBlock`]; a device gone is [`Errno::NotFound`]; one
+/// that would not answer its own reset is [`Errno::TimedOut`], which the
+/// unit's health rides out before failing it.
+pub(crate) const fn after_reset(cause: Errno, reset: Result<(), Errno>) -> Errno {
+    match (cause, reset) {
+        (Errno::NotFound, _) | (_, Err(Errno::NotFound)) => Errno::NotFound,
+        (_, Ok(()) | Err(Errno::WouldBlock)) => Errno::WouldBlock,
+        (_, Err(_)) => Errno::TimedOut,
+    }
+}
+
+/// What a logical unit is, by the removability its `INQUIRY` reported.
+#[must_use]
+pub const fn lun_medium(state: &LunState) -> BlkMedium {
+    if state.removable {
+        BlkMedium::UsbFlash
+    } else {
+        BlkMedium::UsbDisk
     }
 }
 
@@ -641,11 +690,13 @@ impl<'a, T: ScsiTransport> LunBlock<'a, T> {
 }
 
 impl<T: ScsiTransport> Block for LunBlock<'_, T> {
-    /// A USB logical unit is a removable device: it tolerates the bus
-    /// glitches and resets its transport is prone to, but must fail closed
-    /// promptly once genuinely unplugged.
-    fn device_class(&self) -> BlkDeviceClass {
-        BlkDeviceClass::Removable
+    /// A unit reporting a removable medium is a flash drive or a card in a
+    /// reader; one reporting a fixed medium is a disk in a USB enclosure.
+    /// Either is served the removable patience: it tolerates the bus glitches
+    /// and resets its transport is prone to, but fails closed promptly once
+    /// genuinely unplugged.
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(lun_medium(&self.state))
     }
 
     /// A USB mass-storage logical unit, named by what it is: the standard

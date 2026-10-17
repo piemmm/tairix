@@ -50,7 +50,13 @@ The crate provides:
   bindings onto them, the join that resolves a path to the binding covering
   it and that binding to its volume (one definition `df`, `stat`, `mount`,
   `fstree` and `stress` all resolve through), and the
-  `source on target type fstype (options)` row.
+  `source on target type fstype (options)` row. `for_each_volume_service`
+  pages each block-backed volume's cumulative service counters, joined to its
+  mount by volume id.
+- `rate_per_sec` — a per-second rate from two readings of one cumulative
+  counter and the interval between them, the one division every throughput
+  surface samples through; a counter read going backwards gives `0`, never a
+  wrapped rate.
 - `volume` — the one mount-record view model every surface turns a record
   into facts with: `VolumeBytes` (`total`/`free`/`available`, with `used`,
   `usable`, the `used_permille` share of the whole medium, and a saturating

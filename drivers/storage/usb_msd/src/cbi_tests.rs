@@ -81,6 +81,21 @@ fn a_nonzero_completion_is_a_failed_command_with_sense() {
 }
 
 #[test]
+fn a_completion_an_earlier_command_raised_late_is_not_taken_for_the_next_ones() {
+    let mut dev = ScriptedDevice::new();
+    dev.stale_interrupts.push_back(PASSED.to_vec());
+    dev.in_steps.push_back(InStep::Data(vec![0u8; 512]));
+    dev.interrupts.push_back(vec![0x27, 0x00]); // ASC: WRITE PROTECTED
+    let mut scsi = floppy(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(
+        scsi.read(0, 0, 512, &mut buf),
+        Err(Errno::PermissionDenied),
+        "the command is answered by its own completion, not the stale pass"
+    );
+}
+
+#[test]
 fn an_adsc_stall_is_the_command_not_accepted_answer() {
     let mut dev = ScriptedDevice::new();
     dev.stall_next_control_out = true;
@@ -119,12 +134,34 @@ fn a_malformed_completion_block_runs_command_block_reset() {
     dev.interrupts.push_back(vec![0x00]); // one byte: wrong shape
     let mut scsi = floppy(dev);
     let mut buf = [0u8; 512];
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::LengthOutOfRange));
-    // The reset is the *second* ADSC: SEND DIAGNOSTIC with the reset pads.
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    // The reset is the *second* ADSC: SEND DIAGNOSTIC with the reset pads,
+    // then both bulk pipes cleared (CBI 1.1 §2.2).
     let (_, reset) = &device(&scsi).control_outs[1];
     assert_eq!(reset[0], 0x1D);
     assert_eq!(reset[1], 0x04);
     assert!(reset[2..].iter().all(|&b| b == 0xFF));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+}
+
+#[test]
+fn a_data_phase_or_completion_lost_on_the_wire_resets_the_transport() {
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Fail(Errno::DeviceFault));
+    let mut scsi = floppy(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(device(&scsi).trail, ["reset", "clear"]);
+
+    // No completion block ever comes: the bounded wait ends the exchange.
+    let mut dev = ScriptedDevice::new();
+    dev.in_steps.push_back(InStep::Data(vec![0u8; 512]));
+    let mut scsi = floppy(dev);
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::NotFound));
+    assert!(
+        device(&scsi).trail.is_empty(),
+        "an interface gone is not reset"
+    );
 }
 
 #[test]
@@ -155,7 +192,7 @@ fn the_typed_status_spelling_is_honoured() {
     let mut cbi = typed(dev);
     assert_eq!(
         cbi.execute(0, &[0u8; 12], DataPhase::None),
-        Err(Errno::NotImplemented)
+        Err(Errno::WouldBlock)
     );
     assert_eq!(cbi.transport().control_outs.len(), 2); // command + reset
 
@@ -165,8 +202,9 @@ fn the_typed_status_spelling_is_honoured() {
     let mut cbi = typed(dev);
     assert_eq!(
         cbi.execute(0, &[0u8; 12], DataPhase::None),
-        Err(Errno::BadMagic)
+        Err(Errno::WouldBlock)
     );
+    assert_eq!(cbi.transport().trail, ["reset", "clear"]);
 }
 
 #[test]

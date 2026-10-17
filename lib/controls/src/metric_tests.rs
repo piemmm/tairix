@@ -12,6 +12,10 @@
 //! `MetricLayout::Inline` form, and its `unplated` form, alone and composed
 //! together.
 //!
+//! [`CompositionRing`] draws the same model round a circle: each part at its
+//! own angles in its own tint, the joins ruled where the ring closes too, its
+//! figure in the middle, and nothing at all in bounds that cannot seat it.
+//!
 //! [`CompositionBar`]'s own coverage is the property it exists for — the parts
 //! account for the whole, in order, at their measured shares — plus its
 //! construction refusals, its tint ladder separating the parts, its key, the
@@ -28,8 +32,8 @@ use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::metric::{
-    CompositionBar, CompositionError, CompositionSegment, MetricInstrument, MetricLayout,
-    MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
+    CompositionBar, CompositionError, CompositionRing, CompositionSegment, MetricInstrument,
+    MetricLayout, MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 use crate::state::{MeterValue, PressureKind, PressureState, ProgressValue};
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, text_ladder};
@@ -1669,4 +1673,172 @@ fn a_text_too_long_for_its_room_is_elided_with_the_mark() {
     };
     assert!(marks_elision(|text| key(text, "")), "a key's label");
     assert!(marks_elision(|text| key("", text)), "a key's amount");
+}
+
+// --- CompositionRing ------------------------------------------------------
+
+/// A disk a quarter used, as a ring stating it.
+fn quarter_used() -> CompositionRing {
+    let composition = CompositionBar::new(
+        PressureKind::Disk,
+        alloc::vec![
+            CompositionSegment::new("Used", "16 GB", 250),
+            CompositionSegment::remainder("Free", "48 GB", 750),
+        ],
+    )
+    .expect("accounts for the whole");
+    CompositionRing::new(composition, "25%", "used")
+}
+
+/// `ring` drawn whole into a surface `width` wide, and the ring's side.
+fn ring_surface(ring: &CompositionRing, theme: &Theme, width: u32) -> (Surface, u32) {
+    let height = ring.measured_height(width, Scale::ONE, theme);
+    let mut surface = Surface::new(width, height).expect("surface");
+    ring.render(
+        &mut surface,
+        Rect::new(0, 0, width, height),
+        Scale::ONE,
+        theme,
+    );
+    (surface, CompositionRing::ring_side(Scale::ONE))
+}
+
+/// The pixel in the middle of the ring's band at `turn` (a fraction of a turn
+/// clockwise from the top), for a ring `side` across drawn at the surface's
+/// leading edge.
+fn band_pixel(surface: &Surface, side: u32, turn: f64) -> Pixel {
+    let top = (surface.height() - side) / 2;
+    let radius = f64::from(side) / 2.0;
+    let mid = radius - f64::from(side / 6) / 2.0;
+    let angle = turn * core::f64::consts::TAU;
+    let x = radius + tairix_util::mathf::sin(angle) * mid;
+    let y = radius - tairix_util::mathf::cos(angle) * mid;
+    surface
+        .get(
+            u32::try_from(tairix_util::mathf::round_i32(x)).expect("x"),
+            top + u32::try_from(tairix_util::mathf::round_i32(y)).expect("y"),
+        )
+        .expect("inside the surface")
+}
+
+fn disk_hue(theme: &Theme, index: usize) -> Pixel {
+    crate::paint::composition_tint(theme, PressureKind::Disk, index).premultiply()
+}
+
+#[test]
+fn a_rings_parts_lie_clockwise_from_the_top_at_their_shares() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let (surface, side) = ring_surface(&quarter_used(), &theme, 320);
+        assert_eq!(
+            band_pixel(&surface, side, 0.125),
+            disk_hue(&theme, 0),
+            "the used quarter"
+        );
+        assert_eq!(
+            band_pixel(&surface, side, 0.5),
+            remainder_ink(&theme),
+            "the free rest"
+        );
+        assert_eq!(band_pixel(&surface, side, 0.875), remainder_ink(&theme));
+    }
+}
+
+#[test]
+fn a_ring_rules_every_join_including_where_it_closes_at_the_top() {
+    let theme = Theme::dark();
+    let (surface, side) = ring_surface(&quarter_used(), &theme, 320);
+    // A rule a border wide straddles pixel edges, so a join reads as neither
+    // part rather than as one exact colour.
+    for (turn, join) in [
+        (0.25, "the join after the used part"),
+        (0.0, "the join at the top"),
+    ] {
+        let pixel = band_pixel(&surface, side, turn);
+        assert_ne!(pixel, disk_hue(&theme, 0), "{join}");
+        assert_ne!(pixel, remainder_ink(&theme), "{join}");
+    }
+
+    let whole = CompositionRing::new(
+        CompositionBar::new(
+            PressureKind::Disk,
+            alloc::vec![CompositionSegment::new("Used", "64 GB", 1000)],
+        )
+        .expect("one part is the whole"),
+        "100%",
+        "used",
+    );
+    let (surface, side) = ring_surface(&whole, &theme, 320);
+    assert_eq!(
+        band_pixel(&surface, side, 0.0),
+        disk_hue(&theme, 0),
+        "a whole held by one part has no join"
+    );
+}
+
+#[test]
+fn a_ring_states_its_figure_in_the_middle_and_names_its_parts_beside_it() {
+    let theme = Theme::dark();
+    let (surface, side) = ring_surface(&quarter_used(), &theme, 320);
+    let top = (surface.height() - side) / 2;
+    let ink = premul(theme.palette().on_surface);
+    let middle = (side / 3, side * 2 / 3);
+    assert!(
+        crate::testkit::region_has(&surface, middle, (top + middle.0, top + middle.1), ink),
+        "the figure is written in the ring's middle"
+    );
+    assert!(
+        crate::testkit::region_has(&surface, (side, 320), (0, surface.height()), ink),
+        "the key beside the ring states each part's amount"
+    );
+}
+
+#[test]
+fn a_ring_is_at_least_its_own_side_tall_and_draws_nothing_where_it_cannot_sit() {
+    let theme = Theme::dark();
+    let ring = quarter_used();
+    let side = CompositionRing::ring_side(Scale::ONE);
+    assert!(ring.measured_height(320, Scale::ONE, &theme) >= side);
+
+    let mut cramped = Surface::new(side - 1, side - 1).expect("surface");
+    let before = cramped.pixels().to_vec();
+    ring.render(
+        &mut cramped,
+        Rect::new(0, 0, side - 1, side - 1),
+        Scale::ONE,
+        &theme,
+    );
+    assert_eq!(cramped.pixels(), &before[..], "fail closed: nothing drawn");
+}
+
+#[test]
+fn a_sliver_of_a_whole_stays_a_part_a_reader_can_see() {
+    let theme = Theme::dark();
+    let nearly_full = CompositionRing::new(
+        CompositionBar::new(
+            PressureKind::Disk,
+            alloc::vec![
+                CompositionSegment::new("Used", "997 GB", 997),
+                CompositionSegment::remainder("Free", "3 GB", 3),
+            ],
+        )
+        .expect("a valid composition"),
+        "99.7%",
+        "used",
+    );
+    let (surface, _) = ring_surface(&nearly_full, &theme, 320);
+    assert!(
+        surface.pixels().contains(&remainder_ink(&theme)),
+        "three permille of free space is still drawn"
+    );
+}
+
+#[test]
+fn a_lifted_sliver_is_paid_for_by_the_largest_part() {
+    assert_eq!(crate::metric::shown_shares(&[997, 3], 8), [992, 8]);
+    assert_eq!(
+        crate::metric::shown_shares(&[500, 0, 500], 8),
+        [500, 0, 500],
+        "an empty part stays empty"
+    );
+    assert_eq!(crate::metric::shown_shares(&[1000], 8), [1000]);
 }

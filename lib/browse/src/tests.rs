@@ -14,8 +14,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::Errno;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -89,7 +88,7 @@ fn home() -> Vec<String> {
 }
 
 /// One offered volume.
-fn volume(label: &str, target: &str, medium: Option<BlkDeviceClass>) -> Volume {
+fn volume(label: &str, target: &str, medium: Option<BlkMedium>) -> Volume {
     Volume {
         label: label.to_string(),
         target: target.to_string(),
@@ -111,16 +110,8 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
     let places = Places::new(
         &home(),
         &[
-            volume(
-                "Scratch",
-                "/Storage/Scratch",
-                Some(BlkDeviceClass::SolidState),
-            ),
-            volume(
-                "Backup",
-                "/Storage/Backup",
-                Some(BlkDeviceClass::Rotational),
-            ),
+            volume("Scratch", "/Storage/Scratch", Some(BlkMedium::SolidState)),
+            volume("Backup", "/Storage/Backup", Some(BlkMedium::HardDisk)),
         ],
     );
     // The user's own places first, in their fixed order, then the volumes
@@ -170,10 +161,10 @@ fn every_storage_medium_draws_its_own_drive_icon() {
     let places = Places::new(
         &[],
         &[
-            volume("Disk", "/Storage/Disk", Some(BlkDeviceClass::Rotational)),
-            volume("Fast", "/Storage/Fast", Some(BlkDeviceClass::SolidState)),
-            volume("Stick", "/Storage/Stick", Some(BlkDeviceClass::Removable)),
-            volume("Guest", "/Storage/Guest", Some(BlkDeviceClass::Virtual)),
+            volume("Disk", "/Storage/Disk", Some(BlkMedium::HardDisk)),
+            volume("Fast", "/Storage/Fast", Some(BlkMedium::SolidState)),
+            volume("Stick", "/Storage/Stick", Some(BlkMedium::UsbFlash)),
+            volume("Guest", "/Storage/Guest", Some(BlkMedium::Virtual)),
             volume("Plain", "/Storage/Plain", None),
         ],
     );
@@ -919,6 +910,155 @@ fn a_rail_row_carries_every_state_the_control_offers() {
     );
 }
 
+/// `/Storage` holding two mounted volumes, a folder no volume is mounted at,
+/// and a file named like a mount point.
+fn storage() -> MockFs {
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/Storage".to_string(),
+        vec![
+            Entry::directory("Backup"),
+            Entry::directory("Camera"),
+            Entry::directory("Stray"),
+            Entry::file("Image"),
+        ],
+    );
+    fs.dirs.insert(
+        "/Storage/Backup".to_string(),
+        vec![Entry::directory("2026")],
+    );
+    fs
+}
+
+/// The volumes [`storage`] has mounted, one elsewhere, and one at its file.
+fn storage_volumes() -> Vec<Volume> {
+    vec![
+        volume("Backup", "/Storage/Backup", Some(BlkMedium::Nvme)),
+        volume("Camera", "/Storage/Camera", Some(BlkMedium::SdCard)),
+        volume("Image", "/Storage/Image", Some(BlkMedium::UsbFlash)),
+        volume("Deep", "/Archive/Deep", Some(BlkMedium::HardDisk)),
+    ]
+}
+
+/// The root-first components of an absolute `path`.
+fn components(path: &str) -> Vec<String> {
+    crate::vfs::components_from_absolute_path(path).expect("valid path")
+}
+
+/// Each entry's drive picture, by name.
+fn drives(browser: &Browser<MockFs>) -> Vec<(&str, Option<IconKind>)> {
+    browser
+        .entries()
+        .iter()
+        .map(|entry| (entry.name(), entry.drive()))
+        .collect()
+}
+
+#[test]
+fn a_volume_root_is_drawn_as_the_drive_it_is_on() {
+    let places = Places::new(&home(), &storage_volumes());
+    let mut browser = Browser::open_at(storage(), components("/Storage")).expect("Storage");
+
+    assert!(browser.mark_volume_roots(&places));
+    assert_eq!(
+        drives(&browser),
+        [
+            ("Backup", Some(IconKind::DiskNvme)),
+            ("Camera", Some(IconKind::DiskSdCard)),
+            ("Stray", None),
+            // A file cannot be a mount point, whatever it is named.
+            ("Image", None),
+        ]
+    );
+    assert!(
+        !browser.mark_volume_roots(&places),
+        "marking again changes no picture"
+    );
+}
+
+#[test]
+fn every_volume_root_finds_its_drive_whatever_order_the_rail_lists_it_in() {
+    // The rail orders volumes by label, and these labels run opposite to the
+    // names they are mounted at, so a lookup that leaned on the rail's order
+    // would hand out the wrong drives.
+    let volumes = [
+        volume("A", "/Storage/Zulu", Some(BlkMedium::HardDisk)),
+        volume("B", "/Storage/Mike", Some(BlkMedium::SolidState)),
+        volume("C", "/Storage/Kilo", Some(BlkMedium::Nvme)),
+        volume("D", "/Storage/Alfa", Some(BlkMedium::UsbDisk)),
+    ];
+    let mut fs = MockFs::fixture();
+    fs.dirs.insert(
+        "/Storage".to_string(),
+        ["Alfa", "Kilo", "Lima", "Mike", "Zulu"]
+            .into_iter()
+            .map(Entry::directory)
+            .collect(),
+    );
+    let mut browser = Browser::open_at(fs, components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&Places::new(&home(), &volumes)));
+    assert_eq!(
+        drives(&browser),
+        [
+            ("Alfa", Some(IconKind::DiskExternal)),
+            ("Kilo", Some(IconKind::DiskNvme)),
+            ("Lima", None),
+            ("Mike", Some(IconKind::DiskSolidState)),
+            ("Zulu", Some(IconKind::DiskHard)),
+        ]
+    );
+}
+
+#[test]
+fn an_unmounted_volume_root_is_drawn_as_a_folder_again() {
+    let mut browser = Browser::open_at(storage(), components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&Places::new(&home(), &storage_volumes())));
+
+    let unmounted = Places::new(&home(), &[]);
+    assert!(browser.mark_volume_roots(&unmounted));
+    assert!(drives(&browser).iter().all(|(_, drive)| drive.is_none()));
+    assert!(!browser.mark_volume_roots(&unmounted));
+}
+
+#[test]
+fn only_the_directory_holding_a_mount_point_marks_it() {
+    let places = Places::new(&home(), &storage_volumes());
+    // `/Archive` is not the parent `/Storage/Backup` is mounted under, and
+    // the root lists `Storage` itself, which is no volume's mount point.
+    let mut root = Browser::open_root(storage()).expect("root");
+    assert!(!root.mark_volume_roots(&places));
+    assert!(drives(&root).iter().all(|(_, drive)| drive.is_none()));
+
+    // Inside a volume nothing is a volume root: leaving `/Storage` for one
+    // shows its folders as folders.
+    let mut browser = Browser::open_at(storage(), components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&places));
+    assert!(browser
+        .navigate_to(components("/Storage/Backup"))
+        .expect("Backup"));
+    assert!(!browser.mark_volume_roots(&places));
+    assert_eq!(drives(&browser), [("2026", None)]);
+}
+
+#[test]
+fn a_volume_root_keeps_its_drive_across_a_change_to_it() {
+    let places = Places::new(&home(), &storage_volumes());
+    let mut browser = Browser::open_at(storage(), components("/Storage")).expect("Storage");
+    assert!(browser.mark_volume_roots(&places));
+
+    let touched = Entry::new(
+        "Backup",
+        EntryKind::Directory,
+        0,
+        Time64::from_secs(1_700_000_000),
+    );
+    browser
+        .apply_changes(vec![crate::watch::EntryChange::Upsert(touched)])
+        .expect("merged");
+    assert_eq!(drives(&browser)[0], ("Backup", Some(IconKind::DiskNvme)));
+    assert!(!browser.mark_volume_roots(&places));
+}
+
 /// An in-memory directory tree with an optional set of unreadable paths.
 struct MockFs {
     dirs: BTreeMap<String, Vec<Entry>>,
@@ -1373,7 +1513,7 @@ fn a_rename_selects_the_stem_and_keeps_the_ending() {
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     use crate::render::{
-        chrome_height, grid_metrics, modal_dialog_rect, open_with_chooser_extent, row_height,
+        chrome_height, grid_metrics, open_with_chooser_extent, progress_dialog_rect, row_height,
         scrollbar_bounds, sidebar_view, toolbar_height,
     };
 
@@ -1404,13 +1544,13 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     assert!(tiles_hidpi.cell_height > tiles.cell_height);
     assert!(tiles_hidpi.gap > tiles.gap);
 
-    // The overlays this surface still owns: the delete confirmation and the
-    // "Open With…" chooser. The right-click menu is not among them — its
-    // plates are the desktop's, placed by the one shared rule that reads the
-    // desktop's own density.
+    // The overlays this surface still owns: the progress panel and the
+    // "Open With…" chooser. The right-click menu and every question are not
+    // among them — their windows are the desktop's, sized by the one shared
+    // rule that reads the desktop's own density.
     assert!(
-        modal_dialog_rect(vp, hidpi, &theme).height
-            > modal_dialog_rect(vp, Scale::ONE, &theme).height
+        progress_dialog_rect(vp, hidpi, &theme).height
+            > progress_dialog_rect(vp, Scale::ONE, &theme).height
     );
     // The chooser is its own popup, sized to its content, so what scales with
     // the density is the extent it asks that popup to be — in both axes, since
@@ -4399,19 +4539,55 @@ fn the_offered_type_is_the_registry_type() {
 }
 
 #[test]
-fn a_file_the_registry_cannot_type_is_offered_nothing() {
-    // An unrecognised extension, no extension at all, and a bare dotfile each
-    // yield an honest empty answer rather than a guessed default — even from a
-    // store whose bundle claims the generic type.
-    let catch_all = AppAssociation::new(
-        "catch-all",
-        "/System/Applications/catch-all.app",
+fn a_file_the_registry_cannot_type_is_bytes() {
+    // An unrecognised extension, no extension at all, and a bare dotfile are
+    // each bytes: an application claiming bytes is offered them, and one
+    // claiming only text is not.
+    let bytes = AppAssociation::new(
+        "bytes",
+        "/System/Applications/bytes.app",
         vec!["application/octet-stream".to_string()],
     );
-    let bundles = [catch_all];
-    for name in ["mystery.xyz", "Makefile", ".profile", "archive.", ""] {
-        assert!(applications_for(name, &bundles).is_empty(), "{name}");
+    let text = AppAssociation::new(
+        "text",
+        "/System/Applications/text.app",
+        vec!["text/plain".to_string()],
+    );
+    let bundles = [text, bytes];
+    for name in ["mystery.xyz", "Makefile", ".profile", "archive."] {
+        let offered = applications_for(name, &bundles);
+        assert_eq!(offered.len(), 1, "{name}");
+        assert_eq!(offered[0].name(), "bytes", "{name}");
     }
+    assert!(
+        applications_for("", &bundles).is_empty(),
+        "an empty name names no file"
+    );
+}
+
+#[test]
+fn a_byte_editor_is_offered_every_file_behind_what_claims_it_exactly() {
+    let viewer = AppAssociation::new(
+        "viewer",
+        "/System/Applications/viewer.app",
+        vec!["image/png".to_string()],
+    );
+    let bytes = AppAssociation::new(
+        "bytes",
+        "/System/Applications/bytes.app",
+        vec!["application/octet-stream".to_string()],
+    );
+    let bundles = [bytes, viewer];
+    let offered: Vec<&str> = applications_for("photo.png", &bundles)
+        .iter()
+        .map(|app| app.name())
+        .collect();
+    assert_eq!(offered, ["viewer", "bytes"], "the exact claim ranks first");
+    let program: Vec<&str> = applications_for("Run.rxe", &bundles)
+        .iter()
+        .map(|app| app.name())
+        .collect();
+    assert_eq!(program, ["bytes"]);
 }
 
 #[test]
@@ -7156,7 +7332,10 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     let AppMenuRowView::Item(candidate) = candidate else {
         panic!("the candidate is an item");
     };
-    assert_eq!(candidate.icon_bundle, "/System/Applications/Viewer.app");
+    assert_eq!(
+        candidate.icon,
+        tairix_abi::window_ipc::AppMenuIconView::Bundle("/System/Applications/Viewer.app")
+    );
     let last_command = rows
         .iter()
         .rposition(|(row, _)| {
@@ -7925,8 +8104,9 @@ use crate::render::{
     draw_properties_window, permission_cells, properties_attr_editor_rect, properties_hit,
     properties_owner_editor_rect, properties_permissions_key, properties_reveal,
     properties_scroll_pointer, properties_scroll_wheel, properties_window_extent, AttrAction,
-    Identity, OwnerField, PermsCursor, PermsKeyed, PermsPanel, PermsShown, PropertiesControls,
-    PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
+    Identity, OwnerField, PermsCursor, PermsKeyed, PermsPanel, PropertiesControls, PropertiesFrame,
+    PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView, SectionsShown,
+    PERMISSION_BITS,
 };
 use crate::ScrollColumn;
 use tairix_controls::text::TextField;
@@ -7936,7 +8116,7 @@ use tairix_input::{Key, NamedKey};
 /// The window the Properties surface is laid out in for these tests: the
 /// extent it actually opens at, so what is asserted is what a user sees.
 fn props_window() -> Rect {
-    let (w, h) = properties_window_extent(Scale::ONE, &Theme::dark());
+    let (w, h) = properties_window_extent(PropertiesStrip::Node, Scale::ONE, &Theme::dark());
     Rect::new(0, 0, w, h)
 }
 
@@ -7986,16 +8166,18 @@ fn resting<'a>(
         attribute: editor,
         scrollbar: bar.scrollbar(),
         perms,
+        drive: None,
     }
 }
 
 /// What a window with nothing being typed into composes its Permissions
 /// section from, kept in `perms`.
-fn shown(perms: &PermsPanel, can_chown: bool) -> PermsShown<'_> {
-    PermsShown {
+fn shown(perms: &PermsPanel, can_chown: bool) -> SectionsShown<'_> {
+    SectionsShown {
         can_chown,
         owner: None,
         panel: perms,
+        drive: None,
     }
 }
 
@@ -8025,8 +8207,10 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
         tabs: BTreeSet::new(),
         editor_points: 0,
     };
-    for tab in PropertiesTab::ALL {
+    // A drive's strip offers every section, so scanning it reaches them all.
+    for tab in PropertiesStrip::Drive.tabs().iter().copied() {
         let view = PropertiesView {
+            strip: PropertiesStrip::Drive,
             tab,
             ..PropertiesView::default()
         };
@@ -8089,6 +8273,42 @@ fn scan(props: &Properties, view: PropertiesView, window: Rect) -> Vec<(Point, P
         }
     }
     found
+}
+
+/// A node's strip offers its own three sections and resolves a press on each
+/// tab to that tab, though the drive's strip seats one more ahead of them.
+#[test]
+fn a_nodes_strip_resolves_only_its_own_three_tabs() {
+    let props = props_with(some_attributes(1));
+    let window = props_window();
+    let theme = Theme::dark();
+    let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
+    let editor = TextField::new();
+    let controls = resting(&bar, &editor, &perms_panel);
+    let band = crate::render::identity_height(Scale::ONE, &theme);
+    let mut tabs = BTreeSet::new();
+    for y in i32::try_from(band).unwrap()..i32::try_from(band + 40).unwrap() {
+        for x in 0..i32::try_from(window.width).unwrap() {
+            let at = Point::new(x, y);
+            if let Some(PropertiesTarget::Tab(tab)) = properties_hit(
+                &props,
+                PropertiesView::default(),
+                controls,
+                window,
+                Scale::ONE,
+                &theme,
+                at,
+            ) {
+                tabs.insert(tab);
+            }
+        }
+    }
+    assert_eq!(
+        tabs,
+        PropertiesStrip::Node.tabs().iter().copied().collect(),
+        "a node's window offers no Drive section"
+    );
 }
 
 /// One scan of each drawn section, asserting everything the window's geometry
@@ -8339,37 +8559,54 @@ fn scan_first_permission(props: &Properties, view: PropertiesView, window: Rect)
 }
 
 /// The sections walk without wrapping, and a strip index round-trips to the
-/// section it names.
+/// section it names, in both strips.
 #[test]
 fn the_section_strip_walks_without_wrapping_past_either_end() {
     assert_eq!(PropertiesTab::default(), PropertiesTab::General);
-    for (index, tab) in PropertiesTab::ALL.into_iter().enumerate() {
-        assert_eq!(PropertiesTab::at(index), Some(tab));
-        assert_eq!(tab.index(), index);
-        assert!(!tab.label().is_empty());
+    assert_eq!(PropertiesStrip::default(), PropertiesStrip::Node);
+    for strip in [PropertiesStrip::Node, PropertiesStrip::Drive] {
+        for (index, tab) in strip.tabs().iter().copied().enumerate() {
+            assert_eq!(strip.at(index), Some(tab));
+            assert_eq!(strip.index_of(tab), index);
+            assert!(!tab.label().is_empty());
+        }
+        assert_eq!(strip.at(strip.tabs().len()), None);
+        assert_eq!(
+            strip.stepped(strip.first(), -1),
+            strip.first(),
+            "a walk off the leading end stays put"
+        );
+        assert_eq!(
+            strip.stepped(PropertiesTab::Attributes, 1),
+            PropertiesTab::Attributes,
+            "a walk off the trailing end stays put"
+        );
+        assert_eq!(
+            strip.stepped(strip.first(), i32::MAX),
+            PropertiesTab::Attributes
+        );
+        assert_eq!(
+            strip.stepped(PropertiesTab::Attributes, i32::MIN),
+            strip.first()
+        );
     }
-    assert_eq!(PropertiesTab::at(PropertiesTab::ALL.len()), None);
     assert_eq!(
-        PropertiesTab::General.stepped(-1),
-        PropertiesTab::General,
-        "a walk off the leading end stays put"
+        PropertiesStrip::Node.tabs(),
+        [
+            PropertiesTab::General,
+            PropertiesTab::Permissions,
+            PropertiesTab::Attributes
+        ]
     );
+    assert_eq!(PropertiesStrip::Drive.first(), PropertiesTab::Drive);
     assert_eq!(
-        PropertiesTab::General.stepped(1),
-        PropertiesTab::Permissions
-    );
-    assert_eq!(
-        PropertiesTab::Attributes.stepped(1),
-        PropertiesTab::Attributes,
-        "a walk off the trailing end stays put"
-    );
-    assert_eq!(
-        PropertiesTab::General.stepped(i32::MAX),
-        PropertiesTab::Attributes
-    );
-    assert_eq!(
-        PropertiesTab::Attributes.stepped(i32::MIN),
+        PropertiesStrip::Drive.stepped(PropertiesTab::Drive, 1),
         PropertiesTab::General
+    );
+    assert_eq!(
+        PropertiesStrip::Node.index_of(PropertiesTab::Drive),
+        0,
+        "a section the strip does not offer reads as its first"
     );
 }
 
@@ -8899,7 +9136,7 @@ fn an_unread_attribute_set_claims_nothing() {
 fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     let perms_panel = PermsPanel::default();
     let theme = Theme::dark();
-    let (w, h) = properties_window_extent(Scale::ONE, &theme);
+    let (w, h) = properties_window_extent(PropertiesStrip::Node, Scale::ONE, &theme);
     assert!(w > 0 && h > 0);
     let window = Rect::new(0, 0, w, h);
     let full = props_with(some_attributes(20));
@@ -8947,7 +9184,7 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
 
     // A hidpi window is proportionally larger, not the same pixel count.
     let hidpi = Scale::from_dpi(192).expect("a valid scale");
-    let (hw, hh) = properties_window_extent(hidpi, &theme);
+    let (hw, hh) = properties_window_extent(PropertiesStrip::Node, hidpi, &theme);
     assert!(hw > w && hh > h, "the window is authored in logical pixels");
 }
 
@@ -9182,7 +9419,7 @@ fn every_flag_is_seated_whole_at_the_size_the_window_opens_at() {
         (text_ladder(22), Scale::ONE),
     ];
     for (theme, scale) in cases {
-        let (w, h) = properties_window_extent(scale, &theme);
+        let (w, h) = properties_window_extent(PropertiesStrip::Node, scale, &theme);
         let window = Rect::new(0, 0, w, h);
         let extents = toggle_extents(&props, window, scale, &theme);
         assert_eq!(extents.len(), PERMISSION_BITS.len(), "{}", theme.name());
@@ -9211,7 +9448,7 @@ fn the_narrowest_window_still_seats_every_toggle_apart() {
     else {
         panic!("the manager's windows are resizable");
     };
-    let (_, h) = properties_window_extent(Scale::ONE, &theme);
+    let (_, h) = properties_window_extent(PropertiesStrip::Node, Scale::ONE, &theme);
     let window = Rect::new(0, 0, min_width_px, h);
     let extents = toggle_extents(&props, window, Scale::ONE, &theme);
     assert_eq!(extents.len(), PERMISSION_BITS.len());
@@ -9543,7 +9780,7 @@ fn shortest_props_window(theme: &Theme) -> Rect {
     else {
         panic!("the manager's windows are resizable");
     };
-    let (w, _) = properties_window_extent(Scale::ONE, theme);
+    let (w, _) = properties_window_extent(PropertiesStrip::Node, Scale::ONE, theme);
     Rect::new(0, 0, w, min_height_px)
 }
 
@@ -9804,13 +10041,11 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
     );
 }
 
-// --- FM7b: the delete-confirmation dialog ---------------------------------
+// --- FM7b, FM10: the delete question ----------------------------------------
 
-use crate::render::{
-    build_delete_dialog, draw_modal_dialog, modal_dialog_action_at, modal_dialog_rect,
-    DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
-};
+use crate::render::{delete_alert, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX};
 use crate::trash::DeleteDisposition;
+use tairix_abi::window_ipc::{AlertButtonRole, AlertSeverity};
 
 /// A plan removing a single regular file.
 fn one_file_plan() -> DeletePlan {
@@ -9826,205 +10061,70 @@ fn folder_plan() -> DeletePlan {
     .expect("a plan")
 }
 
-#[test]
-fn delete_dialog_titles_a_single_target_by_its_name() {
-    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
-    // A single target is named, so the user sees exactly what they are about
-    // to remove.
-    assert!(dialog.title().contains("Kernel"));
-    // A files-only removal warns only that it cannot be undone.
-    let message = dialog.message().expect("a message");
-    assert!(message.contains("cannot be undone"));
-    assert!(!message.to_ascii_lowercase().contains("folder"));
+/// The roles of `alert`'s buttons, in order.
+fn roles(alert: &tairix_abi::window_ipc::AlertSpec) -> Vec<AlertButtonRole> {
+    alert
+        .buttons()
+        .map(tairix_abi::window_ipc::AlertButton::role)
+        .collect()
 }
 
 #[test]
-fn delete_dialog_reports_the_honest_count_and_folder_warning() {
-    let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
-    // More than one target: the honest count, not a single name.
-    assert!(dialog.title().contains('2'));
-    // A plan that includes a directory warns that folders (and their contents)
-    // are removed, so the confirmation is not misleading.
-    let message = dialog.message().expect("a message");
-    assert!(message.to_ascii_lowercase().contains("folder"));
+fn a_delete_question_names_a_single_target() {
+    let alert = delete_alert(&one_file_plan(), DeleteDisposition::Permanent).expect("an alert");
+    assert!(alert.headline().contains("Kernel"));
+    assert!(alert.detail().contains("cannot be undone"));
+    assert!(!alert.detail().to_ascii_lowercase().contains("folder"));
 }
 
 #[test]
-fn delete_dialog_offers_a_destructive_delete_and_a_recommended_cancel() {
-    use tairix_controls::state::ControlRole;
-    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
-    let actions = dialog.actions();
-    assert_eq!(actions.len(), 2);
-    // The honest warmth is on the safe Cancel, never on the destructive Delete:
-    // the delete carries the Destructive role, Cancel the Recommended.
+fn a_delete_question_reports_the_honest_count_and_folder_warning() {
+    let alert = delete_alert(&folder_plan(), DeleteDisposition::Permanent).expect("an alert");
+    assert!(alert.headline().contains('2'));
+    assert!(alert.detail().to_ascii_lowercase().contains("folder"));
+}
+
+#[test]
+fn a_permanent_delete_is_destructive_and_warns() {
+    let alert = delete_alert(&one_file_plan(), DeleteDisposition::Permanent).expect("an alert");
+    assert_eq!(alert.severity(), AlertSeverity::Warning);
+    assert!(alert
+        .headline()
+        .to_ascii_lowercase()
+        .contains("permanently"));
+    let roles = roles(&alert);
+    assert_eq!(roles[DELETE_CANCEL_INDEX], AlertButtonRole::Cancel);
     assert_eq!(
-        actions[DELETE_CONFIRM_INDEX].role(),
-        ControlRole::Destructive
-    );
-    assert_eq!(
-        actions[DELETE_CANCEL_INDEX].role(),
-        ControlRole::Recommended
+        roles[DELETE_CONFIRM_INDEX],
+        AlertButtonRole::Destructive,
+        "the removal is never the answer Enter gives"
     );
 }
 
 #[test]
-fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
-    let theme = Theme::dark();
+fn a_move_to_trash_is_recoverable_and_the_default() {
+    let alert = delete_alert(&one_file_plan(), DeleteDisposition::Trash).expect("an alert");
+    assert_eq!(alert.severity(), AlertSeverity::Question);
+    assert!(alert.headline().contains("Kernel") && alert.headline().contains("Trash"));
+    assert!(alert.detail().contains("restore"));
+    assert!(!alert
+        .detail()
+        .to_ascii_lowercase()
+        .contains("cannot be undone"));
+    let roles = roles(&alert);
+    assert_eq!(roles[DELETE_CANCEL_INDEX], AlertButtonRole::Cancel);
+    assert_eq!(roles[DELETE_CONFIRM_INDEX], AlertButtonRole::Default);
+}
 
-    let vp = Rect::new(0, 0, 480, 320);
-    let rect = modal_dialog_rect(vp, Scale::ONE, &theme);
-    assert!(rect.width > 0 && rect.height > 0);
-    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
-    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
+#[test]
+fn a_delete_question_about_a_very_long_name_still_asks() {
+    let long = "n".repeat(255);
+    let plan = DeletePlan::new(vec![(comps(&["System", long.as_str()]), false)]).expect("a plan");
+    let alert = delete_alert(&plan, DeleteDisposition::Trash).expect("an alert");
     assert!(
-        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
+        alert.headline().ends_with('\u{2026}'),
+        "shortened, not refused"
     );
-    // Centered on each axis (within one pixel of the integer split).
-    let right_margin =
-        i32::try_from(vp.width).unwrap() - (rect.origin.x + i32::try_from(rect.width).unwrap());
-    assert!((rect.origin.x - right_margin).abs() <= 1);
-
-    // A window smaller than the dialog would like still yields a drawable rect
-    // clamped to the window, never a zero or over-size rectangle (no panic).
-    let tiny = Rect::new(0, 0, 20, 16);
-    let small = modal_dialog_rect(tiny, Scale::ONE, &theme);
-    assert!(small.width >= 1 && small.width <= tiny.width);
-    assert!(small.height >= 1 && small.height <= tiny.height);
-}
-
-#[test]
-fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
-    use tairix_raster::Surface;
-
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
-    let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
-
-    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
-    let before = surface.pixels().to_vec();
-    draw_modal_dialog(&mut surface, &dialog, Scale::ONE, &theme, vp);
-    assert_ne!(surface.pixels().to_vec(), before);
-
-    // A degenerate viewport draws nothing and does not panic.
-    let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_modal_dialog(
-        &mut tiny,
-        &dialog,
-        Scale::ONE,
-        &theme,
-        Rect::new(0, 0, 2, 2),
-    );
-}
-
-#[test]
-fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
-    let dialog = build_delete_dialog(&folder_plan(), DeleteDisposition::Permanent);
-
-    // Scanning the whole window, every index the hit-test resolves is one of
-    // the two action buttons, and both are reachable — so the drawn buttons and
-    // the hit-test cover exactly the same two distinct actions.
-    let mut seen: BTreeSet<usize> = BTreeSet::new();
-    let mut y = 0;
-    while y < i32::try_from(vp.height).unwrap() {
-        let mut x = 0;
-        while x < i32::try_from(vp.width).unwrap() {
-            if let Some(index) =
-                modal_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(x, y))
-            {
-                assert!(
-                    index == DELETE_CONFIRM_INDEX || index == DELETE_CANCEL_INDEX,
-                    "resolved a non-action index"
-                );
-                seen.insert(index);
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    assert_eq!(
-        seen,
-        [DELETE_CONFIRM_INDEX, DELETE_CANCEL_INDEX]
-            .into_iter()
-            .collect()
-    );
-
-    // A click well outside the dialog resolves nothing (fail closed).
-    assert_eq!(
-        modal_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(-5, -5)),
-        None
-    );
-    // On a window too small for the dialog buttons, nothing resolves (fail
-    // closed) rather than placing a phantom button.
-    let tiny = Rect::new(0, 0, 20, 16);
-    assert_eq!(
-        modal_dialog_action_at(&dialog, tiny, Scale::ONE, &theme, Point::new(5, 5)),
-        None
-    );
-}
-
-#[test]
-fn a_refusal_dialog_states_its_reason_and_offers_one_ok() {
-    use crate::render::{build_refusal_dialog, REFUSAL_DISMISS_INDEX};
-    use tairix_controls::state::ControlRole;
-    let dialog = build_refusal_dialog("Copy stopped", "the destination is full");
-    assert_eq!(dialog.title(), "Copy stopped");
-    assert_eq!(dialog.message(), Some("the destination is full"));
-    let actions = dialog.actions();
-    assert_eq!(actions.len(), 1);
-    assert_eq!(
-        actions[REFUSAL_DISMISS_INDEX].role(),
-        ControlRole::Recommended
-    );
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 360);
-    let rects = dialog.action_rects(
-        modal_dialog_rect(vp, Scale::ONE, &theme),
-        Scale::ONE,
-        &theme,
-    );
-    let ok = rects[REFUSAL_DISMISS_INDEX];
-    let centre = Point::new(
-        ok.left() + i32::try_from(ok.width / 2).expect("fits"),
-        ok.top() + i32::try_from(ok.height / 2).expect("fits"),
-    );
-    assert_eq!(
-        modal_dialog_action_at(&dialog, vp, Scale::ONE, &theme, centre),
-        Some(REFUSAL_DISMISS_INDEX)
-    );
-}
-
-// --- FM10: the move-to-Trash confirmation wording -------------------------
-
-#[test]
-fn trash_dialog_is_recoverable_and_worded_honestly() {
-    use tairix_controls::state::ControlRole;
-    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Trash);
-    // The recoverable move names the item and says "Trash", never "delete" or
-    // "cannot be undone" (the wording matches what will happen).
-    assert!(dialog.title().contains("Kernel"));
-    assert!(dialog.title().contains("Trash"));
-    let message = dialog.message().expect("a message");
-    assert!(message.contains("restore"));
-    assert!(!message.to_ascii_lowercase().contains("cannot be undone"));
-    // A recoverable move is not destructive: the confirm action is the
-    // recommended (safe) primary, and Cancel carries no honest-warmth role.
-    let actions = dialog.actions();
-    assert_eq!(actions.len(), 2);
-    assert_eq!(
-        actions[DELETE_CONFIRM_INDEX].role(),
-        ControlRole::Recommended
-    );
-    assert_eq!(actions[DELETE_CANCEL_INDEX].role(), ControlRole::Neutral);
-}
-
-#[test]
-fn permanent_dialog_names_the_irreversible_delete() {
-    // The permanent wording is explicit that the removal is forever, so it can
-    // never be mistaken for the recoverable Trash move.
-    let dialog = build_delete_dialog(&one_file_plan(), DeleteDisposition::Permanent);
-    assert!(dialog.title().to_ascii_lowercase().contains("permanently"));
 }
 
 // --- FM10: the shared Trash-directory location ----------------------------
@@ -12226,4 +12326,295 @@ fn the_open_with_chooser_marks_the_default_candidate() {
         "the selection is drawn, and it is not the default mark"
     );
     assert!(!paint(&one).is_empty());
+}
+
+// --- The Drive section ----------------------------------------------------
+
+use crate::drive::{Drive, DriveChange, DrivePanels, DriveSample};
+use crate::render::properties_drive_damage;
+use tairix_abi::blkio::{BlkDeviceName, BlkIoCounters};
+use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeIoStatsRecord};
+use tairix_geometry::Region;
+
+/// A drive read twice a second apart, `free` of its 1000 blocks unallocated
+/// at the second reading, its device busy reading.
+fn read_drive(free: u64) -> Drive {
+    let record = |free: u64| {
+        MountRecord::new(
+            b"nvme0p2",
+            b"/Storage/Backup",
+            b"arxfs",
+            MountFlags::default(),
+            MountVolumeState {
+                usage: VolumeStats {
+                    block_size: 4096,
+                    in_reserve: false,
+                    total_blocks: 1000,
+                    free_blocks: free,
+                    avail_blocks: free,
+                    files: 0,
+                    files_free: 0,
+                },
+                availability: MountAvailability::Available,
+                medium: Some(BlkMedium::Nvme),
+            },
+            [0x5f; 16],
+        )
+        .expect("a valid record")
+    };
+    let service = |read: u64| {
+        VolumeIoStatsRecord::new(
+            [0x5f; 16],
+            9,
+            BlkIoCounters {
+                read_bytes: read,
+                ..BlkIoCounters::default()
+            },
+            BlkDeviceName::new("Samsung-970"),
+        )
+    };
+    let mut drive = Drive::new();
+    drive.adopt(&DriveSample {
+        mount: Some(record(400)),
+        service: Some(service(0)),
+        at_ns: 0,
+    });
+    drive.adopt(&DriveSample {
+        mount: Some(record(free)),
+        service: Some(service(8 << 20)),
+        at_ns: 1_000_000_000,
+    });
+    drive
+}
+
+/// What a drive's window draws at `view`.
+fn drive_frame(drive: &Drive, view: PropertiesView, window: Rect) -> Surface {
+    let theme = Theme::dark();
+    let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
+    let editor = TextField::new();
+    let props = props_with(some_attributes(1));
+    let controls = PropertiesControls {
+        drive: Some(drive),
+        ..resting(&bar, &editor, &perms_panel)
+    };
+    let mut surface = Surface::new(window.width, window.height).expect("surface");
+    draw_properties_window(
+        &mut surface,
+        PropertiesFrame::Ready(&props),
+        view,
+        controls,
+        Scale::ONE,
+        &theme,
+        window,
+        &mut NoArtwork,
+    );
+    surface
+}
+
+fn drive_view() -> PropertiesView {
+    PropertiesView {
+        strip: PropertiesStrip::Drive,
+        tab: PropertiesStrip::Drive.first(),
+        ..PropertiesView::default()
+    }
+}
+
+#[test]
+fn a_drives_window_opens_tall_enough_to_show_its_whole_drive_section() {
+    let theme = Theme::dark();
+    let (node_w, node_h) = properties_window_extent(PropertiesStrip::Node, Scale::ONE, &theme);
+    let (w, h) = properties_window_extent(PropertiesStrip::Drive, Scale::ONE, &theme);
+    assert_eq!(w, node_w);
+    assert!(h >= node_h);
+
+    let drive = read_drive(300);
+    let window = Rect::new(0, 0, w, h);
+    let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
+    let editor = TextField::new();
+    let controls = PropertiesControls {
+        drive: Some(&drive),
+        ..resting(&bar, &editor, &perms_panel)
+    };
+    let mut column = ScrollColumn::new();
+    let mut damage = Region::new();
+    assert!(
+        !properties_scroll_wheel(
+            &mut column,
+            &props_with(some_attributes(1)),
+            drive_view(),
+            controls.sections(),
+            (window, Scale::ONE, &theme),
+            (0, -3),
+            &mut damage,
+        ),
+        "a section that fits its body has nothing to scroll"
+    );
+}
+
+#[test]
+fn a_drives_section_draws_its_ring_its_trace_and_its_facts() {
+    let theme = Theme::dark();
+    let (w, h) = properties_window_extent(PropertiesStrip::Drive, Scale::ONE, &theme);
+    let window = Rect::new(0, 0, w, h);
+    let drive = read_drive(300);
+    let surface = drive_frame(&drive, drive_view(), window);
+    // A ring's first part wears its resource's own signal colour.
+    let used = Color::from(theme.palette().signal(tairix_theme::SignalRole::Disk)).premultiply();
+    assert!(
+        surface.pixels().contains(&used),
+        "the used part of the ring is drawn in its own tint"
+    );
+    let general = drive_frame(
+        &drive,
+        PropertiesView {
+            tab: PropertiesTab::General,
+            ..drive_view()
+        },
+        window,
+    );
+    assert!(
+        !general.pixels().contains(&used),
+        "the ring is the Drive section's"
+    );
+
+    // Until a reading lands the section says it is reading, and draws no ring.
+    let unread = drive_frame(&Drive::new(), drive_view(), window);
+    assert!(!unread.pixels().contains(&used));
+}
+
+#[test]
+fn a_readings_damage_is_the_panel_it_moved_and_only_on_the_drive_section() {
+    let theme = Theme::dark();
+    let (w, h) = properties_window_extent(PropertiesStrip::Drive, Scale::ONE, &theme);
+    let window = Rect::new(0, 0, w, h);
+    let drive = read_drive(300);
+    let perms_panel = PermsPanel::default();
+    let sections = SectionsShown {
+        drive: Some(&drive),
+        ..shown(&perms_panel, true)
+    };
+    let frame = (window, Scale::ONE, &theme);
+
+    let mut activity = Region::new();
+    let moved = DriveChange::Panels(DrivePanels {
+        activity: true,
+        ..DrivePanels::default()
+    });
+    assert!(properties_drive_damage(
+        drive_view(),
+        sections,
+        frame,
+        moved,
+        &mut activity
+    ));
+    let mut capacity = Region::new();
+    let filled = DriveChange::Panels(DrivePanels {
+        capacity: true,
+        ..DrivePanels::default()
+    });
+    assert!(properties_drive_damage(
+        drive_view(),
+        sections,
+        frame,
+        filled,
+        &mut capacity
+    ));
+    let (a, c) = (bounds(&activity), bounds(&capacity));
+    assert!(
+        a.top() > c.bottom() - 1,
+        "the trace sits below the ring, apart from it"
+    );
+    assert!(
+        a.height < h / 2 && c.height < h / 2,
+        "a panel's change repaints that panel, not the window"
+    );
+
+    let mut whole = Region::new();
+    let restated = DriveChange::Layout;
+    assert!(properties_drive_damage(
+        drive_view(),
+        sections,
+        frame,
+        restated,
+        &mut whole
+    ));
+    assert!(
+        bounds(&whole).height > a.height + c.height,
+        "facts lay the body out again"
+    );
+
+    let mut none = Region::new();
+    let elsewhere = PropertiesView {
+        tab: PropertiesTab::General,
+        ..drive_view()
+    };
+    assert!(!properties_drive_damage(
+        elsewhere, sections, frame, restated, &mut none
+    ));
+    assert!(!properties_drive_damage(
+        drive_view(),
+        sections,
+        frame,
+        DriveChange::default(),
+        &mut none
+    ));
+    assert!(none.is_empty());
+}
+
+/// The least rectangle holding all of `region`.
+fn bounds(region: &Region) -> Rect {
+    let rects = region.rects();
+    let left = rects.iter().map(Rect::left).min().unwrap_or(0);
+    let top = rects.iter().map(Rect::top).min().unwrap_or(0);
+    let right = rects.iter().map(Rect::right).max().unwrap_or(0);
+    let bottom = rects.iter().map(Rect::bottom).max().unwrap_or(0);
+    Rect::new(
+        left,
+        top,
+        u32::try_from(right - left).unwrap_or(0),
+        u32::try_from(bottom - top).unwrap_or(0),
+    )
+}
+
+#[test]
+fn a_drive_whose_root_cannot_be_read_still_shows_its_drive_section() {
+    // The mount table describes a drive whatever its root's own permissions
+    // or health, so a refused node read costs the node's sections, not the
+    // drive's.
+    let theme = Theme::dark();
+    let (w, h) = properties_window_extent(PropertiesStrip::Drive, Scale::ONE, &theme);
+    let window = Rect::new(0, 0, w, h);
+    let drive = read_drive(300);
+    let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
+    let editor = TextField::new();
+    let controls = PropertiesControls {
+        drive: Some(&drive),
+        ..resting(&bar, &editor, &perms_panel)
+    };
+    let used = Color::from(theme.palette().signal(tairix_theme::SignalRole::Disk)).premultiply();
+    for tab in [PropertiesTab::Drive, PropertiesTab::General] {
+        let mut surface = Surface::new(w, h).expect("surface");
+        draw_properties_window(
+            &mut surface,
+            PropertiesFrame::Refused("could not be read: permission denied"),
+            PropertiesView {
+                tab,
+                ..drive_view()
+            },
+            controls,
+            Scale::ONE,
+            &theme,
+            window,
+            &mut NoArtwork,
+        );
+        assert_eq!(
+            surface.pixels().contains(&used),
+            tab == PropertiesTab::Drive,
+            "{tab:?}: the ring is drawn on the Drive tab alone"
+        );
+    }
 }

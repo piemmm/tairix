@@ -425,6 +425,16 @@ impl CompletionCode {
         self as u8
     }
 
+    /// Whether this is what a Stop Endpoint command gives the TD it
+    /// interrupted (xHCI §4.6.9): an ending, not a halt.
+    #[must_use]
+    pub const fn is_stopped(self) -> bool {
+        matches!(
+            self,
+            Self::Stopped | Self::StoppedLengthInvalid | Self::StoppedShortPacket
+        )
+    }
+
     /// Decode a raw completion-code value.
     ///
     /// # Errors
@@ -502,7 +512,8 @@ impl CompletionCode {
     /// [`Self::ContextStateError`]; the device never saw a `SET_ADDRESS`, so
     /// it stays in Default state and re-driving a fresh slot recovers it,
     /// exactly as for an unreachable device. Distinct from
-    /// [`Self::indicates_device_unreachable`], which reads as a hot-removal.
+    /// [`Self::indicates_device_unreachable`], where the device failed to
+    /// answer.
     #[must_use]
     pub const fn indicates_state_disagreement(self) -> bool {
         matches!(

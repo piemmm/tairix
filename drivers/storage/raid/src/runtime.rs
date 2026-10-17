@@ -35,6 +35,7 @@
 //! there is nothing to do.
 
 use alloc::vec::Vec;
+use tairix_abi::driver::block::BlockClass;
 
 use tairix_abi::blkio::{serve_request_recovering, BlkHealth, BlkHealthState, BLK_COMPLETION_LEN};
 use tairix_abi::driver::block::Block;

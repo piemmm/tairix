@@ -1402,41 +1402,6 @@ fn the_retained_roster_refuses_to_grow_past_its_stated_bound() {
 // --- Byte-rate traces --------------------------------------------------------
 
 #[test]
-fn a_byte_trace_is_drawn_against_the_least_power_of_two_seating_its_peak() {
-    assert_eq!(
-        super::trace_full_scale(0),
-        64 * 1024,
-        "idle reads against the floor"
-    );
-    assert_eq!(super::trace_full_scale(4_096), 64 * 1024);
-    assert_eq!(super::trace_full_scale(64 * 1024), 64 * 1024);
-    assert_eq!(super::trace_full_scale(64 * 1024 + 1), 128 * 1024);
-    assert_eq!(super::trace_full_scale(3_000_000_000), 1 << 32);
-    assert_eq!(
-        super::trace_full_scale(u64::MAX),
-        u64::MAX,
-        "a rate past the last power of two saturates rather than wrapping"
-    );
-}
-
-#[test]
-fn a_point_is_its_exact_share_of_the_scale_and_never_past_the_box() {
-    assert_eq!(super::share_of_scale(0, 1_024), 0);
-    assert_eq!(super::share_of_scale(512, 1_024), 500);
-    assert_eq!(
-        super::share_of_scale(2_048, 1_024),
-        1_000,
-        "clamped at full"
-    );
-    assert_eq!(
-        super::share_of_scale(u64::MAX, u64::MAX),
-        1_000,
-        "no overflow at the top of the range"
-    );
-    assert_eq!(super::share_of_scale(u64::MAX / 2, u64::MAX), 499);
-}
-
-#[test]
 fn the_scale_follows_the_window_and_comes_back_down_once_a_burst_leaves_it() {
     // A burst fills the box while it is in the window; once it has scrolled
     // out, the quieter traffic after it is drawn at its own scale again rather

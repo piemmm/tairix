@@ -21,14 +21,15 @@
 //! and tears down what the chain no longer lists. That is what lets every rule
 //! in section 1 be tested without a screen.
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal, APP_MENU_ENTRY_MAX};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TextAction,
-    TextField, TitleBar, TitleBarEvent,
+    plate_rect, AboutSheet, ChainChild, ChainModel, Menu, MenuAction, PlatePlacement, RowIcon,
+    TextAction, TextField, TitleBar, TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -102,17 +103,17 @@ pub enum ChainAction {
 /// One row of the open chain that wants a picture, and the pixel side it must
 /// be rasterised at.
 ///
-/// A row *names* the bundle its icon comes from; resolving it is the
-/// session's, because only the session owns an icon cache and a sandboxed
-/// decoder. A paint reads nothing, so the answer is set before the next one.
+/// A row *names* where its picture comes from; resolving it is the session's,
+/// because only the session owns an icon cache and a sandboxed decoder. A
+/// paint reads nothing, so the answer is set before the next one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChainIconWant {
     /// The model row asking, as [`MenuChain::set_row_artwork`] names it.
     pub row: usize,
     /// The side, in physical pixels, the picture must be rasterised at.
     pub side: u32,
-    /// The application bundle the picture comes from.
-    pub bundle: String,
+    /// Where the picture comes from.
+    pub source: RowIcon,
 }
 
 /// One surface the chain occupies on screen.
@@ -131,7 +132,7 @@ pub struct ChainSurface {
 pub enum SurfaceKind {
     /// The plate at this depth, root first.
     Plate(usize),
-    /// The session-drawn information panel.
+    /// The session-drawn sheet about the application.
     Info,
     /// The session-drawn quick-entry field.
     Entry,
@@ -157,23 +158,15 @@ struct Plate {
     repaint: Repaint,
 }
 
-/// Logical width of the information panel at the reference density: wide
-/// enough for a one-line purpose beside its label.
-const INFO_PANEL_WIDTH: u32 = 260;
-
-/// The information panel's width in physical pixels at `scale`.
-fn info_panel_width(scale: Scale, _theme: &Theme) -> u32 {
-    scale.scale_length(INFO_PANEL_WIDTH).max(1)
-}
-
-/// The desktop's own information panel, hanging where a submenu's plate would.
+/// The desktop's own sheet about the application, hanging where a submenu's
+/// plate would and closing with the chain.
 #[derive(Clone, Debug)]
 struct InfoPanel {
-    /// The facts, read from the owner's signed manifest by the host.
-    facts: FactList,
+    /// What it states, read from the owner's signed manifest by the host.
+    sheet: Box<AboutSheet>,
     /// Where it sits.
     rect: Rect,
-    /// What of the panel the session has still to paint. It states facts that
+    /// What of the sheet the session has still to paint. It states facts that
     /// never change, so after its first paint it owes nothing.
     repaint: Repaint,
 }
@@ -502,7 +495,7 @@ impl MenuChain {
         }
     }
 
-    /// Every row of the open chain that names a bundle its icon comes from,
+    /// Every row of the open chain that names where its picture comes from,
     /// and the side each must be rasterised at.
     ///
     /// Only rows on a plate that is actually up are reported, so a submenu
@@ -521,7 +514,7 @@ impl MenuChain {
                 let Some(entry) = chain.model.rows().get(row) else {
                     continue;
                 };
-                let Some(bundle) = entry.icon_bundle() else {
+                let Some(source) = entry.icon_source() else {
                     continue;
                 };
                 if entry
@@ -534,7 +527,7 @@ impl MenuChain {
                 wants.push(ChainIconWant {
                     row,
                     side,
-                    bundle: bundle.to_string(),
+                    source: source.clone(),
                 });
             }
         }
@@ -675,8 +668,9 @@ impl MenuChain {
             return;
         };
         let local = Rect::new(0, 0, panel.rect.width, panel.rect.height);
-        lay_plate(surface, (local.width, local.height), 0, geom);
-        panel.facts.render(surface, local, geom.scale, geom.theme);
+        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(local.height);
+        lay_plate(surface, (local.width, local.height), band_h, geom);
+        panel.sheet.render(surface, local, geom.scale, geom.theme);
     }
 
     /// Paint the quick-entry surface: the band over the field, on the same
@@ -822,12 +816,12 @@ impl MenuChain {
 /// Resolve the pictures the open chain's rows asked for, through the
 /// session's one artwork cache.
 ///
-/// The identical request a taskbar slot makes for an application's icon, so a
-/// candidate row and that application's slot draw the same picture from the
-/// same cache. The artwork tier reads and validates the bundle's own *signed*
-/// manifest, so nothing outside a bundle's declared icon is ever read and an
-/// unresolvable path resolves to nothing — the row then draws the built-in
-/// glyph rather than blanking.
+/// The identical request a taskbar slot makes for an application's icon, or a
+/// file manager's tile for a class, so a row and that slot or tile draw the
+/// same picture from the same cache. The artwork tier reads and validates a
+/// bundle's own *signed* manifest, so nothing outside a bundle's declared icon
+/// is ever read and an unresolvable path resolves to nothing — the row then
+/// draws the built-in glyph rather than blanking.
 pub fn resolve_chain_icons(
     chain: &mut MenuChain,
     geom: &ChainGeometry<'_>,
@@ -835,7 +829,10 @@ pub fn resolve_chain_icons(
     cache: &mut ArtworkCache,
 ) {
     for want in chain.icon_wants(geom) {
-        let request = IconRequest::bundle(IconKind::AppBundle, &want.bundle);
+        let request = match &want.source {
+            RowIcon::Bundle(dir) => IconRequest::bundle(IconKind::AppBundle, dir),
+            RowIcon::Class(kind) => IconRequest::kind(*kind),
+        };
         let art = cache
             .artwork(resolver, request, want.side)
             .and_then(IconPicture::artwork);
@@ -1450,12 +1447,11 @@ impl OpenChain {
                 self.replace_geometry(geom);
                 ChainAction::Redraw
             }
-            ChainChild::Info(facts) => {
-                let width = info_panel_width(geom.scale, geom.theme);
-                let height = facts.measured_height(geom.scale, geom.theme).max(1);
+            ChainChild::Info(sheet) => {
+                let (width, height) = sheet.measured_size(geom.scale, geom.theme);
                 self.info = Some(InfoPanel {
-                    facts,
-                    rect: self.hang(width, height, geom),
+                    sheet,
+                    rect: self.hang(width.max(1), height.max(1), geom),
                     repaint: Repaint::Whole,
                 });
                 ChainAction::Redraw

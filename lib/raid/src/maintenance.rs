@@ -183,7 +183,8 @@ pub struct MaintenancePolicy {
 
 impl MaintenancePolicy {
     /// The default policy for an array of `class` — the class its members'
-    /// fold declares through [`Block::device_class`].
+    /// fold declares through
+    /// [`BlockClass::device_class`](tairix_abi::driver::block::BlockClass::device_class).
     ///
     /// Both parts are derived from that class rather than from a second
     /// hand-written table that could drift: the background cadences from

@@ -3,9 +3,9 @@
 //!
 //! A USB mass-storage device's logical units do **not** each own their own
 //! transport: every LUN behind one Bulk-Only / UAS device shares the *same*
-//! bulk pipe pair. A transport-wide event — a `CLEAR_FEATURE(HALT)` /
-//! bulk-reset ([`ScsiDevice::scrub_window`](crate::scsi::ScsiDevice::scrub_window),
-//! the driver's one data-path recovery mechanism), a port reset, a bus blip —
+//! bulk pipe pair. A transport-wide event — a transport reset
+//! ([`ScsiDevice::reset_transport`](crate::scsi::ScsiDevice::reset_transport),
+//! which clears the halt of each bulk pipe), a port reset, a bus blip —
 //! therefore hits *all* of them at once. Left uncoordinated, one LUN's stall
 //! that triggers a shared-transport reset would look to every *other* LUN's
 //! per-device [`BlkHealth`] machine like an independent failure, so a
@@ -28,7 +28,7 @@
 
 use tairix_abi::blkio::{
     decode_outcome, effective_child_status, serve_request_recovering, BlkCompletion, BlkHealth,
-    BlkStatus, FaultDomain, FaultDomainState, BLK_COMPLETION_LEN,
+    BlkHealthState, BlkStatus, FaultDomain, FaultDomainState, BLK_COMPLETION_LEN,
 };
 use tairix_abi::driver::block::Block;
 
@@ -177,6 +177,34 @@ pub fn serve_lun_with_domain<B: Block>(
         .unwrap_or(len)
 }
 
+/// How a unit failed closed: the edges outside the shared
+/// [`BlkHealthTransition`](tairix_abi::sysinfo::BlkHealthTransition) vocabulary,
+/// each its own event so a log line says which happened.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FailedClosed {
+    /// Its grace window elapsed without it answering.
+    GraceElapsed,
+    /// It reported itself gone.
+    Gone,
+    /// It met a fault nothing recovers, with no window to ride out.
+    Unrecoverable,
+}
+
+/// The way a unit's health moving from `before` to `after` failed it closed,
+/// `None` for any other edge.
+#[must_use]
+pub fn failed_closed(before: BlkHealthState, after: BlkHealthState) -> Option<FailedClosed> {
+    if before == after {
+        return None;
+    }
+    match after {
+        BlkHealthState::Faulted => Some(FailedClosed::GraceElapsed),
+        BlkHealthState::Offline => Some(FailedClosed::Gone),
+        BlkHealthState::Failed => Some(FailedClosed::Unrecoverable),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +213,32 @@ mod tests {
     use tairix_abi::blkio::{BlkDeviceClass, BlkOp, BlkRequest};
     use tairix_abi::driver::block::BlockGeometry;
     use tairix_abi::DriverError;
+
+    #[test]
+    fn each_way_of_failing_closed_is_named_as_itself() {
+        // A healthy unit failing at once had no window to elapse.
+        assert_eq!(
+            failed_closed(BlkHealthState::Healthy, BlkHealthState::Failed),
+            Some(FailedClosed::Unrecoverable)
+        );
+        assert_eq!(
+            failed_closed(BlkHealthState::Recovering, BlkHealthState::Faulted),
+            Some(FailedClosed::GraceElapsed)
+        );
+        assert_eq!(
+            failed_closed(BlkHealthState::Healthy, BlkHealthState::Offline),
+            Some(FailedClosed::Gone)
+        );
+        assert_eq!(
+            failed_closed(BlkHealthState::Faulted, BlkHealthState::Faulted),
+            None,
+            "an edge, not a state"
+        );
+        assert_eq!(
+            failed_closed(BlkHealthState::Healthy, BlkHealthState::Recovering),
+            None
+        );
+    }
 
     const BLOCK_SIZE: usize = 512;
     /// `BLOCK_SIZE` as the wire-width type the geometry carries.

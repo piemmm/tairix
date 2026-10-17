@@ -56,7 +56,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::num::NonZeroUsize;
 
-use tairix_abi::driver::block::Block;
+use tairix_abi::driver::block::{Block, BlockClass};
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,

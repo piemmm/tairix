@@ -66,7 +66,7 @@ mod program {
     use tairix_log::{Event, Sink};
     use tairix_rt::io::Read;
     use tairix_sandbox::decode::{
-        container_summary, disassemble, ContainerFormat, DecodeFailure, DecodeRefusal,
+        container_summary, disassemble, CodeWindow, ContainerFormat, DecodeFailure, DecodeRefusal,
         DecodeService, Isa,
     };
     use tairix_sandbox::host::{
@@ -155,8 +155,14 @@ mod program {
         3, 0, 0x01, 0x0B, // body: locals 0, nop, end
     ];
 
-    /// Two A64 `nop`s (0xD503201F little-endian).
-    const NOPS: &[u8] = &[0x1F, 0x20, 0x03, 0xD5, 0x1F, 0x20, 0x03, 0xD5];
+    /// Two A64 `nop`s (0xD503201F little-endian) at 0x1000, the whole of the
+    /// code.
+    const NOPS: CodeWindow<'static> = CodeWindow {
+        address: 0x1000,
+        depth: 0,
+        code: &[0x1F, 0x20, 0x03, 0xD5, 0x1F, 0x20, 0x03, 0xD5],
+        continues: false,
+    };
 
     /// Diagnostic exit code of the dying worker (asserted nowhere — any
     /// non-clean death is contained identically; distinct for a human
@@ -537,7 +543,7 @@ mod program {
         }
 
         // 3. Instruction decode through the same worker.
-        match disassemble(&mut good, Isa::Aarch64, 0x1000, 0, 16, NOPS) {
+        match disassemble(&mut good, Isa::Aarch64, NOPS, 16) {
             Ok(window) => {
                 if window.insns.len() != 2 {
                     return 16;

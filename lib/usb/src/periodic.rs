@@ -13,10 +13,10 @@ use tairix_abi::usb_urb::UsbSpeed;
 use tairix_abi::DriverError;
 
 use crate::descriptor::{
-    DESC_TYPE_ENDPOINT, ENDPOINT_ADDR_DIR_IN, ENDPOINT_ADDR_NUMBER_MASK, ENDPOINT_ATTR_BULK,
-    ENDPOINT_ATTR_INTERRUPT, ENDPOINT_ATTR_ISOCHRONOUS, ENDPOINT_ATTR_TYPE_MASK,
-    ENDPOINT_DESCRIPTOR_LEN, ENDPOINT_MAX_PACKET_MASK, ENDPOINT_TRANSACTIONS_SHIFT,
-    SS_ENDPOINT_COMPANION_LEN,
+    address_dci, DESC_TYPE_ENDPOINT, ENDPOINT_ADDR_DIR_IN, ENDPOINT_ADDR_NUMBER_MASK,
+    ENDPOINT_ATTR_BULK, ENDPOINT_ATTR_INTERRUPT, ENDPOINT_ATTR_ISOCHRONOUS,
+    ENDPOINT_ATTR_TYPE_MASK, ENDPOINT_DESCRIPTOR_LEN, ENDPOINT_MAX_PACKET_MASK,
+    ENDPOINT_TRANSACTIONS_SHIFT, SS_ENDPOINT_COMPANION_LEN,
 };
 
 /// How an isochronous endpoint keeps time with the host (USB 2.0 §5.12.4.1,
@@ -189,10 +189,10 @@ impl EndpointDescriptor {
         self.address & ENDPOINT_ADDR_DIR_IN != 0
     }
 
-    /// The Device Context Index the controller knows it by (xHCI §4.5.1).
+    /// The Device Context Index the controller knows it by.
     #[must_use]
     pub const fn dci(&self) -> u8 {
-        self.number() * 2 + self.is_in() as u8
+        address_dci(self.address)
     }
 
     /// Whether this is an isochronous endpoint.

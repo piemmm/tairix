@@ -13,7 +13,7 @@ loaded as user-space drivers unless their manifest declares
 | Method                         | Purpose                                       | Capability gate                |
 |--------------------------------|-----------------------------------------------|--------------------------------|
 | `geometry`                     | report `BlockGeometry { block_size, block_count }` | `DriverHandle` ownership |
-| `device_class`                 | report the `BlkDeviceClass` the I/O budget derives from | `DriverHandle` ownership |
+| `medium`                       | report the `BlkMedium` the device is, which its class and I/O budget follow from | `DriverHandle` ownership |
 | `device_name`                  | report the device's own short name, for a consumer that lists devices | `DriverHandle` ownership |
 | `backing_availability`         | report what the device can promise a background consumer | `DriverHandle` ownership |
 | `read_blocks` / `write_blocks` | bulk transfer (multiple of `block_size`)      | `DriverHandle` ownership       |
@@ -97,26 +97,31 @@ would either fail a slow-but-healthy disk early or let a wedged fast device
 stall its callers far longer than policy intends, so the one component that
 knows what the hardware is — the driver that binds it — declares it:
 
-- `Block::device_class` reports the device's `blkio::BlkDeviceClass`
-  (`Rotational`, `SolidState`, `Removable`, `Virtual`). Reporting it is a pure
+- `Block::medium` reports what the device is, a `blkio::BlkMedium`
+  (`HardDisk`, `SolidState`, `Nvme`, `UsbFlash`, `UsbDisk`, `SdCard`,
+  `Virtual`), and its `blkio::BlkDeviceClass` (`Rotational`, `SolidState`,
+  `Removable`, `Virtual`) follows from it (`BlockClass::device_class`, a
+  blanket implementation over `BlkDeviceClass::of`), so what a device is said
+  to be and how patiently it is served cannot disagree. Reporting it is a pure
   observation: it touches no hardware and cannot fail. The trait default is
-  `Virtual`, the *unclassified* envelope — bounded rather than maximally
+  `None`, served the *unclassified* envelope — bounded rather than maximally
   patient, so a device whose driver says nothing about itself still fails
-  closed promptly when it wedges.
-- The class travels to the consumer in the **geometry completion**
-  (`BlkCompletion::class`, an `Option<BlkDeviceClass>` so "the driver named a
-  class this ABI does not define" stays a state of its own), alongside the
+  closed promptly when it wedges. A forwarding layer forwards its device's
+  medium, and a composition takes `BlkMedium::of_members`.
+- The medium travels to the consumer in the **geometry completion**
+  (`BlkCompletion::medium`, an `Option<BlkMedium>` so "the driver named a
+  medium this ABI does not define" stays a state of its own), alongside the
   device's size and write policy, and the consumer adopts it for every
   subsequent request: its per-request deadline, reissue budget, and the
   driver's grace window all derive from that one shared
   `BlkDeviceClass::budget` policy for *this* device (`AGENTS.md` §2.2, §24.1),
-  reached for an unknown through the single `BlkDeviceClass::served_as`
+  reached for an unknown through the single `BlkDeviceClass::of`
   patience policy. Until the device answers, the geometry probe itself runs on the
   bounded unclassified envelope, so an endpoint that never answers fails closed
   promptly rather than being granted a spinning disk's patience on nothing but
   hope.
 - `Block::device_name` reports the device's own short name, declared by the
-  driver for the same reason the class is: nothing above the driver knows what
+  driver for the same reason the medium is: nothing above the driver knows what
   the device *is*, and a surface listing storage devices has otherwise only
   the volumes that happen to sit on one to name it by — which names a
   filesystem, not a disk. It travels to the consumer in the same geometry
@@ -132,12 +137,12 @@ knows what the hardware is — the driver that binds it — declares it:
   to the unnamed device — so an untrusted driver can neither forge an
   identity that means anything nor put an escape sequence on a reader's
   screen.
-- The serving driver is untrusted, and this field needs no trust: the class
-  selects only how patient the consumer is with this one device, grants no
-  authority, and is bounded by the widest class budget either way. A driver
-  that overstates its patience only delays its own deadline; one that
-  understates it only fails itself sooner. An unrecognised class word on the
-  wire is served the bounded unclassified envelope rather than being trusted
+- The serving driver is untrusted, and this field needs no trust: the medium
+  selects only how patient the consumer is with this one device and which
+  picture a reader is shown, grants no authority, and is bounded by the widest
+  class budget either way. A driver that overstates its patience only delays
+  its own deadline; one that understates it only fails itself sooner. An
+  unrecognised medium word on the wire is served the bounded unclassified envelope rather than being trusted
   with a wider one — and never discards an otherwise well-formed completion.
   It is not rewritten to `Virtual` on the way in, though: the decode keeps it
   unknown, so "the driver said something I cannot read" stays distinct from
@@ -148,12 +153,14 @@ knows what the hardware is — the driver that binds it — declares it:
 - **A device that wraps another reports what it wraps.** A partition window, a
   block cache, the kernel's disk-sharing boundary, the retained-writes
   journal, and the remote block clients all forward their inner device's
-  class, so the real hardware's envelope survives every layer above it rather
-  than being flattened to the default. A device *composed* of several others (a
-  RAID array) declares the **most patient** of its live members
-  (`BlkDeviceClass::most_patient`): the array can only answer as fast as the
-  member it is waiting on, so a mirror of an SSD and a spinning disk is served
-  the spinning disk's spin-up budget.
+  medium, so the real hardware's identity and envelope survive every layer
+  above it rather than being flattened to the default. A device *composed* of
+  several others (a RAID array) declares the medium of the live member it must
+  wait on longest (`BlkMedium::of_members`): the array can only answer as fast
+  as the member it is waiting on, so a mirror of an SSD and a spinning disk
+  reads as the spinning disk and is served its spin-up budget. An undeclared
+  member is waited on as a paravirtual device, and when it is the one the array
+  waits on the array reads as unknown rather than as a medium nobody declared.
 
 ## What a device can promise a background consumer
 
@@ -325,9 +332,9 @@ that unit's `BlkHealth`:
 
 `usb_msd` is the first consumer: after replying to each request its serve loop
 consults the LUN's ladder from the just-folded `BlkHealth` state and, on a
-`Reset`, clears the unit's bulk pipes (`ScsiDevice::scrub_window` — this
-driver's one data-path reset mechanism) and logs an `MSD_RECOVERY_RESET` audit
-event. The reset is only ever issued for a unit already being answered
+`Reset`, resets the transport (`ScsiDevice::reset_transport`: BOT's reset
+recovery, CBI's Command Block Reset with the bulk clears, UAS's four pipes
+cleared) and logs an `MSD_RECOVERY_RESET` audit event. The reset is only ever issued for a unit already being answered
 reissuably, so it cannot stall an unrelated LUN. Which concrete mechanism a
 `Reset` maps to is per-driver (a virtio/NVMe driver re-inits its queue); an
 action a driver's hardware cannot express is a no-op that still advances the
@@ -755,15 +762,18 @@ assumed), then drives one transport-neutral SCSI command layer
   bounded chunks, and the CSW validated field by field (signature, tag
   match, residue bound, status) — the device is hostile input. A stalled
   data phase falls through to the CSW; a stalled CSW read is retried once;
-  a tag mismatch, corrupt CSW, or phase error runs the spec's Bulk-Only
-  Mass Storage Reset and fails the command closed.
+  a transfer that fails or outruns the exchange, a tag mismatch, a corrupt
+  CSW, or a phase error runs the spec's reset recovery — the Bulk-Only Mass
+  Storage Reset, then both bulk pipes' halts cleared — and fails the
+  command.
 - **Control/Bulk/Interrupt 1.1** (`08:04:00`, the classic USB floppy):
   the 12-byte command block over the ADSC control-OUT data stage (a
   control STALL is the device's "command not accepted" answer, recovered
   in place by the URB layer), the data phase over the bulk pair, and the
   two-byte command-completion interrupt (UFI ASC/ASCQ, or the typed
-  status spelling for non-UFI sets); a malformed or out-of-step
-  completion runs the spec's Command Block Reset. A UFI failure's
+  status spelling for non-UFI sets); a failed transfer or a malformed or
+  out-of-step completion runs the spec's Command Block Reset and clears both
+  bulk pipes. A UFI failure's
   ASC/ASCQ is read **in-band** from that completion interrupt (like UAS
   autosense), so the command layer never issues a separate `REQUEST
   SENSE` — a real UFI floppy does not answer one reliably, and depending
@@ -772,10 +782,20 @@ assumed), then drives one transport-neutral SCSI command layer
   pipes with tag-checked Command / Read-Ready / Write-Ready / Sense IU
   sequencing (USB 2.0 non-stream operation) and in-band autosense; every
   IU is validated fail-closed — a foreign tag, wrong-direction ready IU,
-  or lying sense length refuses the exchange. One command is in flight at
+  or lying sense length refuses the exchange, and a broken exchange clears
+  all four pipes. One command is in flight at
   a time (the block service is synchronous); queueing, task-management
   IUs, and SuperSpeed streams are the staged remainder (`plans/DEVICES.md`
   §3).
+
+Every exchange is bounded: its transfers carry what remains of a budget
+derived from the class's per-request deadline (a request's share with the
+class queue full, halved so the reset a broken exchange owes still fits), so a
+device that stops answering fails the command rather than holding the driver.
+A command a reset ended is answered reissuably — `TransientError` once the
+transport is back in step, `Timeout` when the device would not answer its own
+reset — so the unit's health rides it out in its grace window rather than
+failing it at once.
 
 Per logical unit (`GET MAX LUN` for BOT, `REPORT LUNS` for UAS, exactly
 one for CBI; up to 16) the bring-up runs `INQUIRY` (non-disk types are

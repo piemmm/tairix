@@ -48,7 +48,9 @@ Every format the app claims is supported **completely** — every bit depth,
 compression, colour space, and structural variant the format defines — not the
 subset a common file happens to use. A format that can only be half-decoded is
 not claimed at all. A file the decoder refuses fails closed to a **stated
-reason drawn in the window and written to `stderr`**; never a blank surface,
+reason**: an error alert of the desktop's and a line on `stderr`, with no
+window left open for a document that never arrived. A page of an open document
+that will not draw is stated on the canvas in its place. Never a blank surface,
 and never a fabricated image.
 
 Associations are **pictures and PDF only**; text is claimed by nothing, for
@@ -388,16 +390,13 @@ below then shrank it, which reads as a **flash** as a picture loads. Both are
 the same mistake — presenting a window whose document is not in yet — so
 `nothing_to_show` asks only whether the document has landed.
 
-A pick the user **cancels** closes that window rather than leaving it stating a
-refusal they already know about — they chose nothing, so there is nothing to
-display, and `Refusal::Cancelled` is therefore deleted rather than shown. A
-window that already holds a document keeps it. Every other conclusion is shown:
-the document once it decodes, `Refusal::Failed` if it will not, and
-`Refusal::PickRefused` if the session would not open a chooser at all (a pick
-already showing for another application, a refused listing). That last one is
-why `View::cancelled` became `View::no_document(why)`: a refused *ask* is the
-one outcome with nothing coming after it, so a window withheld on it would
-never appear.
+A pick the user **cancels** closes that window: they chose nothing, so there
+is nothing to display. A window that already holds a document keeps it, and a
+document chosen from it opens in a window of its own. Every other conclusion
+ends the wait: the document once it decodes; or, for a document that will not
+open or a chooser the session would not open at all, an error alert stating
+why, and the window that was waiting for it closed, since it has nothing to
+show.
 
 **A document opens at 100% if it fits, and zoomed out to fit if it does not.**
 A picture the window can hold is first shown at the size it was authored at

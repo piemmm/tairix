@@ -79,7 +79,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
@@ -735,6 +735,7 @@ fn open_filesystem(
             }
             .map_err(DriverError::as_errno)?;
             let identity = fs.volume_uuid();
+            let fstype = fs.generation().name();
             let write_refusal = if read_only { None } else { fs.write_refusal() };
             let writes = !read_only && write_refusal.is_none();
             serve_staged(fs, identity, writes, wiring, volume_handle).map(|(driver, watch)| {
@@ -742,7 +743,7 @@ fn open_filesystem(
                     driver,
                     watch,
                     identity,
-                    fstype: "ext4",
+                    fstype,
                     write_refusal,
                 }
             })
@@ -841,7 +842,7 @@ fn mount_storage_volume(
 ) -> Result<(), (&'static str, Errno)> {
     vfs.mounts_write()
         .attach_at(
-            Attachment::new(handle, device.class, mount_flags(read_only)),
+            Attachment::new(handle, device.medium, mount_flags(read_only)),
             path.clone(),
             mount_template(map_gid),
         )
@@ -961,9 +962,9 @@ struct SharedDevice {
     read_only: bool,
     /// The storage medium the device declared at connect, carried onto every
     /// mount that lives on it so a volume reports the drive it is really on.
-    /// `None` is a device whose declared class this build does not recognise,
-    /// which the mount reports as unknown rather than as a guessed medium.
-    class: Option<BlkDeviceClass>,
+    /// `None` is a device that declared no medium this build recognises,
+    /// which the mount reports as unknown rather than as a guessed one.
+    medium: Option<BlkMedium>,
     /// The device's reported-health overlay, folded once for every volume
     /// on the device.
     health: VolumeIoSource,
@@ -999,7 +1000,7 @@ fn connect_device(
     let client = BlkClient::connect(request.endpoint, hold, wiring.audit)
         .map_err(|err| ("endpoint_unusable", err))?;
     let read_only = client.read_only();
-    let class = client.declared_class();
+    let medium = client.medium();
     let health = client.io_source();
     // Every volume on the disk reads through one coherent cache of its
     // recently used blocks, on the device side of the sharing lock, so a
@@ -1017,7 +1018,7 @@ fn connect_device(
         window: request.window,
         device: Arc::new(device),
         read_only,
-        class,
+        medium,
         health,
     })
 }
@@ -1740,7 +1741,7 @@ impl RuntimeVolumeService {
         let read_only = read_only || write_refusal.is_some();
         reattach_then_serve(
             vfs,
-            Attachment::new(target.handle, device.class, mount_flags(read_only)),
+            Attachment::new(target.handle, device.medium, mount_flags(read_only)),
             target.path.clone(),
             mount_template(map_gid),
             || {

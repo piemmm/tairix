@@ -20,3 +20,4 @@ path = "src/lib.rs"
 # integration test's build script; it never links into the OS image.
 [dependencies]
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }

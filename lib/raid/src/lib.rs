@@ -223,12 +223,15 @@
 //!
 //! A consumer that derives its per-request deadline, reissue budget, and
 //! recovery grace window from a device's class reads
-//! [`device_class`](tairix_abi::driver::block::Block::device_class): the array
-//! declares the *most patient* of its live members' classes, because it can
+//! [`device_class`](tairix_abi::driver::block::BlockClass::device_class), which
+//! follows the array's [`medium`](tairix_abi::driver::block::Block::medium): the
+//! array declares the *most patient* of its live members' media, because it can
 //! only answer as fast as the member it is waiting on — a mirror of an SSD and
-//! a spinning disk must be given the spinning disk's spin-up budget. An array
-//! with no live member declares the bounded unclassified envelope, so its
-//! callers fail closed sooner rather than waiting out disks that are gone.
+//! a spinning disk must be given the spinning disk's spin-up budget. An
+//! undeclared member is waited on as a paravirtual device, and the array reads
+//! as unknown when that is the member it waits on. An array with no live
+//! member declares nothing and is served the bounded unclassified envelope, so
+//! its callers fail closed sooner rather than waiting out disks that are gone.
 //!
 //! # On-disk metadata and reassembly ([`ArraySuperblock`], [`ArrayIdentity`])
 //!

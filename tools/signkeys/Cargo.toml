@@ -1,0 +1,17 @@
+[package]
+name = "tairix-signkeys"
+description = "The build's secret signing key set, kept outside the tree."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `key value` line grammar, the hex codec and the erased buffers the
+# seeds are held in.
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }

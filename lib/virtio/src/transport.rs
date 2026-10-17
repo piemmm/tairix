@@ -197,17 +197,20 @@ pub struct Negotiated {
 }
 
 /// Take the device at `transport` through reset and feature negotiation to
-/// `FEATURES_OK` (virtio 1.2 §3.1.1). `quiesced` runs once the reset
-/// confirms, so memory an earlier instance left with the device can be
-/// released; `accept` takes, from the features the device offers, those the
-/// driver implements, or refuses a device it cannot drive.
+/// `FEATURES_OK` (virtio 1.2 §3.1.1), then route its configuration-change
+/// notifications ([`Transport::route_config_changes`]), which the reset
+/// unmapped. `quiesced` runs once the reset confirms, so memory an earlier
+/// instance left with the device can be released; `accept` takes, from the
+/// features the device offers, those the driver implements, or refuses a
+/// device it cannot drive.
 ///
 /// # Errors
 ///
 /// What the reset answers — [`VirtioError::DeviceFault`] for a device whose
-/// reset never confirms — `accept`'s refusal, or
+/// reset never confirms — `accept`'s refusal,
 /// [`VirtioError::FeaturesRejected`] for one that clears
-/// [`Status::FEATURES_OK`].
+/// [`Status::FEATURES_OK`], or [`VirtioError::DeviceFault`] for one that
+/// cannot route its configuration changes.
 pub fn negotiate<T: Transport + ?Sized, E: From<VirtioError>>(
     transport: &mut T,
     quiesced: impl FnOnce(),
@@ -226,6 +229,7 @@ pub fn negotiate<T: Transport + ?Sized, E: From<VirtioError>>(
     if !transport.status().contains(Status::FEATURES_OK) {
         return Err(VirtioError::FeaturesRejected.into());
     }
+    transport.route_config_changes()?;
     Ok(Negotiated { features, status })
 }
 
@@ -324,6 +328,20 @@ pub trait Transport {
     ///   self.queue_max_size()`.
     fn queue_set(&mut self, size: u16, desc: u64, avail: u64, used: u64)
         -> Result<(), VirtioError>;
+
+    /// Route the device's configuration-change notifications to the
+    /// interrupt its queues signal through, so a change — a link going
+    /// down — wakes the driver rather than waiting on its next completion.
+    ///
+    /// The default does nothing: where the device has one interrupt line, a
+    /// configuration change already raises it.
+    ///
+    /// # Errors
+    ///
+    /// [`VirtioError::DeviceFault`] for a device that cannot map them.
+    fn route_config_changes(&mut self) -> Result<(), VirtioError> {
+        Ok(())
+    }
 
     /// Notify the device that the driver published new chain(s) on
     /// `queue`.
@@ -435,6 +453,23 @@ mod tests {
         assert!(!s.contains(Status::DRIVER_OK));
         assert_eq!(s.bits(), 1 | 2 | 8);
         assert_eq!(Status::from_bits(0xFF).bits(), 0xFF);
+    }
+
+    #[test]
+    fn negotiation_fails_closed_on_a_device_that_cannot_route_its_configuration_changes() {
+        let mut transport = MockTransport::new(1, 8, 0, 0);
+        assert_eq!(
+            negotiate::<_, VirtioError>(&mut transport, || {}, |_| Ok(0)).map(|done| done.status),
+            Ok(Status::default()
+                .with(Status::ACKNOWLEDGE)
+                .with(Status::DRIVER)
+                .with(Status::FEATURES_OK))
+        );
+        transport.refuse_config_routes();
+        assert_eq!(
+            negotiate::<_, VirtioError>(&mut transport, || {}, |_| Ok(0)),
+            Err(VirtioError::DeviceFault)
+        );
     }
 
     #[test]

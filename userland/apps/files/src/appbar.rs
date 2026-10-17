@@ -24,8 +24,9 @@
 //! convention's rows — a component states no identity panel of its own and is
 //! not the user's to quit — and instead lists the places the browser's own
 //! rail lists: the user's home and folders, the machine's roots, then whatever
-//! is mounted right now. Choosing one opens a window there, and a primary
-//! click on the slot opens one among the user's own files
+//! is mounted right now, each beside the picture the rail draws it with — a
+//! folder, or the drive a volume is on. Choosing one opens a window there, and
+//! a primary click on the slot opens one among the user's own files
 //! ([`DESKTOP_SLOT_CLICK`]).
 //!
 //! # The row cap is a display cap, and it is stated
@@ -37,8 +38,8 @@
 //! short one that admits it.
 
 use tairix_abi::window_ipc::{
-    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    APP_MENU_MAX_ROWS,
+    AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuItem, AppMenuItemId, AppMenuLabel,
+    AppMenuRow, APP_MENU_MAX_ROWS,
 };
 use tairix_abi::Errno;
 use tairix_browse::{PlaceKind, Places};
@@ -61,11 +62,12 @@ pub const WINDOW_SLOT_CLICK: AppBarClick = AppBarClick::RaiseOrOpen;
 /// The component's declaration for `places`, addressed to its own `endpoint`,
 /// together with the number of places that did not fit the row cap.
 ///
-/// One row per place in rail order, with a rule where the user's own places
-/// give way to the mounted volumes, so the menu reads as two groups rather
-/// than one long list. A row carries the place's own index as its id, so a
-/// place that had to be skipped shifts nothing: the caller resolves a chosen
-/// row through [`place_of`] and lands on exactly the place the user saw.
+/// One row per place in rail order, each with the class picture the rail draws
+/// it with, and a rule where the user's own places give way to the mounted
+/// volumes, so the menu reads as two groups rather than one long list. A row
+/// carries the place's own index as its id, so a place that had to be skipped
+/// shifts nothing: the caller resolves a chosen row through [`place_of`] and
+/// lands on exactly the place the user saw.
 ///
 /// A place whose label the menu's own bounds refuse is skipped rather than
 /// truncated — a row reading almost like a volume's name would navigate
@@ -106,7 +108,10 @@ pub fn component_declaration(endpoint: u64, places: &Places) -> Result<(AppBar, 
             menu.push(AppMenuRow::Separator)?;
             ruled = true;
         }
-        let row = AppMenuItem::new(id, label);
+        let mut row = AppMenuItem::new(id, label);
+        if let Ok(asset) = AppMenuAsset::new(place.icon().asset_id()) {
+            row = row.with_icon_asset(asset);
+        }
         menu.push(AppMenuRow::Item(if place.is_available() {
             row
         } else {

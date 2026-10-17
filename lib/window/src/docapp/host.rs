@@ -33,8 +33,9 @@ use tairix_abi::driver::display::DisplayMode;
 use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
 use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
-    AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, CursorShape,
-    DocumentName, MenuOutcome, PickPurpose, ToolOver, WindowEvent, WindowRegion, WindowSizing,
+    AlertOutcome, AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
+    CursorShape, DocumentName, MenuOutcome, PickPurpose, ToolOver, WindowEvent, WindowRegion,
+    WindowSizing,
 };
 use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, DOCUMENT_WRITABLE_ROLE_ARG, STDIN};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -45,6 +46,7 @@ use tairix_rt::work::{Desk, Worker, WorkerGuard};
 use tairix_theme::{Theme, ThemeRegistry};
 use tairix_util::defer::JobQueue;
 
+use super::closing::{next_quit_step, save_changes_alert, CloseAnswer, QuitStanding, QuitStep};
 use super::title::Title;
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
@@ -392,8 +394,7 @@ pub struct DocWindow<A: DocumentApp> {
     pub extra: A::Extra,
     chrome: Chrome,
     file: DocumentFile<Handle, SnapshotOf<A>>,
-    /// Its document is being read in: input waits until it lands.
-    loading: bool,
+    reading: Reading,
     /// Counts the documents it has shown, so an answer to the one before is
     /// told apart.
     epoch: u64,
@@ -408,6 +409,25 @@ pub struct DocWindow<A: DocumentApp> {
     /// Whether its view was last told it has the keyboard: it has while the
     /// window or one of its tool windows does.
     focus_told: bool,
+    /// The alert asking whether to save its changes before it closes, while
+    /// that is up.
+    closing: Option<u64>,
+    /// The quit under way asked it whether to save its changes, so its
+    /// keeping them turns the quit down.
+    quit_asked: bool,
+}
+
+/// Whether a window's document is still being read in; input waits until it
+/// lands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reading {
+    /// It shows its document.
+    Done,
+    /// A document is being read in over the one it showed.
+    Over,
+    /// It was opened for the document being read in and shows nothing else,
+    /// so one that will not open takes it down.
+    Alone,
 }
 
 /// A tool window a document window has open: one more pane and surface,
@@ -676,8 +696,8 @@ impl<A: DocumentApp> DocWindow<A> {
 
     /// Whether its document is still being read in.
     #[must_use]
-    pub const fn loading(&self) -> bool {
-        self.loading
+    pub fn loading(&self) -> bool {
+        self.reading != Reading::Done
     }
 
     /// What work asked for now carries: this window, and the document it
@@ -699,7 +719,7 @@ impl<A: DocumentApp> DocWindow<A> {
     /// Whether a document opened now may take its place.
     #[must_use]
     pub fn pristine(&self) -> bool {
-        !self.loading && self.file.pristine(&self.view)
+        !self.loading() && self.file.pristine(&self.view)
     }
 
     /// Whether the document shown may be replaced in place: no save or file
@@ -712,6 +732,31 @@ impl<A: DocumentApp> DocWindow<A> {
     /// round that changed nothing on screen paints nothing.
     pub fn owe_reported(&mut self) {
         self.owe(Repaint::reported_if(!self.damage.is_empty()));
+    }
+
+    /// Whether a question that is part of closing it is up: whether to save
+    /// its changes, or a view's own question of how.
+    #[must_use]
+    pub fn asking_to_close(&self) -> bool {
+        self.closing.is_some() || self.view.asking_to_close()
+    }
+
+    /// Where it stands in the quit under way; `leaving` when it is about to
+    /// close.
+    fn quit_standing(&self, leaving: bool) -> QuitStanding {
+        if leaving {
+            QuitStanding::Clear
+        } else if self.asking_to_close() || self.file.picking() {
+            QuitStanding::Asking
+        } else if self.file.closing() {
+            QuitStanding::Saving
+        } else if self.quit_asked {
+            QuitStanding::Kept
+        } else if !self.loading() && self.view.is_modified() {
+            QuitStanding::Unasked
+        } else {
+            QuitStanding::Clear
+        }
     }
 
     /// Say `message` where the window shows what it is told.
@@ -773,7 +818,7 @@ impl<A: DocumentApp> DocWindow<A> {
         if !owed {
             return;
         }
-        let wanted = if self.loading {
+        let wanted = if self.loading() {
             None
         } else {
             self.view.tool_tip(&self.layout, scale, theme)
@@ -781,7 +826,7 @@ impl<A: DocumentApp> DocWindow<A> {
         let area = self.area();
         if mem::take(&mut self.chrome.pointing.owed) {
             let shape = match self.chrome.pointing.at {
-                Some(_) if self.loading => CursorShape::Busy,
+                Some(_) if self.loading() => CursorShape::Busy,
                 Some(at) => self.view.cursor(&self.layout, at),
                 None => self.chrome.pointing.shape,
             };
@@ -874,6 +919,12 @@ impl<A: DocumentApp> DocWindow<A> {
         self.owe_reported();
     }
 }
+
+/// The headline of an alert saying a window could not be opened.
+const NO_NEW_WINDOW: &str = "No new window could be opened";
+
+/// Why a window could not be opened when it could not be drawn.
+const NO_SURFACE: &str = "There is not enough memory to draw another window.";
 
 /// Whether `inner` lies wholly inside `outer`.
 fn within(inner: Rect, outer: Rect) -> bool {
@@ -1017,32 +1068,101 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// Say `message` as [`notify`](Self::notify) does, opening a window to
-    /// say it in when none is open: the user acted, and expects one.
-    fn tell(&mut self, message: String) {
-        if self.windows.is_empty() {
-            if let Ok(view) = A::untitled(self) {
-                let _ = self.open_window(view, false);
+    /// State, in an error alert holding window `owner` when it is some and
+    /// on `stderr`, that what `headline` names was not done because of
+    /// `detail`.
+    fn alert(&mut self, owner: Option<usize>, headline: &str, detail: &str) {
+        let window = owner
+            .and_then(|index| self.windows.get(index))
+            .map(DocWindow::id);
+        let _ = app::refuse(
+            &mut self.client,
+            (A::NAME, self.event_endpoint),
+            window,
+            headline,
+            detail,
+        );
+    }
+
+    /// Ask whether to save window `index`'s changes before it closes, unless
+    /// that is being asked already. A question the desktop cannot put up
+    /// keeps the window open, saying so: closing it would lose the changes.
+    fn ask_to_close(&mut self, index: usize) {
+        if self.windows[index].closing.is_some() {
+            return;
+        }
+        let question = save_changes_alert(self.windows[index].view.name());
+        let id = self.windows[index].id();
+        let asked = question.ok_or(Errno::OutOfRange).and_then(|question| {
+            self.client
+                .open_alert(self.event_endpoint, Some(id), &question)
+        });
+        match asked {
+            Ok(alert) => self.windows[index].closing = Some(alert),
+            Err(err) => {
+                self.quitting = false;
+                let window = &mut self.windows[index];
+                window.state(format!(
+                    "The window stays open: whether to save could not be asked ({err})"
+                ));
+                self.report(format_args!(
+                    "{}: whether to save could not be asked ({err})",
+                    self.windows[index].view.name()
+                ));
             }
         }
-        self.notify(message);
+    }
+
+    /// The answer to alert `alert_id`: the one a window asked before closing
+    /// is acted on, and an error alert's needs nothing.
+    fn alert_answered(&mut self, alert_id: u64, outcome: AlertOutcome) {
+        let Some(index) = self
+            .windows
+            .iter()
+            .position(|window| window.closing == Some(alert_id))
+        else {
+            return;
+        };
+        self.windows[index].closing = None;
+        let id = self.windows[index].id();
+        match CloseAnswer::of(outcome) {
+            CloseAnswer::Save => {
+                let window = &mut self.windows[index];
+                let outcome = window
+                    .view
+                    .save_then_close(&window.layout, &mut window.damage);
+                self.apply(index, outcome);
+                self.carry_quit_on(None);
+            }
+            CloseAnswer::Discard => {
+                // The next question goes up before this window comes down,
+                // while the keyboard the user answered with is still its.
+                self.carry_quit_on(Some(id));
+                if let Some(index) = self.index_of(id) {
+                    self.close_window(index);
+                }
+            }
+            CloseAnswer::Keep => self.quitting = false,
+        }
     }
 
     /// Open a window on a new document, or say why not.
     pub fn new_window(&mut self) {
         match A::untitled(self) {
             Ok(view) => {
-                let _ = self.open_window(view, false);
+                let _ = self.open_view(view);
             }
-            Err(why) => self.tell(format!("No new window could be opened: {why}")),
+            Err(why) => self.alert(None, NO_NEW_WINDOW, &why),
         }
     }
 
-    /// Open a window showing `view`, answering its index. A refusal is stated
-    /// and answers `None`: the application carries on with the windows it
-    /// has, and is still on the icon bar.
+    /// Open a window showing `view`, answering its index. A refusal is put
+    /// up as an alert and answers `None`: the application carries on with the
+    /// windows it has, and is still on the icon bar.
     pub fn open_view(&mut self, view: A::View) -> Option<usize> {
-        self.open_window(view, false)
+        self.open_window(view, Reading::Done)
+            .map_err(|why| self.alert(None, NO_NEW_WINDOW, &why))
+            .ok()
     }
 
     /// Show `view` in window `index` in place of what it showed, its document
@@ -1050,7 +1170,7 @@ impl<A: DocumentApp> Host<A> {
     /// document shown is not [`replaceable`](DocWindow::replaceable).
     pub fn show(&mut self, index: usize, view: A::View, handle: Option<Arc<Handle>>) {
         if !self.windows[index].replaceable() {
-            if let Some(index) = self.open_window(view, false) {
+            if let Some(index) = self.open_view(view) {
                 self.windows[index].file.opened(handle);
             }
             return;
@@ -1060,19 +1180,26 @@ impl<A: DocumentApp> Host<A> {
         let window = &mut self.windows[index];
         window.view = view;
         window.file.opened(handle);
-        window.loading = false;
+        window.reading = Reading::Done;
         window.relayout(theme, scale, self.faces);
     }
 
-    /// The document `name` could not be read into window `index`, which
-    /// stays open — untitled, where a new document can be made, and saying
-    /// why: an empty window under the file's name would read as an empty file.
-    /// A document that is not [`replaceable`](DocWindow::replaceable) stays.
+    /// The document `name` could not be read into window `index`, which an
+    /// error alert says. A window opened for it alone goes, since it shows
+    /// nothing; one that showed a document before stays — untitled, where a
+    /// new document can be made, since an empty window under the file's name
+    /// would read as an empty file — and a document that is not
+    /// [`replaceable`](DocWindow::replaceable) stays as it was.
     pub fn not_opened(&mut self, index: usize, name: &str, why: &dyn Display) {
-        let message = format!("{name} could not be opened: {why}");
-        self.report(&message);
+        let headline = format!("\u{201c}{name}\u{201d} could not be opened");
+        let detail = format!("{why}");
+        if self.windows[index].reading == Reading::Alone {
+            self.close_window(index);
+            self.alert(None, &headline, &detail);
+            return;
+        }
+        self.alert(Some(index), &headline, &detail);
         if !self.windows[index].replaceable() {
-            self.windows[index].state(message);
             return;
         }
         self.move_on(index);
@@ -1082,9 +1209,8 @@ impl<A: DocumentApp> Host<A> {
         if let Ok(view) = fresh {
             window.view = view;
         }
-        window.view.say(message);
         window.file.opened(None);
-        window.loading = false;
+        window.reading = Reading::Done;
         window.relayout(theme, scale, self.faces);
     }
 
@@ -1107,25 +1233,24 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// Open a window showing `view`, `loading` when its document is still to
-    /// be read in.
-    fn open_window(&mut self, view: A::View, loading: bool) -> Option<usize> {
+    /// Open a window showing `view`, its document `reading` as said,
+    /// answering its index, or why it could not open.
+    fn open_window(&mut self, view: A::View, reading: Reading) -> Result<usize, String> {
         let theme = self.themes.active();
         let scale = self.desktop.scale();
         let (width, height) = self.desktop.window_size(A::WINDOW_SIZE.0, A::WINDOW_SIZE.1);
         let mode = app::mode_for(width, height);
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-            self.report("no drawing surface; no window opened");
-            return None;
+            return Err(String::from(NO_SURFACE));
         };
         if self.queue.grow(A::JOBS_PER_WINDOW).is_err() {
-            self.report("no room for another window's work; no window opened");
-            return None;
+            return Err(String::from(
+                "There is not enough memory for another window\u{2019}s work.",
+            ));
         }
         if let Err(why) = self.app.reserve_window() {
             self.queue.shrink(A::JOBS_PER_WINDOW);
-            self.report(format!("{why}; no window opened"));
-            return None;
+            return Err(String::from(why));
         }
         let least = view.min_size(theme, scale, self.faces);
         let mut title = String::new();
@@ -1141,8 +1266,7 @@ impl<A: DocumentApp> Host<A> {
             Ok(pane) => pane,
             Err(why) => {
                 self.give_back_window();
-                self.report(format!("{why}; no window opened"));
-                return None;
+                return Err(why);
             }
         };
         let layout = view.layout(mode.width_px, mode.height_px, theme, scale, self.faces);
@@ -1153,20 +1277,22 @@ impl<A: DocumentApp> Host<A> {
             extra: A::Extra::default(),
             chrome: Chrome::new(pane, surface, title),
             file: DocumentFile::new(),
-            loading,
+            reading,
             epoch: 0,
             own_held: 0,
             menu: None,
             tools: Vec::new(),
             focus_told: true,
+            closing: None,
+            quit_asked: false,
         };
         window.view.settle(&window.layout, &mut window.damage);
         self.windows.push(window);
-        Some(self.windows.len() - 1)
+        Ok(self.windows.len() - 1)
     }
 
     /// Open a window of the application's own showing `view`, answering its
-    /// index. A refusal is stated and answers `None`.
+    /// index. A refusal is put up as an alert and answers `None`.
     pub fn open_app_window(&mut self, view: A::AppView) -> Option<usize> {
         let theme = self.themes.active();
         let scale = self.desktop.scale();
@@ -1174,7 +1300,7 @@ impl<A: DocumentApp> Host<A> {
         let (width, height) = self.desktop.window_size(width, height);
         let mode = app::mode_for(width, height);
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-            self.report("no drawing surface; no window opened");
+            self.alert(None, NO_NEW_WINDOW, NO_SURFACE);
             return None;
         };
         let least = view.min_size(theme, scale, self.faces);
@@ -1189,7 +1315,7 @@ impl<A: DocumentApp> Host<A> {
         let pane = match opened {
             Ok(pane) => pane,
             Err(why) => {
-                self.report(format!("{why}; no window opened"));
+                self.alert(None, NO_NEW_WINDOW, &why);
                 return None;
             }
         };
@@ -1203,7 +1329,11 @@ impl<A: DocumentApp> Host<A> {
         window.view.settle(&window.layout, &mut window.damage);
         if self.app_windows.try_reserve(1).is_err() {
             let _ = window.chrome.pane.close(&mut self.client);
-            self.report("no room to hold another window; no window opened");
+            self.alert(
+                None,
+                NO_NEW_WINDOW,
+                "There is not enough memory to hold another window.",
+            );
             return None;
         }
         self.app_windows.push(window);
@@ -1309,7 +1439,8 @@ impl<A: DocumentApp> Host<A> {
         let mut view = match A::placeholder(self, &name, access) {
             Ok(view) => view,
             Err(why) => {
-                self.tell(format!("{name} could not be opened: {why}"));
+                let headline = format!("\u{201c}{name}\u{201d} could not be opened");
+                self.alert(None, &headline, &why);
                 return;
             }
         };
@@ -1320,13 +1451,17 @@ impl<A: DocumentApp> Host<A> {
                 let (theme, scale) = (self.themes.active(), self.desktop.scale());
                 let window = &mut self.windows[index];
                 window.view = view;
-                window.loading = true;
+                window.reading = Reading::Over;
                 window.relayout(theme, scale, self.faces);
                 index
             }
-            None => match self.open_window(view, true) {
-                Some(index) => index,
-                None => return,
+            None => match self.open_window(view, Reading::Alone) {
+                Ok(index) => index,
+                Err(why) => {
+                    let headline = format!("\u{201c}{name}\u{201d} could not be opened");
+                    self.alert(None, &headline, &why);
+                    return;
+                }
             },
         };
         A::load(self, index, Arc::new(handle), name);
@@ -1384,6 +1519,7 @@ impl<A: DocumentApp> Host<A> {
             Request::SaveWhere { then_close } => self.ask_where(index, then_close),
             Request::Open => self.ask_pick(index, &PickPurpose::Open, PickFor::Open),
             Request::Close => self.close_window(index),
+            Request::AskToClose => self.ask_to_close(index),
             Request::Menu { kind, anchor } => self.open_menu(index, kind, anchor),
             Request::Own(own) => A::request(self, index, own),
         }
@@ -1408,7 +1544,8 @@ impl<A: DocumentApp> Host<A> {
         };
         if let Some(refusal) = destination.and_then(|name| window.view.refuse_save(name)) {
             self.quitting = false;
-            window.state(refusal);
+            let headline = format!("\u{201c}{}\u{201d} could not be saved", window.view.name());
+            self.alert(Some(index), &headline, &refusal);
             return;
         }
         let step = window.file.save(&mut window.view, save_as, then_close);
@@ -1444,7 +1581,14 @@ impl<A: DocumentApp> Host<A> {
             }
             SaveStep::Queued => window.state("Saving\u{2026}"),
             SaveStep::AskWhere { then_close } => self.ask_how(index, then_close),
-            SaveStep::NoMemory => window.state("There is not enough memory to save"),
+            SaveStep::NoMemory => {
+                let headline = format!("\u{201c}{}\u{201d} could not be saved", window.view.name());
+                self.alert(
+                    Some(index),
+                    &headline,
+                    "There is not enough memory to save it. Close something and save again.",
+                );
+            }
         }
     }
 
@@ -1459,7 +1603,8 @@ impl<A: DocumentApp> Host<A> {
             ..
         } = saved;
         if let Err(err) = &result {
-            self.report(format!("{name} could not be saved: {err}"));
+            let headline = format!("\u{201c}{name}\u{201d} could not be saved");
+            self.alert(Some(index), &headline, &format!("{err}"));
         }
         let window = &mut self.windows[index];
         let landed = window
@@ -1498,12 +1643,13 @@ impl<A: DocumentApp> Host<A> {
     /// form it would be written — held to the endings it can be written
     /// under, or saying why it can be written under none.
     fn ask_where(&mut self, index: usize, then_close: bool) {
-        let window = &mut self.windows[index];
+        let window = &self.windows[index];
         let endings = match window.view.save_endings() {
             Ok(endings) => endings,
             Err(why) => {
                 self.quitting = false;
-                window.state(why);
+                let headline = format!("\u{201c}{}\u{201d} could not be saved", window.view.name());
+                self.alert(Some(index), &headline, &why);
                 return;
             }
         };
@@ -1537,7 +1683,14 @@ impl<A: DocumentApp> Host<A> {
             Ok(()) => {
                 let _ = window.file.start_pick(pick);
             }
-            Err(err) => window.state(format!("The desktop offered no file chooser ({err})")),
+            Err(err) => {
+                self.quitting = false;
+                self.alert(
+                    Some(index),
+                    "No file chooser could be opened",
+                    &format!("The desktop would not offer one ({err})."),
+                );
+            }
         }
     }
 
@@ -1551,10 +1704,12 @@ impl<A: DocumentApp> Host<A> {
         let file = match Handle::from_delegation(grant) {
             Ok(file) => file,
             Err(raw) => {
-                window.state(format!(
-                    "The chosen file could not be taken ({})",
-                    Errno::from_syscall(raw)
-                ));
+                self.quitting = false;
+                self.alert(
+                    Some(index),
+                    "The chosen file could not be used",
+                    &format!("It could not be taken over ({}).", Errno::from_syscall(raw)),
+                );
                 return;
             }
         };
@@ -1603,7 +1758,7 @@ impl<A: DocumentApp> Host<A> {
             return;
         }
         window.menu = None;
-        if window.loading {
+        if window.loading() {
             return;
         }
         let outcome = match outcome {
@@ -1650,7 +1805,7 @@ impl<A: DocumentApp> Host<A> {
         };
         pointing.at = Some(at);
         pointing.owed = true;
-        if window.loading {
+        if window.loading() {
             return;
         }
         let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
@@ -1727,6 +1882,10 @@ impl<A: DocumentApp> Host<A> {
                 self.drain_open_targets();
                 return;
             }
+            WindowEvent::AlertClosed { alert_id, outcome } => {
+                self.alert_answered(*alert_id, *outcome);
+                return;
+            }
             _ => {}
         }
         let id = event.window_id();
@@ -1743,9 +1902,6 @@ impl<A: DocumentApp> Host<A> {
             return;
         };
         self.act(index, event);
-        if self.quitting && self.quit_abandoned() {
-            self.quitting = false;
-        }
     }
 
     /// Route one window-scoped event to window `index`.
@@ -1753,7 +1909,7 @@ impl<A: DocumentApp> Host<A> {
         let window = &mut self.windows[index];
         match event {
             WindowEvent::CloseRequested { .. } | WindowEvent::AlternateCloseRequested { .. } => {
-                if window.loading {
+                if window.loading() {
                     self.close_window(index);
                     return;
                 }
@@ -1792,7 +1948,7 @@ impl<A: DocumentApp> Host<A> {
                 open_id, outcome, ..
             } => self.menu_closed(index, *open_id, *outcome),
             WindowEvent::Key { key, .. } => {
-                if !window.loading {
+                if !window.loading() {
                     self.feed(index, core::iter::once(key_input_event(*key)));
                 }
             }
@@ -1847,6 +2003,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
@@ -1928,6 +2085,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
@@ -1988,7 +2146,7 @@ impl<A: DocumentApp> Host<A> {
             // It asks for no file; one handed to it anyway is let go.
             WindowEvent::FilePicked { handle, .. } => release(*handle),
             WindowEvent::Key { key, .. } => {
-                if !window.loading {
+                if !window.loading() {
                     self.feed(index, core::iter::once(key_input_event(*key)));
                 }
             }
@@ -2038,6 +2196,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::AppBarMenu { .. }
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::AlertClosed { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
@@ -2205,24 +2364,55 @@ impl<A: DocumentApp> Host<A> {
         }
     }
 
-    /// Quit: every window closes, and one holding changes asks first.
+    /// Quit: every window closes, and those holding changes ask first, one
+    /// at a time.
     fn quit(&mut self) {
         self.quitting = true;
-        let ids: Vec<u64> = self.windows.iter().map(DocWindow::id).collect();
-        for id in ids {
-            let Some(index) = self.index_of(id) else {
-                continue;
-            };
-            let window = &mut self.windows[index];
-            if window.loading || !window.view.is_modified() {
+        for window in &mut self.windows {
+            window.quit_asked = false;
+        }
+        // The first question goes up before the rest come down, while the
+        // user's own quit still lets it come forward.
+        self.carry_quit_on(None);
+        let done: Vec<u64> = self
+            .windows
+            .iter()
+            .filter(|window| window.loading() || !window.view.is_modified())
+            .map(DocWindow::id)
+            .collect();
+        for id in done {
+            if let Some(index) = self.index_of(id) {
                 self.close_window(index);
-            } else if !window.view.asking_to_close() && !window.file.closing() {
-                let outcome = window
-                    .view
-                    .close_requested(&window.layout, &mut window.damage);
-                self.apply(index, outcome);
             }
         }
+    }
+
+    /// Carry a quit on: given up once the user kept a window they were asked
+    /// about, else the next window holding changes is asked whether to save
+    /// them, once nothing else is being asked. `leaving`, about to close, is
+    /// passed over.
+    fn carry_quit_on(&mut self, leaving: Option<u64>) {
+        if !self.quitting {
+            return;
+        }
+        let standing = self
+            .windows
+            .iter()
+            .map(|window| window.quit_standing(Some(window.id()) == leaving));
+        let index = match next_quit_step(standing) {
+            QuitStep::Ask(index) => index,
+            QuitStep::GiveUp => {
+                self.quitting = false;
+                return;
+            }
+            QuitStep::Wait | QuitStep::Done => return,
+        };
+        let window = &mut self.windows[index];
+        window.quit_asked = true;
+        let outcome = window
+            .view
+            .close_requested(&window.layout, &mut window.damage);
+        self.apply(index, outcome);
     }
 
     /// Close every application window.
@@ -2230,14 +2420,6 @@ impl<A: DocumentApp> Host<A> {
         while let Some(last) = self.app_windows.len().checked_sub(1) {
             self.close_app_window(last);
         }
-    }
-
-    /// Whether the user turned a quit down: a window they were asked about is
-    /// still open, not asking to close, with nothing about to close it.
-    fn quit_abandoned(&self) -> bool {
-        self.windows.iter().any(|window| {
-            !window.view.asking_to_close() && !window.file.closing() && !window.file.picking()
-        })
     }
 
     /// Open a window at every document the desktop has handed this instance.
@@ -2258,10 +2440,14 @@ impl<A: DocumentApp> Host<A> {
                     writable,
                 } => match Handle::from_delegation(grant) {
                     Ok(file) => self.open_document(file, name, writable, None),
-                    Err(raw) => self.tell(format!(
-                        "{name} could not be opened: it could not be taken over ({})",
-                        Errno::from_syscall(raw)
-                    )),
+                    Err(raw) => self.alert(
+                        None,
+                        &format!("\u{201c}{name}\u{201d} could not be opened"),
+                        &format!(
+                            "The document could not be taken over ({}).",
+                            Errno::from_syscall(raw)
+                        ),
+                    ),
                 },
                 // Unreachable from the desktop, which hands a document
                 // application an open document because it holds no authority
@@ -2642,6 +2828,7 @@ impl<A: DocumentApp> Host<A> {
         }
         let now = tairix_rt::clock_get();
         let answered = A::turn(self, now) | self.answered;
+        self.carry_quit_on(None);
         self.settle_tools();
         self.settle_focus();
         self.settle_pointers();

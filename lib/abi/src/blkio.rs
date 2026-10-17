@@ -281,9 +281,10 @@ impl BlkRequest {
 /// serving driver emits the status from what it already knows (SCSI sense →
 /// [`BlkStatus::MediumError`], surprise removal → [`BlkStatus::Offline`] /
 /// [`BlkStatus::Removed`], a recovered error → [`BlkStatus::TransientError`],
-/// device self-report → [`BlkStatus::Degraded`]); [`BlkStatus::Timeout`] is
-/// synthesised kernel-side by the deadlined reap path (`plans/FIX-IO.md` IO1)
-/// when the driver never answers.
+/// device self-report → [`BlkStatus::Degraded`], a device that did not answer
+/// in time → [`BlkStatus::Timeout`]); the kernel synthesises
+/// [`BlkStatus::Timeout`] too, from the deadlined reap path
+/// (`plans/FIX-IO.md` IO1), when the driver itself never answers.
 ///
 /// Decoding is fail-closed: an unknown status word is [`BlkStatus::Fatal`],
 /// never silently [`BlkStatus::Ok`].
@@ -302,8 +303,9 @@ pub enum BlkStatus {
     /// A transient, retryable error (a recovered communications glitch): the
     /// caller may reissue the request.
     TransientError = 2,
-    /// The request did not complete within its deadline. Synthesised by the
-    /// deadlined reap path; safe to reissue.
+    /// The request did not complete within its deadline: synthesised by the
+    /// deadlined reap path, or answered by a serving driver that abandoned an
+    /// operation its device did not answer in time. Safe to reissue.
     Timeout = 3,
     /// The transfer was aborted by a device, endpoint, or hub reset. The
     /// path has already recovered, so the request is safe to reissue.
@@ -410,7 +412,8 @@ impl BlkStatus {
     /// reasons, and only one of them is about the device's health. A bad
     /// sector ([`DriverError::MediumError`]), a gone/unresponsive device
     /// ([`DriverError::DeviceOffline`]), a busy device or a recovered stall
-    /// ([`DriverError::Busy`] / [`DriverError::EndpointStalled`]), and an
+    /// ([`DriverError::Busy`] / [`DriverError::EndpointStalled`]), a device
+    /// that did not answer in time ([`DriverError::TimedOut`]), and an
     /// unrecoverable hardware fault ([`DriverError::DeviceFault`]) all speak
     /// to the *device* and are folded into [`BlkHealth`]. A rejected request
     /// — an out-of-range LBA, a write to a read-only unit, an unsupported op
@@ -423,6 +426,7 @@ impl BlkStatus {
             DriverError::DeviceOffline => Some(Self::Offline),
             DriverError::Busy => Some(Self::TransientError),
             DriverError::EndpointStalled => Some(Self::Reset),
+            DriverError::TimedOut => Some(Self::Timeout),
             DriverError::DeviceFault => Some(Self::Fatal),
             _ => None,
         }
@@ -505,7 +509,7 @@ impl BlkStatus {
 }
 
 /// Byte offsets of the completion frame:
-/// `status(4) || errno(4) || block_size(4) || block_count(8) || flags(4) || class(4)`.
+/// `status(4) || errno(4) || block_size(4) || block_count(8) || flags(4) || medium(4)`.
 const COMPLETION_STATUS_OFF: usize = 0;
 const COMPLETION_ERRNO_OFF: usize = 4;
 const COMPLETION_GEOMETRY_OFF: usize = 8;
@@ -515,7 +519,7 @@ const COMPLETION_HEADER_LEN: usize = COMPLETION_GEOMETRY_OFF;
 
 /// Encoded length of a block-service completion: the health/status word, an
 /// [`Errno`] detail word (`0` when none), then the geometry payload
-/// (`block_size(4) || block_count(8) || flags(4) || class(4) || name`,
+/// (`block_size(4) || block_count(8) || flags(4) || medium(4) || name`,
 /// zero-filled for the non-geometry operations). Also the endpoint's maximum
 /// reply size.
 pub const BLK_COMPLETION_LEN: usize = COMPLETION_HEADER_LEN + 4 + 8 + 4 + 4 + BLK_DEVICE_NAME_LEN;
@@ -541,32 +545,34 @@ pub struct BlkCompletion {
     pub block_count: u64,
     /// Device flags ([`BLK_FLAG_READ_ONLY`]).
     pub flags: u32,
-    /// The device's declared [`BlkDeviceClass`], from which the consumer
-    /// derives the per-request deadline, reissue budget, and recovery grace
-    /// window it serves this device with ([`BlkDeviceClass::budget`]).
+    /// The device's declared [`BlkMedium`]: what it is, and so the class the
+    /// consumer derives its per-request deadline, reissue budget, and recovery
+    /// grace window from ([`BlkDeviceClass::budget`]).
     ///
     /// The serving driver is the one component that knows what the hardware
-    /// is, so it declares the class here (from its [`Block::device_class`])
-    /// and the consumer derives its budget from that one shared policy
-    /// instead of assuming a single envelope for every device.
+    /// is, so it declares the medium here (from its [`Block::medium`]) and the
+    /// consumer derives its budget from that one shared policy instead of
+    /// assuming a single envelope for every device.
     ///
-    /// `None` is a device that declared a class word this build does not
-    /// recognise. It is kept distinct from every named class so a consumer
-    /// that *reports* what a volume is — the mount table, and the drive icon
-    /// a file manager draws from it — says "unknown" rather than asserting a
-    /// medium nobody declared. For patience it is served exactly the
-    /// [`BlkDeviceClass::served_as`] envelope, so it buys no extra time.
+    /// `None` is a device that declared no medium, or a medium word this
+    /// build does not recognise. It is kept distinct from every named medium
+    /// so a consumer that *reports* what a volume is — the mount table, and
+    /// the drive picture a file manager draws from it — says "unknown"
+    /// rather than asserting a medium nobody declared. Its patience is
+    /// [`BlkDeviceClass::of`] it, which grants an unknown no more than a
+    /// paravirtual device.
     ///
     /// The driver is untrusted, and this field needs no trust: it selects
-    /// only how patient the consumer is with *this* device, grants no
-    /// authority, and is bounded by the widest class budget either way. A
-    /// driver that overstates its patience only delays its own deadline; one
-    /// that understates it only fails itself sooner.
-    pub class: Option<BlkDeviceClass>,
+    /// only how patient the consumer is with *this* device and which picture
+    /// a reader is shown, grants no authority, and is bounded by the widest
+    /// class budget either way. A driver that overstates its patience only
+    /// delays its own deadline; one that understates it only fails itself
+    /// sooner.
+    pub medium: Option<BlkMedium>,
     /// The device's own short name, as the serving driver declares it
     /// ([`Block::device_name`]).
     ///
-    /// Declared here for the same reason the class is: the driver that binds
+    /// Declared here for the same reason the medium is: the driver that binds
     /// the hardware is the one component that knows what the device *is*, and
     /// a consumer that reports a storage device to a reader needs to name the
     /// device rather than the volumes that happen to sit on it. It grants no
@@ -576,28 +582,28 @@ pub struct BlkCompletion {
     pub name: BlkDeviceName,
 }
 
-/// The class word written for a device whose declared class this build does
-/// not recognise, so an unknown survives a re-encode as an unknown instead of
-/// being relayed as a class nobody declared. It is deliberately outside the
-/// defined range, so [`BlkDeviceClass::from_u32`] refuses it.
-const BLK_CLASS_UNRECOGNISED: u32 = u32::MAX;
+/// The medium word written for a device that declared none, or one this
+/// build does not recognise, so an unknown survives a re-encode as an unknown
+/// instead of being relayed as a medium nobody declared. It is deliberately
+/// outside the defined range, so [`BlkMedium::from_u32`] refuses it.
+const BLK_MEDIUM_UNKNOWN: u32 = u32::MAX;
 
-/// The wire word for a declared class.
-const fn class_to_wire(class: Option<BlkDeviceClass>) -> u32 {
-    match class {
-        Some(class) => class.as_u32(),
-        None => BLK_CLASS_UNRECOGNISED,
+/// The completion word for a declared medium.
+const fn encode_medium(medium: Option<BlkMedium>) -> u32 {
+    match medium {
+        Some(medium) => medium.as_u32(),
+        None => BLK_MEDIUM_UNKNOWN,
     }
 }
 
-/// The declared class a wire word names, or `None` for any word outside the
-/// defined set.
+/// The declared medium a completion word names, or `None` for any word outside
+/// the defined set.
 ///
 /// Every unrecognised word collapses to the one `None`, so a driver cannot
 /// smuggle a value of its choosing through a relaying consumer.
-const fn class_from_wire(word: u32) -> Option<BlkDeviceClass> {
-    match BlkDeviceClass::from_u32(word) {
-        Ok(class) => Some(class),
+const fn decode_medium(word: u32) -> Option<BlkMedium> {
+    match BlkMedium::from_u32(word) {
+        Ok(medium) => Some(medium),
         Err(_) => None,
     }
 }
@@ -624,7 +630,7 @@ fn encode_frame(
     put_u32(
         buf,
         COMPLETION_GEOMETRY_OFF + 16,
-        class_to_wire(geometry.class),
+        encode_medium(geometry.medium),
     );
     buf[COMPLETION_NAME_OFF..COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN]
         .copy_from_slice(&geometry.name.to_le_bytes());
@@ -751,14 +757,13 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
                 block_size: read_u32(reply, COMPLETION_GEOMETRY_OFF),
                 block_count: read_u64(reply, COMPLETION_GEOMETRY_OFF + 4),
                 flags: read_u32(reply, COMPLETION_GEOMETRY_OFF + 12),
-                // An unrecognised class word is not a reason to discard an
-                // otherwise well-formed completion: the class selects only
-                // how patient this consumer is. It stays an explicit unknown
-                // rather than being folded into a named class, so a consumer
-                // reporting what the volume is cannot assert a medium the
-                // device never declared; patience comes from `served_as`,
-                // which grants an unknown no more than a paravirtual device.
-                class: class_from_wire(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16)),
+                // An unrecognised medium word is not a reason to discard an
+                // otherwise well-formed completion: the medium selects only
+                // how patient this consumer is and what a reader is shown. It
+                // stays an explicit unknown rather than being folded into a
+                // named medium, so a consumer reporting what the volume is
+                // cannot assert one the device never declared.
+                medium: decode_medium(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16)),
                 // Re-validated on the way in, so an unprintable or
                 // overlong declaration reads as the unnamed device rather
                 // than reaching a surface that prints it.
@@ -794,6 +799,104 @@ pub fn decode_completion(reply: &[u8]) -> Result<BlkCompletion, Errno> {
     decode_outcome(reply).data()
 }
 
+/// What a block device *is*, as the driver that binds it declares: the fact a
+/// reader is shown — the drive picture, the kind a volume's properties state
+/// — and the one its patience follows from ([`class`](Self::class)), so what
+/// a device is said to be and how it is served cannot disagree.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum BlkMedium {
+    /// A spinning hard disk on SATA or SAS.
+    HardDisk = 0,
+    /// A solid-state drive on SATA or SAS.
+    SolidState = 1,
+    /// A solid-state drive on `NVMe`.
+    Nvme = 2,
+    /// A USB flash drive, or a card in a USB reader: a removable medium.
+    UsbFlash = 3,
+    /// A disk in a USB enclosure: a fixed medium on a removable bus.
+    UsbDisk = 4,
+    /// An SD or eMMC card.
+    SdCard = 5,
+    /// A paravirtual or software-backed device.
+    Virtual = 6,
+}
+
+impl BlkMedium {
+    /// The wire value for this medium.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Recover a medium from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` is not a known medium (fail closed).
+    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::HardDisk),
+            1 => Ok(Self::SolidState),
+            2 => Ok(Self::Nvme),
+            3 => Ok(Self::UsbFlash),
+            4 => Ok(Self::UsbDisk),
+            5 => Ok(Self::SdCard),
+            6 => Ok(Self::Virtual),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The patience a device of this medium is served with.
+    #[must_use]
+    pub const fn class(self) -> BlkDeviceClass {
+        match self {
+            Self::HardDisk => BlkDeviceClass::Rotational,
+            Self::SolidState | Self::Nvme => BlkDeviceClass::SolidState,
+            // A USB unit resets, re-enumerates and is pulled out whatever it
+            // holds, and a card is removable by design.
+            Self::UsbFlash | Self::UsbDisk | Self::SdCard => BlkDeviceClass::Removable,
+            Self::Virtual => BlkDeviceClass::Virtual,
+        }
+    }
+
+    /// The medium of a composition over members of `media`: that of the
+    /// member it must wait on longest, each member waited on as
+    /// [`BlkDeviceClass::of`] its medium, so the composition is served the
+    /// patience of its slowest member and reads as that member. When that
+    /// member declared nothing the composition is unknown too, so a layer
+    /// never asserts a medium no member declared. Equally patient members
+    /// rank a declared medium first, then the greater wire value, so the
+    /// answer does not depend on their order.
+    #[must_use]
+    pub fn of_members(media: impl IntoIterator<Item = Option<Self>>) -> Option<Self> {
+        media
+            .into_iter()
+            .reduce(|held, offered| {
+                if Self::outwaits(offered, held) {
+                    offered
+                } else {
+                    held
+                }
+            })
+            .flatten()
+    }
+
+    /// Whether a member of `offered` must be waited on longer than one of
+    /// `held`: a total order, so a fold over it is order-independent.
+    fn outwaits(offered: Option<Self>, held: Option<Self>) -> bool {
+        let (wider, narrower) = (BlkDeviceClass::of(offered), BlkDeviceClass::of(held));
+        if wider != narrower {
+            return wider.most_patient(narrower) == wider;
+        }
+        match (offered, held) {
+            (Some(offered), Some(held)) => offered.as_u32() > held.as_u32(),
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+}
+
 /// The broad performance/behaviour class of a block device, discovered from
 /// its hardware-tree node, that its per-device I/O budget is derived from.
 ///
@@ -803,8 +906,7 @@ pub fn decode_completion(reply: &[u8]) -> Result<BlkCompletion, Errno> {
 /// envelopes, so a single global deadline would either punish a slow disk
 /// that is merely spinning up or let a wedged fast device stall far too long.
 /// The budget is *policy* sized per class, not a security/validation bound.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BlkDeviceClass {
     /// A rotational disk (spinning SATA/SAS): a large reset/spin-up budget.
     Rotational = 0,
@@ -816,45 +918,28 @@ pub enum BlkDeviceClass {
     /// A paravirtual device (virtio-blk) or other software-backed unit: fast,
     /// but bounded so a wedged host backend never stalls forever. Also the
     /// bounded envelope an unrecognised device is served with
-    /// ([`BlkDeviceClass::served_as`]).
-    #[default]
+    /// ([`BlkDeviceClass::of`]).
     Virtual = 3,
 }
 
 impl BlkDeviceClass {
-    /// The wire value for this class.
-    #[must_use]
-    pub const fn as_u32(self) -> u32 {
+    /// This class's place in declaration order: the final, deterministic
+    /// tie-break [`most_patient`](Self::most_patient) falls back on.
+    const fn ordinal(self) -> u32 {
         self as u32
     }
 
-    /// Recover a class from its wire value.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfRange`] if `value` is not a known class (fail closed).
-    pub const fn from_u32(value: u32) -> Result<Self, Errno> {
-        match value {
-            0 => Ok(Self::Rotational),
-            1 => Ok(Self::SolidState),
-            2 => Ok(Self::Removable),
-            3 => Ok(Self::Virtual),
-            _ => Err(Errno::OutOfRange),
-        }
-    }
-
-    /// The class a device that declared `class` is *served as*, where `None`
-    /// is a device whose declared class word this build does not recognise.
-    ///
-    /// An unrecognised device is served the paravirtual envelope: bounded,
-    /// and no more patient than any class it could have named honestly, so
-    /// naming a word nobody defines can never buy a driver extra time. This
-    /// is patience policy only — what the device *is* stays the declared
-    /// `Option`, so nothing downstream reports a medium nobody declared.
+    /// The class a device of `medium` is served as: its medium's, and for a
+    /// medium nobody declared, or one this build does not recognise, the
+    /// paravirtual envelope — bounded, and narrower than a spinning disk's or
+    /// a removable unit's, so an unknown word never buys a driver the widest
+    /// patience. This is patience only: what the device *is* stays the
+    /// declared `Option`, so nothing downstream reports a medium nobody
+    /// declared.
     #[must_use]
-    pub const fn served_as(class: Option<Self>) -> Self {
-        match class {
-            Some(class) => class,
+    pub const fn of(medium: Option<BlkMedium>) -> Self {
+        match medium {
+            Some(medium) => medium.class(),
             None => Self::Virtual,
         }
     }
@@ -939,7 +1024,7 @@ impl BlkDeviceClass {
     /// whose rotational member is merely spinning up.
     ///
     /// The ordering is *derived* from the budgets themselves (deadline, then
-    /// grace, then the wire value as a deterministic final tie-break) rather
+    /// grace, then declaration order as a deterministic final tie-break) rather
     /// than a second hand-written table that could drift from
     /// [`budget`](Self::budget); it is total and commutative, so folding a
     /// member set in any order yields the same class.
@@ -952,7 +1037,7 @@ impl BlkDeviceClass {
         } else if theirs.grace_ns != mine.grace_ns {
             theirs.grace_ns > mine.grace_ns
         } else {
-            other.as_u32() > self.as_u32()
+            other.ordinal() > self.ordinal()
         };
         if wider {
             other
@@ -2532,18 +2617,19 @@ fn classify<B: Block>(
     match request.op {
         BlkOp::Geometry => {
             // The geometry reply is where a consumer learns what this device
-            // *is*: its declared class travels with its size and write policy
-            // so the consumer derives its deadline, reissue, and grace budget
-            // from the same shared policy the driver serves it with, and its
-            // name travels with them so a consumer reporting the device can
-            // name it rather than the volumes on it.
-            let class = Some(device.device_class());
+            // *is*: its declared medium travels with its size and write
+            // policy so the consumer derives its deadline, reissue, and grace
+            // budget from the same shared policy the driver serves it with,
+            // and its name travels with them so a consumer reporting the
+            // device can name it rather than the volumes on it. A layer whose
+            // member declared none relays none.
+            let medium = device.medium();
             let name = device.device_name();
             Served::Device(device.geometry().map(|geometry| BlkCompletion {
                 block_size: geometry.block_size,
                 block_count: geometry.block_count,
                 flags: if read_only { BLK_FLAG_READ_ONLY } else { 0 },
-                class,
+                medium,
                 name,
             }))
         }
@@ -2686,7 +2772,7 @@ mod tests {
             block_size: 512,
             block_count: 8,
             flags: 0,
-            class: Some(BlkDeviceClass::Rotational),
+            medium: Some(BlkMedium::HardDisk),
             name: BlkDeviceName::new("fixture-blk"),
         };
         let mut frame = [0u8; BLK_COMPLETION_LEN];
@@ -3068,7 +3154,7 @@ mod tests {
             block_size: 512,
             block_count: 0x2_0000_0000,
             flags: BLK_FLAG_READ_ONLY,
-            class: Some(BlkDeviceClass::Rotational),
+            medium: Some(BlkMedium::HardDisk),
             name: BlkDeviceName::UNNAMED,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
@@ -3077,41 +3163,119 @@ mod tests {
         assert_eq!(decode_completion(&buf[..n]), Ok(completion));
     }
 
+    /// Every medium a driver may declare.
+    const MEDIA: [BlkMedium; 7] = [
+        BlkMedium::HardDisk,
+        BlkMedium::SolidState,
+        BlkMedium::Nvme,
+        BlkMedium::UsbFlash,
+        BlkMedium::UsbDisk,
+        BlkMedium::SdCard,
+        BlkMedium::Virtual,
+    ];
+
     #[test]
-    fn completion_round_trips_every_device_class() {
-        // The class a device declares survives the wire unchanged, so the
+    fn completion_round_trips_every_medium() {
+        // The medium a device declares survives the wire unchanged, so the
         // consumer derives the same budget the driver serves it with.
-        for class in [
-            BlkDeviceClass::Rotational,
-            BlkDeviceClass::SolidState,
-            BlkDeviceClass::Removable,
-            BlkDeviceClass::Virtual,
-        ] {
+        for medium in MEDIA {
             let completion = BlkCompletion {
                 block_size: 4096,
                 block_count: 9,
                 flags: 0,
-                class: Some(class),
+                medium: Some(medium),
                 name: BlkDeviceName::UNNAMED,
             };
             let mut buf = [0u8; BLK_COMPLETION_LEN];
             completion.encode(&mut buf).expect("encodes");
             let decoded = decode_completion(&buf).expect("valid completion");
-            assert_eq!(decoded.class, Some(class));
+            assert_eq!(decoded.medium, Some(medium));
             assert_eq!(
-                BlkDeviceClass::served_as(decoded.class).budget(),
-                class.budget()
+                BlkDeviceClass::of(decoded.medium).budget(),
+                medium.class().budget()
             );
+            assert_eq!(BlkMedium::from_u32(medium.as_u32()), Ok(medium));
+        }
+        assert_eq!(BlkMedium::from_u32(7), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn every_medium_is_served_as_what_it_is() {
+        assert_eq!(BlkMedium::HardDisk.class(), BlkDeviceClass::Rotational);
+        assert_eq!(BlkMedium::SolidState.class(), BlkDeviceClass::SolidState);
+        assert_eq!(BlkMedium::Nvme.class(), BlkDeviceClass::SolidState);
+        for removable in [BlkMedium::UsbFlash, BlkMedium::UsbDisk, BlkMedium::SdCard] {
+            assert_eq!(removable.class(), BlkDeviceClass::Removable);
+        }
+        assert_eq!(BlkMedium::Virtual.class(), BlkDeviceClass::Virtual);
+        for medium in MEDIA {
+            assert_eq!(BlkDeviceClass::of(Some(medium)), medium.class());
+        }
+        assert_eq!(BlkDeviceClass::of(None), BlkDeviceClass::Virtual);
+    }
+
+    /// A composition reads as the member it must wait on longest, whatever
+    /// order the members are in.
+    #[test]
+    fn a_composition_reads_as_its_most_patient_member() {
+        let hdd = Some(BlkMedium::HardDisk);
+        let nvme = Some(BlkMedium::Nvme);
+        let ssd = Some(BlkMedium::SolidState);
+        assert_eq!(BlkMedium::of_members([nvme, hdd]), hdd);
+        assert_eq!(BlkMedium::of_members([hdd, nvme]), hdd);
+        assert_eq!(
+            BlkMedium::of_members([ssd, nvme]),
+            BlkMedium::of_members([nvme, ssd]),
+            "equally patient members answer the same either way round"
+        );
+        assert_eq!(
+            BlkMedium::of_members([nvme, None, hdd]),
+            hdd,
+            "a disk is waited on longer than an undeclared member"
+        );
+        assert_eq!(BlkMedium::of_members([None, None]), None);
+        assert_eq!(BlkMedium::of_members([]), None);
+        let every: Vec<Option<BlkMedium>> = MEDIA.iter().copied().map(Some).chain([None]).collect();
+        for &a in &every {
+            for &b in &every {
+                assert_eq!(
+                    BlkMedium::of_members([a, b]),
+                    BlkMedium::of_members([b, a]),
+                    "{a:?} and {b:?}"
+                );
+            }
         }
     }
 
-    /// A completion whose class word names nothing this build defines.
+    /// An undeclared member is served the paravirtual envelope, longer than a
+    /// solid-state member's, so an array holding both must wait as long as
+    /// the undeclared one may take — and reads as unknown, which it is.
+    #[test]
+    fn an_undeclared_member_is_waited_on_as_paravirtual() {
+        let nvme = Some(BlkMedium::Nvme);
+        let composed = BlkMedium::of_members([nvme, None]);
+        assert_eq!(composed, None);
+        assert_eq!(BlkDeviceClass::of(composed), BlkDeviceClass::Virtual);
+        assert_eq!(BlkMedium::of_members([None, nvme]), None);
+        assert_eq!(
+            BlkMedium::of_members([None, Some(BlkMedium::Virtual)]),
+            Some(BlkMedium::Virtual),
+            "an equally patient declared member names the array"
+        );
+        assert_eq!(
+            BlkMedium::of_members([None, Some(BlkMedium::UsbFlash)]),
+            Some(BlkMedium::UsbFlash),
+            "a removable member outwaits the paravirtual envelope"
+        );
+    }
+
+    /// A completion whose medium word names nothing this build defines.
     fn completion_with_unknown_class_word() -> [u8; BLK_COMPLETION_LEN] {
         let completion = BlkCompletion {
             block_size: 512,
             block_count: 4,
             flags: 0,
-            class: Some(BlkDeviceClass::Rotational),
+            medium: Some(BlkMedium::HardDisk),
             name: BlkDeviceName::UNNAMED,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
@@ -3128,7 +3292,7 @@ mod tests {
         let buf = completion_with_unknown_class_word();
         let decoded = decode_completion(&buf).expect("valid completion");
         assert_eq!(
-            BlkDeviceClass::served_as(decoded.class).budget(),
+            BlkDeviceClass::of(decoded.medium).budget(),
             BlkDeviceClass::Virtual.budget()
         );
         assert_eq!(decoded.block_count, 4);
@@ -3143,25 +3307,12 @@ mod tests {
         // relaying consumer cannot launder it into a named class.
         let buf = completion_with_unknown_class_word();
         let decoded = decode_completion(&buf).expect("valid completion");
-        assert_eq!(decoded.class, None);
-        assert_ne!(decoded.class, Some(BlkDeviceClass::Virtual));
+        assert_eq!(decoded.medium, None);
+        assert_ne!(decoded.medium, Some(BlkMedium::Virtual));
 
         let mut relayed = [0u8; BLK_COMPLETION_LEN];
         decoded.encode(&mut relayed).expect("encodes");
-        assert_eq!(decode_completion(&relayed).expect("valid").class, None);
-    }
-
-    #[test]
-    fn served_as_maps_every_declared_class_to_itself() {
-        for class in [
-            BlkDeviceClass::Rotational,
-            BlkDeviceClass::SolidState,
-            BlkDeviceClass::Removable,
-            BlkDeviceClass::Virtual,
-        ] {
-            assert_eq!(BlkDeviceClass::served_as(Some(class)), class);
-        }
-        assert_eq!(BlkDeviceClass::served_as(None), BlkDeviceClass::Virtual);
+        assert_eq!(decode_completion(&relayed).expect("valid").medium, None);
     }
 
     #[test]
@@ -3245,7 +3396,7 @@ mod tests {
             block_size: 4096,
             block_count: 7,
             flags: BLK_FLAG_READ_ONLY,
-            class: Some(BlkDeviceClass::Removable),
+            medium: Some(BlkMedium::UsbFlash),
             name: BlkDeviceName::UNNAMED,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
@@ -3402,7 +3553,6 @@ mod tests {
             BlkDeviceClass::Removable,
             BlkDeviceClass::Virtual,
         ] {
-            assert_eq!(BlkDeviceClass::from_u32(class.as_u32()), Ok(class));
             let b = class.budget();
             assert!(b.deadline_ns > 0 && b.queue_depth > 0);
             // The grace window rides out at least one full deadline's worth of
@@ -3412,7 +3562,6 @@ mod tests {
                 "{class:?} grace must exceed its per-request deadline"
             );
         }
-        assert_eq!(BlkDeviceClass::from_u32(4), Err(Errno::OutOfRange));
         // A rotational disk is given a longer spin-up/reset budget than an SSD,
         // and the SSD a deeper queue — no single global constant fits both.
         assert!(
@@ -3667,6 +3816,7 @@ mod tests {
             (DriverError::DeviceOffline, BlkStatus::Offline),
             (DriverError::Busy, BlkStatus::TransientError),
             (DriverError::EndpointStalled, BlkStatus::Reset),
+            (DriverError::TimedOut, BlkStatus::Timeout),
             (DriverError::DeviceFault, BlkStatus::Fatal),
         ] {
             assert_eq!(BlkStatus::for_driver_health(err), Some(status), "{err:?}");
@@ -4386,10 +4536,10 @@ mod tests {
     const BLOCK_COUNT: u64 = 64;
     /// `BLOCK_SIZE` as the wire-width type the geometry carries.
     const BLOCK_SIZE_U32: u32 = 512;
-    /// The class the double declares. Deliberately *not* the trait default,
+    /// The medium the double declares. Deliberately *not* the trait default,
     /// so a test asserting it proves the engine asked the device rather than
     /// falling back.
-    const MEM_BLOCK_CLASS: BlkDeviceClass = BlkDeviceClass::Rotational;
+    const MEM_BLOCK_MEDIUM: BlkMedium = BlkMedium::HardDisk;
 
     /// An in-memory 512-byte-block device with a flush counter.
     struct MemBlock {
@@ -4414,8 +4564,8 @@ mod tests {
             })
         }
 
-        fn device_class(&self) -> BlkDeviceClass {
-            MEM_BLOCK_CLASS
+        fn medium(&self) -> Option<BlkMedium> {
+            Some(MEM_BLOCK_MEDIUM)
         }
 
         fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
@@ -4496,7 +4646,7 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
                 flags: 0,
-                class: Some(MEM_BLOCK_CLASS),
+                medium: Some(MEM_BLOCK_MEDIUM),
                 name: BlkDeviceName::UNNAMED,
             })
         );
@@ -4506,7 +4656,7 @@ mod tests {
                 block_size: BLOCK_SIZE_U32,
                 block_count: BLOCK_COUNT,
                 flags: BLK_FLAG_READ_ONLY,
-                class: Some(MEM_BLOCK_CLASS),
+                medium: Some(MEM_BLOCK_MEDIUM),
                 name: BlkDeviceName::UNNAMED,
             })
         );
@@ -4529,11 +4679,11 @@ mod tests {
             &mut window,
         )
         .expect("geometry");
-        assert_eq!(completion.class, Some(MEM_BLOCK_CLASS));
-        assert_ne!(MEM_BLOCK_CLASS, BlkDeviceClass::Virtual);
+        assert_eq!(completion.medium, Some(MEM_BLOCK_MEDIUM));
+        assert_ne!(MEM_BLOCK_MEDIUM.class(), BlkDeviceClass::Virtual);
         assert_eq!(
-            BlkDeviceClass::served_as(completion.class).budget(),
-            MEM_BLOCK_CLASS.budget()
+            BlkDeviceClass::of(completion.medium).budget(),
+            MEM_BLOCK_MEDIUM.class().budget()
         );
     }
 

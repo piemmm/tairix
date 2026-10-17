@@ -517,6 +517,82 @@ draws (`plans/COMPOSITOR-WORK.md` stage M).
   off the parent, refused while the seat is held) and the hold-back's fold
   and end rules.
 
+### AW8 — alerts `[x]`
+
+An alert is a refusal, a warning, a notice or a question, stated in a window of
+its own that the desktop draws. It is never drawn inside, clipped to or placed
+against the window that raised it, so a message is never cut to fit, and no
+application draws the chrome that names who is speaking.
+
+- **Protocol**: `WindowRequest::OpenAlert { event_endpoint, owner_window_id,
+  alert }` carries an `AlertSpec`: a severity (`Error`, `Warning`,
+  `Information`, `Question`), a headline, an optional detail, and one to
+  `ALERT_MAX_BUTTONS` buttons, each a label and a role (`Plain`, `Default`,
+  `Cancel`, `Destructive`). The reply mints the alert's id. The answer,
+  `WindowEvent::AlertClosed { alert_id, outcome }`, arrives exactly once:
+  `Chosen { index }`, or `Dismissed` when the alert was withdrawn
+  (`CloseAlert`), its owner closed, or the session took it down. The request
+  needs no capability: its scope is the caller's attested identity, a named
+  owner must be one of the caller's own top-level windows, and an application
+  with no window may raise one. An alert is not a security decision and is not
+  logged.
+- **Bounds**: headline, detail and label bytes, the button count, and the
+  alerts one application may have up (`ALERT_MAX_OPEN`) are containment bounds.
+  Text is UTF-8 with no control character but the detail's line feed; at most
+  one button is `Default` and one `Cancel`, and at least one destroys nothing,
+  so every alert can be declined. A spec that breaks a rule is refused whole,
+  and a refused request mints no id. The request names the caller's own event
+  mailbox or is refused.
+- **The window**: exactly 4:3, frame included — the smallest such extent at or
+  above `ALERT_MIN_WIDTH` that seats all it says, capped at the largest the
+  screen holds, past which the detail scrolls; nothing is elided. RISC OS's
+  error box is the model: the severity mark on the left, the text beside it,
+  the buttons along the foot at the right, wrapping to a row above when they
+  do not fit across. The frame is `WindowFrame::dialog()`,
+  a title band seating only put-to-back and no resize edge, and the session
+  titles it — "Error from *App*", "Warning from *App*", "Message from *App*" —
+  with *App* the bundle's attested name — or, for a bundle titled as the
+  desktop, its bundle path.
+- **Placement and stacking**: centred across the screen a third of the way
+  down, each further alert one cascade step on. An alert with an owner is its
+  transient: it rises with the owner and holds it modal, so no press, motion,
+  key, scroll or drop reaches the owner's client until it is answered, while
+  the owner's furniture still works; only a release does, so a press begun
+  before the alert is not left down. An alert with no owner is a top-level
+  session window, off the task list.
+- **Focus is earned**: an alert takes the keyboard only when its owner's family
+  or its application holds it, or when it answers the user's own gesture;
+  otherwise it opens beneath the window holding the keyboard and waits. Its
+  buttons arm `ALERT_ARM_NS` after it is first shown, so input meant for what
+  was there cannot answer it. One that held the keyboard hands it, as it comes
+  down, to the alert behind it holding the same window, else that window, else
+  the window it took it from — or leaves it on the desktop when that is gone.
+- **Keys**: the focus starts on the default button, else the cancel, else the
+  first that destroys nothing, so a stray `Enter` never destroys. `Enter` and
+  `Space` press the focused button, `Escape` the cancel one or the only one,
+  and `Tab`, `Shift+Tab` and the arrows move along the row.
+- **One renderer**: `lib/controls`' `Alert` lays out and paints the client area
+  and reports `AlertAction` and the damage it caused; the session's `alert`
+  module owns the windows, placement, modality and answers, and paints the
+  damage input left once after the drained run, into the window's kept frame. The desktop's own refusals and questions are
+  notices of the same service, answered to no client.
+- **Who raises them**: every error and question put to the user — the file
+  manager's refusals and delete questions, the document host's open and save
+  failures and its save-changes question, a document the viewer or the player
+  cannot open, a window an application was refused (`app::refuse`, every one
+  built by the one `refusal_alert`), the picker's replace question, the
+  session's confirmation and resolution prompts, and a refused drop
+  (`plans/NEW-TASKBAR.md` T21). Forms stay in their windows: go to line, a new
+  picture's size, a settings sheet, a credential prompt. A long operation's
+  progress panel is its own surface, not a question.
+- Coverage: the `lib/abi` round trip and fail-closed decode; the `lib/window`
+  loopback suite (answered exactly once, an owner that is the caller's own
+  top-level window, an ownerless alert, the per-application bound, a refusal
+  that spends no id, withdrawal); `lib/controls`' `Alert` (every window 4:3,
+  nothing cut, scrolling past the screen, the button row, focus and keys); and
+  the session suite (title, placement, owner modality, arming, earned focus,
+  withdrawal, a density change, desktop notices).
+
 ## 2. Documentation
 
 `docs/src/desktop/apps.md` carries the app-side design as each stage

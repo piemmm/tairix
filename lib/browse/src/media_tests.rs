@@ -454,22 +454,48 @@ const TEXTUAL: &[MediaType] = &[
 /// Each codec's file and the container it is carried in.
 const CONTAINED: &[(MediaType, MediaType)] = &[(MediaType::AudioOpus, MediaType::AudioOgg)];
 
+/// What is not a stream of bytes: a directory, and a bundle, which is one.
+const NOT_BYTES: &[MediaType] = &[
+    MediaType::InodeDirectory,
+    MediaType::TairixApp,
+    MediaType::TairixService,
+];
+
 #[test]
 fn every_textual_type_reaches_plain_text_and_a_codec_its_container() {
     for media in TEXTUAL {
-        let root = ancestry(*media).last().expect("the walk yields the type");
-        assert_eq!(root, MediaType::TextPlain, "{media:?}");
+        assert!(
+            ancestry(*media).any(|step| step == MediaType::TextPlain),
+            "{media:?}"
+        );
     }
     for (codec, container) in CONTAINED {
         assert_eq!(codec.parent(), Some(*container), "{codec:?}");
     }
-    // The converse: nothing else subclasses anything, so plain text itself and
-    // every other binary type are roots.
+    // The converse: every other file type is bytes and nothing narrower.
     for media in ALL {
-        if !TEXTUAL.contains(media) && !CONTAINED.iter().any(|(codec, _)| codec == media) {
-            assert_eq!(media.parent(), None, "{media:?}");
+        let narrower = TEXTUAL.contains(media) || CONTAINED.iter().any(|(codec, _)| codec == media);
+        if !narrower && !NOT_BYTES.contains(media) && *media != MediaType::ApplicationOctetStream {
+            assert_eq!(
+                media.parent(),
+                Some(MediaType::ApplicationOctetStream),
+                "{media:?}"
+            );
         }
     }
+}
+
+#[test]
+fn every_file_is_at_last_bytes_and_nothing_else_is() {
+    for media in ALL {
+        let root = ancestry(*media).last().expect("the walk yields the type");
+        if NOT_BYTES.contains(media) {
+            assert_eq!(root, *media, "{media:?} is no stream of bytes");
+        } else {
+            assert_eq!(root, MediaType::ApplicationOctetStream, "{media:?}");
+        }
+    }
+    assert_eq!(MediaType::ApplicationOctetStream.parent(), None);
 }
 
 #[test]
@@ -496,11 +522,16 @@ fn a_multi_step_chain_widens_one_level_at_a_time() {
     // SVG is XML, and XML is text: the walk is a chain, not a flat parent.
     assert_eq!(
         ancestry(MediaType::ImageSvg).collect::<Vec<_>>(),
-        [MediaType::ImageSvg, MediaType::Xml, MediaType::TextPlain]
+        [
+            MediaType::ImageSvg,
+            MediaType::Xml,
+            MediaType::TextPlain,
+            MediaType::ApplicationOctetStream
+        ]
     );
     assert_eq!(
         ancestry(MediaType::TextPlain).collect::<Vec<_>>(),
-        [MediaType::TextPlain]
+        [MediaType::TextPlain, MediaType::ApplicationOctetStream]
     );
 }
 
@@ -716,4 +747,27 @@ fn only_a_listed_picture_the_decoders_read_has_a_thumbnail() {
         let (kind, request) = entry_icon(PICTURES, &components(PICTURES), &entry, &mut scratch);
         assert_eq!(request, IconRequest::kind(kind), "{}", entry.name());
     }
+}
+
+/// A mounted volume's root is drawn as its drive, even once probed as holding
+/// something: its picture is the drive's own artwork, never a folder card.
+#[test]
+fn a_volume_root_is_pictured_as_its_drive() {
+    let storage = components("/Storage");
+    let mut root = Entry::directory("Backup");
+    root.set_occupancy(crate::entry::Occupancy::NonEmpty(
+        tairix_icon::FolderSample::default(),
+    ));
+    root.set_drive(Some(IconKind::DiskNvme));
+    let mut scratch = String::new();
+    let (kind, request) = entry_icon("/Storage", &storage, &root, &mut scratch);
+    assert_eq!(kind, IconKind::DiskNvme);
+    assert_eq!(request, IconRequest::kind(IconKind::DiskNvme));
+    assert_eq!(super::icon_for_entry(&root, &storage), IconKind::DiskNvme);
+
+    root.set_drive(None);
+    assert_eq!(
+        super::icon_for_entry(&root, &storage),
+        IconKind::FolderFilled
+    );
 }

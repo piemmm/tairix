@@ -95,6 +95,7 @@ pub mod helpdoc;
 pub mod host;
 pub mod imageedit;
 pub mod imagerender;
+pub mod listing;
 pub mod loopback;
 pub mod memory;
 pub mod proto;

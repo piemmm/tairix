@@ -15,6 +15,9 @@ pub(crate) enum InStep {
     Data(Vec<u8>),
     /// STALL the transfer (the transport reports the endpoint recovered).
     Stall,
+    /// Fail the transfer other than by a STALL: a wire fault, or a deadline
+    /// the controller abandoned it at.
+    Fail(Errno),
 }
 
 /// A scripted mass-storage device behind the [`MsdTransport`] seam.
@@ -39,6 +42,18 @@ pub(crate) struct ScriptedDevice {
     pub stall_next_control_out: bool,
     /// Queued interrupt-IN answers — the CBI completion blocks.
     pub interrupts: VecDeque<Vec<u8>>,
+    /// Interrupts captured before the command began — a late answer to an
+    /// earlier one — read ahead of [`Self::interrupts`] unless discarded.
+    pub stale_interrupts: VecDeque<Vec<u8>>,
+    /// How the next bulk-OUT fails other than by a STALL (consumed once).
+    pub fail_next_out: Option<Errno>,
+    /// How the next no-data control request (the BOT reset) fails, if it does.
+    pub reset_failure: Option<Errno>,
+    /// The recovery steps in the order they ran: `"reset"` for the class
+    /// reset, `"clear"` for the bulk clears.
+    pub trail: Vec<&'static str>,
+    /// Exchanges begun.
+    pub exchanges: usize,
 }
 
 impl ScriptedDevice {
@@ -53,6 +68,11 @@ impl ScriptedDevice {
             control_outs: Vec::new(),
             stall_next_control_out: false,
             interrupts: VecDeque::new(),
+            stale_interrupts: VecDeque::new(),
+            fail_next_out: None,
+            reset_failure: None,
+            trail: Vec::new(),
+            exchanges: 0,
         }
     }
 
@@ -86,13 +106,17 @@ impl MsdTransport for ScriptedDevice {
             self.stall_next_control_out = false;
             return Err(Errno::EndpointStalled);
         }
+        if data.first() == Some(&0x1D) {
+            self.trail.push("reset");
+        }
         self.control_outs.push((setup, data.to_vec()));
         Ok(())
     }
 
     fn control_no_data(&mut self, setup: [u8; 8]) -> Result<(), Errno> {
         self.resets.push(setup);
-        Ok(())
+        self.trail.push("reset");
+        self.reset_failure.take().map_or(Ok(()), Err)
     }
 
     fn bulk_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
@@ -103,6 +127,7 @@ impl MsdTransport for ScriptedDevice {
                 Ok(n)
             }
             Some(InStep::Stall) => Err(Errno::EndpointStalled),
+            Some(InStep::Fail(errno)) => Err(errno),
             None => Err(Errno::NotFound),
         }
     }
@@ -112,12 +137,19 @@ impl MsdTransport for ScriptedDevice {
             self.stall_next_out = false;
             return Err(Errno::EndpointStalled);
         }
+        if let Some(errno) = self.fail_next_out.take() {
+            return Err(errno);
+        }
         self.out_frames.push(data.to_vec());
         Ok(data.len())
     }
 
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<usize, Errno> {
-        match self.interrupts.pop_front() {
+        let next = self
+            .stale_interrupts
+            .pop_front()
+            .or_else(|| self.interrupts.pop_front());
+        match next {
             Some(bytes) => {
                 let n = bytes.len().min(data.len());
                 data[..n].copy_from_slice(&bytes[..n]);
@@ -125,6 +157,20 @@ impl MsdTransport for ScriptedDevice {
             }
             None => Err(Errno::NotFound),
         }
+    }
+
+    fn discard_interrupts(&mut self) -> Result<(), Errno> {
+        self.stale_interrupts.clear();
+        Ok(())
+    }
+
+    fn begin_exchange(&mut self) {
+        self.exchanges += 1;
+    }
+
+    fn clear_halts(&mut self) -> Result<(), Errno> {
+        self.trail.push("clear");
+        Ok(())
     }
 
     fn scrub(&mut self) {

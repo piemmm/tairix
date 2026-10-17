@@ -100,9 +100,12 @@ impl WorkerEnd {
         };
         match WorkerExit::from_code(code) {
             Some(WorkerExit::OutOfMemory) => Self::OutOfMemory,
-            Some(WorkerExit::PeerClosed | WorkerExit::Oversize | WorkerExit::Transport) => {
-                Self::TransportFailed
-            }
+            Some(
+                WorkerExit::PeerClosed
+                | WorkerExit::Oversize
+                | WorkerExit::Transport
+                | WorkerExit::Unserved,
+            ) => Self::TransportFailed,
             None if code == tairix_abi::LOAD_OOM || code == tairix_abi::OOM_EXIT_STATUS => {
                 Self::OutOfMemory
             }
@@ -638,6 +641,10 @@ mod tests {
             ),
             (
                 Some(WorkerExit::Transport.code()),
+                WorkerEnd::TransportFailed,
+            ),
+            (
+                Some(WorkerExit::Unserved.code()),
                 WorkerEnd::TransportFailed,
             ),
             (Some(WorkerExit::Finished.code()), WorkerEnd::Unknown),

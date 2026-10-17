@@ -46,6 +46,14 @@ use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32
 use crate::touch::PinchPhase;
 use crate::{Errno, ProcId};
 
+mod alert;
+
+pub use alert::{
+    AlertButton, AlertButtonRole, AlertDetail, AlertHeadline, AlertLabel, AlertOutcome,
+    AlertSeverity, AlertSpec, ALERT_DETAIL_MAX, ALERT_HEADLINE_MAX, ALERT_LABEL_MAX,
+    ALERT_MAX_BUTTONS, ALERT_MAX_OPEN,
+};
+
 /// Reserved well-known call-endpoint id of the desktop session's window
 /// service (`"WI"` ASCII hex-spelled prefix, mirroring
 /// [`crate::seat::SEATMGR_ENDPOINT`]'s convention). Like the
@@ -671,6 +679,33 @@ pub type AppMenuEntryText = BoundedText<0, APP_MENU_ENTRY_MAX>;
 /// resolves to nothing and the row draws the built-in glyph.
 pub type AppMenuBundle = BoundedText<0, APP_MENU_BUNDLE_MAX>;
 
+/// Maximum encoded length, in bytes, of the asset id a menu row names as its
+/// class picture ([`AppMenuItem::with_icon_asset`]): the public name an icon
+/// master is shipped under (`folder`, `disk-usb`).
+pub const APP_MENU_ASSET_MAX: usize = 32;
+
+/// A validated class-picture asset id, over the shared validator.
+///
+/// A name the desktop looks up in its own icon vocabulary, never a path: an
+/// application names a picture and can never name a file. An id the desktop
+/// does not know draws its generic glyph.
+pub type AppMenuAsset = BoundedText<1, APP_MENU_ASSET_MAX>;
+
+/// Where a chooseable row's picture comes from.
+// A path dwarfs an asset id. The trade `AppMenuRow` makes: a `Copy`,
+// allocation-free builder value, interned into the menu's text block and
+// dropped on push, so the size is paid on the stack for one call.
+#[allow(clippy::large_enum_variant)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AppMenuIcon {
+    /// None: the row draws its label alone.
+    None,
+    /// The icon of the application bundle at this path.
+    Bundle(AppMenuBundle),
+    /// A class picture the desktop ships.
+    Asset(AppMenuAsset),
+}
+
 /// A menu row's quick-entry field: one line of text the desktop puts in a
 /// child surface of the row, pre-filled and ready to edit.
 ///
@@ -809,7 +844,7 @@ pub struct AppMenuItem {
     reason: AppMenuReason,
     role: AppMenuRole,
     entry: Option<AppMenuEntry>,
-    icon_bundle: AppMenuBundle,
+    icon: AppMenuIcon,
 }
 
 impl AppMenuItem {
@@ -825,7 +860,7 @@ impl AppMenuItem {
             reason: AppMenuReason::EMPTY,
             role: AppMenuRole::Neutral,
             entry: None,
-            icon_bundle: AppMenuBundle::EMPTY,
+            icon: AppMenuIcon::None,
         }
     }
 
@@ -888,7 +923,16 @@ impl AppMenuItem {
     /// an unresolvable path costs the row its picture and nothing else.
     #[must_use]
     pub const fn with_icon_bundle(mut self, bundle: AppMenuBundle) -> Self {
-        self.icon_bundle = bundle;
+        self.icon = AppMenuIcon::Bundle(bundle);
+        self
+    }
+
+    /// This row drawing the class picture the desktop ships under `asset` —
+    /// a folder, a kind of drive — through the same artwork cache every
+    /// other surface draws that class through.
+    #[must_use]
+    pub const fn with_icon_asset(mut self, asset: AppMenuAsset) -> Self {
+        self.icon = AppMenuIcon::Asset(asset);
         self
     }
 }
@@ -957,8 +1001,19 @@ pub struct AppMenuItemView<'a> {
     /// The quick-entry field this row opens as its child, if it declares
     /// one.
     pub entry: Option<AppMenuEntryView<'a>>,
-    /// The bundle whose icon the row draws, empty when it names none.
-    pub icon_bundle: &'a str,
+    /// Where the row's picture comes from.
+    pub icon: AppMenuIconView<'a>,
+}
+
+/// Where a row's picture comes from, as a built menu reports it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppMenuIconView<'a> {
+    /// None: the row draws its label alone.
+    None,
+    /// The icon of the application bundle at this path.
+    Bundle(&'a str),
+    /// The class picture shipped under this asset id.
+    Asset(&'a str),
 }
 
 /// A declared quick-entry field as a built menu reports it: the id a commit
@@ -1037,15 +1092,17 @@ struct RowRecord {
     mark: AppMenuMark,
     role: AppMenuRole,
     parent: u8,
-    /// Where this row's label, shortcut, reason, entry text and icon-bundle
-    /// path lie, in that order, within the menu's text block. Follows from
-    /// the rows before it, so it is stored but never encoded.
+    /// Where this row's label, shortcut, reason, entry text and icon source
+    /// lie, in that order, within the menu's text block. Follows from the rows
+    /// before it, so it is stored but never encoded.
     text_at: u16,
     label_len: u8,
     shortcut_len: u8,
     reason_len: u8,
     entry_len: u8,
-    bundle_len: u8,
+    icon_len: u8,
+    /// Whether the icon source names a class asset rather than a bundle.
+    icon_asset: bool,
     /// The id a commit of this row's quick-entry field answers with; zero
     /// when the row declares no field, which is what makes the field
     /// optional with no second flag to fall out of step with it.
@@ -1079,7 +1136,8 @@ impl RowRecord {
         shortcut_len: 0,
         reason_len: 0,
         entry_len: 0,
-        bundle_len: 0,
+        icon_len: 0,
+        icon_asset: false,
         entry_id: 0,
     };
 }
@@ -1219,7 +1277,13 @@ impl AppMenu {
         let shortcut = self.text_field(shortcut_at, record.shortcut_len);
         let reason_at = shortcut_at.saturating_add(usize::from(record.shortcut_len));
         let entry_at = reason_at.saturating_add(usize::from(record.reason_len));
-        let bundle_at = entry_at.saturating_add(usize::from(record.entry_len));
+        let icon_at = entry_at.saturating_add(usize::from(record.entry_len));
+        let icon_text = self.text_field(icon_at, record.icon_len);
+        let icon = match (record.icon_len, record.icon_asset) {
+            (0, _) => AppMenuIconView::None,
+            (_, false) => AppMenuIconView::Bundle(icon_text),
+            (_, true) => AppMenuIconView::Asset(icon_text),
+        };
         match record.kind {
             RowKind::Item(id) => AppMenuRowView::Item(AppMenuItemView {
                 id,
@@ -1235,7 +1299,7 @@ impl AppMenu {
                         id,
                         initial: self.text_field(entry_at, record.entry_len),
                     }),
-                icon_bundle: self.text_field(bundle_at, record.bundle_len),
+                icon,
             }),
             RowKind::Separator => AppMenuRowView::Separator,
             RowKind::Submenu => AppMenuRowView::Submenu {
@@ -1271,7 +1335,7 @@ impl AppMenu {
             ..RowRecord::VACANT
         };
         let mut entry_text = AppMenuEntryText::EMPTY;
-        let mut bundle = AppMenuBundle::EMPTY;
+        let mut icon = AppMenuIcon::None;
         let (label, shortcut, reason) = match *row {
             AppMenuRow::Item(item) => {
                 record.enabled = item.enabled;
@@ -1282,7 +1346,7 @@ impl AppMenu {
                     record.entry_id = entry.id.get();
                     entry_text = entry.initial;
                 }
-                bundle = item.icon_bundle;
+                icon = item.icon;
                 (item.label, item.shortcut, item.reason)
             }
             AppMenuRow::Separator => (
@@ -1304,6 +1368,15 @@ impl AppMenu {
                 )
             }
         };
+        let (icon_text, icon_asset): (&[u8], bool) = match &icon {
+            AppMenuIcon::None => (&[], false),
+            AppMenuIcon::Bundle(bundle) => {
+                (&bundle.raw_bytes()[..usize::from(bundle.len_byte())], false)
+            }
+            AppMenuIcon::Asset(asset) => {
+                (&asset.raw_bytes()[..usize::from(asset.len_byte())], true)
+            }
+        };
         // The whole row's text is admitted or none of it is, so a refusal
         // leaves the text block exactly as it was.
         let text_at = usize::from(self.text_len);
@@ -1311,7 +1384,7 @@ impl AppMenu {
             + usize::from(shortcut.len_byte())
             + usize::from(reason.len_byte())
             + usize::from(entry_text.len_byte())
-            + usize::from(bundle.len_byte());
+            + icon_text.len();
         let end = text_at.saturating_add(needed);
         if end > APP_MENU_TEXT_BYTES {
             return Err(Errno::NoSpace);
@@ -1322,7 +1395,7 @@ impl AppMenu {
             &shortcut.raw_bytes()[..usize::from(shortcut.len_byte())],
             &reason.raw_bytes()[..usize::from(reason.len_byte())],
             &entry_text.raw_bytes()[..usize::from(entry_text.len_byte())],
-            &bundle.raw_bytes()[..usize::from(bundle.len_byte())],
+            icon_text,
         ] {
             self.text[cursor..cursor + field.len()].copy_from_slice(field);
             cursor += field.len();
@@ -1332,7 +1405,8 @@ impl AppMenu {
         record.shortcut_len = shortcut.len_byte();
         record.reason_len = reason.len_byte();
         record.entry_len = entry_text.len_byte();
-        record.bundle_len = bundle.len_byte();
+        record.icon_len = u8::try_from(icon_text.len()).map_err(|_| Errno::NoSpace)?;
+        record.icon_asset = icon_asset && !icon_text.is_empty();
         self.rows[at] = record;
         self.text_len = u16::try_from(end).map_err(|_| Errno::NoSpace)?;
         self.len = self.len.saturating_add(1);
@@ -2852,6 +2926,35 @@ pub enum WindowRequest {
         /// The layer surface asking (from its `OpenLayer` reply).
         window_id: u64,
     },
+    /// Put an alert to the user: a refusal, warning, notice or question the
+    /// desktop draws in a window of its own and answers exactly once with
+    /// [`WindowEvent::AlertClosed`] naming the id the reply mints.
+    ///
+    /// Application-scoped, so an application with no window open may still
+    /// say why it refused what it was given. `owner_window_id`, when not
+    /// zero, must be one of the caller's own top-level windows: the alert
+    /// then holds that window until it is answered and goes down with it.
+    /// The window's title is the desktop's, from the caller's attested
+    /// identity, so the request carries none.
+    ///
+    /// It carries no capability: the caller's kernel-attested identity is
+    /// the scope, and at most [`ALERT_MAX_OPEN`] of its alerts are up at
+    /// once.
+    OpenAlert {
+        /// The caller's own endpoint the answer is delivered to. Never a
+        /// reserved endpoint.
+        event_endpoint: u64,
+        /// The caller's own window the alert holds, or zero for none.
+        owner_window_id: u64,
+        /// What the alert says and the answers it offers.
+        alert: AlertSpec,
+    },
+    /// Withdraw the caller's own alert `alert_id`, which is answered
+    /// [`AlertOutcome::Dismissed`] as it comes down.
+    CloseAlert {
+        /// The alert, from its open's reply.
+        alert_id: u64,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -2928,6 +3031,10 @@ const OP_DRAG_VERDICT: u16 = 34;
 const OP_QUERY_DRAG_SPOT: u16 = 35;
 /// Wire operation discriminant of [`WindowRequest::CreateTool`].
 const OP_CREATE_TOOL: u16 = 36;
+/// Wire operation discriminant of [`WindowRequest::OpenAlert`].
+const OP_OPEN_ALERT: u16 = 38;
+/// Wire operation discriminant of [`WindowRequest::CloseAlert`].
+const OP_CLOSE_ALERT: u16 = 39;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3255,7 +3362,7 @@ const APP_MENU_ROW_REASON_LEN_OFFSET: usize = 5;
 /// text length.
 const APP_MENU_ROW_ENTRY_LEN_OFFSET: usize = 6;
 /// Byte offset, within one row record, of its icon bundle path's length.
-const APP_MENU_ROW_BUNDLE_LEN_OFFSET: usize = 7;
+const APP_MENU_ROW_ICON_LEN_OFFSET: usize = 7;
 /// Byte offset, within one row record, of its item id.
 const APP_MENU_ROW_ID_OFFSET: usize = 8;
 /// Byte offset, within one row record, of the id a commit of its quick-entry
@@ -3320,6 +3427,14 @@ const OPEN_MENU_MAX_WIRE_LEN: usize = open_menu_wire_len(
     APP_MENU_LABEL_MAX,
 );
 
+/// Byte offset of a [`WindowRequest::OpenAlert`]'s owner window, after its
+/// event endpoint.
+const OPEN_ALERT_OWNER_OFFSET: usize = 16;
+/// Byte offset of an alert's own operand block.
+const OPEN_ALERT_SPEC_OFFSET: usize = 24;
+/// Encoded size of the longest possible [`WindowRequest::OpenAlert`].
+const OPEN_ALERT_MAX_WIRE_LEN: usize = OPEN_ALERT_SPEC_OFFSET + alert::MAX_WIRE_LEN;
+
 /// The larger of two encoded lengths.
 const fn longer(a: usize, b: usize) -> usize {
     if a > b {
@@ -3337,9 +3452,14 @@ const APP_MENU_ROW_MARK_MASK: u8 = 0b110;
 const APP_MENU_ROW_MARK_SHIFT: u32 = 1;
 /// Bit of a menu row's flag byte meaning [`AppMenuRole::Destructive`].
 const APP_MENU_ROW_FLAG_DESTRUCTIVE: u8 = 1 << 3;
+/// Bit of a menu row's flag byte meaning its icon source names a class asset
+/// rather than a bundle.
+const APP_MENU_ROW_FLAG_ASSET: u8 = 1 << 4;
 /// Every flag bit a menu row defines; anything else is refused.
-const APP_MENU_ROW_FLAG_MASK: u8 =
-    APP_MENU_ROW_FLAG_ENABLED | APP_MENU_ROW_MARK_MASK | APP_MENU_ROW_FLAG_DESTRUCTIVE;
+const APP_MENU_ROW_FLAG_MASK: u8 = APP_MENU_ROW_FLAG_ENABLED
+    | APP_MENU_ROW_MARK_MASK
+    | APP_MENU_ROW_FLAG_DESTRUCTIVE
+    | APP_MENU_ROW_FLAG_ASSET;
 
 /// Wire kind of [`AppMenuRow::Item`].
 const APP_MENU_KIND_ITEM: u8 = 1;
@@ -3366,7 +3486,7 @@ impl WindowRequest {
             ),
             longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
         ),
-        PREVIEW_SCREENSAVER_MAX_WIRE_LEN,
+        longer(PREVIEW_SCREENSAVER_MAX_WIRE_LEN, OPEN_ALERT_MAX_WIRE_LEN),
     );
 
     /// Encoded size of `self`: the header plus this operation's own operand
@@ -3387,7 +3507,9 @@ impl WindowRequest {
             | Self::TakePickedFile { .. }
             | Self::TakeDropTarget { .. }
             | Self::TakeTerrain { .. }
-            | Self::ActivateWindow { .. } => WINDOW_ID_WIRE_LEN,
+            | Self::ActivateWindow { .. }
+            | Self::CloseAlert { .. } => WINDOW_ID_WIRE_LEN,
+            Self::OpenAlert { ref alert, .. } => OPEN_ALERT_SPEC_OFFSET + alert::wire_len(alert),
             Self::BeginDrag { ref items, .. } => {
                 begin_drag_wire_len(items.first().len_byte() as usize)
             }
@@ -3536,6 +3658,8 @@ impl WindowRequest {
             Self::OpenLayer { .. } => OP_OPEN_LAYER,
             Self::PlaceLayer { .. } => OP_PLACE_LAYER,
             Self::TakeTerrain { .. } => OP_TAKE_TERRAIN,
+            Self::OpenAlert { .. } => OP_OPEN_ALERT,
+            Self::CloseAlert { .. } => OP_CLOSE_ALERT,
         }
     }
 
@@ -3619,8 +3743,20 @@ impl WindowRequest {
             | Self::TakePickedFile { window_id }
             | Self::TakeDropTarget { window_id }
             | Self::TakeTerrain { window_id }
-            | Self::ActivateWindow { window_id } => {
+            | Self::ActivateWindow { window_id }
+            | Self::CloseAlert {
+                alert_id: window_id,
+            } => {
                 put_u64(out, 8, window_id);
+            }
+            Self::OpenAlert {
+                event_endpoint,
+                owner_window_id,
+                ref alert,
+            } => {
+                put_u64(out, 8, event_endpoint);
+                put_u64(out, OPEN_ALERT_OWNER_OFFSET, owner_window_id);
+                alert::write(&mut out[OPEN_ALERT_SPEC_OFFSET..], alert);
             }
             Self::PickFile { .. }
             | Self::BeginDrag { .. }
@@ -4000,9 +4136,33 @@ impl WindowRequest {
                 exact_len(bytes, QUERY_NOTIFY_SOURCES_WIRE_LEN).map(|()| Self::QueryNotifySources)
             }
             OP_LOCK_SCREEN => exact_len(bytes, LOCK_SCREEN_WIRE_LEN).map(|()| Self::LockScreen),
+            OP_OPEN_ALERT => read_open_alert(bytes),
+            OP_CLOSE_ALERT => {
+                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+                let alert_id = nonzero_id(read_u64(bytes, 8))?;
+                Ok(Self::CloseAlert { alert_id })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a [`WindowRequest::OpenAlert`]: the endpoint, refused when
+/// reserved; the owner, zero for none; and the spec, which must fill the
+/// rest of the frame exactly.
+fn read_open_alert(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if bytes.len() < OPEN_ALERT_SPEC_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let event_endpoint = read_u64(bytes, 8);
+    if crate::ipc::is_reserved_endpoint(event_endpoint) {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(WindowRequest::OpenAlert {
+        event_endpoint,
+        owner_window_id: read_u64(bytes, OPEN_ALERT_OWNER_OFFSET),
+        alert: alert::read(&bytes[OPEN_ALERT_SPEC_OFFSET..])?,
+    })
 }
 
 /// Decode a [`WindowRequest::Resize`] frame.
@@ -4416,13 +4576,14 @@ fn write_menu_block(out: &mut [u8], at: usize, menu: &AppMenu) -> usize {
         out[record_at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(record.enabled)
             * APP_MENU_ROW_FLAG_ENABLED)
             | ((record.mark as u8) << APP_MENU_ROW_MARK_SHIFT)
-            | (u8::from(record.role == AppMenuRole::Destructive) * APP_MENU_ROW_FLAG_DESTRUCTIVE);
+            | (u8::from(record.role == AppMenuRole::Destructive) * APP_MENU_ROW_FLAG_DESTRUCTIVE)
+            | (u8::from(record.icon_asset) * APP_MENU_ROW_FLAG_ASSET);
         out[record_at + APP_MENU_ROW_PARENT_OFFSET] = record.parent;
         out[record_at + APP_MENU_ROW_LABEL_LEN_OFFSET] = record.label_len;
         out[record_at + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = record.shortcut_len;
         out[record_at + APP_MENU_ROW_REASON_LEN_OFFSET] = record.reason_len;
         out[record_at + APP_MENU_ROW_ENTRY_LEN_OFFSET] = record.entry_len;
-        out[record_at + APP_MENU_ROW_BUNDLE_LEN_OFFSET] = record.bundle_len;
+        out[record_at + APP_MENU_ROW_ICON_LEN_OFFSET] = record.icon_len;
         put_u16(
             out,
             record_at + APP_MENU_ROW_ID_OFFSET,
@@ -4628,18 +4789,26 @@ fn read_app_menu_row(
         cursor,
         record[APP_MENU_ROW_ENTRY_LEN_OFFSET],
     )?;
-    let bundle = read_app_menu_text::<0, APP_MENU_BUNDLE_MAX>(
-        text,
-        cursor,
-        record[APP_MENU_ROW_BUNDLE_LEN_OFFSET],
-    )?;
+    let icon_len = record[APP_MENU_ROW_ICON_LEN_OFFSET];
+    // An asset id is never empty, so the flag with no id is refused by the
+    // asset's own bound.
+    let icon = if flags & APP_MENU_ROW_FLAG_ASSET != 0 {
+        AppMenuIcon::Asset(read_app_menu_text::<1, APP_MENU_ASSET_MAX>(
+            text, cursor, icon_len,
+        )?)
+    } else {
+        match read_app_menu_text::<0, APP_MENU_BUNDLE_MAX>(text, cursor, icon_len)? {
+            bundle if bundle.is_empty() => AppMenuIcon::None,
+            bundle => AppMenuIcon::Bundle(bundle),
+        }
+    };
     // Only a chooseable row states any of this, so a row of another kind
     // carrying it is refused rather than read with the extra silently
     // dropped.
     let item_only = shortcut.is_empty()
         && reason.is_empty()
         && initial.is_empty()
-        && bundle.is_empty()
+        && icon == AppMenuIcon::None
         && entry_id == 0
         && mark == AppMenuMark::None
         && role == AppMenuRole::Neutral;
@@ -4650,8 +4819,8 @@ fn read_app_menu_row(
                 .with_mark(mark)
                 .with_shortcut(shortcut)
                 .with_reason(reason)
-                .with_role(role)
-                .with_icon_bundle(bundle);
+                .with_role(role);
+            item.icon = icon;
             if entry_id != 0 {
                 item = item.with_entry(AppMenuEntry {
                     id: AppMenuItemId::new(entry_id)?,
@@ -6591,6 +6760,8 @@ const EV_PREVIEW_RENDERED: u16 = 20;
 const EV_PINCH: u16 = 21;
 /// Wire kind of [`WindowEvent::ToolMoved`].
 const EV_TOOL_MOVED: u16 = 23;
+/// Wire event discriminant of [`WindowEvent::AlertClosed`].
+const EV_ALERT_CLOSED: u16 = 25;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -6923,6 +7094,17 @@ pub enum WindowEvent {
         /// What became of the chain.
         outcome: MenuOutcome,
     },
+    /// The whole answer to one accepted [`WindowRequest::OpenAlert`],
+    /// delivered **exactly once** to the endpoint the open named.
+    ///
+    /// Application-scoped: an alert belongs to the application that raised
+    /// it, whether or not it held one of its windows.
+    AlertClosed {
+        /// The alert this answers, from its open's reply; never zero.
+        alert_id: u64,
+        /// How it ended.
+        outcome: AlertOutcome,
+    },
     /// At least one target is queued for this **application** to open.
     ///
     /// A **wake**, not the target: the application answers by pulling with
@@ -7116,7 +7298,10 @@ impl WindowEvent {
             | Self::LayerPointer { window_id, .. }
             | Self::ToolMoved { window_id, .. }
             | Self::MenuClosed { window_id, .. } => Some(window_id),
-            Self::AppBarDefault | Self::AppBarMenu { .. } | Self::OpenRequested => None,
+            Self::AppBarDefault
+            | Self::AppBarMenu { .. }
+            | Self::OpenRequested
+            | Self::AlertClosed { .. } => None,
         }
     }
 
@@ -7231,6 +7416,11 @@ impl WindowEvent {
                 put_u16(&mut out, MENU_CLOSED_OUTCOME_OFFSET, kind);
                 put_u16(&mut out, MENU_CLOSED_ITEM_OFFSET, item);
                 put_u16(&mut out, MENU_CLOSED_REFUSAL_OFFSET, refusal);
+            }
+            Self::AlertClosed { alert_id, outcome } => {
+                put_u16(&mut out, 6, EV_ALERT_CLOSED);
+                put_u64(&mut out, 16, alert_id);
+                alert::write_outcome(&mut out, outcome);
             }
         }
         out
@@ -7689,6 +7879,19 @@ fn read_app_scoped_event(kind: u16, bytes: &[u8]) -> Option<Result<WindowEvent, 
                 Err(err) => return Some(Err(err)),
             }
         }
+        EV_ALERT_CLOSED => {
+            if let Err(err) = event_reserved_zero(bytes, alert::ALERT_CLOSED_WIRE_END) {
+                return Some(Err(err));
+            }
+            let answer = nonzero_id(read_u64(bytes, 16)).and_then(|alert_id| {
+                alert::read_outcome(bytes)
+                    .map(|outcome| WindowEvent::AlertClosed { alert_id, outcome })
+            });
+            match answer {
+                Ok(event) => event,
+                Err(err) => return Some(Err(err)),
+            }
+        }
         _ => return None,
     };
     if read_u64(bytes, 8) != 0 {
@@ -7841,22 +8044,22 @@ mod tests {
         encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
         encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply,
         hand_over_wire_len, open_menu_wire_len, put_i32, put_u16, put_u64, read_i32, read_u16,
-        read_u32, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText,
-        AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
-        AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath, ClipboardHeld, ClipboardKind,
-        CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
-        HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget,
-        PickPurpose, PinchPhase, PointerAction, SaveEndings, TerrainPlate, TooltipText,
-        WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing,
-        WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
-        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
+        read_u32, AppBar, AppBarClick, AppMenu, AppMenuAsset, AppMenuBundle, AppMenuEntry,
+        AppMenuEntryText, AppMenuIconView, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
+        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
+        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
+        DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome,
+        MenuRefusal, OpenTarget, PickPurpose, PinchPhase, PointerAction, SaveEndings, TerrainPlate,
+        TooltipText, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState,
+        WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX, APP_MENU_ENTRY_MAX,
         APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
         APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
-        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
-        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
-        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
-        APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN,
-        CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
+        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET,
+        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
+        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN,
+        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
+        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
         DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET, DRAG_EVENT_KIND_OFFSET,
         DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
         DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
@@ -9026,6 +9229,60 @@ mod tests {
         }
     }
 
+    /// A row names a class picture by its asset id, which crosses the wire
+    /// as what it is — never as a bundle path a desktop might read.
+    #[test]
+    fn a_row_names_a_class_picture_by_its_asset_id() {
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(AppMenuItemId::new(1).expect("a valid id"), label("Home"))
+                .with_icon_asset(AppMenuAsset::new("folder").expect("a valid id")),
+        ))
+        .expect("room for the row");
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(2).expect("a valid id"),
+            label("Plain"),
+        )))
+        .expect("room for the row");
+        let Ok(WindowRequest::OpenMenu { menu: back, .. }) =
+            WindowRequest::from_bytes(&opening(&menu).frame())
+        else {
+            panic!("the open decodes");
+        };
+        let icon = |at: usize| match back.rows().nth(at).expect("a declared row").0 {
+            AppMenuRowView::Item(item) => item.icon,
+            other => panic!("an item, not {other:?}"),
+        };
+        assert_eq!(icon(0), AppMenuIconView::Asset("folder"));
+        assert_eq!(icon(1), AppMenuIconView::None);
+        assert!(AppMenuAsset::new("").is_err(), "an asset is named");
+        assert!(AppMenuAsset::new(&"a".repeat(APP_MENU_ASSET_MAX + 1)).is_err());
+    }
+
+    /// The asset flag is a property of a chooseable row's picture: on a row
+    /// with no picture, or a row of another kind, it is refused.
+    #[test]
+    fn an_asset_flag_with_nothing_to_name_is_refused() {
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(1).expect("a valid id"),
+            label("Plain"),
+        )))
+        .expect("room for the row");
+        menu.push(AppMenuRow::Separator).expect("room for the rule");
+        let frame = opening(&menu).frame();
+        for record in 0..2 {
+            let mut flagged = frame;
+            flagged[OPEN_MENU_ROWS_OFFSET
+                + record * APP_MENU_ROW_WIRE_LEN
+                + APP_MENU_ROW_FLAGS_OFFSET] |= APP_MENU_ROW_FLAG_ASSET;
+            assert!(
+                WindowRequest::from_bytes(&flagged).is_err(),
+                "row {record} flagged with no asset id"
+            );
+        }
+    }
+
     /// A row may be chooseable *and* open a plate, and a chooseable row may
     /// carry a quick-entry field and name the bundle its icon comes from —
     /// all of it surviving the wire unchanged.
@@ -9075,12 +9332,15 @@ mod tests {
         assert_eq!(entry.id.get(), 90, "and the field carries its own");
         assert_eq!(entry.initial, "report.txt");
         assert_eq!(rename.shortcut, "F2", "beside the caption it already had");
-        assert_eq!(rename.icon_bundle, "");
+        assert_eq!(rename.icon, AppMenuIconView::None);
 
         let AppMenuRowView::Item(candidate) = row(2) else {
             panic!("the candidate is an item");
         };
-        assert_eq!(candidate.icon_bundle, "/System/Applications/view.app");
+        assert_eq!(
+            candidate.icon,
+            AppMenuIconView::Bundle("/System/Applications/view.app")
+        );
         assert!(candidate.entry.is_none());
         assert_eq!(
             back.rows().nth(2).expect("a declared row").1,
@@ -9604,7 +9864,7 @@ mod tests {
         kind[APP_BAR_ROWS_OFFSET] = 0;
         assert_eq!(WindowRequest::from_bytes(&kind), Err(Errno::OutOfRange));
         let mut row_flags = base;
-        row_flags[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_FLAGS_OFFSET] |= 0b1_0000;
+        row_flags[APP_BAR_ROWS_OFFSET + APP_MENU_ROW_FLAGS_OFFSET] |= 0b10_0000;
         assert_eq!(
             WindowRequest::from_bytes(&row_flags),
             Err(Errno::OutOfRange)

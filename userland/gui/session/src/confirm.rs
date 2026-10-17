@@ -4,8 +4,8 @@
 //! Restarting or powering the machine off ends every task of every principal
 //! on it, so neither may happen on a single click. The session — not the
 //! taskbar, which holds no authority at all — puts the choice to the user in
-//! a window it owns, drawn with the shared `lib/controls` dialog, and only a
-//! deliberate confirmation produces the outcome the caller relays onward.
+//! an alert of its own, and only a deliberate confirmation produces the
+//! outcome the caller relays onward.
 //!
 //! The prompt is modelled on the session's trusted file picker: one slot (a
 //! second request while one is showing is refused rather than stacking a
@@ -18,23 +18,12 @@
 //! did not answer.
 
 use tairix_abi::input::KeyInput;
+use tairix_abi::window_ipc::{AlertButtonRole, AlertSpec};
 use tairix_abi::PowerAction;
-use tairix_controls::{Button, ControlRole, ControlState, Dialog, FocusState};
 use tairix_wm::{Compositor, Point, WindowId};
 
-use crate::choice::{Choice, ChoicePrompt};
+use crate::choice::{question, Choice, ChoicePrompt};
 use crate::shell::DesktopShell;
-
-/// The prompt window's width in pixels.
-///
-/// Wide enough for the longest confirmation sentence on one line at the
-/// reference density, narrow enough to read as a question rather than a
-/// document.
-pub const WIN_WIDTH: u32 = 460;
-
-/// The prompt window's height in pixels: the title, one sentence of body
-/// text, and the action band beneath them.
-pub const WIN_HEIGHT: u32 = 170;
 
 /// How the user answered a confirmation prompt.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -68,6 +57,22 @@ impl ConfirmPrompt {
         Self { active: None }
     }
 
+    /// The centre of the showing prompt's button at `index`, in its client.
+    #[cfg(test)]
+    pub(crate) fn button_centre(
+        &self,
+        index: usize,
+        shell: &DesktopShell,
+        compositor: &Compositor,
+    ) -> Option<Point> {
+        Some(
+            self.active
+                .as_ref()?
+                .prompt
+                .button_centre(index, shell, compositor),
+        )
+    }
+
     /// The compositor window of the showing prompt, if one is up.
     ///
     /// The embedder routes this window's key and click input into
@@ -93,40 +98,44 @@ impl ConfirmPrompt {
     pub fn ask(
         &mut self,
         action: PowerAction,
+        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
         if self.active.is_some() {
             return false;
         }
-        let Some(prompt) = ChoicePrompt::open(
-            build_dialog(action),
-            (WIN_WIDTH, WIN_HEIGHT),
-            title(action),
-            shell,
-            compositor,
-        ) else {
+        let Some(mut prompt) =
+            build_spec(action).and_then(|spec| ChoicePrompt::open(&spec, None, shell, compositor))
+        else {
             return false;
         };
+        prompt.stamp(now_ns);
         self.active = Some(ActivePrompt { action, prompt });
         true
     }
 
-    /// Apply one key press to the showing prompt.
+    /// Apply one key press at `now_ns` to the showing prompt.
     ///
-    /// `Escape` declines outright. `Enter` activates whichever button holds
-    /// focus, which is the safe one when the prompt opens, so confirming
-    /// always takes a deliberate move to the other button.
+    /// `Escape` declines outright. `Enter` and `Space` press whichever button
+    /// holds the focus — the safe one when the prompt opens, since the
+    /// confirming one destroys — so confirming always takes a deliberate move
+    /// to the other button.
     ///
     /// Returns the answer once the user has given one; the prompt window is
     /// already closed by then.
     pub fn handle_key(
         &mut self,
         key: &KeyInput,
+        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
-        let choice = self.active.as_mut()?.prompt.key(key, shell, compositor)?;
+        let choice = self
+            .active
+            .as_mut()?
+            .prompt
+            .key(key, now_ns, shell, compositor)?;
         self.conclude(shell, compositor, choice)
     }
 
@@ -139,6 +148,7 @@ impl ConfirmPrompt {
     pub fn handle_click(
         &mut self,
         local: Point,
+        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Answer> {
@@ -146,7 +156,7 @@ impl ConfirmPrompt {
             .active
             .as_mut()?
             .prompt
-            .click(local, shell, compositor)?;
+            .click(local, now_ns, shell, compositor)?;
         self.conclude(shell, compositor, choice)
     }
 
@@ -167,6 +177,13 @@ impl ConfirmPrompt {
         }
     }
 
+    /// Paint what input changed in the prompt since the last paint.
+    pub fn paint_owed(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
+        if let Some(active) = self.active.as_mut() {
+            active.prompt.paint_owed(shell, compositor);
+        }
+    }
+
     fn conclude(
         &mut self,
         shell: &mut DesktopShell,
@@ -182,11 +199,11 @@ impl ConfirmPrompt {
     }
 }
 
-/// The prompt window's title for `action`.
-const fn title(action: PowerAction) -> &'static str {
+/// The question the prompt asks about `action`.
+const fn headline(action: PowerAction) -> &'static str {
     match action {
-        PowerAction::PowerOff => "Shut Down",
-        PowerAction::Restart => "Restart",
+        PowerAction::PowerOff => "Shut down the computer?",
+        PowerAction::Restart => "Restart the computer?",
     }
 }
 
@@ -206,23 +223,20 @@ const fn message(action: PowerAction) -> &'static str {
 /// The label on the confirming button: the same words as the row that asked,
 /// so the user confirms the thing they chose.
 const fn confirm_label(action: PowerAction) -> &'static str {
-    title(action)
+    match action {
+        PowerAction::PowerOff => "Shut Down",
+        PowerAction::Restart => "Restart",
+    }
 }
 
-/// Build the prompt's dialog: the safe button leading and focused, the
-/// destructive one trailing.
-///
-/// The one definition of the prompt's shape, so the render, the hit-test,
-/// and the button geometry a caller resolves through
-/// [`Dialog::action_rects`] all agree rather than each re-deriving it.
-pub(crate) fn build_dialog(action: PowerAction) -> Dialog {
-    let mut cancel = Button::labelled("Cancel");
-    cancel.set_state(ControlState::default().with_focus(FocusState::FOCUSED));
-    let confirm = Button::new(
-        tairix_controls::ButtonContent::Label(alloc::string::String::from(confirm_label(action))),
-        ControlRole::Destructive,
-    );
-    Dialog::new(title(action))
-        .with_message(message(action))
-        .with_actions(alloc::vec![cancel, confirm])
+/// The prompt's alert: the safe button leading and holding the keyboard, the
+/// destructive one trailing. `None` only for compiled-in text no alert can
+/// carry, which the tests rule out.
+pub(crate) fn build_spec(action: PowerAction) -> Option<AlertSpec> {
+    question(
+        headline(action),
+        message(action),
+        "Cancel",
+        (confirm_label(action), AlertButtonRole::Destructive),
+    )
 }

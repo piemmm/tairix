@@ -426,10 +426,11 @@ unknown type is `OutOfRange`, never a guess) and the **complete**
 name is a code no diagnostic can report, which is how the Pi 4's
 `Context State Error` on Address Device read as a driver decode failure;
 only the values the specification reserves or leaves vendor-defined still
-fail closed. `indicates_device_unreachable` names the codes that read as a
-hot-removal and `indicates_state_disagreement` those where the controller
-*rejected* the command on its own slot/port state, which a fresh slot
-re-drives. It also carries the on-ring little-endian byte conversion and
+fail closed. `indicates_device_unreachable` names the codes where the device
+failed to answer — no handshake, or a hub's transaction translator could not
+reach it — and `indicates_state_disagreement` those where the controller
+*rejected* the command on its own slot/port state; enumeration re-drives
+either on a fresh slot. It also carries the on-ring little-endian byte conversion and
 the transfer-event field decoders (slot ID, endpoint ID, transfer
 residual). `ring` carries the §4.9 state machines and
 holds **no memory**: `ProducerRing::push` returns a `PushOutcome` —
@@ -547,8 +548,8 @@ request names the longest report it expects: to that, or to one service
 interval's payload if that is longer, and no further. A full/low-speed
 endpoint behind the high-speed hub's transaction translator faults with a
 Split Transaction Error when a transfer outruns the interval budget the TT
-scheduled, retracting the interface — the metal keyboard behind the Pi 4 hub.
-Each report is delivered as the device sent it.
+scheduled — the metal keyboard behind the Pi 4 hub. Each report is delivered
+as the device sent it.
 
 The endpoint is not primed during enumeration. A hub
 reports interface class `0x09`, not HID, and is served as a hub alone: no
@@ -743,6 +744,64 @@ not remove the controller's children.**
   `hw_remove_node` returns, and a node is published on the endpoint only after
   every call still queued there has been answered `NotFound`, so nothing the
   previous driver posted reaches the new device (`plans/USB.md` U10).
+
+### An endpoint recovery that fails is decided by its settled port
+
+A device's interrupt-IN endpoint that halts is recovered in place — stopped,
+its ring restarted, the device's own `CLEAR_FEATURE(ENDPOINT_HALT)` — and its
+class driver never sees the fault. A device that does not answer that
+handshake may be gone, or only disturbed: a hub's transaction translator
+glitching for a moment fails it as surely as an unplug does. So the device
+stays served, its URB held and its endpoint unarmed, and the HCD retries the
+recovery off a one-shot timer, half a second apart and at most twice
+(`domain::RECOVERY_SETTLE_NS`, `RECOVERY_RETRIES`). Each retry first reads the
+port the device hangs off: a vacant port frees the device, a port its hub
+disabled is reset and enumerated afresh, and on an enabled one the endpoint is
+recovered again, so a device that was only disturbed keeps its node and its
+class driver. A recovery still failing once the retries are spent frees the
+device, and its port is reset and enumerated in the next round, so the
+device's node is retracted before whatever answers there is published — a node
+is never carried across a reset on an identity it has not proved. A hub's
+report that the port is vacant settles it sooner. An incident closes only when a
+transfer next completes, so a recovery the device answers but that halts
+again counts as failed, and a device the reset produced that fails the same
+way is given up, its port left unserved until it is re-plugged: no endpoint
+that never works can keep the controller recovering it.
+
+A hub's status-change transfer that fails halts its endpoint just the same.
+`UsbDevice::next_hub_change` recovers it — stopped, its ring restarted, the
+hub's own `CLEAR_FEATURE(ENDPOINT_HALT)`, a fresh transfer armed — and
+reconciles every downstream port, since the report the failure lost may have
+carried any change: a device freed while its port went on carrying it is
+served again by that sweep. A hub that cannot be reached is owed the same
+retries on the same ladder; one still failing once they are spent is reset as
+a whole tier — freed with everything behind it, the port above it reset, and
+the tier enumerated afresh — and a tier that reset brings up failing the same
+way is given up (`plans/USB.md` U12).
+
+### A bulk transfer is bounded, and its pipe always recovered
+
+Every bulk URB names how long the HCD may hold it. The serve loop parks no
+longer than the soonest held URB's deadline, and one still held then is
+abandoned — its pipe stopped and restarted empty, so its TD can never complete
+late into a later transfer — and answered `TimedOut`. A held URB the
+controller finished in time is delivered first, so a deadline never discards a
+completion already in. A report poll may hold for ever, since a device reports
+when it has something to say.
+
+A bulk completion that halts its pipe — a STALL, a transaction error, babble —
+is recovered in place before its URB is answered, so the next transfer runs:
+one halted and left halted would never run another. A class driver that must
+put the device's own state back in step clears a pipe's halt through the
+interface operation `ClearHalt`, scoped to the interface's own endpoints and
+refused while it holds a URB; the HCD resets the controller's toggle with the
+device's (`lib/usb`). The HCD keeps an interrupt-IN endpoint armed whether or
+not a URB is held, so a class driver whose completions carry no tag — CBI's —
+drops what it has captured before each command through `DiscardReports`,
+scoped and refused the same way. Each failure and expiry is logged as event 27153 with
+the controller's completion code for the endpoint the transfer ran on — a
+request reaching outside its interface as the refusal 27149 — and one refused
+at once as a held one would be.
 
 ## VL805 USB bus driver — `drivers/bus/usb/vl805`
 

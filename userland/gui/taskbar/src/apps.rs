@@ -21,6 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppBarClick, AppMenu};
+use tairix_abi::ProcId;
 use tairix_controls::damage;
 use tairix_controls::{ControlState, PointerState, TaskbarItem};
 use tairix_geometry::{Rect, Region};
@@ -64,14 +65,15 @@ pub struct AppSlot {
     menu: AppMenu,
     click: AppBarClick,
     identity: AppIdentity,
+    owner: ProcId,
 }
 
 impl AppSlot {
-    /// A slot for an application with the given display label and class
-    /// glyph: no windows, no declaration, and the label as its whole
-    /// identity.
+    /// A slot for the application process `owner`, with the given display
+    /// label and class glyph: no windows, no declaration, and the label as its
+    /// whole identity. A row chosen from its menu is answered to `owner`.
     #[must_use]
-    pub fn new(label: impl Into<String>, icon: IconKind) -> Self {
+    pub fn new(owner: ProcId, label: impl Into<String>, icon: IconKind) -> Self {
         let label = label.into();
         Self {
             identity: AppIdentity {
@@ -86,7 +88,14 @@ impl AppSlot {
             // Nothing declared: the session raises the window this slot was
             // derived from, and an application with none is asked nothing.
             click: AppBarClick::Raise,
+            owner,
         }
+    }
+
+    /// The process this slot stands for.
+    #[must_use]
+    pub const fn owner(&self) -> ProcId {
+        self.owner
     }
 
     /// This slot with the application's own rasterised icon artwork.
@@ -221,6 +230,12 @@ impl AppStrip {
     #[must_use]
     pub fn apps(&self) -> &[AppSlot] {
         &self.apps
+    }
+
+    /// The slot standing for the process `owner`, if the strip holds one.
+    #[must_use]
+    pub fn owned_by(&self, owner: ProcId) -> Option<&AppSlot> {
+        self.apps.iter().find(|app| app.owner == owner)
     }
 
     /// The slot at `index`, if any.

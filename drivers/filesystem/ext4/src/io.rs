@@ -10,7 +10,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::driver::block::Block;
+use tairix_abi::driver::block::{Block, BlockClass};
 use tairix_abi::DriverError;
 use tairix_writeback::{WritePhase, RUN_BYTES};
 

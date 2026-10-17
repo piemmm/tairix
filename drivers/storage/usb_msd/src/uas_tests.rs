@@ -25,6 +25,11 @@ struct ScriptedPipes {
     /// Data the host wrote to the data-out pipe.
     data_out: Vec<Vec<u8>>,
     scrubs: usize,
+    /// How the next data-in read fails, if it does (consumed once).
+    data_in_failure: Option<Errno>,
+    /// Exchanges begun and four-pipe clears run.
+    exchanges: usize,
+    clears: usize,
 }
 
 impl ScriptedPipes {
@@ -36,6 +41,9 @@ impl ScriptedPipes {
             data_in: VecDeque::new(),
             data_out: Vec::new(),
             scrubs: 0,
+            data_in_failure: None,
+            exchanges: 0,
+            clears: 0,
         }
     }
 
@@ -80,6 +88,9 @@ impl UasPipes for ScriptedPipes {
     }
 
     fn data_in(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if let Some(errno) = self.data_in_failure.take() {
+            return Err(errno);
+        }
         let bytes = self.data_in.pop_front().ok_or(Errno::NotFound)?;
         let n = bytes.len().min(buf.len());
         buf[..n].copy_from_slice(&bytes[..n]);
@@ -89,6 +100,15 @@ impl UasPipes for ScriptedPipes {
     fn data_out(&mut self, buf: &[u8]) -> Result<usize, Errno> {
         self.data_out.push(buf.to_vec());
         Ok(buf.len())
+    }
+
+    fn begin_exchange(&mut self) {
+        self.exchanges += 1;
+    }
+
+    fn clear_halts(&mut self) -> Result<(), Errno> {
+        self.clears += 1;
+        Ok(())
     }
 
     fn scrub(&mut self) {
@@ -185,7 +205,8 @@ fn a_foreign_tag_fails_the_exchange_closed() {
     dev.echo_tag = false; // the scripted IU keeps its zero tag
     dev.status.push_back(good());
     let mut scsi = scsi(dev);
-    assert_eq!(scsi.test_unit_ready(0), Err(Errno::BadMagic));
+    assert_eq!(scsi.test_unit_ready(0), Err(Errno::WouldBlock));
+    assert_eq!(pipes(&scsi).clears, 1, "the four pipes are cleared");
 }
 
 #[test]
@@ -195,7 +216,8 @@ fn a_ready_iu_of_the_wrong_direction_is_refused() {
     dev.queue_ready(0x24);
     let mut scsi = scsi(dev);
     let mut buf = [0u8; 512];
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::BadMagic));
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(pipes(&scsi).clears, 1);
 
     // As is a second Read Ready after the data already moved.
     let mut dev = ScriptedPipes::new();
@@ -203,7 +225,33 @@ fn a_ready_iu_of_the_wrong_direction_is_refused() {
     dev.data_in.push_back(vec![0u8; 512]);
     dev.queue_ready(0x25);
     let mut scsi = self::scsi(dev);
-    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::BadMagic));
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(pipes(&scsi).clears, 1);
+}
+
+#[test]
+fn a_data_pipe_that_fails_on_the_wire_clears_all_four_pipes() {
+    let mut dev = ScriptedPipes::new();
+    dev.queue_ready(0x25);
+    dev.data_in_failure = Some(Errno::TimedOut);
+    let mut scsi = scsi(dev);
+    let mut buf = [0u8; 512];
+    assert_eq!(scsi.read(0, 0, 512, &mut buf), Err(Errno::WouldBlock));
+    assert_eq!(pipes(&scsi).clears, 1);
+    assert_eq!(pipes(&scsi).exchanges, 1);
+}
+
+#[test]
+fn a_malformed_request_is_refused_before_any_exchange_or_reset() {
+    let mut scsi = scsi(ScriptedPipes::new());
+    let mut uas = Uas::new(ScriptedPipes::new());
+    assert_eq!(
+        uas.execute(0, &[], crate::scsi::DataPhase::None),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!((uas.pipes().exchanges, uas.pipes().clears), (0, 0));
+    scsi.reset_transport().expect("the reset runs");
+    assert_eq!(pipes(&scsi).clears, 1);
 }
 
 #[test]
@@ -214,7 +262,7 @@ fn a_sense_iu_lying_about_its_length_is_refused() {
     iu[14..16].copy_from_slice(&300u16.to_be_bytes()); // longer than the frame
     dev.status.push_back(iu);
     let mut scsi = scsi(dev);
-    assert_eq!(scsi.test_unit_ready(0), Err(Errno::BadMagic));
+    assert_eq!(scsi.test_unit_ready(0), Err(Errno::WouldBlock));
 }
 
 #[test]
@@ -227,7 +275,7 @@ fn an_endless_status_stream_is_bounded_not_looped_on() {
     let payload = [0u8; 512];
     // The first Write Ready moves the data; the second is refused, well
     // before the scripted queue runs dry.
-    assert_eq!(scsi.write(0, 0, 512, &payload), Err(Errno::BadMagic));
+    assert_eq!(scsi.write(0, 0, 512, &payload), Err(Errno::WouldBlock));
     assert!(pipes(&scsi).status.len() >= 4);
 }
 

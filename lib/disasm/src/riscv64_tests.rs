@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::decode;
+use super::{declared_length, decode, MAX_INSN_LEN};
 use crate::BAD_MNEMONIC;
 
 /// One conformance row: encoding bytes at `address` must decode to exactly
@@ -319,6 +319,12 @@ fn truncated_full_word_consumes_what_is_present() {
     let insn = decode(&[0x13], 0).expect("decodes");
     assert_eq!(insn.mnemonic, BAD_MNEMONIC);
     assert_eq!(insn.length, 1);
+}
+
+#[test]
+fn no_parcel_declares_more_than_the_longest_encoding() {
+    let longest = (0..=u16::MAX).map(declared_length).max();
+    assert_eq!(longest, Some(MAX_INSN_LEN));
 }
 
 #[test]

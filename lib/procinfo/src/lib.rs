@@ -142,6 +142,7 @@ pub mod nettopo;
 pub mod pressure;
 pub mod process;
 pub mod raid;
+pub mod rate;
 pub mod request;
 pub mod resinfo;
 pub mod resolve;
@@ -176,7 +177,8 @@ pub use kstats::{
 };
 pub use list::{field_lossy, walk_pages, walk_pages_with, walk_records, ListError, WalkStep};
 pub use mount::{
-    for_each_mount, for_each_view, render_binding, render_options, Namespace, MOUNT_PAGE, VIEW_PAGE,
+    for_each_mount, for_each_view, for_each_volume_service, render_binding, render_options,
+    Namespace, MOUNT_PAGE, VIEW_PAGE, VOLUME_SERVICE_PAGE,
 };
 pub use netaddr::{
     render_if_addr, render_ip, render_mac, render_neighbor, render_route, render_server,

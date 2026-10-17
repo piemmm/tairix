@@ -16,8 +16,14 @@ workspace = true
 # scroll units the engine speaks.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The sandboxed syntax protocol's batch bounds and answer shape, so a batch
-# the editor builds is one the seam accepts.
+# the editor builds is one the seam accepts, and the decode service and the
+# shared code listing its Code display is built from.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The container magics alone, so an executable is offered as code; the
+# container itself is parsed only in the decode worker.
+tairix-binfmt = { path = "../../../lib/binfmt", version = "=0.0.0" }
+# The sink a sandbox logs a worker's replacement through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The shared Reactive Alloy controls the window composes: the find bar's
 # fields and buttons, the scrollbars.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }

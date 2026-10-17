@@ -12,12 +12,13 @@ use alloc::string::String;
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::time::NANOS_PER_SEC;
-use tairix_controls::{Button, ButtonContent, ControlRole, ControlState, Dialog, FocusState};
+use tairix_abi::window_ipc::{AlertButtonRole, AlertSpec};
 use tairix_log::{EventId, Field, FieldValue};
+use tairix_theme::Theme;
 use tairix_wallpaper::Resolution;
-use tairix_wm::{Compositor, Point, WindowId};
+use tairix_wm::{Compositor, Point, Rect, Scale, WindowId};
 
-use crate::choice::{Choice, ChoicePrompt};
+use crate::choice::{question, Choice, ChoicePrompt};
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
 
@@ -163,15 +164,8 @@ impl TrialOutcome {
     }
 }
 
-/// The prompt window's width in logical pixels.
-pub const WIN_WIDTH: u32 = 440;
-
-/// The prompt window's height in logical pixels: the title, the countdown
-/// and the action band.
-pub const WIN_HEIGHT: u32 = 170;
-
-/// The prompt window's title.
-const TITLE: &str = "Keep this resolution?";
+/// The question the prompt asks.
+const HEADLINE: &str = "Keep this resolution?";
 
 /// A resolution on trial: the request that asked for it and the call to
 /// answer. What it reverts to is the resolution the settings in force name.
@@ -230,6 +224,22 @@ impl ResolutionPrompt {
         self.ended.take()
     }
 
+    /// The centre of the showing prompt's button at `index`, in its client.
+    #[cfg(test)]
+    pub(crate) fn button_centre(
+        &self,
+        index: usize,
+        shell: &DesktopShell,
+        compositor: &Compositor,
+    ) -> Option<Point> {
+        Some(
+            self.active
+                .as_ref()?
+                .prompt
+                .button_centre(index, shell, compositor),
+        )
+    }
+
     /// The compositor window of the showing prompt, if one is up; the
     /// embedder routes its key and click input here.
     #[must_use]
@@ -261,15 +271,12 @@ impl ResolutionPrompt {
             return Err(trial);
         }
         let due_ns = now_ns.saturating_add(TRIAL_SECONDS * u64::from(NANOS_PER_SEC));
-        let Some(prompt) = ChoicePrompt::open(
-            build_dialog(seconds_left(due_ns, now_ns)),
-            (WIN_WIDTH, WIN_HEIGHT),
-            TITLE,
-            shell,
-            compositor,
-        ) else {
+        let Some(mut prompt) = build_spec(seconds_left(due_ns, now_ns))
+            .and_then(|spec| ChoicePrompt::open(&spec, None, shell, compositor))
+        else {
             return Err(trial);
         };
+        prompt.stamp(now_ns);
         self.active = Some(Active {
             trial,
             prompt,
@@ -305,25 +312,26 @@ impl ResolutionPrompt {
             return self.conclude(shell, compositor, Choice::Declined);
         }
         let message = countdown(seconds_left(active.due_ns, now_ns));
-        if active.prompt.message() != Some(message.as_str()) {
-            active.prompt.set_message(message, shell, compositor);
+        if active.prompt.detail() != message {
+            active.prompt.set_detail(&message, shell, compositor);
         }
         false
     }
 
-    /// Apply one key press: `Escape` reverts, `Enter` presses the focused
-    /// button, and `Tab` or an arrow moves the focus. Answers whether the
-    /// trial ended.
+    /// Apply one key press at `now_ns`: `Escape` reverts, `Enter` keeps,
+    /// `Space` presses the focused button, and `Tab` or an arrow moves the
+    /// focus. Answers whether the trial ended.
     pub fn handle_key(
         &mut self,
         key: &KeyInput,
+        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
         let Some(choice) = self
             .active
             .as_mut()
-            .and_then(|active| active.prompt.key(key, shell, compositor))
+            .and_then(|active| active.prompt.key(key, now_ns, shell, compositor))
         else {
             return false;
         };
@@ -336,13 +344,14 @@ impl ResolutionPrompt {
     pub fn handle_click(
         &mut self,
         local: Point,
+        now_ns: u64,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
         let Some(choice) = self
             .active
             .as_mut()
-            .and_then(|active| active.prompt.click(local, shell, compositor))
+            .and_then(|active| active.prompt.click(local, now_ns, shell, compositor))
         else {
             return false;
         };
@@ -362,6 +371,13 @@ impl ResolutionPrompt {
     pub fn repaint(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
         if let Some(active) = self.active.as_mut() {
             active.prompt.repaint(shell, compositor);
+        }
+    }
+
+    /// Paint what input changed in the prompt since the last paint.
+    pub fn paint_owed(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
+        if let Some(active) = self.active.as_mut() {
+            active.prompt.paint_owed(shell, compositor);
         }
     }
 
@@ -402,17 +418,26 @@ fn countdown(seconds: u64) -> String {
     format!("The previous resolution comes back in {seconds} {unit}.")
 }
 
-/// The prompt's dialog at `seconds` left: *Revert* leading, *Keep Changes*
-/// trailing and focused.
-fn build_dialog(seconds: u64) -> Dialog {
-    let mut keep = Button::new(
-        ButtonContent::Label(String::from("Keep Changes")),
-        ControlRole::Recommended,
-    );
-    keep.set_state(ControlState::default().with_focus(FocusState::FOCUSED));
-    Dialog::new(TITLE)
-        .with_message(countdown(seconds))
-        .with_actions(alloc::vec![Button::labelled("Revert"), keep])
+/// Where the trial's prompt opens on `screen` at `scale` in `theme`, frame
+/// included, at the countdown it opens with: what a check of the desktop's own
+/// pixels must allow it to cover. `None` only for compiled-in text no alert
+/// can carry.
+#[must_use]
+pub fn prompt_rect(screen: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let alert = tairix_controls::Alert::from_spec(&build_spec(TRIAL_SECONDS)?);
+    let client = crate::alert::extent(&alert, screen, scale, theme);
+    Some(crate::shell::alert_rect(screen, client, 0, (scale, theme)))
+}
+
+/// The prompt's alert at `seconds` left: *Revert* leading, *Keep Changes*
+/// trailing and the default.
+fn build_spec(seconds: u64) -> Option<AlertSpec> {
+    question(
+        HEADLINE,
+        &countdown(seconds),
+        "Revert",
+        ("Keep Changes", AlertButtonRole::Default),
+    )
 }
 
 #[cfg(test)]

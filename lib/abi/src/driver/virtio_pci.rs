@@ -63,6 +63,11 @@ pub mod common {
     pub const DRIVER_FEATURE_SELECT: usize = 0x08;
     /// `driver_feature` (`le32`, windowed by the select register).
     pub const DRIVER_FEATURE: usize = 0x0C;
+    /// `msix_config` (`le16`) — the MSI-X table entry the device signals
+    /// a configuration change through. Defaults to
+    /// [`VIRTIO_MSI_NO_VECTOR`](super::VIRTIO_MSI_NO_VECTOR) on reset,
+    /// which leaves a change, a link going down among them, unannounced.
+    pub const MSIX_CONFIG: usize = 0x10;
     /// `num_queues` (`le16`).
     pub const NUM_QUEUES: usize = 0x12;
     /// `device_status` (`u8`).

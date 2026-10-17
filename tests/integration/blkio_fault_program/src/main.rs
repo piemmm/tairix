@@ -50,8 +50,8 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::blkio::{
-        serve_request_recovering, BlkDeviceClass, BlkHealth, BlkOp, BlkRequest, BLK_COMPLETION_LEN,
-        BLK_REQUEST_LEN,
+        serve_request_recovering, BlkDeviceClass, BlkHealth, BlkMedium, BlkOp, BlkRequest,
+        BLK_COMPLETION_LEN, BLK_REQUEST_LEN,
     };
     use tairix_abi::driver::block::{Block, BlockGeometry};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -72,10 +72,13 @@ mod program {
     /// masking a transport defect.
     const ENDPOINT_CAPACITY: usize = 4;
 
-    /// The class the served device declares. Its budget is the single shared
-    /// policy this fixture reads its reissue count from — never a literal of
-    /// its own.
-    const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Virtual;
+    /// The class the served device is served as. Its budget is the single
+    /// shared policy this fixture reads its reissue count from — never a
+    /// literal of its own.
+    const DEVICE_CLASS: BlkDeviceClass = DEVICE_MEDIUM.class();
+
+    /// What the served device declares it is.
+    const DEVICE_MEDIUM: BlkMedium = BlkMedium::Virtual;
 
     /// Logical block size the served device reports.
     const BLOCK_SIZE: u32 = 512;
@@ -199,8 +202,8 @@ mod program {
     }
 
     impl Block for FaultDisk {
-        fn device_class(&self) -> BlkDeviceClass {
-            DEVICE_CLASS
+        fn medium(&self) -> Option<BlkMedium> {
+            Some(DEVICE_MEDIUM)
         }
 
         fn geometry(&self) -> Result<BlockGeometry, DriverError> {

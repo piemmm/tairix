@@ -38,13 +38,15 @@ mod program {
     use tairix_raster::Surface;
     use tairix_rt::sync::WorkerWake;
     use tairix_rt::work::{Worker, WorkerGuard};
-    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::decode::{self, DecodeService, Isa, MAX_INPUT};
+    use tairix_sandbox::rt::{serve_stdio, serves, worker_role, RtLauncher};
     use tairix_sandbox::textsyntax::{
         detect, lex_lines, validate_document, LexedBatch, SyntaxFailure, TextSyntaxService,
         MAX_HEAD_LEN, MAX_VALIDATE_LEN,
     };
-    use tairix_sandbox::ParserSandbox;
+    use tairix_sandbox::{ParserSandbox, WorkerExit};
     use tairix_syntax::{Diagnostic, Format, Severity};
+    use tairix_textedit::code::{list_code, CodeListing, Unlisted};
     use tairix_textedit::detect::format_for_name;
     use tairix_textedit::document::{Document, OutOfMemory, Snapshot, STEP_BYTES};
     use tairix_textedit::editor::{Conversion, Converted, Editor, Mode};
@@ -206,6 +208,51 @@ mod program {
 
     type SyntaxWorker = Worker<SyntaxSandbox, SyntaxJob, SyntaxReply>;
 
+    type CodeSandbox = ParserSandbox<RtLauncher, tairix_rt::LogSink>;
+
+    /// What each worker is spawned to serve: a worker apiece, so an
+    /// executable's parsers never share an address space with the ones that
+    /// colour text.
+    const CODE_SERVICE: &[u8] = b"code";
+    const SYNTAX_SERVICE: &[u8] = b"syntax";
+
+    /// The decode worker's answer wake.
+    const CODE_TOKEN: u64 = APP_TOKEN + 1;
+
+    /// A listing of the document `stamp` names, asked as `id`.
+    struct CodeJob {
+        stamp: Stamp,
+        id: u64,
+        snapshot: Arc<Snapshot>,
+        isa: Option<Isa>,
+        system: Option<Isa>,
+    }
+
+    struct CodeReply {
+        stamp: Stamp,
+        id: u64,
+        listing: Result<CodeListing, Unlisted>,
+    }
+
+    type CodeWorker = Worker<CodeSandbox, CodeJob, CodeReply>;
+
+    fn serve_code(sandbox: &mut CodeSandbox, job: &mut CodeJob) -> CodeReply {
+        let listing = match bytes_of(&job.snapshot) {
+            Some(image) => list_code(
+                sandbox,
+                &image,
+                (job.isa, job.system),
+                &mut tairix_rt::clock_get,
+            ),
+            None => Err(Unlisted::no_memory()),
+        };
+        CodeReply {
+            stamp: job.stamp,
+            id: job.id,
+            listing,
+        }
+    }
+
     fn serve_syntax(sandbox: &mut SyntaxSandbox, job: &mut SyntaxJob) -> SyntaxReply {
         let answer = match &job.work {
             SyntaxWork::Lex(batch) => {
@@ -238,14 +285,19 @@ mod program {
         if snapshot.len() > MAX_VALIDATE_LEN {
             return Err(SyntaxFailure::TooLarge);
         }
-        let mut text = Vec::new();
-        text.try_reserve_exact(snapshot.len())
-            .map_err(|_| SyntaxFailure::TooLarge)?;
+        bytes_of(snapshot).ok_or(SyntaxFailure::TooLarge)
+    }
+
+    /// `snapshot` as one run of bytes, or `None` when the allocator will not
+    /// hold them.
+    fn bytes_of(snapshot: &Snapshot) -> Option<Vec<u8>> {
+        let mut run = Vec::new();
+        run.try_reserve_exact(snapshot.len()).ok()?;
         snapshot.walk(0, |bytes| {
-            text.extend_from_slice(bytes);
+            run.extend_from_slice(bytes);
             ControlFlow::Continue(())
         });
-        Ok(text)
+        Some(run)
     }
 
     /// What the editor keeps beside the host's own.
@@ -257,6 +309,14 @@ mod program {
         /// The window after the one whose syntax job ran last, so no window
         /// can starve another's colouring.
         next_syntax: usize,
+        /// Code listings, one at a time.
+        code: Arc<CodeWorker>,
+        _code_guard: WorkerGuard<CodeSandbox, CodeJob, CodeReply>,
+        code_busy: bool,
+        /// The window after the one whose listing was asked last.
+        next_code: usize,
+        /// The instruction set this machine runs, which an `rxe` is read as.
+        system: Option<Isa>,
     }
 
     /// What the editor keeps for each window.
@@ -288,24 +348,43 @@ mod program {
             let syntax = Arc::new(SyntaxWorker::new(
                 serve_syntax,
                 ParserSandbox::new(
-                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages)
+                        .serving(SYNTAX_SERVICE),
                     tairix_rt::LogSink,
                 ),
                 WorkerWake::create(),
             ));
             docapp::start_worker(APP_NAME, &syntax, set, APP_TOKEN, "syntax")?;
             let guard = WorkerGuard::new(&syntax);
+            let code = Arc::new(CodeWorker::new(
+                serve_code,
+                ParserSandbox::new(
+                    RtLauncher::own_binary(decode::WORKER_MEMORY).serving(CODE_SERVICE),
+                    tairix_rt::LogSink,
+                ),
+                WorkerWake::create(),
+            ));
+            docapp::start_worker(APP_NAME, &code, set, CODE_TOKEN, "code")?;
+            let code_guard = WorkerGuard::new(&code);
             Ok(Self {
                 syntax,
                 _syntax_guard: guard,
                 syntax_busy: false,
                 next_syntax: 0,
+                code,
+                _code_guard: code_guard,
+                code_busy: false,
+                next_code: 0,
+                system: tairix_rt::boot_facts()
+                    .ok()
+                    .map(|facts| Isa::of_arch(facts.arch)),
             })
         }
 
         fn wakes(&self) -> Vec<(u64, Arc<dyn AnswerWake>)> {
             let syntax: Arc<dyn AnswerWake> = self.syntax.clone();
-            alloc::vec![(APP_TOKEN, syntax)]
+            let code: Arc<dyn AnswerWake> = self.code.clone();
+            alloc::vec![(APP_TOKEN, syntax), (CODE_TOKEN, code)]
         }
 
         fn faces(theme: &Theme, scale: Scale) -> Faces {
@@ -379,10 +458,16 @@ mod program {
                 host.app.syntax_busy = false;
                 adopt_syntax(host, reply);
             }
+            while let Some(reply) = host.app.code.collect() {
+                host.app.code_busy = false;
+                adopt_code(host, reply);
+            }
         }
 
         fn turn(host: &mut Host<Self>, now_ns: u64) -> bool {
-            submit_syntax(host, now_ns)
+            let syntax = submit_syntax(host, now_ns);
+            let code = submit_code(host);
+            syntax || code
         }
 
         /// When the soonest store check falls due.
@@ -504,6 +589,74 @@ mod program {
             return host.app.syntax.submit(job);
         }
         false
+    }
+
+    /// Hand the decode worker the next listing any window wants, answering
+    /// whether the answer is already waiting.
+    ///
+    /// A document past what one decode may carry is refused here rather than
+    /// frozen for a worker that could only refuse it.
+    fn submit_code(host: &mut Host<TextEdit>) -> bool {
+        if host.app.code_busy {
+            return false;
+        }
+        let count = host.windows.len();
+        for turn in 0..count {
+            let index = (host.app.next_code + turn) % count;
+            let window = &mut host.windows[index];
+            if window.loading() {
+                continue;
+            }
+            let Some((id, isa)) = window.view.code_want() else {
+                continue;
+            };
+            let snapshot = if window.view.editor().document().len() > MAX_INPUT {
+                Err(Unlisted::too_large())
+            } else {
+                window
+                    .view
+                    .editor_mut()
+                    .snapshot()
+                    .map_err(|OutOfMemory| Unlisted::no_memory())
+            };
+            let snapshot = match snapshot {
+                Ok((_, snapshot)) => snapshot,
+                Err(unlisted) => {
+                    let (layout, damage) = (&window.layout, &mut window.damage);
+                    window.view.code_refused(unlisted, layout, damage);
+                    window.owe_reported();
+                    continue;
+                }
+            };
+            let job = CodeJob {
+                stamp: window.stamp(),
+                id,
+                snapshot,
+                isa,
+                system: host.app.system,
+            };
+            host.app.next_code = (index + 1) % count;
+            host.app.code_busy = true;
+            return host.app.code.submit(job);
+        }
+        false
+    }
+
+    /// Take in a listing the decode worker built, for the document that asked
+    /// for it: one for a document since gone is let go.
+    fn adopt_code(host: &mut Host<TextEdit>, reply: CodeReply) {
+        let Some(index) = host.showing(reply.stamp) else {
+            return;
+        };
+        let window = &mut host.windows[index];
+        if window.loading() {
+            return;
+        }
+        let (layout, damage) = (&window.layout, &mut window.damage);
+        window
+            .view
+            .code_listed(reply.id, reply.listing, layout, damage);
+        window.owe_reported();
     }
 
     /// The syntax job `window` wants next, if any.
@@ -756,7 +909,13 @@ mod program {
         // is parsed by a capability-empty child this binary is re-entered as,
         // which never becomes the editor.
         if worker_role() {
-            return serve_stdio(&mut TextSyntaxService).exit_code();
+            return if serves(CODE_SERVICE) {
+                serve_stdio(&mut DecodeService).exit_code()
+            } else if serves(SYNTAX_SERVICE) {
+                serve_stdio(&mut TextSyntaxService).exit_code()
+            } else {
+                WorkerExit::Unserved.code()
+            };
         }
         if tairix_rt::arg(1).is_some_and(|arg| matches!(arg, b"-h" | b"--help" | b"-?")) {
             return tairix_help::print_own_short_help(APP_NAME, None);

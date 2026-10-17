@@ -22,8 +22,8 @@
 //!
 //! So a refused set is an ordinary outcome, not a bug: an account whose
 //! ceiling withholds `CAP_TIME_SET` gets `PermissionDenied`, and the app
-//! **says so in its window and on `stderr` and keeps running**. It never
-//! reports a clock it did not change as changed.
+//! **says so in an alert held by its window and on `stderr`, and keeps
+//! running**. It never reports a clock it did not change as changed.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -35,8 +35,12 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    extern crate alloc;
 
     use core::cell::Cell;
+
+    use alloc::format;
+    use alloc::string::String;
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
@@ -172,59 +176,71 @@ mod program {
     }
 
     /// Commit the editor's fields: validate, compose, and ask the kernel to
-    /// step the clock.
+    /// step the clock, answering why the kernel refused it.
     ///
-    /// Every outcome is stated. A field fault never reaches the kernel; a
-    /// refused set is reported as refused and the clock is left alone. The
+    /// Every outcome is stated. A field fault never reaches the kernel and is
+    /// stated in the form beside the field; a set the kernel refused leaves
+    /// the clock alone and is the caller's to state in an alert. The
     /// provenance is [`WallTimeState::Adjusted`], which is what a human at the
     /// keyboard actually is — a step correction, not a synchronised source.
-    fn commit(editor: &mut Editor) {
+    fn commit(editor: &mut Editor) -> Option<String> {
         let instant = match editor.compose() {
             Ok(instant) => instant,
             Err(fault) => {
                 app::report(APP_NAME, fault.message());
                 editor.set_status(Status::Rejected(fault));
-                return;
+                return None;
             }
         };
         let ret = tairix_rt::wall_time_set(instant, WallTimeState::Adjusted);
         if ret == 0 {
             editor.set_status(Status::Applied);
-            return;
+            return None;
         }
+        editor.set_status(Status::Idle);
         let err = Errno::from_syscall(ret);
-        let status = if err == Errno::PermissionDenied {
-            Status::Denied
+        Some(if err == Errno::PermissionDenied {
+            String::from("This account may not set the clock. Nothing was changed.")
         } else {
-            Status::Failed("The clock could not be set.")
-        };
-        // Loud on both channels: the window states it for the user in front
-        // of it, `stderr` for whoever started the app.
-        if let Some(message) = status.message() {
-            app::report(APP_NAME, message);
-        }
-        editor.set_status(status);
+            format!("The system refused it ({err}). Nothing was changed.")
+        })
     }
 
-    /// Apply one key press to the editor, answering whether the window should
-    /// close.
+    /// The headline of an alert saying the clock was not set.
+    const NOT_SET: &str = "The clock could not be set";
+
+    /// What a key asked of the form.
+    enum Keyed {
+        /// Nothing beyond what the editor already shows.
+        Edited,
+        /// Close the window.
+        Close,
+        /// The clock was not set, for the reason given.
+        Refused(String),
+    }
+
+    /// Apply one key press to the editor.
     ///
     /// `Tab` moves between fields, `Enter` commits, `Escape` closes, and a
     /// digit or `Backspace` edits the focused field. Nothing else is
     /// interpreted: a key with no meaning here is ignored rather than guessed
     /// at.
-    fn apply_key(editor: &mut Editor, key: Key) -> bool {
+    fn apply_key(editor: &mut Editor, key: Key) -> Keyed {
         match key {
-            Key::Named(NamedKey::Escape) => return true,
+            Key::Named(NamedKey::Escape) => return Keyed::Close,
             Key::Named(NamedKey::Tab) => editor.focus_next(),
-            Key::Named(NamedKey::Enter) => commit(editor),
+            Key::Named(NamedKey::Enter) => {
+                if let Some(why) = commit(editor) {
+                    return Keyed::Refused(why);
+                }
+            }
             Key::Named(NamedKey::Backspace) => editor.backspace(editor.focus()),
             Key::Char(ch) => editor.push(editor.focus(), ch),
             // Every other named key means nothing in a six-field form; it is
             // ignored rather than guessed at.
             Key::Named(_) => {}
         }
-        false
+        Keyed::Edited
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
@@ -331,8 +347,19 @@ mod program {
                     ..
                 } => {
                     if let InputEvent::KeyPressed { key, .. } = key_input_event(pressed) {
-                        if apply_key(&mut editor, key) {
-                            return 0;
+                        match apply_key(&mut editor, key) {
+                            Keyed::Edited => {}
+                            Keyed::Close => return 0,
+                            Keyed::Refused(why) => {
+                                let owner = window.window_id();
+                                let _ = app::refuse(
+                                    window.client(),
+                                    (APP_NAME, binding.endpoint()),
+                                    owner,
+                                    NOT_SET,
+                                    &why,
+                                );
+                            }
                         }
                     }
                 }
@@ -357,7 +384,13 @@ mod program {
                     {
                         // A refused re-open is a click that did not work, not
                         // a fault: the application stays on the bar.
-                        app::report(APP_NAME, format_args!("{err}"));
+                        let _ = app::refuse(
+                            window.client(),
+                            (APP_NAME, binding.endpoint()),
+                            None,
+                            "The Date & Time window could not be opened",
+                            &format!("{err}"),
+                        );
                         continue;
                     }
                     if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {

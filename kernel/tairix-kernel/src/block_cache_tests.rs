@@ -154,6 +154,10 @@ impl MemDisk {
 }
 
 impl Block for MemDisk {
+    fn medium(&self) -> Option<BlkMedium> {
+        Some(BlkMedium::HardDisk)
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         Ok(self.geo)
     }
@@ -212,6 +216,12 @@ fn cached() -> (Rc<RefCell<Store>>, BlockCache<MemDisk>) {
     let cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), sink())
         .expect("geometry queried");
     (store, cache)
+}
+
+#[test]
+fn the_cache_reports_the_medium_of_the_disk_it_caches() {
+    let (_store, cache) = cached();
+    assert_eq!(cache.medium(), Some(BlkMedium::HardDisk));
 }
 
 /// One block of recognisable bytes.

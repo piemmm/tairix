@@ -27,11 +27,11 @@ use tairix_abi::window_ipc::{
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
     decode_open_target_reply, decode_picked_file_reply, decode_picked_name_reply,
-    decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu, BundleRunPath, ClipboardHeld,
-    ClipboardKind, CursorShape, DragItems, DropOperation, DropTarget, HandOverDocument,
-    HandOverOutcome, LayerDepth, NameList, OpenTarget, PickPurpose, PickedFile, PointerAction,
-    PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent, WindowRegion,
-    WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
+    decode_terrain_reply, decode_wallpapers_reply, AlertSeverity, AlertSpec, AppBar, AppMenu,
+    BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DragItems, DropOperation, DropTarget,
+    HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget, PickPurpose, PickedFile,
+    PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
     WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
     WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX,
     WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
@@ -379,6 +379,32 @@ pub fn retained_damage(
         width_px: right - wanted.x,
         height_px: bottom - wanted.y,
     })
+}
+
+/// The error alert stating that what `headline` names was not done because of
+/// `reason`, a clause written to follow a colon on `stderr`.
+///
+/// # Errors
+///
+/// [`AlertSpec::acknowledged`]'s.
+pub(crate) fn refusal_alert(headline: &str, reason: &str) -> Result<AlertSpec, Errno> {
+    AlertSpec::acknowledged(AlertSeverity::Error, headline, &alert_sentence(reason))
+}
+
+/// `reason` as the sentence an alert states it in: its first letter a capital
+/// and a full stop at its end. No reason stays none.
+fn alert_sentence(reason: &str) -> String {
+    let mut chars = reason.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut sentence = String::with_capacity(reason.len() + 1);
+    sentence.extend(first.to_uppercase());
+    sentence.push_str(chars.as_str());
+    if !sentence.ends_with(['.', '!', '?', '\u{2026}']) {
+        sentence.push('.');
+    }
+    sentence
 }
 
 /// The window-local [`Point`] a wire pointer event's `(x, y)` names.
@@ -1415,6 +1441,48 @@ impl<T: WindowTransport> WindowClient<T> {
         let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
         let len = self.call(&request, &mut reply)?;
         decode_minted_id_reply(&reply[..len])
+    }
+
+    /// Put `alert` to the user in a window of its own, holding `owner` — one
+    /// of this app's own top-level windows — until it is answered, or no
+    /// window when `None`. Returns the id its one
+    /// [`WindowEvent::AlertClosed`] names, delivered to `event_endpoint`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotSupported`] — the desktop draws no alerts. The caller
+    ///   states its message on `stderr` instead and carries on.
+    /// * [`Errno::LimitExceeded`] — this app already has
+    ///   [`ALERT_MAX_OPEN`](tairix_abi::window_ipc::ALERT_MAX_OPEN) alerts up.
+    /// * [`Errno::NotFound`] — `owner` is not one of this app's windows.
+    /// * [`Errno::OutOfRange`] — `owner` is a popup, tool or layer surface.
+    /// * A transport failure, or a corrupt reply frame.
+    ///
+    /// [`WindowEvent::AlertClosed`]: tairix_abi::window_ipc::WindowEvent::AlertClosed
+    pub fn open_alert(
+        &mut self,
+        event_endpoint: u64,
+        owner: Option<u64>,
+        alert: &AlertSpec,
+    ) -> Result<u64, Errno> {
+        let request = WindowRequest::OpenAlert {
+            event_endpoint,
+            owner_window_id: owner.unwrap_or(0),
+            alert: *alert,
+        };
+        let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
+        let len = self.call(&request, &mut reply)?;
+        decode_minted_id_reply(&reply[..len])
+    }
+
+    /// Withdraw this app's alert `alert_id`; it is answered `Dismissed`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for an alert already answered or not this app's,
+    /// a transport failure, or a corrupt status frame.
+    pub fn close_alert(&mut self, alert_id: u64) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::CloseAlert { alert_id })
     }
 
     /// Take the next target queued for this application to open, or `None`

@@ -19,28 +19,25 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, VolumeIoHealthRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
+    VOLUME_ID_UNPUBLISHED,
 };
-use tairix_controls::PressureKind;
+use tairix_controls::{PressureKind, RateTrace};
 use tairix_procinfo::display::{format_bytes, format_rate, percent};
 use tairix_procinfo::{availability_name, medium_name, mount_name_bytes, VolumeBytes};
 use tairix_theme::SignalRole;
 
 use super::health_text;
 use crate::format::format_latency;
-use crate::model::{OwnerBundles, RateTrace, RollingMeters, VolumeService};
+use crate::model::{OwnerBundles, RollingMeters, VolumeService};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice, StorageId, TaskCostColumn, Trace,
 };
-
-/// The nil volume identity: what a volume that published no identity
-/// reports, which no per-volume query can be keyed on.
-const NO_VOLUME: [u8; MOUNT_VOLUME_ID_LEN] = [0; MOUNT_VOLUME_ID_LEN];
 
 /// One storage device the rail lists, and what is on it.
 pub(crate) struct StorageSubject<'a> {
@@ -62,7 +59,7 @@ impl StorageSubject<'_> {
     pub(crate) fn key(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
         self.volumes
             .first()
-            .map_or(NO_VOLUME, |volume| volume.volume_id())
+            .map_or(VOLUME_ID_UNPUBLISHED, |volume| volume.volume_id())
     }
 
     /// This device's rail entry identity.
@@ -81,7 +78,7 @@ impl StorageSubject<'_> {
 
     /// The medium the device declares, taking the first volume that names
     /// one so an unclassified volume cannot hide a classified sibling.
-    fn medium(&self) -> Option<BlkDeviceClass> {
+    fn medium(&self) -> Option<BlkMedium> {
         self.volumes.iter().find_map(|volume| volume.medium())
     }
 
@@ -163,7 +160,7 @@ impl StorageSubject<'_> {
 pub(crate) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
     let mut subjects: Vec<StorageSubject<'_>> = Vec::new();
     for volume in sample.mounts.iter().flatten() {
-        if volume.volume_id() == NO_VOLUME {
+        if volume.volume_id() == VOLUME_ID_UNPUBLISHED {
             continue;
         }
         let id = subject_of(sample, &volume.volume_id());

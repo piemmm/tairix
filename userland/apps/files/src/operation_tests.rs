@@ -7,8 +7,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{content_area, progress_cancel_at, progress_dialog_rect, sidebar_view};
@@ -18,8 +17,8 @@ use tairix_theme::Theme;
 
 use super::{
     change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
-    mode_flip_allowed, move_refusal, operation_control, reaches_operation_under_notice,
-    read_refusal, remove_refusal, trash_read_refusal, OperationControl,
+    mode_flip_allowed, move_refusal, operation_control, read_refusal, remove_refusal,
+    trash_read_refusal, OperationControl,
 };
 use tairix_abi::Errno;
 
@@ -41,7 +40,7 @@ fn places() -> Places {
         &[Volume {
             label: "Backup".to_string(),
             target: "/Storage/Backup".to_string(),
-            medium: Some(BlkDeviceClass::Rotational),
+            medium: Some(BlkMedium::HardDisk),
         }],
     )
 }
@@ -339,23 +338,6 @@ fn a_redraw_request_during_an_operation_is_answered() {
         operation_control(None, Scale::ONE, &theme, WINDOW, BAND, &event),
         OperationControl::Redraw
     );
-}
-
-/// A notice over the panel takes its own dismissal, which the panel would
-/// read as Cancel; only closing the window still reaches the operation.
-#[test]
-fn a_notice_over_the_panel_takes_everything_but_a_close() {
-    let escape = WindowEvent::Key {
-        window_id: 1,
-        key: KeyInput::Pressed {
-            key: KeyValue::Named(NamedKeyCode::Escape),
-            modifiers: Modifiers::default(),
-        },
-    };
-    assert!(!reaches_operation_under_notice(&escape));
-    assert!(reaches_operation_under_notice(
-        &WindowEvent::CloseRequested { window_id: 1 }
-    ));
 }
 
 /// A second flip taken from the mode as it was before the first landed would

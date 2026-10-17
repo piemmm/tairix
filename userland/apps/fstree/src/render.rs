@@ -24,7 +24,7 @@ use crate::model::{
     InputOp, IsaPurpose, Model, Overlay, Pane, Prompt, SortKey, View, Viewer, ViewerKind,
 };
 use crate::settings::SettingKey;
-use crate::view_disasm::{isa_name, DisasmPane, DisasmView};
+use crate::view_disasm::{DisasmPane, DisasmView};
 use crate::view_hex::{dump_row, offset_digits, HexView};
 use crate::view_text::TextView;
 use crate::walk::{relative_to, WalkPurpose};
@@ -699,7 +699,7 @@ fn render_viewer_status(model: &Model, window: &mut Window, rows: u16, cols: u16
         }
         Some(Viewer::Disasm(view)) => {
             let isa = match view.isa() {
-                Some(isa) => isa_name(isa),
+                Some(isa) => isa.name(),
                 None => "isa?",
             };
             let scanning = if view.ticking() {

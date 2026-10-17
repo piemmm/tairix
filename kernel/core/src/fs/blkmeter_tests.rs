@@ -2,6 +2,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use tairix_abi::driver::block::BlockClass;
 
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
@@ -36,7 +37,7 @@ struct FixtureBlock {
     fail: Option<DriverError>,
     promise: MountAvailability,
     name: BlkDeviceName,
-    class: BlkDeviceClass,
+    medium: Option<BlkMedium>,
     flushes: usize,
     discards: usize,
 }
@@ -48,7 +49,7 @@ impl FixtureBlock {
             fail: None,
             promise: MountAvailability::Available,
             name: BlkDeviceName::new("fixture-blk"),
-            class: BlkDeviceClass::Rotational,
+            medium: Some(BlkMedium::HardDisk),
             flushes: 0,
             discards: 0,
         }
@@ -110,8 +111,8 @@ impl Block for FixtureBlock {
         Ok(())
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        self.class
+    fn medium(&self) -> Option<BlkMedium> {
+        self.medium
     }
 
     fn device_name(&self) -> BlkDeviceName {
@@ -142,18 +143,15 @@ fn a_new_meter_reports_its_identity_and_no_readings() {
     // medium's patience on nothing but hope.
     assert_eq!(
         source.budget,
-        BlkDeviceClass::served_as(None).budget(),
+        BlkDeviceClass::of(None).budget(),
         "an unanswered device buys no patience"
     );
 }
 
 #[test]
-fn adopting_the_device_takes_its_name_and_its_class_budget() {
+fn adopting_the_device_takes_its_name_and_its_mediums_budget() {
     let mut meter = meter();
-    meter.adopt_device(
-        Some(BlkDeviceClass::Rotational),
-        BlkDeviceName::new("fixture-blk"),
-    );
+    meter.adopt_device(Some(BlkMedium::HardDisk), BlkDeviceName::new("fixture-blk"));
     let source = meter.io_source();
     assert_eq!(source.device.as_str(), "fixture-blk");
     assert_eq!(source.budget, BlkDeviceClass::Rotational.budget());
@@ -343,9 +341,10 @@ fn concurrent_attempts_read_a_deeper_queue() {
 }
 
 #[test]
-fn a_metered_device_names_and_classifies_itself_from_what_it_wraps() {
+fn a_metered_device_names_itself_and_reads_as_what_it_wraps() {
     let device = MeteredBlock::new(FixtureBlock::new(4), DEV, &SINK);
     assert_eq!(device.device_name().as_str(), "fixture-blk");
+    assert_eq!(device.medium(), Some(BlkMedium::HardDisk));
     assert_eq!(device.device_class(), BlkDeviceClass::Rotational);
 
     let source = device.io_source();
@@ -354,7 +353,7 @@ fn a_metered_device_names_and_classifies_itself_from_what_it_wraps() {
     assert_eq!(
         source.budget,
         BlkDeviceClass::Rotational.budget(),
-        "the wrapped device's class earns the envelope"
+        "the wrapped device's medium earns the envelope"
     );
 }
 

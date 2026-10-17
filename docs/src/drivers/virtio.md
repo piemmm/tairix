@@ -201,9 +201,14 @@ unprogrammed queue.
 
 The transport is built signalling one way, fixed for its life: through
 the MSI-X table entry the kernel routed, which `queue_set` programs into
-every queue's `queue_msix_vector`, or, with no entry, on the function's
-INTx pin, which the device holds until `ack_interrupt` reads the ISR
-status (virtio 1.1 §4.1.4.5). A user-space driver builds it with
+every queue's `queue_msix_vector` and `negotiate` into `msix_config`
+(`route_config_changes`), or, with no entry, on the function's INTx pin,
+which the device holds until `ack_interrupt` reads the ISR status
+(virtio 1.1 §4.1.4.5). A reset unmaps `msix_config`, and an MSI-X device
+then announces no configuration change at all (virtio 1.1 §4.1.5.3), so
+without the mapping a NIC's link going down reached its driver only if
+something else woke it. Each mapping is read back and a device that
+refuses one fails closed. A user-space driver builds it with
 `PciTransport::map`, from the windows and the entry its grants name
 (`virtio_pci_windows`), so the entry comes from the kernel that routed
 it, never from a constant the driver assumes.

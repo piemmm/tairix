@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use super::{Admission, ComposerAction, MemberRegistry, MemberStanding, ProbedDevice};
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::BlockGeometry;
 use tairix_abi::raid::{RaidLevel, SlotDisposition};
 use tairix_abi::raid_ipc::MemberOffer;
@@ -74,10 +74,10 @@ fn agent_of(endpoint: u64) -> ProcId {
     ProcId::from_raw(raw)
 }
 
-/// What a device of `class` answered when the composer connected to it.
-fn probed(class: BlkDeviceClass) -> ProbedDevice {
+/// What a device of `medium` answered when the composer connected to it.
+fn probed(medium: BlkMedium) -> ProbedDevice {
     ProbedDevice {
-        class,
+        medium: Some(medium),
         geometry: BlockGeometry {
             block_size: 512,
             block_count: 8192,
@@ -90,7 +90,7 @@ fn probed(class: BlkDeviceClass) -> ProbedDevice {
 fn admit(
     registry: &mut MemberRegistry,
     endpoint: u64,
-    class: BlkDeviceClass,
+    medium: BlkMedium,
     superblock: ArraySuperblock,
     now_ns: u64,
 ) -> usize {
@@ -98,7 +98,7 @@ fn admit(
         membership_of(endpoint),
         agent_of(endpoint),
         offer(endpoint),
-        probed(class),
+        probed(medium),
         superblock,
         now_ns,
     ) {
@@ -107,10 +107,10 @@ fn admit(
     }
 }
 
-/// The settle window an array of `class` devices is given: that class's own
+/// The settle window an array of `medium` devices is given: its class's own
 /// recovery grace window, read from the shared cadence rather than restated.
-fn settle_ns(class: BlkDeviceClass) -> u64 {
-    RetryCadence::for_class(class).base_ns()
+fn settle_ns(medium: BlkMedium) -> u64 {
+    RetryCadence::for_class(medium.class()).base_ns()
 }
 
 /// Compose and publish `array_uuid` the way the live composer would, returning
@@ -133,18 +133,18 @@ fn an_offered_member_is_registered_against_its_own_metadata() {
     let index = admit(
         &mut registry,
         7,
-        BlkDeviceClass::Removable,
+        BlkMedium::UsbFlash,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 4),
         0,
     );
     assert_eq!(index, 0);
     let held = registry.members()[index];
     // Everything the composer needs to drive and end this membership: the call
-    // to answer when it ends, the transport to reach the device, the class its
+    // to answer when it ends, the transport to reach the device, the medium its
     // patience is sized from, and its standing.
     assert_eq!(held.membership(), membership_of(7));
     assert_eq!(held.offer(), offer(7));
-    assert_eq!(held.class(), BlkDeviceClass::Removable);
+    assert_eq!(held.medium(), Some(BlkMedium::UsbFlash));
     assert_eq!(held.standing(), MemberStanding::Held);
     // The reassembly view is the one copy of the device's metadata, tagged so
     // a resolved slot maps straight back to the member that fills it.
@@ -156,13 +156,13 @@ fn an_offered_member_is_registered_against_its_own_metadata() {
 fn a_second_membership_for_a_device_already_held_is_refused() {
     let mut registry = MemberRegistry::new();
     let sb = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4);
-    admit(&mut registry, 7, BlkDeviceClass::Removable, sb, 0);
+    admit(&mut registry, 7, BlkMedium::UsbFlash, sb, 0);
     assert_eq!(
         registry.admit(
             membership_of(99),
             agent_of(99),
             offer(7),
-            probed(BlkDeviceClass::Removable),
+            probed(BlkMedium::UsbFlash),
             sb,
             0
         ),
@@ -180,7 +180,7 @@ fn a_membership_is_found_by_the_agent_holding_it_and_its_release_frees_the_devic
     // was a duplicate and the disk could never rejoin its array.
     let mut registry = MemberRegistry::new();
     let sb = superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4);
-    let index = admit(&mut registry, 7, BlkDeviceClass::Removable, sb, 0);
+    let index = admit(&mut registry, 7, BlkMedium::UsbFlash, sb, 0);
     assert_eq!(registry.members()[index].agent(), agent_of(7));
     assert_eq!(
         registry.index_of_agent(agent_of(8)),
@@ -197,7 +197,7 @@ fn a_membership_is_found_by_the_agent_holding_it_and_its_release_frees_the_devic
             membership_of(7),
             agent_of(70),
             offer(7),
-            probed(BlkDeviceClass::Removable),
+            probed(BlkMedium::UsbFlash),
             sb,
             0
         ),
@@ -212,7 +212,7 @@ fn a_held_window_is_recognised_by_the_handle_the_offer_names() {
     admit(
         &mut registry,
         7,
-        BlkDeviceClass::Removable,
+        BlkMedium::UsbFlash,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
@@ -221,7 +221,7 @@ fn a_held_window_is_recognised_by_the_handle_the_offer_names() {
             membership_of(9),
             agent_of(9),
             offer(9),
-            probed(BlkDeviceClass::Removable)
+            probed(BlkMedium::UsbFlash)
         ),
         Admission::Registered { index: 1 }
     );
@@ -254,11 +254,11 @@ fn a_complete_array_is_composed_with_no_wait_at_all() {
     // The common path — every member discovered — must cost no delay, so an
     // array comes up at boot as promptly as a plain disk.
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::Rotational;
+    let medium = BlkMedium::HardDisk;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
@@ -271,7 +271,7 @@ fn a_complete_array_is_composed_with_no_wait_at_all() {
     admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 4),
         0,
     );
@@ -284,11 +284,11 @@ fn a_complete_array_is_composed_with_no_wait_at_all() {
 #[test]
 fn an_incomplete_array_settles_before_it_starts_degraded() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::SolidState;
+    let medium = BlkMedium::SolidState;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         1_000,
     );
@@ -298,7 +298,7 @@ fn an_incomplete_array_settles_before_it_starts_degraded() {
     else {
         panic!("a copy that may merely be slow is waited for, not written off");
     };
-    assert_eq!(deadline_ns, 1_000 + settle_ns(class));
+    assert_eq!(deadline_ns, 1_000 + settle_ns(medium));
     assert!(
         deadline_ns > 1_000,
         "parking on the settle deadline must be a wait, never a spin"
@@ -319,12 +319,12 @@ fn an_incomplete_array_settles_before_it_starts_degraded() {
 fn the_settle_window_is_read_from_the_members_own_hardware() {
     // A spinning disk may legitimately still be spinning up; a solid-state one
     // that has not appeared is not coming. The wait is that difference, taken
-    // from the class the device itself declared.
+    // from the medium the device itself declared.
     let mut fast = MemberRegistry::new();
     admit(
         &mut fast,
         1,
-        BlkDeviceClass::SolidState,
+        BlkMedium::SolidState,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
@@ -332,7 +332,7 @@ fn the_settle_window_is_read_from_the_members_own_hardware() {
     admit(
         &mut slow,
         1,
-        BlkDeviceClass::Rotational,
+        BlkMedium::HardDisk,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
@@ -359,14 +359,14 @@ fn the_settle_window_follows_the_most_patient_member_of_the_array() {
     admit(
         &mut registry,
         1,
-        BlkDeviceClass::SolidState,
+        BlkMedium::SolidState,
         superblock(RaidLevel::Mirror, UUID_A, 3, 0, 4),
         0,
     );
     admit(
         &mut registry,
         2,
-        BlkDeviceClass::Rotational,
+        BlkMedium::HardDisk,
         superblock(RaidLevel::Mirror, UUID_A, 3, 1, 4),
         1_000,
     );
@@ -378,9 +378,43 @@ fn the_settle_window_follows_the_most_patient_member_of_the_array() {
     };
     assert_eq!(
         deadline_ns,
-        settle_ns(BlkDeviceClass::Rotational),
+        settle_ns(BlkMedium::HardDisk),
         "the window widens to the slowest member's, but still runs from the \
          array's first member: a trickle of arrivals cannot postpone assembly"
+    );
+}
+
+#[test]
+fn an_undeclared_member_is_waited_on_as_a_paravirtual_device() {
+    // A member that declared nothing is served the paravirtual envelope, wider
+    // than a solid-state sibling's, so the array waits as long as that member
+    // may take rather than writing it off on the sibling's terms.
+    let mut registry = MemberRegistry::new();
+    admit(
+        &mut registry,
+        1,
+        BlkMedium::Nvme,
+        superblock(RaidLevel::Mirror, UUID_A, 3, 0, 4),
+        0,
+    );
+    let undeclared = ProbedDevice {
+        medium: None,
+        ..probed(BlkMedium::Nvme)
+    };
+    let admitted = registry.admit(
+        membership_of(2),
+        agent_of(2),
+        offer(2),
+        undeclared,
+        superblock(RaidLevel::Mirror, UUID_A, 3, 1, 4),
+        0,
+    );
+    assert!(matches!(admitted, Admission::Registered { .. }));
+    assert_eq!(
+        registry.next_action(0),
+        ComposerAction::Wait {
+            deadline_ns: Some(settle_ns(BlkMedium::Virtual))
+        }
     );
 }
 
@@ -390,11 +424,11 @@ fn an_array_its_members_cannot_serve_is_never_brought_online() {
     // unreconstructable. Publishing it would hand a filesystem a device that
     // silently cannot read parts of itself.
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::SolidState;
+    let medium = BlkMedium::SolidState;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Parity, UUID_A, 3, 0, 4),
         0,
     );
@@ -413,7 +447,7 @@ fn an_array_its_members_cannot_serve_is_never_brought_online() {
     admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Parity, UUID_A, 3, 1, 4),
         0,
     );
@@ -437,7 +471,7 @@ fn a_stripe_missing_a_member_is_never_brought_online() {
     admit(
         &mut registry,
         1,
-        BlkDeviceClass::SolidState,
+        BlkMedium::SolidState,
         superblock(RaidLevel::Stripe, UUID_A, 2, 0, 4),
         0,
     );
@@ -450,25 +484,25 @@ fn a_stripe_missing_a_member_is_never_brought_online() {
 #[test]
 fn composing_an_array_marks_only_its_own_members() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::Virtual;
+    let medium = BlkMedium::Virtual;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
     admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 4),
         0,
     );
     let foreign = admit(
         &mut registry,
         3,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_B, 2, 0, 9),
         0,
     );
@@ -496,18 +530,18 @@ fn a_slot_table_from_another_array_marks_nothing() {
     // `note_composed` is told which array it published, so a slot table
     // resolved for a different one cannot mark the wrong devices in service.
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::Virtual;
+    let medium = BlkMedium::Virtual;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 1, 0, 4),
         0,
     );
     let elsewhere = admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_B, 1, 0, 4),
         0,
     );
@@ -527,15 +561,15 @@ fn a_slot_table_from_another_array_marks_nothing() {
 #[test]
 fn a_member_that_turns_up_late_joins_the_array_already_serving() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::SolidState;
+    let medium = BlkMedium::SolidState;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 8),
         0,
     );
-    let deadline_ns = settle_ns(class);
+    let deadline_ns = settle_ns(medium);
     assert_eq!(
         registry.next_action(deadline_ns),
         ComposerAction::Assemble { array_uuid: UUID_A }
@@ -548,7 +582,7 @@ fn a_member_that_turns_up_late_joins_the_array_already_serving() {
     let late = admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 7),
         deadline_ns,
     );
@@ -572,18 +606,18 @@ fn a_member_that_turns_up_late_joins_the_array_already_serving() {
 #[test]
 fn a_stale_claimant_of_an_occupied_slot_is_held_rather_than_swapped_in() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::Virtual;
+    let medium = BlkMedium::Virtual;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 9),
         0,
     );
     admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 9),
         0,
     );
@@ -595,7 +629,7 @@ fn a_stale_claimant_of_an_occupied_slot_is_held_rather_than_swapped_in() {
     let stale = admit(
         &mut registry,
         3,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 3),
         0,
     );
@@ -613,25 +647,25 @@ fn a_member_that_disagrees_about_the_array_is_held_unused_not_refused() {
     // a later, fresher member legitimately redefine the array — refusing it
     // would let one corrupt disk evict a healthy one from consideration.
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::Virtual;
+    let medium = BlkMedium::Virtual;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 9),
         0,
     );
     admit(
         &mut registry,
         2,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 1, 9),
         0,
     );
     let mismatched = admit(
         &mut registry,
         3,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 5, 4, 9),
         0,
     );
@@ -651,11 +685,11 @@ fn a_member_that_disagrees_about_the_array_is_held_unused_not_refused() {
 #[test]
 fn a_refused_assembly_backs_off_instead_of_being_retried_at_once() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::SolidState;
+    let medium = BlkMedium::SolidState;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 1, 0, 4),
         0,
     );
@@ -694,7 +728,7 @@ fn publishing_an_array_clears_the_escalation_it_was_carrying() {
     admit(
         &mut registry,
         1,
-        BlkDeviceClass::SolidState,
+        BlkMedium::SolidState,
         superblock(RaidLevel::Mirror, UUID_A, 1, 0, 4),
         0,
     );
@@ -719,21 +753,21 @@ fn the_soonest_deadline_across_the_arrays_is_the_one_to_park_on() {
     admit(
         &mut registry,
         1,
-        BlkDeviceClass::Rotational,
+        BlkMedium::HardDisk,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
     admit(
         &mut registry,
         2,
-        BlkDeviceClass::SolidState,
+        BlkMedium::SolidState,
         superblock(RaidLevel::Mirror, UUID_B, 2, 0, 4),
         0,
     );
     assert_eq!(
         registry.next_action(0),
         ComposerAction::Wait {
-            deadline_ns: Some(settle_ns(BlkDeviceClass::SolidState))
+            deadline_ns: Some(settle_ns(BlkMedium::SolidState))
         },
         "one park serves every array, so it is armed to whichever is due first"
     );
@@ -742,12 +776,12 @@ fn the_soonest_deadline_across_the_arrays_is_the_one_to_park_on() {
 #[test]
 fn releasing_a_member_renumbers_the_reassembly_view_in_step() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::Virtual;
+    let medium = BlkMedium::Virtual;
     for slot in 0..3u16 {
         admit(
             &mut registry,
             u64::from(slot) + 1,
-            class,
+            medium,
             superblock(RaidLevel::Mirror, UUID_A, 3, slot, 4),
             0,
         );
@@ -771,11 +805,11 @@ fn releasing_a_member_renumbers_the_reassembly_view_in_step() {
 #[test]
 fn an_array_whose_last_member_leaves_is_forgotten() {
     let mut registry = MemberRegistry::new();
-    let class = BlkDeviceClass::SolidState;
+    let medium = BlkMedium::SolidState;
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         0,
     );
@@ -796,14 +830,14 @@ fn an_array_whose_last_member_leaves_is_forgotten() {
     admit(
         &mut registry,
         1,
-        class,
+        medium,
         superblock(RaidLevel::Mirror, UUID_A, 2, 0, 4),
         5_000,
     );
     assert_eq!(
         registry.next_action(5_000),
         ComposerAction::Wait {
-            deadline_ns: Some(5_000 + settle_ns(class))
+            deadline_ns: Some(5_000 + settle_ns(medium))
         }
     );
 }

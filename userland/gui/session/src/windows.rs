@@ -36,20 +36,21 @@ use tairix_log::{EventId, Field, FieldValue};
 use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
 use tairix_window::{
-    Activation, ClientRegion, CursorSetName, HandOverDesk, PreviewSize, ToolSpec, WallpaperName,
-    WindowHost,
+    Activation, AlertOpen, ClientRegion, CursorSetName, HandOverDesk, PreviewSize, ToolSpec,
+    WallpaperName, WindowHost,
 };
 
 use crate::launch::{
     open_entry, resolve_launch, DocumentAuthority, DocumentRelay, Launch, LaunchHost, LaunchTarget,
 };
-use tairix_taskbar::menu::info_facts;
+use tairix_taskbar::menu::about_sheet;
 use tairix_window::WindowSizing;
 use tairix_wm::{
-    Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Surface, Window,
+    Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Scale, Surface, Window,
     WindowControlKind, WindowId,
 };
 
+use crate::alert::{alert_title, app_speaker, Alerts, Speaker};
 use crate::apps::{AppBarBridge, BundleIndex};
 use crate::clipboard::ClipboardService;
 use crate::confirm::ConfirmPrompt;
@@ -377,6 +378,8 @@ pub struct SessionWindows {
     /// the one the user is working in, which a window that only took the
     /// keyboard by opening is not.
     worked_in: Option<u64>,
+    /// The alerts applications have up, each holding its window modal.
+    pub alerts: Alerts,
 }
 
 /// The reports that move apps told the keyboard rests on `told` to where it
@@ -982,6 +985,19 @@ fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> (Option<
         ArtworkOutcome::Refused => (None, false),
         ArtworkOutcome::Pending => (None, true),
     }
+}
+
+/// The picture an *Info* sheet about the application launched from `bundle`
+/// shows: its artwork rasterised at the sheet's own side at `scale`, so it
+/// fills the sheet's slot whatever size the icon bar draws it at. `None` while
+/// it is not yet decoded, or when nothing decodes, leaving the built-in glyph.
+pub fn sheet_artwork(shell: &mut DesktopShell, bundle: &str, scale: Scale) -> Option<Surface> {
+    bundle_artwork(
+        shell,
+        bundle,
+        scale.scale_length(tairix_controls::ABOUT_ICON_SIDE),
+    )
+    .0
 }
 
 /// What a screensaver preview needs from the session that serves it: the
@@ -1881,16 +1897,60 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // signed manifest, so an application cannot state an identity that is
         // not its own — and a process with nothing attesting one gets no
         // information row at all rather than a fabricated panel.
-        let facts = self
-            .windows
-            .owner_of(window_id)
-            .and_then(|owner| self.apps.attested_identity(owner))
-            .map(|identity| info_facts(&identity));
-        let model = ChainModel::from_app_menu(menu.title(), menu, facts.as_ref());
+        let sheet = self.windows.owner_of(window_id).and_then(|owner| {
+            let identity = self.apps.attested_identity(owner)?;
+            let mut sheet = about_sheet(&identity);
+            let scale = self.compositor.scale();
+            let art = self
+                .apps
+                .attested_bundle(owner)
+                .and_then(|bundle| sheet_artwork(self.shell, &bundle, scale));
+            if let Some(art) = art {
+                sheet.set_artwork(art);
+            }
+            Some(sheet)
+        });
+        let model = ChainModel::from_app_menu(menu.title(), menu, sheet.as_ref());
         let geom = chain_geometry(self.shell.session(), self.compositor);
         self.menu
             .open(owner, model, window_menu_placement(anchor), &geom)
             .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
+    }
+
+    fn alert_opened(&mut self, open: &AlertOpen<'_>) -> Result<(), Errno> {
+        // The title is the session's: the speaker is the bundle's signed
+        // title, never anything the process says, and a title claiming the
+        // desktop's own word speaks by its bundle path instead.
+        let identity = self.apps.attested_identity(open.owner);
+        let bundle = self.apps.attested_bundle(open.owner);
+        let speaker = match (&identity, &bundle) {
+            (Some(identity), Some(bundle)) => app_speaker(&identity.name, bundle),
+            _ => Speaker::App("an unidentified program"),
+        };
+        let title = alert_title(open.spec.severity(), speaker);
+        let owner = match open.window {
+            Some(window_id) => Some(self.windows.wm_id(window_id).ok_or(Errno::NotFound)?),
+            None => None,
+        };
+        let opened = self.windows.alerts.open(
+            (open.alert_id, open.window, owner),
+            open.spec,
+            &title,
+            (open.focus, self.seat_held),
+            self.shell,
+            self.compositor,
+        );
+        if opened {
+            Ok(())
+        } else {
+            Err(Errno::OutOfMemory)
+        }
+    }
+
+    fn alert_withdrawn(&mut self, alert_id: u64) {
+        self.windows
+            .alerts
+            .withdraw(alert_id, self.shell, self.compositor);
     }
 
     fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
@@ -2291,6 +2351,10 @@ mod tests {
         }
 
         fn attested_identity(&self, _owner: ProcId) -> Option<tairix_taskbar::AppIdentity> {
+            None
+        }
+
+        fn attested_bundle(&self, _owner: ProcId) -> Option<String> {
             None
         }
 

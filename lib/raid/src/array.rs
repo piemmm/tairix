@@ -21,8 +21,7 @@
 //! hot-swap — the no-redundancy RAID0 stripe fails it closed with
 //! [`RaidError::NotRedundant`] rather than pretending, exactly as the stripe
 //! engine reports only [`ArrayHealth::Optimal`] / [`ArrayHealth::Failed`].
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::{BufferClass, DriverError};
 
@@ -540,14 +539,14 @@ impl<B: Block> RaidArray<'_, B> {
 }
 
 impl<B: Block> Block for RaidArray<'_, B> {
-    fn device_class(&self) -> BlkDeviceClass {
+    fn medium(&self) -> Option<BlkMedium> {
         match self {
-            Self::Mirror(a) => a.device_class(),
-            Self::Stripe(a) => a.device_class(),
-            Self::Parity(a) => a.device_class(),
-            Self::DualParity(a) => a.device_class(),
-            Self::TripleParity(a) => a.device_class(),
-            Self::Raid10(a) => a.device_class(),
+            Self::Mirror(a) => a.medium(),
+            Self::Stripe(a) => a.medium(),
+            Self::Parity(a) => a.medium(),
+            Self::DualParity(a) => a.medium(),
+            Self::TripleParity(a) => a.medium(),
+            Self::Raid10(a) => a.medium(),
         }
     }
 

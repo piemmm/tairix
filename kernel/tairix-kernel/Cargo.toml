@@ -386,6 +386,9 @@ tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # `/System/Drivers/` bundles by the image pipeline (`tools/xtask`), not baked
 # here. Host-only build glue; the production image stays
 # Rust-only.
+# The build's secret signing key set, which the driver manifests baked in
+# here are signed with and the kernel's trust anchors derived from.
+tairix-signkeys = { path = "../../tools/signkeys", version = "=0.0.0" }
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", version = "=0.0.0" }
 tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }

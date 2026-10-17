@@ -245,7 +245,7 @@ fn a_mode_change_copies_a_shared_attribute_block_first() {
         counted,
         "it counted the shared block, and counts its own copy instead"
     );
-    let copy = block_of(&raw).expect("an attribute block");
+    let copy = block_of(&raw, &fs.layout).expect("an attribute block");
     assert_ne!(copy, FIXTURE_XATTR_BLOCK, "this inode's own copy");
     let mut buf = vec![0u8; 1024];
     fs.read_xattr_block(FIXTURE_XATTR_BLOCK, &mut buf)
@@ -273,7 +273,7 @@ fn deleting_releases_a_block_only_with_its_last_sharer() {
         let mut raw = vec![0u8; 128];
         fs.read_inode_raw(12, &mut raw).expect("the record");
         fs.release_xattr_block(&mut raw).expect("released");
-        assert_eq!(block_of(&raw), None);
+        assert_eq!(block_of(&raw, &fs.layout), None);
         let freed = fs
             .freed
             .overlaps(FIXTURE_XATTR_BLOCK, FIXTURE_XATTR_BLOCK + 1);

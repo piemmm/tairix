@@ -86,8 +86,26 @@ Stability tier: **experimental**.
   requests and validate every reply field **fail-closed** — a worker that
   has parsed hostile bytes is itself hostile, so list counts, name
   lengths, tags, and instruction lengths are all bounds-checked before
-  the caller acts on them, and truncation is reported honestly through
-  `regions_truncated`/`symbols_truncated`, never silently.
+  the caller acts on them, a disassembly reply is held to the request it
+  answers (instructions contiguous from the address asked, inside the bytes
+  sent, no more than asked for), and truncation is reported honestly through
+  `regions_truncated`/`symbols_truncated`, never silently. A disassembly reads
+  one `CodeWindow`; one that says the code `continues` past its bytes has no
+  instruction decoded from fewer than `Isa::longest_encoding` of them, so its
+  end cuts none and the next window starts where it stopped. A decode worker is
+  held to `decode::WORKER_MEMORY`, the one memory class for every launcher of
+  the service. `Isa::of_arch`
+  names the instruction set a kernel built for a given `Arch` runs, which an
+  `rxe` — whose container names none — is read as on the machine it is
+  installed on.
+- **`listing`** — what the decode service answers, as text a person reads:
+  `code_lines` gives an instruction a line with its address, encoding bytes
+  and symbolised branch target, after a `<symbol>:` label for each symbol it
+  starts; `region_line` a region's kind, extent and permissions; and
+  `failure_reason` a refusal in words. A branch target is named by a symbol
+  starting at the nearest address at or below it that covers it, so a short
+  alias sharing a function's start cannot hide the function. The `fstree` pane
+  and TextEdit's Code display both list through it.
 - **`helpdoc`** — the sandboxed help-document render: the `HelpService`
   worker parses and renders a foreign bundle's document through
   [`tairix-help`](./help.md), and the client `render_help` re-parses the
@@ -184,7 +202,12 @@ Stability tier: **experimental**.
   (`worker_role` + `serve_stdio`) serves over fd 0/1 — exactly the
   surface the kernel sandbox allow-list admits — and ends with
   `ServeEnd::exit_code`, the one mapping of how its conversation ended to
-  the status it exits with. `RtSessionChannel` is the
+  the status it exits with. A program whose binary serves more than one
+  one-shot service gives each a worker of its own, so no two parsers share an
+  address space: `RtLauncher::serving(name)` passes the service's name after
+  the role marker, and the worker reads it back with `serves(name)`; a worker
+  asked for a service its binary does not serve exits `WorkerExit::Unserved`,
+  which the host reads as its parent breaking the protocol. `RtSessionChannel` is the
   duplex transport over that same spawn (one shared pipe-pair-and-attach
   path, `--sandbox-session-worker`), reporting its two descriptor numbers
   so the owner can register them, and `session_worker_role` +

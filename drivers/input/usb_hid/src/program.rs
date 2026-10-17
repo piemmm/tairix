@@ -237,10 +237,13 @@ fn serve(link: &mut Link, bound: &mut Bound) -> i32 {
     let mut report = [0u8; INT_TRANSFER_MAX];
     let mut faults = 0u8;
     loop {
+        // A device reports when it has something to say, so the wait is
+        // unbounded: it parks until the next report.
         let read = link.0.interrupt_in(
             bound.interface.interrupt_endpoint,
             bound.longest_input,
             &mut report,
+            None,
         );
         match read {
             Ok(len) => {

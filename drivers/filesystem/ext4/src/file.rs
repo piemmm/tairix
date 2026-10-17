@@ -9,7 +9,7 @@ use tairix_writeback::{RunWindow, RUN_BYTES};
 use crate::bytes::{high32, le16, le32, low16, low32, put_le16, put_le32, scratch, usize_of};
 use crate::extent::Mapping;
 use crate::group::MAX_RUN;
-use crate::superblock::{RO_COMPAT_LARGE_FILE, SB_FEATURE_RO_COMPAT};
+use crate::superblock::{make_dynamic, RO_COMPAT_LARGE_FILE, SB_FEATURE_RO_COMPAT};
 use crate::{
     put_stamps, Ext4, Layout, Stamp, INODE_BLOCKS_HI, INODE_BLOCKS_LO, INODE_DTIME, INODE_FLAGS,
     INODE_FLAG_HUGE_FILE, INODE_FLAG_INLINE_DATA, INODE_LINKS, INODE_SIZE_HI, INODE_SIZE_LO,
@@ -79,7 +79,7 @@ fn set_sectors(raw: &mut [u8], layout: &Layout, count: u64) -> Result<(), Driver
 /// Whether record `raw` is a symbolic link whose target `i_block` holds
 /// inline: a fast link owns no data block, only an attribute block at most.
 pub(crate) fn is_fast_symlink(raw: &[u8], layout: &Layout) -> bool {
-    let xattr = if crate::xattr::block_of(raw).is_some() {
+    let xattr = if crate::xattr::block_of(raw, layout).is_some() {
         u64::from(layout.cluster_size / 512)
     } else {
         0
@@ -261,10 +261,7 @@ impl<B: Block> Ext4<B> {
         let size = inode_size_bytes(raw, &self.layout);
         if end > size {
             set_size(raw, end);
-            if end > i32::MAX as u64 {
-                let ro = le32(&self.sb, SB_FEATURE_RO_COMPAT) | RO_COMPAT_LARGE_FILE;
-                put_le32(&mut self.sb, SB_FEATURE_RO_COMPAT, ro);
-            }
+            self.note_size(end);
         }
         put_stamps(raw, self.now(), &[Stamp::Modify, Stamp::Change]);
         self.write_inode_raw(ino, raw)
@@ -288,11 +285,18 @@ impl<B: Block> Ext4<B> {
             self.cut_blocks(ino, raw, size.div_ceil(bs), false)?;
             self.zero_tail(ino, raw, size)?;
         }
+        self.note_size(size);
+        self.write_inode_raw(ino, raw)
+    }
+
+    /// Mark the volume as holding a file past 2 GiB once one reaches `size`,
+    /// which a driver older than `large_file` must know before it writes.
+    fn note_size(&mut self, size: u64) {
         if size > i32::MAX as u64 {
+            make_dynamic(&mut self.sb);
             let ro = le32(&self.sb, SB_FEATURE_RO_COMPAT) | RO_COMPAT_LARGE_FILE;
             put_le32(&mut self.sb, SB_FEATURE_RO_COMPAT, ro);
         }
-        self.write_inode_raw(ino, raw)
     }
 
     /// Zero the bytes past `size` in the block holding it, so a later

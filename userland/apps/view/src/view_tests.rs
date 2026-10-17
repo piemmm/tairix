@@ -10,7 +10,6 @@ use alloc::string::String;
 use alloc::vec;
 
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
-use tairix_abi::Errno;
 use tairix_controls::{damage, ScrollPart, WHEEL_STEP};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -332,20 +331,19 @@ fn a_viewer_waiting_for_its_document_has_nothing_to_show() {
         "the document landed, so there is a picture to show"
     );
 
-    // And the conclusions that are a *reason* rather than a document. Each is
-    // something to show — a refused ask especially, because nothing is coming
-    // after it and a window withheld on it would never appear. A pick the
-    // user cancelled is not among them: they chose nothing, so the embedder
-    // closes that window rather than showing them a reason they already know.
-    for why in [Refusal::PickRefused(Errno::AlreadyExists), Refusal::TooLong] {
-        let mut refused = View::new(false);
-        assert!(refused.nothing_to_show());
-        assert!(refused.no_document(why));
-        assert!(
-            !refused.nothing_to_show(),
-            "{why} left the window with nothing to show, so it would never appear"
-        );
-    }
+    // And the conclusion that is a *reason* rather than a document: the wait
+    // is over, and the embedder states it rather than waiting on for ever.
+    let mut refused = View::new(true);
+    assert!(refused.nothing_to_show());
+    refused.deliver(
+        Answer::Opened {
+            open_id: 1,
+            opened: Err(Refusal::TooLong),
+        },
+        &layout,
+        &mut region,
+    );
+    assert!(!refused.nothing_to_show(), "the refusal ends the wait");
 }
 
 #[test]
@@ -485,22 +483,6 @@ fn a_refused_render_states_the_reason_and_keeps_showing_what_it_had() {
         view.document().is_some(),
         "the document is still open; only this draw failed"
     );
-}
-
-#[test]
-fn a_refused_ask_is_recorded_only_while_nothing_is_open() {
-    // A refused optional action is an answer, not a death: the window appears
-    // stating why there is no document.
-    let mut view = View::new(false);
-    let why = Refusal::PickRefused(Errno::AlreadyExists);
-    assert!(view.no_document(why));
-    assert!(matches!(view.refusal(), Some(Refusal::PickRefused(_))));
-
-    // With a document already open it says nothing new: the picture on screen
-    // is still what the user is looking at.
-    let (mut open, _layout, _registry) = drawn(still(400, 300));
-    assert!(!open.no_document(why));
-    assert!(open.refusal().is_none());
 }
 
 #[test]

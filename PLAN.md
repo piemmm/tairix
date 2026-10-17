@@ -735,8 +735,8 @@ binding increments:
 1. The canonical bundle content hash, `tairix_abi::digest_bundle_contents`: one
    framing shared by the composer and every `BundleStore`.
 2. A per-crate `AppInfo.toml`, found by a discovery walk (never a list) and
-   composed and signed under the system app-signing seed, a trust domain
-   separate from driver signing. The signature covers the header and the
+   composed and signed under the build key set's app-signing seed
+   (`tools/signkeys`), a trust domain separate from driver signing. The signature covers the header and the
    capability body.
 3. The `image_apps` pipeline plants each bundle into `/System/Commands`,
    `/System/Applications` or `/System/Services` by its manifest kind, in the Pi
@@ -924,6 +924,11 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-16 — §3, §19.3: the signing key set is a secret build input.** The
+  driver, app-signing and publisher seeds were committed constants, so anybody
+  could sign a bundle the kernel attests as first-party (`plans/OPEN-DEFECTS.md`
+  D1109); they now come from a key set outside the tree (`tools/signkeys`), and
+  an image is reproducible given it.
 - **2026-10-14 — §16.2, §16.5, §16.8: `/System/Components` and the signed
   kind.** The desktop's own programs shared the users' application store, and
   a bundle's kind was only the directory it sat in, so a system service copied

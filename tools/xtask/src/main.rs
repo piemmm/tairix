@@ -221,6 +221,17 @@ impl Context {
         })
     }
 
+    /// The build's secret signing key set (`tools/signkeys`).
+    ///
+    /// # Errors
+    ///
+    /// Why there is no key set to sign with, and how to create one.
+    pub fn signing_keys(&self) -> Result<tairix_signkeys::SigningKeys, String> {
+        tairix_signkeys::load(&self.workspace_root)
+            .map(|(_, keys)| keys)
+            .map_err(|err| err.to_string())
+    }
+
     /// Builds a `cargo` command rooted at the workspace.
     #[must_use]
     pub fn cargo(&self) -> Command {

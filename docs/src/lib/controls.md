@@ -46,8 +46,8 @@ under the floor and are unchanged.
 | `button` | `Button`, `IconButton`, `SplitButton` |
 | `selector` | `Toggle`, `Checkbox`, `Radio` |
 | `value` | `Slider`, `Progress` |
-| `chart` | `Chart` |
-| `metric` | `MetricTile`, `StatusPill`, `CompositionBar` |
+| `chart` | `Chart`, `DuplexRates`, `RateTrace` |
+| `metric` | `MetricTile`, `StatusPill`, `CompositionBar`, `CompositionRing` |
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A |
@@ -66,7 +66,8 @@ under the floor and are unchanged.
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
-| `decision` | `Dialog`, `Tooltip`, `HelpTip`, and the save-changes question (`Dialog::save_changes`, answered as a `SaveChanges`) every document window asks before closing over changes |
+| `decision` | `Dialog`, `Tooltip`, `HelpTip`; a `Dialog` is a form a window draws over itself for an answer typed in it |
+| `alert` | `Alert`: an alert window's content — severity mark, headline, scrolling detail, and the bottom row of up to four answers — laid out at the smallest 4:3 size that holds it, answering Enter or Space with the focused button and Escape with its cancel |
 
 A continuous control reports where its interaction *settled*, distinctly from
 the values it took along the way: `Slider` answers `SliderAction::SetValue`
@@ -406,6 +407,14 @@ it, or frame the content that does:
   chart never took. The ramp is the *band's* rather than the trace's, so the
   fill's weight at a given height means the same thing whatever the reading is
   there, and a mirrored opposing band ramps the other way.
+  A rate has no ceiling of its own, so a byte-rate history is kept unscaled in
+  a `DuplexRates` — the two directions' recent rates, bounded at the points a
+  chart plots, a direction an interval did not measure adding no point — and
+  its `trace()` is a `RateTrace` drawn against the least power of two at or
+  above both its peak and `RATE_TRACE_FLOOR`, shared by both halves, so the
+  window's busiest point reaches at least half the box and the scale comes back
+  down once a burst has scrolled out. The Switchboard's device traces and a
+  drive's Properties both plot through it.
   `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
   for a tile with a column of its own, `Inline` puts the label leading and the
   reading trailing so a narrow stack of readings can be scanned down. The
@@ -436,6 +445,14 @@ it, or frame the content that does:
   neutral as the unfilled tail, last, and still named in the key. The key wraps
   rather than dropping an entry, so `measured_height` takes the width it will
   be given.
+- `CompositionRing` draws the same validated `CompositionBar` model as a ring:
+  the parts laid clockwise from the top, the one figure a glance wants (how
+  full a disk is) over the word saying what it is in the middle, and the bar's
+  own key beside it, one entry to a row. Every join is ruled, the one at the
+  top where the ring closes on itself included, and a whole held by one part
+  has none. Each sector is one anti-aliased polygon through the shared
+  sub-pixel fill, its arcs flattened finely enough that no chord strays a
+  sub-pixel from the circle; a bounds too small for the ring draws nothing.
 - `block` is the titled block a monitoring surface is laid out in: `plate`
   draws the block's plate and answers its inner rect, `title` and `bare_title`
   its heading, cut with the shared mark where it does not fit, and

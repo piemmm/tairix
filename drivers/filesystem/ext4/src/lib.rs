@@ -68,6 +68,7 @@ use group::{Hints, Releases};
 use indexed::IndexUse;
 use io::Device;
 use journal::Journal;
+pub use superblock::Generation;
 use superblock::{
     Layout, NoWrite, INCOMPAT_RECOVER, RO_COMPAT_METADATA_CSUM, SB_FEATURE_INCOMPAT,
     SB_FEATURE_RO_COMPAT, SB_FREE_INODES, SB_STATE, SB_WTIME, STATE_VALID, SUPERBLOCK_LEN,
@@ -596,6 +597,12 @@ impl<B: Block> Ext4<B> {
     #[must_use]
     pub fn volume_uuid(&self) -> [u8; 16] {
         self.layout.uuid
+    }
+
+    /// The ext generation the volume's features make it.
+    #[must_use]
+    pub fn generation(&self) -> Generation {
+        self.layout.generation
     }
 
     /// Why this handle refuses writes, as a stable cause for the host's

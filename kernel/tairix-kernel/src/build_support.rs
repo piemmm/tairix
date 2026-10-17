@@ -6,14 +6,9 @@
 //! unit tested rather than only exercised implicitly by a cross-compile
 //! (tests are part of the change).
 //!
-//! It holds two kinds of build-time fact: the target-selection logic
-//! (which instruction set / boot linker script a build is for) and the
-//! [`KERNEL_DRIVER_SIGNING_SEED`] — the single source of the driver-load
-//! trust-anchor seed. Because a `#[path]` include carries no dependency,
-//! every build that must sign a driver manifest with the *same* key the
-//! kernel trusts — the kernel's own `build.rs` and any out-of-tree fixture
-//! or image build that lays a kernel-trusted bundle into the driver store —
-//! reads the seed from here rather than carrying its own copy.
+//! It holds the target-selection logic: which instruction set and boot linker
+//! script a build is for. The keys a build signs with are no part of the
+//! source; they come from the build's secret key set (`tools/signkeys`).
 //!
 //! Every decision the build script makes about *which* instruction set
 //! the production kernel is being built for, and *which* per-board boot
@@ -120,64 +115,6 @@ pub fn is_freestanding(target_os: &str, target_arch: &str) -> bool {
     tairix_buildcfg::native_arch_of(target_os, target_arch).is_some()
 }
 
-/// Deterministic Ed25519 seed the build signs every driver manifest with
-/// (`plans/PI.md` P10 5c-ii).
-///
-/// The kernel's driver-load trust anchor is *this
-/// build's own key*: the kernel trusts the drivers its build signed and
-/// statically linked, nothing else. Because the chain drivers are baked
-/// into the kernel image from the same source tree, secrecy of the key
-/// buys nothing — the security boundary is "did this exact, reproducible
-/// source build produce this image" (reproducible
-/// builds + source-hash pinning + a signed SBOM), not a hidden authority.
-/// A deterministic seed keeps the baked signatures bit-reproducible; a random per-build key would defeat that. A
-/// third-party / userland signing authority is a later concern
-/// (`plans/PI.md` P10 5d).
-///
-/// This is the **single source** of the seed. The
-/// kernel's `build.rs` signs the embedded in-kernel chain manifests with
-/// it, and any fixture or image build that lays a *kernel-trusted* driver
-/// bundle into `/System/Drivers/` (the `-M virt` autoload vertical, the
-/// `tools/mkimage` signed bundle — `plans/PI.md` P10 5d-2-ii) signs from
-/// this same definition so the bundle verifies against the kernel's
-/// embedded trust anchor.
-pub const KERNEL_DRIVER_SIGNING_SEED: [u8; 32] = *b"tairix-kernel-driver-signing/v1!";
-
-/// Deterministic Ed25519 seed the build signs every system app bundle's
-/// `AppInfo` manifest with (`plans/APPS.md` deliverable 8).
-///
-/// The same trust model as [`KERNEL_DRIVER_SIGNING_SEED`] — the kernel
-/// trusts the app bundles its own reproducible build signed and planted on
-/// the read-only `/System` store, nothing else — but a **distinct trust
-/// domain**: an authority to sign an application bundle must never also be
-/// an authority to sign a driver (a driver runs with device grants an app
-/// can never request), so the two seeds and the two derived trust anchors
-/// are separate values, checked at separate gates. This is the single
-/// source of the app seed: the image build (`tools/mkimage`'s caller) and
-/// every fixture that plants a kernel-trusted bundle onto the
-/// `/System/Commands`, `/System/Applications`, or `/System/Services` store
-/// signs from this definition.
-pub const SYSTEM_APP_SIGNING_SEED: [u8; 32] = *b"tairix-system-app-signing/v1!\0\0\0";
-
-/// Deterministic Ed25519 seed of the first-party **publisher** identity every
-/// system app bundle's `AppInfo` names.
-///
-/// Distinct from [`SYSTEM_APP_SIGNING_SEED`] because the two answer different
-/// questions. The signing key answers "may this bundle run here?" and is
-/// pinned by the kernel's embedded anchor, so rotating it means shipping a
-/// new kernel. The publisher key answers "whose app is this?" and is what a
-/// user's per-app settings, secrets, and blobs are owned by, so it must
-/// *not* change when a release is re-signed. Keeping them separate is what
-/// makes that rotation survivable, and it means the delegated
-/// ([`tairix_abi::PublisherBinding::Delegated`]) path — the one a
-/// third-party developer's release uses — is the path the first-party build
-/// itself exercises on every boot, rather than a form only tests reach.
-///
-/// This is the single source of the publisher seed: the build's bundle
-/// composer derives the publisher key from it and signs each bundle's
-/// delegation certificate with it.
-pub const SYSTEM_APP_PUBLISHER_SEED: [u8; 32] = *b"tairix-system-app-publisher/v1!\0";
-
 /// Parse a `SOURCE_DATE_EPOCH` value into whole seconds, or `None` when it is
 /// absent/malformed so the build script falls back to the current wall-clock
 /// second.
@@ -210,8 +147,7 @@ pub fn parse_source_date_epoch(value: &str) -> Option<u64> {
 /// non-cryptographic shared hash is the right tool because it only has to
 /// distinguish developer working trees, never resist an adversary — the
 /// image's real integrity guarantee is the reproducible build + source-hash
-/// pinning + signed SBOM, not this id (the driver-signing trust model in
-/// [`KERNEL_DRIVER_SIGNING_SEED`] spells that out). Rolling the 8 bytes out
+/// pinning + signed SBOM, not this id. Rolling the 8 bytes out
 /// as 16 hex and keeping the low 12 (the low 48 bits) gives a marker short
 /// enough to read off a UART line while collision-free across any realistic
 /// set of dev trees. Alloc-free — it renders into the caller's `out` buffer
@@ -369,46 +305,5 @@ mod tests {
         // refactor cannot silently shift the id.
         let mut buf = [0u8; 12];
         assert_eq!(short_content_hash(b"", &mut buf), "db3751d8e999");
-    }
-
-    #[test]
-    fn the_driver_signing_seed_is_the_pinned_single_source_value() {
-        // The seed is the single source every kernel-trusted driver
-        // signature derives from; pinning its exact
-        // bytes guards against a silent edit that would desynchronise the
-        // kernel's embedded trust anchor from a fixture/image build that
-        // signs a bundle with it.
-        assert_eq!(
-            KERNEL_DRIVER_SIGNING_SEED,
-            *b"tairix-kernel-driver-signing/v1!"
-        );
-        assert_eq!(KERNEL_DRIVER_SIGNING_SEED.len(), 32);
-    }
-
-    #[test]
-    fn the_app_signing_seed_is_pinned_and_distinct_from_the_driver_seed() {
-        // Same rationale as the driver seed pin, plus the trust-domain
-        // separation: an app-signing authority must never verify as a
-        // driver-signing authority, so the two seeds may never converge.
-        assert_eq!(
-            SYSTEM_APP_SIGNING_SEED,
-            *b"tairix-system-app-signing/v1!\0\0\0"
-        );
-        assert_eq!(SYSTEM_APP_SIGNING_SEED.len(), 32);
-        assert_ne!(SYSTEM_APP_SIGNING_SEED, KERNEL_DRIVER_SIGNING_SEED);
-    }
-
-    #[test]
-    fn the_publisher_seed_is_pinned_and_distinct_from_every_signing_seed() {
-        // The publisher identity outlives the build signing key, which is the
-        // whole point of it: were they the same value, re-signing a release
-        // would silently re-key every user's per-app store.
-        assert_eq!(
-            SYSTEM_APP_PUBLISHER_SEED,
-            *b"tairix-system-app-publisher/v1!\0"
-        );
-        assert_eq!(SYSTEM_APP_PUBLISHER_SEED.len(), 32);
-        assert_ne!(SYSTEM_APP_PUBLISHER_SEED, SYSTEM_APP_SIGNING_SEED);
-        assert_ne!(SYSTEM_APP_PUBLISHER_SEED, KERNEL_DRIVER_SIGNING_SEED);
     }
 }

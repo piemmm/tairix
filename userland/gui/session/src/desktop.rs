@@ -199,10 +199,46 @@ pub enum DesktopAction {
     /// which is an installed application the embedder resolves and launches
     /// (the model knows no bundle paths).
     ChangeBackground,
-    /// The gesture was refused. The line is complete and newline-terminated,
-    /// ready for `stderr`: a refused action always says why rather than
-    /// failing silently.
-    Refuse(String),
+    /// The gesture was refused, and why: a refused action always says so
+    /// rather than failing silently.
+    Refuse(GestureRefusal),
+}
+
+/// A refused gesture, worded once for the alert the user reads and the line
+/// `stderr` records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GestureRefusal {
+    headline: String,
+    detail: String,
+}
+
+impl GestureRefusal {
+    /// The refusal `headline`, explained by `detail`.
+    #[must_use]
+    pub fn new(headline: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            headline: headline.into(),
+            detail: detail.into(),
+        }
+    }
+
+    /// What was refused.
+    #[must_use]
+    pub fn headline(&self) -> &str {
+        &self.headline
+    }
+
+    /// Why.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// The refusal as one newline-terminated line for `stderr`.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!("desktop: {}: {}\n", self.headline, self.detail)
+    }
 }
 
 /// The work a change to the *backdrop* implies: the wallpaper, and the icons
@@ -438,14 +474,17 @@ impl<S: DirectorySource> Desktop<S> {
     /// already be stale.
     #[must_use]
     pub fn shortcut_to(&self, catalog: &Catalog, entry: &EntryId) -> DesktopAction {
-        let chosen = match catalogued(catalog, entry) {
-            Ok(chosen) => chosen,
-            Err(reason) => return DesktopAction::Refuse(reason),
+        let Ok(chosen) = catalogued(catalog, entry) else {
+            return DesktopAction::Refuse(GestureRefusal::new(
+                "That program is no longer in the program library",
+                format!("Library entry {entry} was removed or replaced since the menu opened."),
+            ));
         };
         let name = chosen.name().as_str();
         if let Err(err) = tairix_path::validate_file_name(name) {
-            return DesktopAction::Refuse(format!(
-                "desktop: '{name}' cannot be a shortcut name ({err})\n"
+            return DesktopAction::Refuse(GestureRefusal::new(
+                format!("\u{201c}{name}\u{201d} cannot name a shortcut"),
+                format!("A shortcut is a file, and {err}."),
             ));
         }
         DesktopAction::CreateShortcut {
@@ -1210,9 +1249,12 @@ impl<S: DirectorySource> Desktop<S> {
             EntryKind::Link(_) => match entry.target() {
                 Some(target) => tairix_browse::resolve_target(&self.folder_path(), target),
                 None => {
-                    return DesktopOutcome::acting(DesktopAction::Refuse(format!(
-                        "desktop: the shortcut '{}' names nothing\n",
-                        entry.name()
+                    return DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
+                        format!(
+                            "The shortcut \u{201c}{}\u{201d} names nothing",
+                            entry.name()
+                        ),
+                        "It holds no target to open.",
                     )));
                 }
             },
@@ -1241,18 +1283,24 @@ impl<S: DirectorySource> Desktop<S> {
                             edits: app.writes_documents(),
                         }),
                     ))),
-                    None => DesktopOutcome::acting(DesktopAction::Refuse(format!(
-                        "desktop: no installed application opens '{}'\n",
-                        entry.name()
+                    None => DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
+                        format!(
+                            "No installed application opens \u{201c}{}\u{201d}",
+                            entry.name()
+                        ),
+                        "No program installed here claims files of this kind.",
                     ))),
                 }
             }
             // A shortcut whose target cannot be reached: reported, never
             // launched or opened on the chance that it works.
             EntryKind::Link(LinkTarget::Dangling) => {
-                DesktopOutcome::acting(DesktopAction::Refuse(format!(
-                    "desktop: the shortcut '{}' points at something that is not there\n",
-                    entry.name()
+                DesktopOutcome::acting(DesktopAction::Refuse(GestureRefusal::new(
+                    format!(
+                        "The shortcut \u{201c}{}\u{201d} points at something that is not there",
+                        entry.name()
+                    ),
+                    "What it named has been moved or deleted.",
                 )))
             }
         }

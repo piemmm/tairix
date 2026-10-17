@@ -34,6 +34,12 @@ const DISC: Outline = Outline::Circle {
     radius: SYMBOL_GRID / 2.0,
 };
 
+/// The warning plate: a triangle standing on its base, its corners eased.
+const TRIANGLE: Outline = Outline::Path(
+    "M13.168 1.997L23.632 21.203Q24.8 23.3 22.4 23.3H1.6Q-0.8 23.3 0.368 21.203\
+     L10.832 1.997Q12 -0.1 13.168 1.997Z",
+);
+
 /// The outline a badge's plate is cut to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum PlateShape {
@@ -41,6 +47,8 @@ pub enum PlateShape {
     Square,
     /// A disc.
     Round,
+    /// A triangle standing on its base: a warning.
+    Triangle,
 }
 
 impl PlateShape {
@@ -48,18 +56,38 @@ impl PlateShape {
         match self {
             Self::Square => SQUARE,
             Self::Round => DISC,
+            Self::Triangle => TRIANGLE,
         }
     }
 
     /// The fraction of the plate's side its symbol is drawn at: smaller on a
-    /// disc, whose sides curve in toward the symbol's corners.
+    /// disc, whose sides curve in toward the symbol's corners, and smaller
+    /// again in a triangle's narrowing top.
     fn symbol_fraction(self) -> f64 {
         match self {
             Self::Square => 0.7,
             Self::Round => 0.62,
+            Self::Triangle => 0.54,
+        }
+    }
+
+    /// Where the symbol stands on the plate: centred, but lowered in a
+    /// triangle toward the broad part of it.
+    fn symbol_placement(self) -> Placement {
+        let centred = Placement::centred(self.symbol_fraction());
+        match self {
+            Self::Square | Self::Round => centred,
+            Self::Triangle => Placement {
+                origin: (centred.origin.0, centred.origin.1 + TRIANGLE_DROP * UNIT),
+                ..centred
+            },
         }
     }
 }
+
+/// How far below the grid's centre a triangle's symbol stands, in symbol
+/// units: its visual centre sits low, where the plate is widest.
+const TRIANGLE_DROP: f64 = 2.8;
 
 /// How far the light catching the plate's upper face reaches down it.
 const SHEEN_REACH: f64 = 0.6;
@@ -162,23 +190,36 @@ impl IconKind {
             | Self::Accessibility
             | Self::Users
             | Self::Ethernet
-            | Self::TcpIp => BadgeHue::Blue,
+            | Self::TcpIp
+            | Self::AlertInformation
+            | Self::AlertQuestion => BadgeHue::Blue,
             Self::Wallpaper | Self::WiFi => BadgeHue::Sky,
             Self::Screensaver | Self::DateTime => BadgeHue::Indigo,
             Self::Sharing | Self::Caching => BadgeHue::Purple,
             Self::Language | Self::Dns => BadgeHue::Teal,
             Self::Power | Self::Startup => BadgeHue::Green,
             Self::Sound | Self::SoundDevices | Self::SoundEffects => BadgeHue::Pink,
-            Self::Notifications => BadgeHue::Red,
-            Self::Theme => BadgeHue::Orange,
+            Self::Notifications | Self::AlertError => BadgeHue::Red,
+            Self::Theme | Self::AlertWarning => BadgeHue::Orange,
             _ => return None,
         })
+    }
+
+    /// The plate this kind's badge is cut to: the alert marks stand on the
+    /// shapes a reader knows them by, every other badge on the square.
+    #[must_use]
+    pub const fn plate_shape(self) -> PlateShape {
+        match self {
+            Self::AlertWarning => PlateShape::Triangle,
+            Self::AlertError | Self::AlertInformation | Self::AlertQuestion => PlateShape::Round,
+            _ => PlateShape::Square,
+        }
     }
 }
 
 /// `kind`'s own badge at `side` pixels, or `None` for a kind that is not one.
 pub(crate) fn badge_picture(kind: IconKind, side: u32) -> Option<Surface> {
-    badge(kind, kind.badge()?, PlateShape::Square, side)
+    badge(kind, kind.badge()?, kind.plate_shape(), side)
 }
 
 /// `kind`'s symbol in white on a plate of `hue` cut to `shape`, at `side`
@@ -215,20 +256,20 @@ pub fn badge(kind: IconKind, hue: BadgeHue, shape: PlateShape, side: u32) -> Opt
         return None;
     }
     let fraction = shape.symbol_fraction();
-    if let Some(ink) =
-        ink(kind, fraction, px_per_unit * fraction).and_then(|symbol| symbol.rasterise(side))
+    if let Some(ink) = ink(kind, shape.symbol_placement(), px_per_unit * fraction)
+        .and_then(|symbol| symbol.rasterise(side))
     {
         picture.blit(0, 0, &ink);
     }
     Some(picture)
 }
 
-/// `kind`'s symbol in white drawn `fraction` of its plate's side, flattened
-/// for a picture `px_per_unit` pixels to the symbol unit.
-fn ink(kind: IconKind, fraction: f64, px_per_unit: f64) -> Option<VectorIcon> {
+/// `kind`'s symbol in white, placed by `placement`, flattened for a picture
+/// `px_per_unit` pixels to the symbol unit.
+fn ink(kind: IconKind, placement: Placement, px_per_unit: f64) -> Option<VectorIcon> {
     let layers = symbol::layers(
         symbol::marks(kind)?,
-        Placement::centred(fraction),
+        placement,
         &Paint::Solid(INK),
         symbol::flatness_at(px_per_unit),
     )?;

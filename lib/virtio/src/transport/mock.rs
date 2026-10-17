@@ -105,6 +105,9 @@ pub struct MockTransport {
     config_responder: Option<ConfigResponder>,
     /// The memory the device reaches, which none before [`Self::reach`].
     memory: Option<Rc<MockMemory>>,
+    /// Whether [`Transport::route_config_changes`] is refused; see
+    /// [`Self::refuse_config_routes`].
+    config_routes_refused: bool,
 }
 
 impl MockTransport {
@@ -135,6 +138,7 @@ impl MockTransport {
             resets_confirmed_left: None,
             config_responder: None,
             memory: None,
+            config_routes_refused: false,
         }
     }
 
@@ -148,6 +152,12 @@ impl MockTransport {
     /// given, in its hands.
     pub fn refuse_resets_after(&mut self, confirmed: u32) {
         self.resets_confirmed_left = Some(confirmed);
+    }
+
+    /// Model a device that cannot route its configuration changes to an
+    /// interrupt.
+    pub fn refuse_config_routes(&mut self) {
+        self.config_routes_refused = true;
     }
 
     /// Advertise at most `max` descriptors for `queue` alone, as a device
@@ -457,6 +467,12 @@ impl Transport for MockTransport {
         q.packed_dev_wrap = true;
         Ok(())
     }
+    fn route_config_changes(&mut self) -> Result<(), VirtioError> {
+        if self.config_routes_refused {
+            return Err(VirtioError::DeviceFault);
+        }
+        Ok(())
+    }
     fn notify(&mut self, queue: u16) {
         self.notify_log.borrow_mut().push(queue);
         // By default the unit tests choose when to drain (so they can
@@ -504,7 +520,7 @@ impl Transport for MockTransport {
 
 impl MockTransport {
     /// Share the mock between the driver under test, which owns one handle as
-    /// its transport, and the [`MockHost`](crate::MockHost) that plays its
+    /// its transport, and the [`MockHost`] that plays its
     /// device through another.
     #[must_use]
     pub fn into_shared(self) -> Rc<RefCell<Self>> {
@@ -547,6 +563,9 @@ impl Transport for Rc<RefCell<MockTransport>> {
         used: u64,
     ) -> Result<(), VirtioError> {
         self.borrow_mut().queue_set(size, desc, avail, used)
+    }
+    fn route_config_changes(&mut self) -> Result<(), VirtioError> {
+        self.borrow_mut().route_config_changes()
     }
     fn notify(&mut self, queue: u16) {
         self.borrow_mut().notify(queue);

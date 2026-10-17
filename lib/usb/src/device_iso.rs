@@ -17,9 +17,9 @@ use tairix_abi::{DriverError, RegisterBlock};
 use tairix_inline::BitSet256;
 
 use super::{
-    bus_speed, ep_ctx_dwords, input_control_dwords, publish, DmaBank, Periodic, SlotHold,
-    UsbDevice, CTX_DWORDS, DCI_CONTROL, DMA_CHUNK_ALIGN, EP_TYPE_ISOCH_IN, EP_TYPE_ISOCH_OUT,
-    SLOT_CTX_CONTEXT_ENTRIES_MASK, SLOT_CTX_CONTEXT_ENTRIES_SHIFT,
+    bus_speed, ep_ctx_dwords, input_control_dwords, publish, Abandoned, DmaBank, Periodic,
+    SlotHold, UsbDevice, CTX_DWORDS, DCI_CONTROL, DMA_CHUNK_ALIGN, EP_TYPE_ISOCH_IN,
+    EP_TYPE_ISOCH_OUT, SLOT_CTX_CONTEXT_ENTRIES_MASK, SLOT_CTX_CONTEXT_ENTRIES_SHIFT,
 };
 use crate::alternate::{alternate_setting, interface_numbers};
 use crate::periodic::{EndpointDescriptor, PeriodicBudget, ServiceInterval};
@@ -1116,45 +1116,19 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
             .ok_or(DriverError::NotFound)?;
         let stream = endpoint.stream.take().ok_or(DriverError::NotFound)?;
         endpoint.ring = None;
-        let (dci, ring_chunk, ring_base) =
-            (endpoint.dci(), endpoint.ring_chunk, endpoint.ring_base);
-        let stopped = self.stop_iso_endpoint(device_slot, dci);
+        let (dci, ring_chunk) = (endpoint.dci(), endpoint.ring_chunk);
+        let stopped = self.stop_endpoint(device_slot, dci, Abandoned::Running);
         if stopped.is_err() {
             self.retire_slot_chunk(stream.data_chunk, SlotHold::Held);
             return Err(DriverError::DeviceFault);
         }
         let _ = self.dma.release(stream.data_chunk);
-        let ring = self.build_ring(ring_chunk, ISO_RING_TRBS)?;
-        self.command(Trb::new(
-            TrbType::SetTrDequeuePointer,
-            ring_base | 1,
-            0,
-            trb::control_slot(device_slot) | trb::control_endpoint(dci),
-        ))?;
+        let ring = self.restart_ring((device_slot, dci), ring_chunk, ISO_RING_TRBS)?;
         if let Some(endpoint) = self
             .device_mut(index)
             .and_then(|device| device.streaming.endpoint_mut(address))
         {
             endpoint.ring = Some(ring);
-        }
-        Ok(())
-    }
-
-    /// Bring endpoint `dci` of `slot` to Stopped: a running endpoint is
-    /// stopped, a halted one reset, and one already stopped left so.
-    fn stop_iso_endpoint(&mut self, slot: u8, dci: u8) -> Result<(), DriverError> {
-        for command in [TrbType::StopEndpoint, TrbType::ResetEndpoint] {
-            let event = self.issue_command(Trb::new(
-                command,
-                0,
-                0,
-                trb::control_slot(slot) | trb::control_endpoint(dci),
-            ))?;
-            match event.completion_code() {
-                Ok(CompletionCode::Success) => return Ok(()),
-                Ok(CompletionCode::ContextStateError) => {}
-                _ => return Err(DriverError::DeviceFault),
-            }
         }
         Ok(())
     }

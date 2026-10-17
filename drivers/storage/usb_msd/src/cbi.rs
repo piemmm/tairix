@@ -14,8 +14,8 @@
 //! (CBI 1.1 §3.4.3.1): a UFI device reports the ASC/ASCQ of the completed
 //! command (both zero = success), while every other command set reports a
 //! typed status value. Both spellings are implemented, chosen by
-//! [`CbiStatus`]; a phase error or persistent failure runs the spec's
-//! Command Block Reset before the command fails. The device is hostile
+//! [`CbiStatus`]; a failed transfer, a phase error or a persistent failure
+//! runs the spec's reset recovery before the command fails. The device is hostile
 //! input: a completion block of the wrong shape fails closed, never
 //! guessed at.
 //!
@@ -27,7 +27,7 @@
 use tairix_abi::Errno;
 
 use crate::bot::MsdTransport;
-use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense};
+use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense};
 
 /// CBI command blocks are fixed 12-byte frames (CBI 1.1 §2.2 for the UFI
 /// and SFF-8070i sets this transport serves).
@@ -114,19 +114,25 @@ impl<T: MsdTransport> Cbi<T> {
         self.transport.control_out(setup, block)
     }
 
-    /// Run the spec's Command Block Reset (CBI 1.1 §2.3): an ADSC whose
-    /// command block is `SEND DIAGNOSTIC` with both reset pad patterns,
-    /// and surface `err` (or the reset's own failure) so a broken exchange
-    /// never silently "passes". The bulk endpoints' halts are recovered
-    /// per-transfer by the transport below.
-    fn recover(&mut self, err: Errno) -> Errno {
+    /// The spec's reset recovery: the Command Block Reset (CBI 1.1 §2.3), an
+    /// ADSC whose command block is `SEND DIAGNOSTIC` with both reset pad
+    /// patterns, then the halt of each bulk pipe cleared (CBI 1.1 §2.2),
+    /// which the reset alone leaves as it was.
+    fn reset_recovery(&mut self) -> Result<(), Errno> {
         let mut block = [0xFFu8; CBI_COMMAND_LEN];
         block[0] = 0x1D; // SEND DIAGNOSTIC
         block[1] = 0x04; // Self-test — the reset spelling the spec fixes.
-        match self.adsc(&block) {
-            Ok(()) => err,
-            Err(reset_err) => reset_err,
+        self.adsc(&block)?;
+        self.transport.clear_halts()
+    }
+
+    /// End an exchange that broke on `cause` with the reset recovery it
+    /// owes, answering what the caller may do about it.
+    fn fail(&mut self, cause: Errno) -> Errno {
+        if cause == Errno::NotFound {
+            return cause;
         }
+        after_reset(cause, self.reset_recovery())
     }
 
     /// Read and interpret the command-completion interrupt block,
@@ -145,14 +151,17 @@ impl<T: MsdTransport> Cbi<T> {
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] for a block of the wrong size,
-    /// [`Errno::BadMagic`] for a typed block of the wrong shape, and the
-    /// reset-first surfaced error for a phase error / persistent failure.
+    /// What [`after_reset`] answers for the reset any failure here owes: a
+    /// completion that never came, a block of the wrong size or shape, or a
+    /// phase error / persistent failure.
     fn completion(&mut self, opcode: u8) -> Result<bool, Errno> {
         let mut block = [0u8; CBI_STATUS_LEN];
-        let received = self.transport.interrupt_in(&mut block)?;
+        let received = self
+            .transport
+            .interrupt_in(&mut block)
+            .map_err(|err| self.fail(err))?;
         if received != CBI_STATUS_LEN {
-            return Err(self.recover(Errno::LengthOutOfRange));
+            return Err(self.fail(Errno::LengthOutOfRange));
         }
         match self.status {
             CbiStatus::UfiSense => {
@@ -173,7 +182,7 @@ impl<T: MsdTransport> Cbi<T> {
             }
             CbiStatus::CommandStatus => {
                 if block[0] != 0 {
-                    return Err(self.recover(Errno::BadMagic));
+                    return Err(self.fail(Errno::BadMagic));
                 }
                 match block[1] & 0x03 {
                     STATUS_VALUE_PASSED => Ok(true),
@@ -182,7 +191,7 @@ impl<T: MsdTransport> Cbi<T> {
                     // out of step; reset it and fail the command. The
                     // masked value cannot exceed 3, so these two arms
                     // cover every remaining state.
-                    _ => Err(self.recover(Errno::NotImplemented)),
+                    _ => Err(self.fail(Errno::NotImplemented)),
                 }
             }
         }
@@ -204,8 +213,11 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
         if cb.is_empty() || cb.len() > CBI_COMMAND_LEN {
             return Err(Errno::OutOfRange);
         }
-        // A stale capture must never explain a later command's failure.
+        // A stale capture must never explain a later command's failure, nor a
+        // stale completion stand for this command's.
         self.sense = None;
+        self.transport.discard_interrupts()?;
+        self.transport.begin_exchange();
         let mut block = [0u8; CBI_COMMAND_LEN];
         block[..cb.len()].copy_from_slice(cb);
 
@@ -221,24 +233,22 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
                     transferred: 0,
                 })
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(self.fail(err)),
         }
 
         // Data phase over the bulk pair. A STALL ends the phase early —
-        // the completion interrupt still reports the command's verdict.
+        // the completion interrupt still reports the command's verdict; any
+        // other failure left the device mid-command.
         let mut transferred = 0usize;
-        match &mut data {
-            DataPhase::In(buf) if !buf.is_empty() => match self.transport.bulk_in(buf) {
-                Ok(n) => transferred = n,
-                Err(Errno::EndpointStalled) => {}
-                Err(err) => return Err(err),
-            },
-            DataPhase::Out(buf) if !buf.is_empty() => match self.transport.bulk_out(buf) {
-                Ok(n) => transferred = n,
-                Err(Errno::EndpointStalled) => {}
-                Err(err) => return Err(err),
-            },
-            _ => {}
+        let moved = match &mut data {
+            DataPhase::In(buf) if !buf.is_empty() => Some(self.transport.bulk_in(buf)),
+            DataPhase::Out(buf) if !buf.is_empty() => Some(self.transport.bulk_out(buf)),
+            _ => None,
+        };
+        match moved {
+            Some(Ok(n)) => transferred = n,
+            Some(Err(Errno::EndpointStalled)) | None => {}
+            Some(Err(err)) => return Err(self.fail(err)),
         }
 
         let passed = self.completion(block[0])?;
@@ -265,6 +275,10 @@ impl<T: MsdTransport> ScsiTransport for Cbi<T> {
     /// all — the command layer then falls back to `REQUEST SENSE`.
     fn take_sense(&mut self) -> Option<Sense> {
         self.sense.take()
+    }
+
+    fn reset(&mut self) -> Result<(), Errno> {
+        self.reset_recovery()
     }
 
     fn scrub(&mut self) {

@@ -58,7 +58,7 @@ use tairix_taskbar::{
     arrival_sound, icon_cache, AppSlot, Edge, Raised, TaskbarConfig, TaskbarRenderer,
     TaskbarResponse, TransientNotification,
 };
-use tairix_theme::{Appearance, CursorSetId, MotionInteraction};
+use tairix_theme::{Appearance, CursorSetId, MotionInteraction, Theme};
 use tairix_wallpaper::{
     merge_within, Backdrop, CursorSize, DesktopSettings, NotifyPolicy, ScreensaverKind,
     ScreensaverOptions, SettingsKey,
@@ -290,6 +290,29 @@ pub fn prompt_origin(screen: Rect, (width, height): (u32, u32)) -> Point {
     )
     .clamped_onto(screen)
     .origin
+}
+
+/// Where an alert whose client is `client` opens on `screen`, frame included:
+/// centred across it a third of the way down, set `cascade` pixels down and
+/// across from those before it, and kept on the screen.
+#[must_use]
+pub fn alert_rect(
+    screen: Rect,
+    client: (u32, u32),
+    cascade: u32,
+    (scale, theme): (Scale, &Theme),
+) -> Rect {
+    let outer =
+        WindowFrame::dialog().outer_for_client(Rect::new(0, 0, client.0, client.1), scale, theme);
+    let centred = prompt_origin(screen, (outer.width, outer.height));
+    let step = tairix_geometry::to_i32(cascade);
+    Rect::new(
+        centred.x.saturating_add(step),
+        centred.y.saturating_add(step),
+        outer.width,
+        outer.height,
+    )
+    .clamped_onto(screen)
 }
 
 /// How many times the shell has run each piece of its per-frame work.
@@ -882,6 +905,86 @@ impl DesktopShell {
         compositor.set_window_frame(window, frame);
         compositor.set_window_title(window, title);
         Some(window)
+    }
+
+    /// Open `surface` as an alert's client, framed as a dialog titled
+    /// `title`: centred across the screen a third of the way down, `cascade`
+    /// pixels further down and across, and wholly on it.
+    ///
+    /// An alert holding `owner` is that window's transient — lifted with its
+    /// family and handed the keyboard when `focus`, else left waiting where
+    /// its family stands. One holding no window opens over everything, off
+    /// the task list. While the seat is held (`behind`) it opens beneath the
+    /// window holding the keyboard and takes nothing. `None` for an owner the
+    /// compositor does not know.
+    pub fn open_alert_window(
+        &mut self,
+        compositor: &mut Compositor,
+        owner: Option<WindowId>,
+        surface: Surface,
+        title: &str,
+        (cascade, focus, behind): (u32, bool, bool),
+    ) -> Option<WindowId> {
+        let frame = WindowFrame::dialog();
+        let origin = alert_rect(
+            compositor.screen_rect(),
+            (surface.width(), surface.height()),
+            cascade,
+            (compositor.scale(), compositor.theme()),
+        )
+        .origin;
+        let focus = focus && !behind;
+        let window = match owner {
+            Some(parent) if focus => compositor.add_transient_window(parent, origin, surface)?,
+            Some(parent) => compositor.add_transient_window_in_place(parent, origin, surface)?,
+            None => compositor.add_window(origin, surface),
+        };
+        compositor.set_window_frame(window, frame);
+        compositor.set_window_title(window, title);
+        // An alert that has not earned the keyboard has not earned the front
+        // either: it waits beneath what the user is working in.
+        if behind || (owner.is_none() && !focus) {
+            if let Some(front) = self.router.focused() {
+                compositor.stack_below(window, front);
+            }
+        } else if focus {
+            self.router.focus(window, compositor);
+        }
+        self.sync_active_frame(compositor);
+        Some(window)
+    }
+
+    /// Take alert window `window` down, handing the keyboard to `next` when
+    /// the alert held it, and leaving it on the desktop when `next` can no
+    /// longer take it — a window already gone. Returns `false`, changing
+    /// nothing, for a window the compositor does not know.
+    pub fn close_alert_window(
+        &mut self,
+        compositor: &mut Compositor,
+        window: WindowId,
+        next: Option<WindowId>,
+    ) -> bool {
+        let held = self.router.focused() == Some(window);
+        if !compositor.remove(window) {
+            return false;
+        }
+        if held && !next.is_some_and(|next| self.router.focus(next, compositor)) {
+            self.router.unfocus();
+        }
+        self.sync_active_frame(compositor);
+        true
+    }
+
+    /// Raise alert window `window` with its owner's family and give it the
+    /// keyboard: the user pressed the window it holds. Returns `false` for a
+    /// window the compositor does not know.
+    pub fn focus_alert_window(&mut self, compositor: &mut Compositor, window: WindowId) -> bool {
+        if !compositor.raise(window) {
+            return false;
+        }
+        let focused = self.router.focus(window, compositor);
+        self.sync_active_frame(compositor);
+        focused
     }
 
     /// Carry the primary press `parent`'s content holds on as a move of its

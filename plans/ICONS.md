@@ -34,6 +34,7 @@ bounds), and `plans/GUI-CONTROLS-DESIGN.md`.
 | I11 | An SVG element the decoder cannot honour falls back rather than being skipped | blocked: refusing per element class or globally is undecided |
 | I12 | Raster masters exceed every slot the desktop can draw them in | blocked: the master side against decode cost and the byte bound is undecided |
 | I13 | A settings category's or disclosed pane's built-in picture is a colour badge | done |
+| I14 | Every drive medium has its own picture | done |
 
 Each item's section below records what it guarantees or what remains.
 
@@ -197,9 +198,9 @@ so shipping it would be a picture nothing could ever choose.
   `ArtworkRasteriser` seams, the `IconArtwork` draw-site lookup with its
   all-glyph `NoArtwork` implementation, `ArtworkCache`, and
   `IconArtworkSource` which binds a cache to its seams.
-- `disk_icon(Option<BlkDeviceClass>)` maps a mounted volume's real storage
-  medium to its icon, with paravirtual and unknown both resolving to the
-  generic drive glyph — the honest answer, not a guess.
+- `disk_icon(Option<BlkMedium>)` maps a mounted volume's declared medium to
+  its icon (I14), with paravirtual and unknown both resolving to the generic
+  drive — the honest answer, not a guess.
 
 ## 3. I2 — the content-type registry (`lib/browse`)
 
@@ -209,7 +210,9 @@ a separate association table). It provides the media-type spelling, the
 reverse lookup, the icon, the subclass parent, and the entry classifier
 (which distinguishes an application bundle from a service bundle by the
 store it was listed from). Association matching walks the subclass chain and
-ranks a specific declaration ahead of a generic one.
+ranks a specific declaration ahead of a generic one. Every byte-stream type
+descends from `application/octet-stream`, and a name the registry does not know
+is that type, so a claim on it covers every file (`plans/TEXTEDIT.md` TE14).
 
 ## 4. I3 — build-time discovery and planting
 
@@ -570,7 +573,16 @@ badge kind of its own too, never its category's borrowed.
   settings category does, never a second plate path. A kind with no symbol
   stands on its plate alone, so the colour is never lost.
 
-## 15. What this plan deliberately does not cover
+## 15. I14 — every drive medium has its own picture
+
+A hard disk, a SATA or SAS SSD, an NVMe drive, a USB flash drive, a disk in a
+USB enclosure and an SD or eMMC card each draw their own master (`disk-hard`,
+`disk-solid-state`, `disk-nvme`, `disk-usb`, `disk-external`, `disk-sd`), and
+a paravirtual or unknown medium the generic `disk`. Each is a raster master in
+the existing drive style over the drive family's built-in glyph, so the rule
+stays total.
+
+## 16. What this plan deliberately does not cover
 
 - **Cursors and window chrome stay vector.** They are tintable silhouettes
   resolved from the theme; a raster master would be the wrong source format

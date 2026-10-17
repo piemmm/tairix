@@ -21,6 +21,8 @@ use tairix_theme::Theme;
 
 use crate::document::SavedDocument;
 
+#[cfg(any(test, all(freestanding, feature = "rt")))]
+mod closing;
 #[cfg(all(freestanding, feature = "rt"))]
 mod host;
 #[cfg(all(freestanding, feature = "rt"))]
@@ -112,6 +114,9 @@ pub enum Request<K, O> {
     Open,
     /// Close the window: its document is saved or its changes given up.
     Close,
+    /// Ask whether to save the document's changes before the window closes:
+    /// the host puts the question in an alert of its own.
+    AskToClose,
     /// Open the window's `kind` menu at `anchor`, in window pixels.
     Menu {
         /// Which of the window's menus.
@@ -230,10 +235,12 @@ pub trait DocumentView: SavedDocument {
     /// Where what the window is told ([`SavedDocument::say`]) is shown.
     fn message_area(layout: &Self::Layout) -> Rect;
 
-    /// Whether the question showing is whether to save before closing,
-    /// which a quit waits on; a quit puts that question in place of any
-    /// other.
-    fn asking_to_close(&self) -> bool;
+    /// Whether a question of the view's own showing is part of closing — how
+    /// to save before the window closes — which a quit waits on. Whether to
+    /// save at all is the host's question, not the view's.
+    fn asking_to_close(&self) -> bool {
+        false
+    }
 
     /// The pointer's shape over `at`.
     fn cursor(&self, layout: &Self::Layout, at: Point) -> CursorShape;
@@ -251,8 +258,20 @@ pub trait DocumentView: SavedDocument {
     /// The rows of the window's `kind` menu.
     fn menu(&self, kind: Self::MenuKind) -> AppMenu;
 
-    /// The user asked to close the window.
+    /// The user asked to close the window: answer [`Request::Close`], or
+    /// [`Request::AskToClose`] for a document holding changes.
     fn close_requested(&mut self, layout: &Self::Layout, damage: &mut Region) -> ViewOutcome<Self>;
+
+    /// The user chose to save before the window closes: answer
+    /// [`Request::SaveThenClose`] once what the view holds apart from its
+    /// document is in it, as any save of its own would.
+    fn save_then_close(
+        &mut self,
+        _layout: &Self::Layout,
+        _damage: &mut Region,
+    ) -> ViewOutcome<Self> {
+        Outcome::asking(Request::SaveThenClose)
+    }
 
     /// The menu row `item` was chosen.
     fn chosen(

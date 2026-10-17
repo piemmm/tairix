@@ -28,8 +28,8 @@ use tairix_wallpaper::{
 use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
-    BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, LaunchDocument,
-    PinboardChange, SettingsEdit, DESKTOP_MARGIN,
+    BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, GestureRefusal,
+    LaunchDocument, PinboardChange, SettingsEdit, DESKTOP_MARGIN,
 };
 use crate::pinboard::{self, PinboardCommand};
 use tairix_controls::{ChainChild, ChainModel};
@@ -1178,10 +1178,11 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
     );
     assert_eq!(
         acted.action,
-        Some(DesktopAction::Refuse(
-            "desktop: no installed application opens 'mystery.qqq'\n".to_string()
-        )),
-        "the refusal names the file and is ready for the error stream"
+        Some(DesktopAction::Refuse(GestureRefusal::new(
+            "No installed application opens \u{201c}mystery.qqq\u{201d}",
+            "No program installed here claims files of this kind.",
+        ))),
+        "the refusal names the file"
     );
     assert_eq!(desktop.selected(), Some(0), "the icon stays selected");
 }
@@ -1210,9 +1211,10 @@ fn a_shortcut_whose_entry_left_the_catalog_is_refused_rather_than_guessed() {
     let desktop = desktop_of(vec![]);
     assert_eq!(
         desktop.shortcut_to(&Catalog::default(), &entry_id("os.tairix.chess")),
-        DesktopAction::Refuse(
-            "desktop: library entry os.tairix.chess is no longer catalogued\n".to_string()
-        )
+        DesktopAction::Refuse(GestureRefusal::new(
+            "That program is no longer in the program library",
+            "Library entry os.tairix.chess was removed or replaced since the menu opened.",
+        ))
     );
 }
 
@@ -1235,8 +1237,9 @@ fn a_display_name_the_shared_rule_refuses_is_refused_with_its_reason() {
         let catalog = catalog_of("os.tairix.chess", name, "/System/Applications/chess.app");
         assert_eq!(
             desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
-            DesktopAction::Refuse(alloc::format!(
-                "desktop: '{name}' cannot be a shortcut name ({reason})\n"
+            DesktopAction::Refuse(GestureRefusal::new(
+                alloc::format!("\u{201c}{name}\u{201d} cannot name a shortcut"),
+                alloc::format!("A shortcut is a file, and {reason}."),
             )),
             "the one shared name rule's own reason is what the desktop reports"
         );
@@ -1398,9 +1401,10 @@ fn double_clicking_a_shortcut_whose_target_has_gone_is_refused_with_its_reason()
     );
     assert_eq!(
         acted.action,
-        Some(DesktopAction::Refuse(
-            "desktop: the shortcut 'Chess' points at something that is not there\n".to_string()
-        )),
+        Some(DesktopAction::Refuse(GestureRefusal::new(
+            "The shortcut \u{201c}Chess\u{201d} points at something that is not there",
+            "What it named has been moved or deleted.",
+        ))),
         "a dangling shortcut is never launched on the chance that it works"
     );
     assert_eq!(desktop.selected(), Some(0), "the icon stays selected");
@@ -1439,9 +1443,10 @@ fn a_shortcut_that_names_nothing_at_all_is_refused_rather_than_opened() {
                 &mut Region::new()
             )
             .action,
-        Some(DesktopAction::Refuse(
-            "desktop: the shortcut 'Chess' names nothing\n".to_string()
-        ))
+        Some(DesktopAction::Refuse(GestureRefusal::new(
+            "The shortcut \u{201c}Chess\u{201d} names nothing",
+            "It holds no target to open.",
+        )))
     );
 }
 

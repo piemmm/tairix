@@ -21,6 +21,7 @@ use tairix_binfmt::{elf, wasm, Format};
 use tairix_disasm::{aarch64, riscv64, wasm as wasm_isa, x86_64, Insn, MAX_INSN_BYTES};
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
+use crate::memory::WorkerMemory;
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
@@ -44,6 +45,10 @@ pub const MAX_TEXT: usize = 256;
 /// Most instructions one disassembly window may return.
 pub const MAX_WINDOW_INSNS: usize = 4096;
 
+/// The memory a decode worker is held to: every request and reply is a
+/// frame, and what the service builds between them is capped to fit one.
+pub const WORKER_MEMORY: WorkerMemory = WorkerMemory::Messages;
+
 /// The instruction-set architectures the disassemble request accepts.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Isa {
@@ -58,6 +63,44 @@ pub enum Isa {
 }
 
 impl Isa {
+    /// Every instruction set the service decodes, in the order a chooser
+    /// offers them.
+    pub const ALL: [Self; 4] = [Self::X86_64, Self::Aarch64, Self::Riscv64, Self::Wasm];
+
+    /// The instruction set a kernel built for `arch` runs: what an `rxe`,
+    /// which names none, is written in on the machine it was installed on.
+    #[must_use]
+    pub const fn of_arch(arch: tairix_abi::Arch) -> Self {
+        match arch {
+            tairix_abi::Arch::X86_64 => Self::X86_64,
+            tairix_abi::Arch::Aarch64 => Self::Aarch64,
+            tairix_abi::Arch::Riscv64 => Self::Riscv64,
+            tairix_abi::Arch::Wasm32 => Self::Wasm,
+        }
+    }
+
+    /// The instruction set's display name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86-64",
+            Self::Aarch64 => "aarch64",
+            Self::Riscv64 => "riscv64",
+            Self::Wasm => "wasm",
+        }
+    }
+
+    /// The most bytes one instruction of this set can take.
+    #[must_use]
+    pub const fn longest_encoding(self) -> usize {
+        match self {
+            Self::X86_64 => x86_64::MAX_INSN_LEN,
+            Self::Aarch64 => aarch64::MAX_INSN_LEN,
+            Self::Riscv64 => riscv64::MAX_INSN_LEN,
+            Self::Wasm => wasm_isa::MAX_INSN_LEN,
+        }
+    }
+
     const fn to_wire(self) -> u8 {
         match self {
             Self::X86_64 => 1,
@@ -87,6 +130,18 @@ pub enum ContainerFormat {
     Elf64,
     /// A WebAssembly module.
     Wasm,
+}
+
+impl ContainerFormat {
+    /// The container's name, as a reader is shown it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rxe => "rxe",
+            Self::Elf64 => "ELF64",
+            Self::Wasm => "wasm",
+        }
+    }
 }
 
 /// What a region holds, as far as inspection cares.
@@ -131,6 +186,15 @@ pub struct SymbolRecord {
     pub addr: u64,
     /// Associated size in bytes.
     pub size: u64,
+}
+
+impl Region {
+    /// The first address past the region's decodable code: the in-memory
+    /// tail past its file bytes is zero fill, not code.
+    #[must_use]
+    pub const fn code_end(&self) -> u64 {
+        self.addr.saturating_add(self.file_size)
+    }
 }
 
 /// The typed container summary a sandboxed decode returns.
@@ -178,6 +242,22 @@ pub struct InsnRecord {
     pub operands: String,
     /// Resolved absolute direct branch/call target, when encoded.
     pub branch_target: Option<u64>,
+}
+
+/// The code one disassembly reads.
+#[derive(Copy, Clone, Debug)]
+pub struct CodeWindow<'a> {
+    /// The address of the first byte.
+    pub address: u64,
+    /// The wasm nesting depth there, carried from the previous window (0
+    /// elsewhere).
+    pub depth: u32,
+    /// The bytes.
+    pub code: &'a [u8],
+    /// Whether the code goes on past `code`. Then no instruction is decoded
+    /// from fewer than [`Isa::longest_encoding`] bytes, so the window's end
+    /// cuts none, and the next window starts where this one stopped.
+    pub continues: bool,
 }
 
 /// One disassembled window and where the next window starts.
@@ -309,14 +389,24 @@ fn dispatch(request: &[u8]) -> Result<Vec<u8>, DecodeRefusal> {
             let address = r.u64().map_err(|_| DecodeRefusal::MalformedRequest)?;
             let depth = r.u32().map_err(|_| DecodeRefusal::MalformedRequest)?;
             let max_insns = r.u32().map_err(|_| DecodeRefusal::MalformedRequest)?;
+            let continues = match r.u8().map_err(|_| DecodeRefusal::MalformedRequest)? {
+                0 => false,
+                1 => true,
+                _ => return Err(DecodeRefusal::MalformedRequest),
+            };
             let code = r
                 .bytes(MAX_INPUT)
                 .map_err(|_| DecodeRefusal::MalformedRequest)?;
             if !r.is_exhausted() {
                 return Err(DecodeRefusal::MalformedRequest);
             }
-            let window = run_disassembly(isa, address, depth, max_insns, code);
-            Ok(encode_disasm(&window))
+            let window = CodeWindow {
+                address,
+                depth,
+                code,
+                continues,
+            };
+            Ok(encode_disasm(&run_disassembly(isa, window, max_insns)))
         }
         _ => Err(DecodeRefusal::MalformedRequest),
     }
@@ -612,14 +702,14 @@ fn push_decimal(out: &mut String, value: u64) {
     }
 }
 
-/// Decode up to `max_insns` instructions from `code` at `address`.
-fn run_disassembly(
-    isa: Isa,
-    address: u64,
-    depth: u32,
-    max_insns: u32,
-    code: &[u8],
-) -> DisasmWindow {
+/// Decode up to `max_insns` instructions of `window`.
+fn run_disassembly(isa: Isa, window: CodeWindow<'_>, max_insns: u32) -> DisasmWindow {
+    let CodeWindow {
+        address,
+        depth,
+        code,
+        continues,
+    } = window;
     let take = usize::try_from(max_insns)
         .unwrap_or(usize::MAX)
         .min(MAX_WINDOW_INSNS);
@@ -628,6 +718,9 @@ fn run_disassembly(
     let mut next_address = address;
     let mut next_depth = depth;
     while insns.len() < take && at < code.len() {
+        if continues && code.len() - at < isa.longest_encoding() {
+            break;
+        }
         let decoded = match isa {
             Isa::X86_64 => x86_64::decode(&code[at..], next_address),
             Isa::Aarch64 => aarch64::decode(&code[at..], next_address),
@@ -801,11 +894,8 @@ pub fn manifest_summary<L: Launcher, S: tairix_log::Sink>(
     })
 }
 
-/// Ask the sandboxed worker to disassemble one window of `code`.
-///
-/// `address` is the first byte's address, `depth` the wasm nesting depth
-/// carried from the previous window (0 elsewhere), `max_insns` the window
-/// size (clamped to [`MAX_WINDOW_INSNS`] worker-side).
+/// Ask the sandboxed worker to disassemble up to `max_insns` instructions
+/// of `window` as `isa` (clamped to [`MAX_WINDOW_INSNS`] worker-side).
 ///
 /// # Errors
 ///
@@ -813,26 +903,49 @@ pub fn manifest_summary<L: Launcher, S: tairix_log::Sink>(
 pub fn disassemble<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     isa: Isa,
-    address: u64,
-    depth: u32,
+    window: CodeWindow<'_>,
     max_insns: u32,
-    code: &[u8],
 ) -> Result<DisasmWindow, DecodeFailure> {
+    let code = window.code;
     if code.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::with_capacity(22 + code.len());
+    let mut w = Writer::with_capacity(23 + code.len());
     w.u8(OP_DISASSEMBLE);
     w.u8(isa.to_wire());
-    w.u64(address);
-    w.u32(depth);
+    w.u64(window.address);
+    w.u32(window.depth);
     w.u32(max_insns);
+    w.u8(u8::from(window.continues));
     w.bytes(code);
     let request = w.finish();
+    let asked = Asked {
+        address: window.address,
+        max_insns,
+        len: code.len(),
+        cut_margin: if window.continues {
+            isa.longest_encoding()
+        } else {
+            1
+        },
+    };
     sandbox.ask(|sandbox| {
         let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
-        decode_disasm_reply(&reply)
+        decode_disasm_reply(&reply, asked)
     })
+}
+
+/// What a disassembly request asked for, which its reply is held to: the
+/// worker is untrusted, so an answer is accepted only as one the request
+/// could have produced.
+#[derive(Copy, Clone, Debug)]
+struct Asked {
+    address: u64,
+    max_insns: u32,
+    len: usize,
+    /// The fewest bytes before the window's end an instruction may start:
+    /// one, or where the code goes on past it, the longest encoding.
+    cut_margin: usize,
 }
 
 /// Split a reply into its tag and body, resolving the error tag.
@@ -956,26 +1069,50 @@ fn decode_manifest_reply(reply: &[u8]) -> Result<ManifestInfo, DecodeFailure> {
     })
 }
 
-/// Decode a disassembly reply fail-closed.
-fn decode_disasm_reply(reply: &[u8]) -> Result<DisasmWindow, DecodeFailure> {
+/// Decode a disassembly reply to the request `asked` described.
+///
+/// The instructions must run on from the address asked, each starting where
+/// the last ended, none past the bytes sent and none where the window's end
+/// could have cut it, no more of them than were asked for, and the next
+/// address must be where the last one ends: an answer repeating an address,
+/// overlapping itself or overrunning its window is a lie, refused before a
+/// byte of it is listed.
+fn decode_disasm_reply(reply: &[u8], asked: Asked) -> Result<DisasmWindow, DecodeFailure> {
+    let malformed = DecodeFailure::ReplyMalformed;
     let mut r = reply_body(reply, REPLY_DISASM)?;
     let step = |_: crate::wire::WireError| DecodeFailure::ReplyMalformed;
     let next_address = r.u64().map_err(step)?;
     let next_depth = r.u32().map_err(step)?;
     let count = r.u32().map_err(step)? as usize;
-    if count > MAX_WINDOW_INSNS {
-        return Err(DecodeFailure::ReplyMalformed);
+    let wanted = usize::try_from(asked.max_insns).unwrap_or(usize::MAX);
+    if count > MAX_WINDOW_INSNS || count > wanted {
+        return Err(malformed);
     }
+    let window_end = u64::try_from(asked.len)
+        .ok()
+        .and_then(|len| asked.address.checked_add(len))
+        .ok_or(malformed)?;
+    let last_start = u64::try_from(asked.cut_margin)
+        .ok()
+        .and_then(|margin| window_end.checked_sub(margin));
+    let mut expected = asked.address;
     let mut insns = Vec::with_capacity(count);
     for _ in 0..count {
         let address = r.u64().map_err(step)?;
         let length = r.u32().map_err(step)?;
         // A zero-length instruction would stall any pager walking the
         // window; a worker claiming one is lying.
-        if length == 0 {
-            return Err(DecodeFailure::ReplyMalformed);
+        if length == 0 || address != expected || last_start.is_none_or(|last| address > last) {
+            return Err(malformed);
         }
+        expected = address
+            .checked_add(u64::from(length))
+            .filter(|&end| end <= window_end)
+            .ok_or(malformed)?;
         let bytes = r.bytes(MAX_INSN_BYTES).map_err(step)?.to_vec();
+        if bytes.len() > length as usize {
+            return Err(malformed);
+        }
         let mnemonic = r.string(MAX_TEXT).map_err(step)?;
         let operands = r.string(MAX_TEXT).map_err(step)?;
         let branch_target = match r.u8().map_err(step)? {
@@ -992,8 +1129,8 @@ fn decode_disasm_reply(reply: &[u8]) -> Result<DisasmWindow, DecodeFailure> {
             branch_target,
         });
     }
-    if !r.is_exhausted() {
-        return Err(DecodeFailure::ReplyMalformed);
+    if !r.is_exhausted() || next_address != expected {
+        return Err(malformed);
     }
     Ok(DisasmWindow {
         insns,
@@ -1006,8 +1143,8 @@ fn decode_disasm_reply(reply: &[u8]) -> Result<DisasmWindow, DecodeFailure> {
 mod tests {
     use super::{
         container_summary, decode_disasm_reply, decode_summary_reply, disassemble,
-        manifest_summary, ContainerFormat, DecodeFailure, DecodeRefusal, DecodeService, Isa,
-        RegionKind, MAX_INPUT, MAX_REGIONS,
+        manifest_summary, CodeWindow, ContainerFormat, DecodeFailure, DecodeRefusal, DecodeService,
+        Isa, RegionKind, MAX_INPUT, MAX_REGIONS,
     };
     use crate::host::ParserSandbox;
     use crate::loopback::LoopbackLauncher;
@@ -1243,11 +1380,134 @@ mod tests {
     }
 
     #[test]
+    fn a_disassembly_reply_is_held_to_the_request_it_answers() {
+        use super::{encode_disasm, Asked, DisasmWindow, InsnRecord};
+        let insn = |address: u64, length: u32| InsnRecord {
+            address,
+            length,
+            bytes: alloc::vec![0x90; length as usize],
+            mnemonic: alloc::string::String::from("nop"),
+            operands: alloc::string::String::new(),
+            branch_target: None,
+        };
+        let window = |insns: alloc::vec::Vec<InsnRecord>, next_address| DisasmWindow {
+            insns,
+            next_address,
+            next_depth: 0,
+        };
+        let asked = Asked {
+            address: 0x1000,
+            max_insns: 2,
+            len: 4,
+            cut_margin: 1,
+        };
+        let honest = window(alloc::vec![insn(0x1000, 1), insn(0x1001, 3)], 0x1004);
+        assert!(decode_disasm_reply(&encode_disasm(&honest), asked).is_ok());
+        let lies = [
+            (
+                window(alloc::vec![insn(0x1000, 1), insn(0x1000, 1)], 0x1001),
+                "an address repeated",
+            ),
+            (
+                window(alloc::vec![insn(0x0fff, 1)], 0x1000),
+                "not where it was asked",
+            ),
+            (
+                window(alloc::vec![insn(0x1000, 5)], 0x1005),
+                "past the bytes sent",
+            ),
+            (
+                window(alloc::vec![insn(0x1000, 1)], 0x1004),
+                "a next address not reached",
+            ),
+            (
+                window(
+                    alloc::vec![insn(0x1000, 1), insn(0x1001, 1), insn(0x1002, 1)],
+                    0x1003,
+                ),
+                "more instructions than were asked for",
+            ),
+        ];
+        for (lie, why) in lies {
+            assert_eq!(
+                decode_disasm_reply(&encode_disasm(&lie), asked),
+                Err(DecodeFailure::ReplyMalformed),
+                "{why}"
+            );
+        }
+        let continuing = Asked {
+            cut_margin: 3,
+            ..asked
+        };
+        let whole = window(alloc::vec![insn(0x1000, 1), insn(0x1001, 3)], 0x1004);
+        assert!(decode_disasm_reply(&encode_disasm(&whole), continuing).is_ok());
+        let cut = window(alloc::vec![insn(0x1000, 2), insn(0x1002, 2)], 0x1004);
+        assert_eq!(
+            decode_disasm_reply(&encode_disasm(&cut), continuing),
+            Err(DecodeFailure::ReplyMalformed),
+            "an instruction the window's end could have cut"
+        );
+    }
+
+    fn whole(address: u64, depth: u32, code: &[u8]) -> CodeWindow<'_> {
+        CodeWindow {
+            address,
+            depth,
+            code,
+            continues: false,
+        }
+    }
+
+    #[test]
+    fn a_window_the_code_runs_past_cuts_no_instruction() {
+        let mut sandbox = sandbox();
+        // Fourteen `nop`s, then a ten-byte `movabs rax, imm64`.
+        let mut code = vec![0x90; 14];
+        code.extend_from_slice(&[0x48, 0xB8, 1, 2, 3, 4, 5, 6, 7, 8]);
+        let first = CodeWindow {
+            continues: true,
+            ..whole(0, 0, &code[..20])
+        };
+        let first = disassemble(&mut sandbox, Isa::X86_64, first, 64).expect("window");
+        // An instruction starts only where all fifteen bytes it may take were sent.
+        assert_eq!(first.insns.len(), 6);
+        assert_eq!(first.next_address, 6);
+        let rest =
+            disassemble(&mut sandbox, Isa::X86_64, whole(6, 0, &code[6..]), 64).expect("window");
+        let last = rest.insns.last().expect("an instruction");
+        assert_eq!((last.address, last.length), (14, 10));
+        assert_eq!(last.mnemonic, "movabs");
+        // Read as the whole code, the same twenty bytes end in a cut one.
+        let cut =
+            disassemble(&mut sandbox, Isa::X86_64, whole(0, 0, &code[..20]), 64).expect("window");
+        assert_ne!(cut.insns.last().map(|insn| insn.length), Some(10));
+    }
+
+    #[test]
+    fn a_continuation_flag_other_than_yes_or_no_is_refused() {
+        let mut service = DecodeService;
+        let mut w = Writer::new();
+        w.u8(super::OP_DISASSEMBLE);
+        w.u8(Isa::Aarch64.to_wire());
+        w.u64(0);
+        w.u32(0);
+        w.u32(1);
+        w.u8(2);
+        w.bytes(&[0x1F, 0x20, 0x03, 0xD5]);
+        let reply = service.handle(&w.finish());
+        assert_eq!(
+            decode_summary_reply(&reply),
+            Err(DecodeFailure::Refused(DecodeRefusal::MalformedRequest))
+        );
+    }
+
+    #[test]
     fn disassembly_pages_by_max_insns_and_reports_the_next_address() {
         let mut sandbox = sandbox();
         // Two A64 `nop`s (0xD503201F little-endian).
         let nops = [0x1F, 0x20, 0x03, 0xD5, 0x1F, 0x20, 0x03, 0xD5];
-        let window = disassemble(&mut sandbox, Isa::Aarch64, 0x1000, 0, 1, &nops).expect("window");
+        let window =
+            disassemble(&mut sandbox, Isa::Aarch64, whole(0x1000, 0, &nops), 1).expect("window");
         assert_eq!(window.insns.len(), 1);
         assert_eq!(window.insns[0].address, 0x1000);
         assert_eq!(window.insns[0].length, 4);
@@ -1257,10 +1517,8 @@ mod tests {
         let rest = disassemble(
             &mut sandbox,
             Isa::Aarch64,
-            window.next_address,
-            0,
+            whole(window.next_address, 0, &nops[4..]),
             16,
-            &nops[4..],
         )
         .expect("window");
         assert_eq!(rest.insns.len(), 1);
@@ -1272,16 +1530,15 @@ mod tests {
         let mut sandbox = sandbox();
         // `block (empty) … end`: depth rises to 1 inside the block.
         let code = [0x02, 0x40, 0x01, 0x0B];
-        let first = disassemble(&mut sandbox, Isa::Wasm, 0, 0, 1, &code).expect("window");
+        let first = disassemble(&mut sandbox, Isa::Wasm, whole(0, 0, &code), 1).expect("window");
         assert_eq!(first.insns.len(), 1);
         assert_eq!(first.next_depth, 1);
+        let at = usize::try_from(first.next_address).expect("small");
         let rest = disassemble(
             &mut sandbox,
             Isa::Wasm,
-            first.next_address,
-            first.next_depth,
+            whole(first.next_address, first.next_depth, &code[at..]),
             16,
-            &code[usize::try_from(first.next_address).expect("small")..],
         )
         .expect("window");
         assert_eq!(rest.insns.len(), 2);
@@ -1310,8 +1567,14 @@ mod tests {
         w.u32(1);
         w.u64(0);
         w.u32(0); // zero length: a lie
+        let asked = super::Asked {
+            address: 0,
+            max_insns: 16,
+            len: 16,
+            cut_margin: 1,
+        };
         assert_eq!(
-            decode_disasm_reply(&w.finish()),
+            decode_disasm_reply(&w.finish(), asked),
             Err(DecodeFailure::ReplyMalformed)
         );
         // An unknown reply tag.

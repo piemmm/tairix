@@ -33,6 +33,7 @@ mod help_lint;
 mod host_fonts;
 mod image_apps;
 mod image_drivers;
+mod keys;
 mod linkcheck;
 mod loom;
 mod miri;
@@ -60,6 +61,7 @@ pub enum Command {
     Build,
     Clean,
     Prune,
+    Keys,
     Test,
     Clippy,
     Fmt,
@@ -101,6 +103,7 @@ impl Command {
         Command::Build,
         Command::Clean,
         Command::Prune,
+        Command::Keys,
         Command::Test,
         Command::Clippy,
         Command::Fmt,
@@ -141,6 +144,7 @@ impl Command {
             "build" => Command::Build,
             "clean" => Command::Clean,
             "prune" => Command::Prune,
+            "keys" => Command::Keys,
             "test" => Command::Test,
             "clippy" => Command::Clippy,
             "fmt" => Command::Fmt,
@@ -183,6 +187,7 @@ impl Command {
             Command::Build => "build",
             Command::Clean => "clean",
             Command::Prune => "prune",
+            Command::Keys => "keys",
             Command::Test => "test",
             Command::Clippy => "clippy",
             Command::Fmt => "fmt",
@@ -223,6 +228,7 @@ impl Command {
         match self {
             Command::Build => "Compile every workspace crate for the host target.",
             Command::Clean => "Delete cargo build artefacts to reclaim target/ disk space.",
+            Command::Keys => "Create the build's secret signing key set (`keys init`).",
             Command::Prune => {
                 "Remove superseded build-script output to reclaim target/ disk space."
             }
@@ -303,6 +309,7 @@ impl Command {
             Command::Build => run_build(ctx, args),
             Command::Clean => run_clean(ctx, args),
             Command::Prune => prune::run(ctx, args),
+            Command::Keys => keys::run(ctx, args),
             Command::Test => run_test(ctx, args),
             Command::Clippy => run_clippy(ctx, args),
             Command::Fmt => run_fmt(ctx, args),
@@ -1395,6 +1402,9 @@ const CI_STAGES: &[&str] = &[
 const CI_TEST_ARGS: [&str; 2] = ["--qemu", "--shuffle"];
 
 fn run_ci(ctx: &Context) -> Result<(), String> {
+    // Every compiling stage signs or derives an anchor from the key set, so a
+    // machine without one fails here rather than a stage in.
+    ctx.signing_keys()?;
     // The pipeline order is deliberate and evidence-based: every stage is
     // cheaper than the one after it, so a failing PR fails as early as its
     // cost allows. Ordering is against measured wall clock (`grep 'stage:'`

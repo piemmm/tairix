@@ -34,12 +34,8 @@ path = "src/main.rs"
 # Rust: a future ABI change cannot pass `cargo build` without breaking
 # the cross-check.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
-# `image-drivers` `#[path]`s the kernel's `build_support.rs`, which takes its
-# build-provenance fingerprint with the workspace's shared non-cryptographic
-# hash.
+# The workspace's shared hashes, keying the fixtures' and benchmarks' tables.
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
-# The same `build_support.rs` refines the shared target classification.
-tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 # `font-atlas` rasterises the committed TrueType faces into the generated
 # `lib/font` atlas through the shared `lib/fontface` glyph engine — the same
 # parser + rasteriser the runtime font uses to resize UI glyphs, so the atlas
@@ -183,6 +179,8 @@ tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # image pipeline is ordinary Rust driven by the same xtask entry point as
 # every other build step.
 tairix-mkimage = { path = "../mkimage", version = "=0.0.0" }
+# The build's secret signing key set the image pipeline signs bundles with.
+tairix-signkeys = { path = "../signkeys", version = "=0.0.0" }
 # `image` cross-compiles and signs the autoloaded `/System/Drivers/` bundles
 # the flashable Pi image ships (`plans/PI.md` P10 D4). The signed-bundle
 # composer and the ELF->rxe converter live in the shared harness — the single

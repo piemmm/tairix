@@ -14,6 +14,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU8;
+use tairix_abi::blkio::BlkMedium;
 
 use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
 use tairix_abi::driver::filesystem::{
@@ -43,7 +44,7 @@ use crate::fs::{Attachment, FinalLink, Listing, Mode, Path, Vfs, VfsError};
 /// A removable volume served by `driver`, attached with the flags every
 /// runtime volume carries.
 fn removable(driver: DriverHandle) -> Attachment {
-    Attachment::new(driver, Some(BlkDeviceClass::Removable), MountFlags::NOEXEC)
+    Attachment::new(driver, Some(BlkMedium::UsbFlash), MountFlags::NOEXEC)
 }
 
 /// Back the `/Storage` catalog with the volume `driver` serves, so a listing

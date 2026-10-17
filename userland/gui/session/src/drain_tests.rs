@@ -17,7 +17,7 @@ use tairix_taskbar::TaskbarResponse;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 
-use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport};
+use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport, SlotAnswer};
 use crate::drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
 use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 use crate::lock::ScreenLock;
@@ -152,7 +152,9 @@ impl SeatRouter for Program {
         match place {
             DragPlace::Slot { index } => DragSurface::Slot {
                 index,
-                target: self.target.map(alloc::boxed::Box::new),
+                answer: self
+                    .target
+                    .map(|target| SlotAnswer::Opens(alloc::boxed::Box::new(target))),
             },
             _ => DragSurface::Nothing,
         }
@@ -283,10 +285,12 @@ fn bar_desktop() -> (DesktopShell, Compositor) {
     let mut comp = compositor();
     shell.set_apps(
         &mut comp,
-        vec![
-            tairix_taskbar::AppSlot::new("Terminal", IconKind::AppBundle)
-                .with_declaration(bar.menu, bar.click),
-        ],
+        vec![tairix_taskbar::AppSlot::new(
+            tairix_abi::ProcId::from_raw([0x7E; 16]),
+            "Terminal",
+            IconKind::AppBundle,
+        )
+        .with_declaration(bar.menu, bar.click)],
     );
     (shell, comp)
 }
@@ -371,6 +375,7 @@ fn a_carried_drag_is_the_drains_until_its_press_comes_up() {
         [DragEnd {
             source: 7,
             ended: DragConclusion::Application(alloc::boxed::Box::new(editor())),
+            refused: None,
         }]
     );
     assert!(!desk.shell.drag_active());
@@ -439,6 +444,7 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
         [DragEnd {
             source: 7,
             ended: DragConclusion::Nothing,
+            refused: None,
         }],
         "the slot claims nothing"
     );
@@ -460,6 +466,7 @@ fn a_drag_ends_with_nothing_dropped_off_a_taker_or_on_escape() {
         [DragEnd {
             source: 9,
             ended: DragConclusion::Nothing,
+            refused: None,
         }]
     );
     assert!(program.reports.is_empty(), "a slot is never reported");
@@ -489,7 +496,7 @@ fn a_row_click_queued_behind_the_press_that_opens_a_bar_menu_is_the_chains() {
     assert!(
         matches!(
             program.outcomes().last(),
-            Some(ShellOutcome::Taskbar(TaskbarResponse::AppMenuChosen { app: 0, item }))
+            Some(ShellOutcome::Taskbar(TaskbarResponse::AppMenuChosen { item, .. }))
                 if *item == new_window()
         ),
         "the queued click chose the row it was aimed at: {:?}",

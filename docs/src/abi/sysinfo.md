@@ -740,10 +740,11 @@ the request/render libraries stay testable against in-memory fixtures.
   hostname bounded by [`HOSTNAME_MAX`].
 - [`MountRecord`] — one mount-table entry: the backing `source` (bounded
   by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
-  the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), the [`MountFlags`]
-  mount-policy bitmap (`ro`/`noexec`), the volume's live
-  [`MountAvailability`] (so neither a surprise-removed volume nor one on a
-  composed backing that has lost redundancy reads as healthy — a degraded
+  the `fstype` naming its on-disk format (`ext2` for an ext2 volume the ext4
+  driver serves; [`MOUNT_FSTYPE_MAX`]), the [`MountFlags`] mount-policy
+  bitmap (`ro`/`noexec`), the volume's live [`MountAvailability`] (so
+  neither a surprise-removed volume nor one on a composed backing that has
+  lost redundancy reads as healthy — a degraded
   array's completions carry that state across the block-service seam,
   [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`MOUNT_VOLUME_ID_LEN`],
   all-zero when the mount publishes none — the identity a `volume_detach`
@@ -760,17 +761,17 @@ the request/render libraries stay testable against in-memory fixtures.
   internally inconsistent usage (available exceeding free, or free
   exceeding total) whole.
 
-  The medium is the [`BlkDeviceClass`] the backing block device declared,
+  The medium is the [`BlkMedium`] the backing block device declared,
   read through the typed [`MountRecord::medium`] accessor rather than as a
   raw byte, so a consumer such as the file manager can show a
   medium-appropriate drive icon instead of guessing one. It reuses the
-  block ABI's own class vocabulary rather than a second one
+  block ABI's own medium vocabulary (`BlkMedium`) rather than a second one
   (`AGENTS.md` §2.2) and is `None` — *unknown* — for a mount with no block
-  backing (a synthetic or view mount), for a device whose class word this
+  backing (a synthetic or view mount), for a device whose medium word this
   ABI does not define, and for a wire byte a decoder does not recognise:
   the record never fabricates a medium nobody reported. On the wire the
   medium is one byte after `availability`, `0` meaning unknown and a known
-  class its discriminant plus one; the seven bytes that follow it are
+  medium its discriminant plus one; the seven bytes that follow it are
   reserved-must-be-zero and a decode refuses a record that sets them.
 
   **The record's block counts are turned into facts in exactly one place.**
@@ -855,7 +856,7 @@ Every payload is `#[repr(C)]`, allocation-free, and exposes a
 [`MOUNT_FSTYPE_MAX`]: ../../tairix_abi/sysinfo/constant.MOUNT_FSTYPE_MAX.html
 [`MOUNT_VOLUME_ID_LEN`]: ../../tairix_abi/sysinfo/constant.MOUNT_VOLUME_ID_LEN.html
 [`MountFlags`]: ../../tairix_abi/driver/filesystem/struct.MountFlags.html
-[`BlkDeviceClass`]: ../../tairix_abi/blkio/enum.BlkDeviceClass.html
+[`BlkMedium`]: ../../tairix_abi/blkio/enum.BlkMedium.html
 [`ResourceLimitRecord`]: ../../tairix_abi/sysinfo/struct.ResourceLimitRecord.html
 [`RESOURCE_LIMITS_REPORT_LEN`]: ../../tairix_abi/sysinfo/constant.RESOURCE_LIMITS_REPORT_LEN.html
 [`LimitKind`]: ../../tairix_abi/rlimit/enum.LimitKind.html

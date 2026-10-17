@@ -22,6 +22,16 @@ file that looks like binary data opens in the hex view, which shows every
 byte as two hex digits beside its character and edits the same bytes the
 text view does.
 
+An executable — a TAIRiX program image, an ELF64 file or a WebAssembly
+module — opens in the code view instead: its regions, then each code region's
+instructions, one a line with its address and encoding bytes, labelled with
+the symbols they start and the symbols their branches reach. The code view is
+read-only; the text and hex views edit the same file. The code is decoded by
+a second worker of its own, with no reach either, and read as the instruction
+set the file names, else as this machine's; the View menu's Instruction set
+reads it as another, and the view field of the status line offers the code
+view beside text and hex.
+
 Source files are coloured: HTML, XML and SVG, CSS, JavaScript, JSON, YAML,
 TOML, Markdown, Rust, C, Java, Python and shell scripts. The system's settings
 files — application settings, the program library, the system and network

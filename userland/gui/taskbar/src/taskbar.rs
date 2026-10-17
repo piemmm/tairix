@@ -323,6 +323,13 @@ impl Taskbar {
         &self.picker
     }
 
+    /// The rasterised artwork of the slot standing for the process `owner`,
+    /// when the bar holds one.
+    #[must_use]
+    pub fn app_artwork(&self, owner: ProcId) -> Option<&Surface> {
+        self.apps.owned_by(owner)?.artwork()
+    }
+
     /// Replace the strip's resolved application slots — how the session
     /// hands the bar its running applications (their identities, artwork,
     /// windows, and declarations) whenever a process starts, exits, opens or
@@ -1102,7 +1109,7 @@ impl Taskbar {
         }
         let identity = app.identity();
         Some(MenuRequest {
-            subject: MenuSubject::App { app: index },
+            subject: MenuSubject::App { owner: app.owner() },
             model: menu::app_menu(&identity.name, app.menu(), identity),
             placement: self.menu_placement(anchor, scale),
         })

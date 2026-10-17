@@ -159,8 +159,8 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 | Online grow | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Device-health monitoring → triggered scrub | ✓ | — | — | — | — |
 
-TAIRiX ships drivers for ARXFS (native) and for ext4, FAT32, and ADFS as
-interoperability drivers for foreign volumes
+TAIRiX ships drivers for ARXFS (native) and for ext2/ext3/ext4, FAT32, and
+ADFS as interoperability drivers for foreign volumes.
 
 ## Security & attack-vector prevention
 
@@ -217,6 +217,15 @@ no ambient root, signed code) are designed in from the kernel up.
 
 
 ## Building
+
+Every build signs the kernel's drivers and the system's programs with a secret
+key set, and the kernel trusts only what that set signed. Create one once per
+machine; it is kept outside the tree, readable by you alone
+([`tools/signkeys`](./tools/signkeys/README.md)):
+
+```sh
+cargo xtask keys init   # ~/.local/share/tairix/signing-keys, or $TAIRIX_SIGNING_KEYS
+```
 
 ```sh
 cargo xtask ci          # Full pipeline a PR must pass

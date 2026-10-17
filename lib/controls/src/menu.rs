@@ -19,10 +19,13 @@
 //! desktop's backdrop builds one, and an application's wire declaration
 //! decodes into one. One model, beside the rows and plates it is made of.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView};
+use tairix_abi::window_ipc::{
+    AppMenu, AppMenuIconView, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView,
+};
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -31,6 +34,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, RingInk, Surface};
 use tairix_theme::{edge_weight, Palette, TextRole, Theme};
 
+use crate::about::AboutSheet;
 use crate::damage;
 use crate::paint::{
     ground_fill, inset, paint_bead, paint_chevron, paint_icon_slot, paint_run, paint_surface_plate,
@@ -38,7 +42,6 @@ use crate::paint::{
     text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, PlateInterior,
     FULL_COLOUR,
 };
-use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
 /// The outcome of feeding input to a [`Menu`].
@@ -297,6 +300,12 @@ impl MenuItem {
     pub fn with_icon(mut self, icon: IconKind) -> Self {
         self.icon = Some(icon);
         self
+    }
+
+    /// The glyph this item draws where it holds no artwork, if any.
+    #[must_use]
+    pub const fn icon(&self) -> Option<IconKind> {
+        self.icon
     }
 
     /// This item drawing already-rasterised `artwork` in its icon column,
@@ -927,8 +936,7 @@ impl Menu {
         let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let row_h = Self::row_height(scale, theme);
-        let icon_slot = font.glyph_height().min(row_h);
+        let icon_slot = Self::icon_side(scale, theme);
         let mut widest = 0;
         for item in &self.items {
             let label_w = font.text_width(&item.label);
@@ -1320,6 +1328,16 @@ fn paint_menu_mark(surface: &mut Surface, slot: (u32, u32, u32), mark: MenuMark,
     }
 }
 
+/// Where a chain row's picture is resolved from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowIcon {
+    /// The icon of the application bundle at this path, read from its own
+    /// signed manifest.
+    Bundle(String),
+    /// A class picture: a folder, a kind of drive.
+    Class(IconKind),
+}
+
 /// What arriving on or choosing a row opens.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChainChild {
@@ -1327,10 +1345,10 @@ pub enum ChainChild {
     None,
     /// A plate holding the rows that name this one as their parent.
     Submenu,
-    /// The desktop's own information panel. Its facts are read from the
-    /// bundle's signed manifest before the chain opened, so an application
-    /// cannot state an identity that is not its own.
-    Info(FactList),
+    /// The desktop's own sheet about the application. What it states is read
+    /// from the bundle's signed manifest before the chain opened, so an
+    /// application cannot state an identity that is not its own.
+    Info(Box<AboutSheet>),
     /// The desktop's own one-line text field, pre-filled with this text and
     /// answering the carried id when it is committed.
     ///
@@ -1356,10 +1374,10 @@ pub struct ChainRow {
     id: Option<AppMenuItemId>,
     /// What this row opens.
     child: ChainChild,
-    /// The application bundle whose icon this row draws, if it named one.
-    /// The path is the *request*, not the picture: whoever owns the icon
-    /// cache resolves it and sets the artwork on the drawn row.
-    bundle: Option<String>,
+    /// Where this row's picture comes from, if it names one. The source is
+    /// the *request*, not the picture: whoever owns the icon cache resolves
+    /// it and sets the artwork on the drawn row.
+    icon: Option<RowIcon>,
     /// Why this row cannot be chosen, for the seat to show as a tip on dwell.
     /// Never drawn on the row: help text beside a label widens every plate
     /// that carries it, whether or not anyone reads it.
@@ -1376,7 +1394,7 @@ impl ChainRow {
             parent: None,
             id: Some(id),
             child: ChainChild::None,
-            bundle: None,
+            icon: None,
             tip: None,
             item,
         }
@@ -1389,20 +1407,20 @@ impl ChainRow {
             parent: None,
             id: None,
             child: ChainChild::Submenu,
-            bundle: None,
+            icon: None,
             tip: None,
             item: item.with_submenu(true),
         }
     }
 
-    /// A row whose child is the desktop's own information panel.
+    /// A row whose child is the desktop's own sheet about the application.
     #[must_use]
-    pub fn info(item: MenuItem, facts: FactList) -> Self {
+    pub fn info(item: MenuItem, sheet: AboutSheet) -> Self {
         Self {
             parent: None,
             id: None,
-            child: ChainChild::Info(facts),
-            bundle: None,
+            child: ChainChild::Info(Box::new(sheet)),
+            icon: None,
             tip: None,
             item: item.with_submenu(true),
         }
@@ -1425,7 +1443,7 @@ impl ChainRow {
             parent: None,
             id: Some(id),
             child: ChainChild::Entry(entry, initial.into()),
-            bundle: None,
+            icon: None,
             tip: None,
             item: item.with_submenu(true),
         }
@@ -1476,10 +1494,22 @@ impl ChainRow {
         self
     }
 
-    /// This row whose icon comes from the application bundle at `path`.
+    /// This row whose icon comes from the application bundle at `path`. Until
+    /// that resolves, or where it never does, the row draws the built-in
+    /// application glyph rather than an empty column.
     #[must_use]
     pub fn from_bundle(mut self, path: impl Into<String>) -> Self {
-        self.bundle = Some(path.into());
+        self.icon = Some(RowIcon::Bundle(path.into()));
+        self.item = self.item.with_icon(IconKind::AppBundle);
+        self
+    }
+
+    /// This row drawing `kind`'s class picture: its artwork once resolved,
+    /// its built-in glyph until then.
+    #[must_use]
+    pub fn with_class_icon(mut self, kind: IconKind) -> Self {
+        self.icon = Some(RowIcon::Class(kind));
+        self.item = self.item.with_icon(kind);
         self
     }
 
@@ -1500,10 +1530,10 @@ impl ChainRow {
         self.tip.as_deref()
     }
 
-    /// The bundle this row wants its icon resolved from, if it named one.
+    /// Where this row wants its picture resolved from, if it names one.
     #[must_use]
-    pub fn icon_bundle(&self) -> Option<&str> {
-        self.bundle.as_deref()
+    pub const fn icon_source(&self) -> Option<&RowIcon> {
+        self.icon.as_ref()
     }
 
     /// This row additionally opening the plate holding the rows filed under
@@ -1534,6 +1564,16 @@ pub struct ChainModel {
 }
 
 impl ChainModel {
+    /// Give the information sheet, if the model has one, the bundle's
+    /// `artwork` rasterised at the sheet's own side.
+    pub fn set_info_artwork(&mut self, artwork: &Surface) {
+        for row in &mut self.rows {
+            if let ChainChild::Info(sheet) = &mut row.child {
+                sheet.set_artwork(artwork.clone());
+            }
+        }
+    }
+
     /// An empty model titled `title`.
     #[must_use]
     pub fn new(title: impl Into<String>) -> Self {
@@ -1589,7 +1629,7 @@ impl ChainModel {
     /// set is therefore read *before* any row is built, because a parent is
     /// declared before its children but learns it is one only from them.
     #[must_use]
-    pub fn from_app_menu(title: &str, menu: &AppMenu, identity: Option<&FactList>) -> Self {
+    pub fn from_app_menu(title: &str, menu: &AppMenu, identity: Option<&AboutSheet>) -> Self {
         let mut model = Self::new(title);
         let parents: Vec<usize> = menu.rows().filter_map(|(_, parent)| parent).collect();
         // A declared row's index is what its children name, and a folded
@@ -1645,7 +1685,7 @@ fn take_pending(pending: &mut [(Option<usize>, bool)], parent: Option<usize>) ->
 /// chain whose owner attested no identity).
 fn wire_row(
     row: AppMenuRowView<'_>,
-    identity: Option<&FactList>,
+    identity: Option<&AboutSheet>,
     opens_children: bool,
 ) -> Option<ChainRow> {
     match row {
@@ -1665,9 +1705,11 @@ fn wire_row(
                 None if opens_children => ChainRow::item(item.id, built).opening_a_plate(),
                 None => ChainRow::item(item.id, built),
             };
-            if !item.icon_bundle.is_empty() {
-                row = row.from_bundle(item.icon_bundle);
-            }
+            row = match item.icon {
+                AppMenuIconView::None => row,
+                AppMenuIconView::Bundle(path) => row.from_bundle(path),
+                AppMenuIconView::Asset(asset) => row.with_class_icon(IconKind::for_asset(asset)),
+            };
             if !item.reason.is_empty() {
                 row = row.explained(item.reason);
             }
@@ -1677,9 +1719,9 @@ fn wire_row(
             MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
         )),
         // Without an attested identity there is nothing truthful to put in the
-        // panel, so the row is left out rather than drawn opening a blank one.
+        // sheet, so the row is left out rather than drawn opening a blank one.
         AppMenuRowView::Info => {
-            identity.map(|facts| ChainRow::info(MenuItem::new(INFO_ROW_LABEL), facts.clone()))
+            identity.map(|sheet| ChainRow::info(MenuItem::new(INFO_ROW_LABEL), sheet.clone()))
         }
     }
 }

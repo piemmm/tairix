@@ -21,8 +21,8 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_abi::blkio::{
-    BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkOp, BlkQueueCounters,
-    BlkStatus, IoBudget,
+    BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkMedium, BlkOp,
+    BlkQueueCounters, BlkStatus, IoBudget,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::{BufferClass, DriverError};
@@ -351,19 +351,16 @@ impl DeviceIoMeter {
             availability: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
             counters: Arc::new(BlkHealthCountersAtomic::default()),
             stats: Arc::new(BlkIoStatsAtomic::default()),
-            budget: BlkDeviceClass::served_as(None).budget(),
+            budget: BlkDeviceClass::of(None).budget(),
             audit,
         }
     }
 
     /// Adopt what the device declares about itself: its `name`, and the
-    /// budget its `class` earns through the one shared
-    /// [`BlkDeviceClass::served_as`] policy.
-    ///
-    /// A class word this build does not recognise is served exactly the
-    /// bounded unclassified envelope, so an unknown buys no patience.
-    pub fn adopt_device(&mut self, class: Option<BlkDeviceClass>, name: BlkDeviceName) {
-        self.budget = BlkDeviceClass::served_as(class).budget();
+    /// budget its `medium` earns through the one shared [`BlkDeviceClass::of`]
+    /// policy, which serves an unknown the bounded unclassified envelope.
+    pub fn adopt_device(&mut self, medium: Option<BlkMedium>, name: BlkDeviceName) {
+        self.budget = BlkDeviceClass::of(medium).budget();
         self.device = name;
     }
 
@@ -515,7 +512,7 @@ impl<B: Block> MeteredBlock<B> {
     /// first operation.
     pub fn new(device: B, dev: u64, audit: &'static (dyn Sink + Sync)) -> Self {
         let mut meter = DeviceIoMeter::new(dev, audit);
-        meter.adopt_device(Some(device.device_class()), device.device_name());
+        meter.adopt_device(device.medium(), device.device_name());
         Self { device, meter }
     }
 
@@ -617,8 +614,8 @@ impl<B: Block> Block for MeteredBlock<B> {
         self.device.device_health()
     }
 
-    fn device_class(&self) -> BlkDeviceClass {
-        self.device.device_class()
+    fn medium(&self) -> Option<BlkMedium> {
+        self.device.medium()
     }
 
     fn device_name(&self) -> BlkDeviceName {

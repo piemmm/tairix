@@ -23,6 +23,17 @@ yn un cam i'r cyrchwr. Mae ffeil sy'n edrych fel data deuaidd yn agor yn yr
 olwg hecs, sy'n dangos pob beit fel dau ddigid hecs wrth ymyl ei nod ac yn
 golygu'r un beitiau â'r olwg testun.
 
+Mae ffeil weithredadwy — delwedd rhaglen TAIRiX, ffeil ELF64 neu fodiwl
+WebAssembly — yn agor yn y wedd cod yn lle hynny: ei rhanbarthau, yna
+cyfarwyddiadau pob rhanbarth cod, un i bob llinell gyda'i gyfeiriad a'i
+feitiau amgodio, wedi'u labelu â'r symbolau y maent yn eu cychwyn a'r
+symbolau y mae eu canghennau'n eu cyrraedd. Darllen yn unig yw'r wedd cod;
+mae'r gweddau testun a hecs yn golygu'r un ffeil. Mae ail broses waith ei hun,
+heb unrhyw gyrhaeddiad chwaith, yn datgodio'r cod, a'i ddarllen fel y set
+gyfarwyddiadau y mae'r ffeil yn ei henwi, neu fel set y peiriant hwn fel arall;
+mae "Set gyfarwyddiadau" yn y ddewislen Gwedd yn ei ddarllen fel un arall, ac
+mae maes gwedd y llinell statws yn cynnig y wedd cod wrth ochr testun a hecs.
+
 Mae cod ffynhonnell yn cael ei liwio: HTML, XML ac SVG, CSS, JavaScript, JSON,
 YAML, TOML, Markdown, Rust, C, Java, Python a sgriptiau cragen. Mae ffeiliau
 gosodiadau'r system — gosodiadau rhaglenni, llyfrgell y rhaglenni,

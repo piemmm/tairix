@@ -114,13 +114,14 @@ use tairix_abi::window_ipc::{
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
     decode_open_target_reply, decode_picked_name_reply, decode_wallpapers_reply,
-    encode_drag_spot_reply, encode_drop_target_reply, encode_picked_name_reply, AppBar,
-    AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem,
-    AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-    AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems,
-    DropOperation, DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose,
-    PreviewOutcome, PreviewSubject, SaveEndings, ToolOver, TooltipText, WindowEvent, WindowRegion,
-    WindowRequest, WindowSizing, WindowTitle,
+    encode_drag_spot_reply, encode_drop_target_reply, encode_picked_name_reply, AlertButton,
+    AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick, AppMenu,
+    AppMenuAsset, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
+    AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
+    BundleRunPath, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
+    DropSite, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewOutcome,
+    PreviewSubject, SaveEndings, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -2051,6 +2052,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     seeds.extend(window_request_transient_seeds());
     seeds.extend(window_request_desktop_seeds());
     seeds.extend(window_request_text_seeds());
+    seeds.extend(window_request_alert_seeds());
     seeds
 }
 
@@ -2201,6 +2203,42 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
     ]
 }
 
+/// The alert operations: the narrowest open, the widest of four answers with a
+/// multi-line detail, and a withdrawal.
+fn window_request_alert_seeds() -> std::vec::Vec<WindowRequest> {
+    std::vec![
+        WindowRequest::OpenAlert {
+            event_endpoint: tairix_abi::window_ipc::event_endpoint_for(9),
+            owner_window_id: 0,
+            alert: AlertSpec::new(
+                AlertSeverity::Information,
+                "Nothing to see",
+                "",
+                &[AlertButton::new("OK", AlertButtonRole::Default).expect("a valid label")],
+            )
+            .expect("the narrowest alert"),
+        },
+        WindowRequest::OpenAlert {
+            event_endpoint: tairix_abi::window_ipc::event_endpoint_for(9),
+            owner_window_id: 3,
+            alert: AlertSpec::new(
+                AlertSeverity::Question,
+                "Replace \u{201c}notes.txt\u{201d}?",
+                "A file of that name is already here.\nReplacing it loses its content.",
+                &[
+                    AlertButton::new("Cancel", AlertButtonRole::Cancel).expect("a valid label"),
+                    AlertButton::new("Keep Both", AlertButtonRole::Plain).expect("a valid label"),
+                    AlertButton::new("Delete", AlertButtonRole::Destructive)
+                        .expect("a valid label"),
+                    AlertButton::new("Replace", AlertButtonRole::Default).expect("a valid label"),
+                ],
+            )
+            .expect("a four-answer alert"),
+        },
+        WindowRequest::CloseAlert { alert_id: 5 },
+    ]
+}
+
 /// Endings of both separators, so a flip lands on each count, length and
 /// ending byte.
 fn fuzz_endings() -> SaveEndings {
@@ -2300,6 +2338,16 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         chooser,
     )
     .expect("a candidate under it");
+    // A row naming a class picture rather than a bundle: the asset flag and
+    // its own bound.
+    menu.push(AppMenuRow::Item(
+        AppMenuItem::new(
+            AppMenuItemId::new(7).expect("a valid id"),
+            AppMenuLabel::new("Backup").expect("a valid label"),
+        )
+        .with_icon_asset(AppMenuAsset::new("disk-usb").expect("a valid asset id")),
+    ))
+    .expect("room for the volume row");
     menu
 }
 
@@ -2341,6 +2389,16 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         }
         .to_le_bytes(),
         WindowEvent::OpenRequested.to_le_bytes(),
+        WindowEvent::AlertClosed {
+            alert_id: 5,
+            outcome: AlertOutcome::Chosen { index: 3 },
+        }
+        .to_le_bytes(),
+        WindowEvent::AlertClosed {
+            alert_id: 5,
+            outcome: AlertOutcome::Dismissed,
+        }
+        .to_le_bytes(),
         WindowEvent::FolderPicked {
             window_id: 3,
             files: 2,

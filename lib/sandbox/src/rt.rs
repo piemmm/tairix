@@ -68,6 +68,18 @@ pub fn worker_role() -> bool {
     tairix_rt::arg(1).is_some_and(|arg| arg == WORKER_ROLE_ARG)
 }
 
+/// Whether this invocation is a one-shot worker asked to serve `service`:
+/// [`worker_role`], with `argv[2]` exactly `service`.
+///
+/// For a program whose binary serves more than one one-shot service, each in
+/// a worker of its own ([`RtLauncher::serving`]) so no two parsers share an
+/// address space. A worker asked for none of them serves nothing and exits
+/// [`crate::WorkerExit::Unserved`].
+#[must_use]
+pub fn serves(service: &[u8]) -> bool {
+    worker_role() && tairix_rt::arg(2).is_some_and(|arg| arg == service)
+}
+
 /// Whether this invocation is a session-worker role: `argv[1]` is exactly
 /// [`SESSION_ROLE_ARG`]. Checked alongside [`worker_role`], and handed to
 /// [`serve_session_stdio`].
@@ -136,6 +148,7 @@ pub struct RtLauncher {
     path: Vec<u8>,
     reply_deadline_ns: u64,
     memory: WorkerMemory,
+    service: Option<&'static [u8]>,
 }
 
 impl RtLauncher {
@@ -148,7 +161,16 @@ impl RtLauncher {
             path: path.to_vec(),
             reply_deadline_ns: REPLY_DEADLINE_NS,
             memory,
+            service: None,
         }
+    }
+
+    /// The same launcher, its workers told to serve `service`, which the
+    /// worker reads back through [`serves`].
+    #[must_use]
+    pub const fn serving(mut self, service: &'static [u8]) -> Self {
+        self.service = Some(service);
+        self
     }
 
     /// The same launcher, its workers given `deadline_ns` to answer each
@@ -183,16 +205,15 @@ fn ceiling_of(memory: WorkerMemory) -> u64 {
     memory.ceiling(ram)
 }
 
-/// Spawn `path` as a sandboxed worker in `role` over a fresh pipe pair, held
-/// to `ceiling` bytes of mapped memory, returning the parent's `(pid,
-/// request write end, reply read end)`.
+/// Spawn `path` as a sandboxed worker in `role`, serving `service` where one
+/// is named, over a fresh pipe pair, held to `ceiling` bytes of mapped
+/// memory, returning the parent's `(pid, request write end, reply read end)`.
 ///
 /// The one place the pipe pair, the `SpawnAttach::sandbox` wiring, and the
-/// unwind are written: both worker shapes — one-shot and session — differ
-/// only in the role marker they pass.
+/// unwind are written, for both worker shapes — one-shot and session.
 fn spawn_sandboxed_worker(
     path: &[u8],
-    role: &[u8],
+    (role, service): (&[u8], Option<&[u8]>),
     ceiling: u64,
 ) -> Result<(i64, u32, u32), Errno> {
     // Request pipe: parent writes, worker fd 0 reads.
@@ -210,7 +231,10 @@ fn spawn_sandboxed_worker(
     wires[STDIN as usize] = FdWire::Handle(request_read);
     wires[STDOUT as usize] = FdWire::Handle(reply_write);
     let attach = SpawnAttach::sandbox(wires, ceiling);
-    let pid = tairix_rt::spawn_attached(path, &attach, &[path, role], &[]);
+    let pid = match service {
+        Some(service) => tairix_rt::spawn_attached(path, &attach, &[path, role, service], &[]),
+        None => tairix_rt::spawn_attached(path, &attach, &[path, role], &[]),
+    };
     // The child holds counted clones of its two wired ends; the parent's
     // own copies are closed regardless of the spawn outcome, so a dead
     // worker's reply pipe reports end-of-stream instead of idling on the
@@ -229,8 +253,11 @@ impl Launcher for RtLauncher {
     type Channel = RtChannel;
 
     fn launch(&mut self) -> Result<RtChannel, Errno> {
-        let (pid, write_fd, read_fd) =
-            spawn_sandboxed_worker(&self.path, WORKER_ROLE_ARG, ceiling_of(self.memory))?;
+        let (pid, write_fd, read_fd) = spawn_sandboxed_worker(
+            &self.path,
+            (WORKER_ROLE_ARG, self.service),
+            ceiling_of(self.memory),
+        )?;
         Ok(RtChannel {
             pid,
             write_fd,
@@ -334,7 +361,7 @@ impl RtSessionChannel {
     /// through [`crate::host::log_unavailable`].
     pub fn launch(path: &[u8], memory: WorkerMemory) -> Result<Self, Errno> {
         let (pid, write_fd, read_fd) =
-            spawn_sandboxed_worker(path, SESSION_ROLE_ARG, ceiling_of(memory))?;
+            spawn_sandboxed_worker(path, (SESSION_ROLE_ARG, None), ceiling_of(memory))?;
         Ok(Self {
             pid,
             write_fd,

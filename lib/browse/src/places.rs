@@ -30,7 +30,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::home::{HOME_DESKTOP_DIR, HOME_USER_FILES_DIR};
 use tairix_icon::{disk_icon, IconKind};
 
@@ -158,7 +158,7 @@ pub struct Volume {
     /// the mount reports no medium (a synthetic mount, or a class this build
     /// does not know). `None` draws the generic drive icon — never a guessed
     /// medium.
-    pub medium: Option<BlkDeviceClass>,
+    pub medium: Option<BlkMedium>,
 }
 
 /// The ordered rail: the user's fixed places, then every accepted volume.

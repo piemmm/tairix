@@ -11,11 +11,13 @@ use std::cell::Cell;
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
-use tairix_abi::DriverError;
 use tairix_drv_fs_ext4::Ext4;
 use tairix_writeback::RUN_BYTES;
+
+#[path = "support/mem_block.rs"]
+mod mem_block;
+use mem_block::MemBlock;
 
 /// A pass-through allocator that counts the bytes each thread asks for, so a
 /// measured call is not disturbed by tests running beside it.
@@ -49,35 +51,6 @@ fn allocated_by(call: impl FnOnce()) -> usize {
     let before = ALLOCATED.with(Cell::get);
     call();
     ALLOCATED.with(Cell::get) - before
-}
-
-const SECTOR: u32 = 512;
-const SECTOR_BYTES: usize = SECTOR as usize;
-
-struct MemBlock {
-    data: Vec<u8>,
-}
-
-impl Block for MemBlock {
-    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        Ok(BlockGeometry {
-            block_size: SECTOR,
-            block_count: (self.data.len() / SECTOR_BYTES) as u64,
-        })
-    }
-    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let start = usize::try_from(lba).expect("small") * SECTOR_BYTES;
-        buf.copy_from_slice(&self.data[start..start + buf.len()]);
-        Ok(())
-    }
-    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let start = usize::try_from(lba).expect("small") * SECTOR_BYTES;
-        self.data[start..start + buf.len()].copy_from_slice(buf);
-        Ok(())
-    }
-    fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
-    }
 }
 
 #[test]

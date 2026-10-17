@@ -8,8 +8,9 @@ use tairix_wallpaper::Resolution;
 
 use super::{
     resolution_ask, ResizedRecord, ResolutionAsk, ResolutionPrompt, Trial, TrialEnd, TrialOutcome,
-    TRIAL_SECONDS, WIN_HEIGHT, WIN_WIDTH,
+    TRIAL_SECONDS,
 };
+use crate::alert::ALERT_ARM_NS;
 use crate::tests::headless_desktop;
 
 const OUTPUT: (u32, u32) = (1024, 768);
@@ -114,16 +115,36 @@ fn enter_keeps_and_escape_or_the_other_button_reverts() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
     assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
-    assert!(prompt.handle_key(&pressed(NamedKeyCode::Enter), &mut shell, &mut comp));
+    assert!(prompt.handle_key(
+        &pressed(NamedKeyCode::Enter),
+        ALERT_ARM_NS,
+        &mut shell,
+        &mut comp
+    ));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Kept(trial())));
 
     assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
-    assert!(prompt.handle_key(&pressed(NamedKeyCode::Escape), &mut shell, &mut comp));
+    assert!(prompt.handle_key(
+        &pressed(NamedKeyCode::Escape),
+        ALERT_ARM_NS,
+        &mut shell,
+        &mut comp
+    ));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Reverted(trial())));
 
     assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
-    assert!(!prompt.handle_key(&pressed(NamedKeyCode::Tab), &mut shell, &mut comp));
-    assert!(prompt.handle_key(&pressed(NamedKeyCode::Enter), &mut shell, &mut comp));
+    assert!(!prompt.handle_key(
+        &pressed(NamedKeyCode::Tab),
+        ALERT_ARM_NS,
+        &mut shell,
+        &mut comp
+    ));
+    assert!(prompt.handle_key(
+        &pressed(NamedKeyCode::Enter),
+        ALERT_ARM_NS,
+        &mut shell,
+        &mut comp
+    ));
     assert_eq!(
         prompt.take_ended(),
         Some(TrialEnd::Reverted(trial())),
@@ -136,20 +157,21 @@ fn a_click_on_keep_keeps_and_a_click_beside_the_buttons_asks_on() {
     let (mut shell, mut comp) = headless_desktop();
     let mut prompt = ResolutionPrompt::new();
     assert!(prompt.ask(trial(), 0, &mut shell, &mut comp).is_ok());
-    let scale = comp.scale();
-    let bounds = tairix_wm::Rect::new(
-        0,
-        0,
-        scale.scale_length(WIN_WIDTH),
-        scale.scale_length(WIN_HEIGHT),
-    );
-    let dialog = super::build_dialog(TRIAL_SECONDS);
-    let theme = shell.session().active_theme().clone();
-    let keys = dialog.action_rects(bounds, scale, &theme);
-    let keep = keys[crate::choice::ACCEPT];
-    assert!(!prompt.handle_click(tairix_wm::Point::new(2, 2), &mut shell, &mut comp));
+    let keep = prompt
+        .button_centre(crate::choice::ACCEPT, &shell, &comp)
+        .expect("showing");
+    assert!(!prompt.handle_click(
+        tairix_wm::Point::new(2, 2),
+        ALERT_ARM_NS,
+        &mut shell,
+        &mut comp
+    ));
     assert!(prompt.is_open());
-    assert!(prompt.handle_click(keep.center(), &mut shell, &mut comp));
+    assert!(
+        !prompt.handle_click(keep, ALERT_ARM_NS - 1, &mut shell, &mut comp),
+        "not before the buttons arm"
+    );
+    assert!(prompt.handle_click(keep, ALERT_ARM_NS, &mut shell, &mut comp));
     assert_eq!(prompt.take_ended(), Some(TrialEnd::Kept(trial())));
 }
 

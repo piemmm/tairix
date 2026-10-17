@@ -48,8 +48,8 @@ which the drift guard enforces.
 | FM9-a | New Folder + inline rename: the product half and the create's guest click-through | blocked: D98 — the rename commit and the toolbar gesture need an ordered typed-key-after-click script the harness cannot yet produce |
 | FM9-b | Open a file into the viewer via CU6 delegation, product and guest | done |
 | FM9-c | Delete with confirm: the product half and the right-click delivery in QEMU | blocked: D98 — the full delete click-through needs the same ordered script |
-| FM10 | Recoverable delete: the pure move-to-Trash model and the app-side verb with its QEMU witness | done |
-| FM11 | Emptying the Trash: the pure model, the app verb, the navigable Trash view, and the QEMU witness | done |
+| FM10 | Recoverable delete: the pure move-to-Trash model and the app-side verb | done |
+| FM11 | Emptying the Trash: the pure model, the app verb and the navigable Trash view | done |
 | FM12 | Pointer activation gestures — four gestures reaching the one `activate` decision | done |
 | FM13 | The places / devices rail | done |
 | FM-polish | UI polish: the resizable/maximizable window, labelled permission controls, and plate-filling icon-only buttons | done |
@@ -60,6 +60,8 @@ which the drift guard enforces.
 | FM17 | The browser window is never taller than its listing: it opens at the height the listing fills, restates that ceiling as it moves, and the window manager holds it there | done |
 | FM18 | The browser window can be made one row of its listing tall, a drag follows the range as it is restated, and the listing's bar stands beside the "Listing…" cue | done |
 | FM19 | A window follows every change any program makes to the folder it shows, through the directory watch, repainting only the rows that moved | done |
+| FM21 | A `/Storage` volume is drawn as its drive, and the rail keeps a degraded or recovering volume | done |
+| FM22 | A drive's Properties: kind, filesystem, options, capacity as a ring, activity as a live trace, health, read off the loop | done |
 | FM20 | Nothing touches a disk on the window's loop: long operations on an operations worker, every one-shot write on the reader by ticket, the opening ladder and the mount list on the reader, and every refusal stated in the window | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
@@ -327,22 +329,17 @@ shift modifier arrives on the pointer event itself (`WindowEvent::Pointer`'s
 `modifiers`, stamped by the seat from the `KeyInput::ModifiersChanged` edges the
 keyboard drivers now report) — a modifier key reaches no surface as a key, so
 an app could not otherwise know one is held. FM1–FM11
-remain landed, including **FM11c (the empty-Trash QEMU
-witness)**: the aarch64 `autoload_input` vertical now proves the empty-Trash
-click-through end to end (after FM10's move-to-Trash `op=rename`, the runner
-clicks Go to Trash → Empty Trash → confirm *Delete Permanently*, and the guest
-PASS latches an eleventh witness — `FsNodeMutated op=rmdir` whose `path` is
-under `Library/Trash`, gated on the move having latched via the one-shot
-`FM11_TRASH_FILLED_MARKER`, so no earlier removal can satisfy it — fail
-closed). **FM11b lands the app-side Empty Trash
+remain landed. Their click-throughs left the `autoload_input` vertical with
+`plans/OPEN-DEFECTS.md` D19/D20, so FM10b's and FM11c's QEMU witnesses are
+withdrawn and that application logic is proven by host tests. **FM11b lands the app-side Empty Trash
 verb + the navigable Trash view.** Two manager-only toolbar tools join the
 `chrome::ManagerTool` set (drawn only for the write-capable file manager): **Go
 to Trash** (`ManagerTool::Trash`) navigates the browser to the user's
 `Library/Trash` via the new `Browser::navigate_to` jump-to-arbitrary-location
 primitive, and **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only in a
 non-empty Trash via the new `chrome::ManagerToolModel` threaded through
-`render`/`manager_tool_at` — builds `empty_trash_plan`, confirms with the
-`DeleteDisposition::Permanent` dialog, and hands the plan's `DeleteWalk` to
+`render`/`manager_tool_at` — builds `empty_trash_plan`, asks the
+`DeleteDisposition::Permanent` question, and hands the plan's `DeleteWalk` to
 the operations worker a delete uses (`ProgressOp::Delete`). Each tool carries a new built-in `lib/icon` glyph
 (`IconKind::Trash` / `IconKind::EmptyTrash`). Host-tested in `lib/browse`
 (`navigate_to` off-spine/no-op/fail-closed; the Empty Trash enable-gate
@@ -362,30 +359,24 @@ identity), so composing it grants nothing and the read-only picker never builds
 one. Host-tested in `lib/browse` (contents-not-the-dir removal, empty=no-op,
 root-trash refusal, invalid-child refusal). Now justified rather than
 speculative: the move that fills the Trash (FM10) has landed, so the way back to
-a permanent removal is real surface (§2.4). **FM11c's witness**: the
-end-to-end empty-Trash click-through on the aarch64 `autoload_input` QEMU
-vertical latches a new eleventh witness (`FsNodeMutated op=rmdir` under
-`Library/Trash`, gated after the FM10 move via the one-shot
-`FM11_TRASH_FILLED_MARKER`). **FM10 (recoverable delete:
+a permanent removal is real surface (§2.4). **FM10 (recoverable delete:
 move to Trash).** FM10a is the pure `lib/browse::trash` model
 (`trash_strategy` same-volume-move-vs-unlink + collision-safe `trash_dest_path`);
-**FM10b is the app-side Trash verb and its QEMU witness.** On a confirmed
+**FM10b is the app-side Trash verb.** On a confirmed
 delete the `files.app` `Run` binary resolves the user's home from the exported
 `HOME`, ensures the fixed `Library/Trash` subtree (shared `trash::trash_dir`),
 and — when Trash and every target share a volume — carries the removal out as a
 recoverable **move to Trash** (`Job::Trash`: one `fs_rename` per target into its
 collision-free `trash_dest_path`, carried out by the operations worker),
 falling back fail-closed to the irreversible
-`DeleteWalk` unlink when Trash is unavailable or cross-volume. The confirmation
-`Dialog` is disposition-aware (`DeleteDisposition` threaded into the shared
-`render::build_delete_dialog`): a recoverable *Move to Trash* vs an irreversible
-*Delete Permanently*, so the wording always matches what will happen (§2.24).
+`DeleteWalk` unlink when Trash is unavailable or cross-volume. The delete
+question is disposition-aware (`DeleteDisposition` passed to
+`render::delete_alert`, a desktop alert): a recoverable *Move to Trash*, its
+default answer, vs an irreversible *Delete Permanently*, which `Enter` never
+chooses, so the wording always matches what will happen.
 The desktop session now forwards the **user environment** (incl. `HOME`) to its
 launched apps (`spawn_app` → `spawn_with`), the prerequisite that lets the file
-manager locate the per-user Trash. The aarch64 `autoload_input` QEMU vertical's
-tenth witness changed from `FsNodeMutated op=rmdir` to `op=rename` with a
-destination under `Library/Trash` (still gated after the FM9-b `fd_redeem`, so
-no earlier mutation can satisfy it — fail closed). **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model,
+manager locate the per-user Trash. **FM1, FM2a, FM2b, FM3, FM4a, FM4b's pure chrome model,
 FM4b's drawn clickable toolbar +
 `Alt+←/→/↑` + `F5` accelerators, FM5, FM6a, FM6b's pure association
 model, FM7a's selection + clipboard model, FM7b's pure paste-execution model,
@@ -1383,33 +1374,24 @@ multiple targets in listing order, the `TooDeep` bound, out-of-step fail-closed
 refusals leaving the walk put, and the interruption/resume holding its exact
 position). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 
-**The app-side Delete verb.** The `files.app` `Run` binary binds the
-`Delete` key to a modal confirmation before any removal. `begin_delete` captures
-the selection with `Browser::plan_delete` (a no-op when nothing is selected —
-the plan is `None`, fail closed) and opens a `lib/controls::Dialog` built by the
-shared `render::build_delete_dialog`: the title names a single target or reports
-the honest count, the message warns when folders (and their contents) are among
-the removals, and the honest Action Warmth sits on the safe recommended
-**Cancel**, never the destructive **Delete** (§2.24). While the dialog is up it
-owns the window (`apply_modal_event` handles it first): `Escape`/Cancel dismiss,
-`Enter`/Delete confirm; a primary press routes through the mirror
-`render::modal_dialog_action_at` (over the dialog's own `Dialog::action_rects`),
-fail closed off a button. On confirm the app drives a `DeleteWalk` to completion
-— reading each directory with the same capability-checked listing call and
-shared decode the browser navigates with (`tairix_browse::vfs`), and
-`fs_unlink`ing each node depth-first (with `UnlinkFlags::DIRECTORY` for a
-directory-backed target) under the user's own identity, **no new capability** —
-then re-lists so a partial removal is shown honestly. It is bounded and fail
-closed: the first refused read or unlink stops the removal, states the reason on
-`stderr` (fail loud, §2.24), and leaves what was already removed removed rather
-than a fabricated success (§5.4). Only the write-capable file manager builds and
-drives this; the read-only picker never deletes. Host-tested in `lib/browse`
-(the confirm dialog's honest title/count + folder warning, the destructive/
-recommended action roles, `modal_dialog_rect` centering/clamp,
-`draw_modal_dialog` paint/degenerate-no-panic, and the `modal_dialog_action_at`
-full-window mirror + fail-closed) and `lib/controls` (`Dialog::action_rects`
-matching `on_pointer`'s geometry). Docs: `docs/src/desktop/apps.md`,
-`lib/browse`/`lib/controls` README + rustdoc.
+**The app-side Delete verb.** The `files.app` `Run` binary binds `Delete` to a
+question before any removal. `begin_delete` captures the selection with
+`Browser::plan_delete` (no plan when nothing is selected — fail closed), and
+`render::delete_alert` builds the question as a desktop alert: it names a single
+target or the honest count, warns when folders are among the removals, and its
+destructive answer is never the one `Enter` gives. On the removal's answer the
+app drives a `DeleteWalk` to completion — reading each directory with the same
+capability-checked listing call and shared decode the browser navigates with
+(`tairix_browse::vfs`), and `fs_unlink`ing each node depth-first under the
+user's own identity, **no new capability** — then re-lists so a partial removal
+is shown honestly. The first refused read or unlink stops the removal and states
+its reason in an alert, leaving what was already removed removed rather than
+claiming a success. Only the write-capable file manager builds and drives this;
+the read-only picker never deletes. Host-tested in `lib/browse`
+(`a_delete_question_names_a_single_target`,
+`a_delete_question_reports_the_honest_count_and_folder_warning`,
+`a_delete_question_about_a_very_long_name_still_asks`). Docs:
+`docs/src/desktop/apps.md`, `lib/browse` README + rustdoc.
 
 **The pure recursive-copy *walk* model** (§2.19 — host-proven ahead of
 the app move/copy verbs, the copy-side analogue of the delete-side
@@ -1910,7 +1892,7 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   passthrough, extension-aware and whole-name and dotfile disambiguation,
   suffix-skipping over taken names, and each fail-closed refusal). Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
-- **FM10b — the app-side Trash verb + the QEMU witness.** The
+- **FM10b — the app-side Trash verb.** The
   `files.app` `Run` binary, on a confirmed delete, decides one disposition for
   the whole plan (a selection lives in one directory, hence one volume): it
   resolves the user's home from the exported `HOME`, spells the fixed
@@ -1922,17 +1904,13 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   a recoverable removal is a `Job::Trash` (one `fs_rename` per target into
   Trash, carried out by the operations worker as delete and paste are,
   `ProgressOp::Trash`); an unavailable or cross-volume Trash falls back, fail
-  closed, to the existing `DeleteWalk` unlink. The confirmation `Dialog` is
-  disposition-aware (`DeleteDisposition` threaded into the shared
-  `render::build_delete_dialog`): a safe, recoverable *Move to Trash* vs the
-  destructive *Delete Permanently*, so the wording always matches what will
-  happen (§2.24). The prerequisite — the desktop session forwarding the user
-  environment (incl. `HOME`) to its launched apps (`spawn_app` → `spawn_with`);
-  plain `spawn` gave a child an empty environment — lands in the same change
-  (§2.19). Rides the aarch64 `autoload_input` QEMU vertical: its tenth witness
-  changed from `FsNodeMutated op=rmdir` to `op=rename` whose `to` is under
-  `Library/Trash` (still gated after the FM9-b `fd_redeem`, so no earlier
-  mutation can satisfy it — fail closed).
+  closed, to the existing `DeleteWalk` unlink. The delete question is
+  disposition-aware (`DeleteDisposition` passed to `render::delete_alert`): a
+  recoverable *Move to Trash* vs the destructive *Delete Permanently*, so the
+  wording always matches what will happen. The prerequisite — the desktop
+  session forwarding the user environment (incl. `HOME`) to its launched apps
+  (`spawn_app` → `spawn_with`); plain `spawn` gave a child an empty
+  environment — lands in the same change (§2.19).
 
 ### FM11 — emptying the Trash
 
@@ -1993,23 +1971,11 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
   Empty Trash tool disabled-vs-enabled hit-test gating) and the freestanding
   files app builds and lints clean. Docs: `docs/src/desktop/apps.md`,
   `lib/browse/README.md`, `lib/icon/README.md` + rustdoc.
-- **FM11c — the QEMU witness for the empty-Trash click-through.**
-  Proves the Empty Trash verb end-to-end on the aarch64 `autoload_input` QEMU
-  vertical with a new eleventh witness. After FM10b's move-to-Trash `op=rename`,
-  the host runner clicks the **Go to Trash** tool (navigating the front files
-  window into `Library/Trash`, now holding the trashed folder), the **Empty
-  Trash** tool (opening the *Delete Permanently* confirmation), and the dialog's
-  Delete button — each point reconstructed from the app's own layout
-  (`render::manager_tool_rect` for the tools, `empty_trash_plan` →
-  `build_delete_dialog(Permanent)` → `Dialog::action_rects` for the confirm
-  button, §2.2). The guest PASS latches a further `FsNodeMutated op=rmdir`
-  whose `path` is under `Library/Trash`, gated on the FM10 move having latched.
-  The whole empty burst is gated on the one-shot `FM11_TRASH_FILLED_MARKER` the
-  test kernel emits the first time it observes the move latch, so the clicks
-  land only after the folder is provably in the Trash (Empty Trash enabled) and
-  no earlier removal can satisfy the witness — fail closed. Contract markers
-  live beside the guest PASS gate (`FM11_TRASH_FILLED_MARKER` in the vertical
-  crate's `lib.rs`), so the script and its observer cannot drift (§2.2).
+- **FM11c — the QEMU witness for the empty-Trash click-through — withdrawn.**
+  It rode the `autoload_input` vertical, whose file-manager choreography was
+  removed with `plans/OPEN-DEFECTS.md` D19/D20. The flow is host-tested:
+  `lib/browse`'s empty-plan and delete-question tests and `files.app`'s
+  `an_empty_confirmation_opens_only_over_the_trash_it_read`.
 
 ### FM12 — pointer activation gestures
 
@@ -2134,6 +2100,29 @@ volume with an icon matching the **real** storage medium.
   start location, and a machine-wide device rail is neither its job nor
   within the authority it is given.
 
+### FM21 — drives are drawn as what they are
+
+An entry of the `/Storage` catalog is drawn as its volume's drive: the mount
+record carries the medium the serving driver declared (`BlkMedium`,
+`plans/FIX-IO.md`), and `tairix_icon::disk_icon` picks the picture
+(`plans/ICONS.md` I14). Marking a listing's volume roots costs nothing in a
+folder that holds none. The places rail keeps a degraded or recovering volume,
+which still serves data, rather than hiding it.
+
+### FM22 — a drive's Properties
+
+Properties on a `/Storage` entry adds a *Drive* tab to the window: the volume's
+kind and medium, filesystem, mount point and options, block size and identity;
+capacity as a ring of used and free with the figures beside it
+(`lib/controls`' `CompositionRing`, the `CompositionBar`'s parts drawn as a
+ring, one model and one key for both), and files used and free where the
+format counts them; activity as a live read and write trace (a duplex `Chart`
+over `DuplexRates`) sampled once a second from the ungated I/O statistics; and
+health from the mount table's availability, toning the facts it qualifies.
+Every read rides the window's reader desk (`WindowReads`); a machine that
+grants no reader reads on the asking thread rather than leaving the window
+reading for ever. A sample repaints only the parts it changed.
+
 ## 2. Sequencing and dependencies
 
 FM1→FM2a→FM2b→FM3 build the shared engine + views + icons (host-proven;
@@ -2149,7 +2138,7 @@ selection/menu. FM8 is split the same way: FM8a models the properties view
 (host-proven); FM8b paints it and adds permission editing. FM9 closes out the
 core with the autoload QEMU vertical. FM10 makes delete recoverable (move to
 Trash), and FM11 gives the way back — emptying the Trash (FM11a the pure model,
-FM11b the app verb + navigable Trash view, FM11c the QEMU witness), each split
+FM11b the app verb + navigable Trash view), each split
 the same way and depending on the FM7 delete walk it reuses (§2.2). FM12 adds
 the pointer double-click gesture (the pointer pass FM6b deferred), reusing the
 FM6 `activate` dispatch so pointer and keyboard never diverge. FM13 adds the

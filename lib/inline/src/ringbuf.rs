@@ -259,6 +259,22 @@ impl<T, const N: usize> RingBuf<T, N> {
     pub fn clear(&mut self) {
         self.discard_front(self.len);
     }
+
+    /// Keep only the elements `keep` accepts, in their order.
+    ///
+    /// Each element is taken off the front and put back at the end if kept,
+    /// so the ring is whole at every step, even when `keep` panics.
+    pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        for _ in 0..self.len {
+            let Some(value) = self.pop_front() else {
+                return;
+            };
+            if keep(&value) {
+                // The pop just freed a slot, so this push is never refused.
+                let _ = self.try_push_back(value);
+            }
+        }
+    }
 }
 
 impl<T: Copy, const N: usize> RingBuf<T, N> {

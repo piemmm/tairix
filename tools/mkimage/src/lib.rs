@@ -71,6 +71,7 @@ use tairix_syshelp::{DiskLayoutError, BOOT_PART_SECTORS};
 use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb, STORAGE_GID,
 };
+use tairix_util::secret::WipedBuf;
 
 /// Sectors in the `ARXFS` root partition as the image is built: 64 MiB, the
 /// skeleton plus headroom. The root is the image's last partition, so the
@@ -637,7 +638,7 @@ pub fn write_root_key(path: &std::path::Path, unlock: &RootUnlock) -> std::io::R
     // through the handle before it is written.
     #[cfg(unix)]
     file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    file.write_all(volume_key_to_hex(&unlock.key).as_bytes())
+    file.write_all(&volume_key_to_hex(&unlock.key))
 }
 
 /// Remove the root-key file an earlier encrypted build left at `path`, so it
@@ -656,15 +657,11 @@ pub fn remove_stale_root_key(path: &std::path::Path) -> std::io::Result<bool> {
 }
 
 /// Render a volume key as the 64-hex-digit key-file body.
-fn volume_key_to_hex(key: &VolumeKey) -> String {
-    let mut text = String::with_capacity(VOLUME_KEY_LEN * 2 + 1);
-    for byte in key {
-        use fmt::Write as _;
-        // Writing to a String cannot fail.
-        let _ = write!(text, "{byte:02x}");
-    }
-    text.push('\n');
-    text
+fn volume_key_to_hex(key: &VolumeKey) -> WipedBuf {
+    let mut text = Vec::with_capacity(VOLUME_KEY_LEN * 2 + 1);
+    text.extend(key.iter().flat_map(|&byte| tairix_util::hex::digits(byte)));
+    text.push(b'\n');
+    WipedBuf::new(text)
 }
 
 #[cfg(test)]
@@ -1450,9 +1447,9 @@ mod tests {
     fn volume_key_renders_as_hex() {
         let text = volume_key_to_hex(&TEST_KEY);
         assert_eq!(text.len(), VOLUME_KEY_LEN * 2 + 1);
-        assert!(text.ends_with('\n'));
-        assert!(text.trim().bytes().all(|b| b.is_ascii_hexdigit()));
-        assert!(text.starts_with("4242"));
+        assert!(text.ends_with(b"\n"));
+        assert!(text[..VOLUME_KEY_LEN * 2].iter().all(u8::is_ascii_hexdigit));
+        assert!(text.starts_with(b"4242"));
     }
 
     #[test]

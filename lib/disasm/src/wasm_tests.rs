@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{decode, MAX_INDENT_LEVELS};
+use super::{decode, MAX_BR_TABLE_TARGETS, MAX_INDENT_LEVELS, MAX_INSN_LEN};
 use crate::BAD_MNEMONIC;
 
 /// Decodes a whole body starting at `depth`, returning
@@ -85,6 +85,30 @@ fn br_table_lists_every_label() {
     assert_eq!(insn.mnemonic, "br_table");
     assert_eq!(insn.operands, "0 1 2");
     assert_eq!(insn.length, 5);
+}
+
+#[test]
+fn the_widest_br_table_is_the_longest_instruction() {
+    // Each immediate at the five bytes a 32-bit LEB128 may take.
+    let padded = |value: u32| {
+        let mut bytes = [0x80_u8; 5];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte |= u8::try_from((value >> (7 * index)) & 0x7f).expect("seven bits");
+        }
+        bytes[4] &= 0x7f;
+        bytes
+    };
+    let mut code = alloc::vec![0x0e];
+    code.extend_from_slice(&padded(MAX_BR_TABLE_TARGETS));
+    for _ in 0..=MAX_BR_TABLE_TARGETS {
+        code.extend_from_slice(&padded(1));
+    }
+    assert_eq!(code.len(), MAX_INSN_LEN);
+    let insn = decode(&code, 0, 0).expect("decodes").0;
+    assert_eq!(insn.mnemonic, "br_table");
+    assert_eq!(insn.length, MAX_INSN_LEN);
+    let short = decode(&code[..MAX_INSN_LEN - 1], 0, 0).expect("decodes").0;
+    assert_eq!(short.mnemonic, BAD_MNEMONIC);
 }
 
 #[test]

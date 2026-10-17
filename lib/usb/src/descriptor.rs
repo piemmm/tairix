@@ -87,6 +87,25 @@ pub const ENDPOINT_ADDR_DIR_IN: u8 = 0x80;
 /// `bEndpointAddress` endpoint-number mask.
 pub const ENDPOINT_ADDR_NUMBER_MASK: u8 = 0x0F;
 
+/// The Device Context Index a controller knows the endpoint at
+/// `bEndpointAddress` `address` by: twice its number, plus one for IN
+/// (xHCI §4.5.1).
+#[must_use]
+pub const fn address_dci(address: u8) -> u8 {
+    (address & ENDPOINT_ADDR_NUMBER_MASK) * 2 + (address & ENDPOINT_ADDR_DIR_IN != 0) as u8
+}
+
+/// [`address_dci`] of endpoint `number` in direction `is_in`, `None` for a
+/// number no endpoint address holds.
+#[must_use]
+pub const fn endpoint_dci(number: u8, is_in: bool) -> Option<u8> {
+    if number > ENDPOINT_ADDR_NUMBER_MASK {
+        return None;
+    }
+    let direction = if is_in { ENDPOINT_ADDR_DIR_IN } else { 0 };
+    Some(address_dci(number | direction))
+}
+
 /// `wMaxPacketSize` packet-size mask (bits 0:10).
 pub const ENDPOINT_MAX_PACKET_MASK: u16 = 0x07FF;
 
@@ -135,7 +154,22 @@ impl core::iter::FusedIterator for Descriptors<'_> {}
 
 #[cfg(test)]
 mod tests {
-    use super::{descriptors, ConfigurationHeader, Malformed, DESC_TYPE_CONFIGURATION};
+    use super::{
+        address_dci, descriptors, endpoint_dci, ConfigurationHeader, Malformed,
+        DESC_TYPE_CONFIGURATION,
+    };
+
+    #[test]
+    fn an_endpoint_is_known_by_twice_its_number_plus_one_for_in() {
+        assert_eq!(address_dci(0x00), 0);
+        assert_eq!(address_dci(0x01), 2);
+        assert_eq!(address_dci(0x81), 3);
+        assert_eq!(address_dci(0x8F), 31);
+        assert_eq!(endpoint_dci(1, true), Some(3));
+        assert_eq!(endpoint_dci(15, false), Some(30));
+        assert_eq!(endpoint_dci(16, true), None, "four bits name an endpoint");
+        assert_eq!(endpoint_dci(u8::MAX, true), None);
+    }
 
     #[test]
     fn a_configuration_header_states_its_length_total_and_value() {

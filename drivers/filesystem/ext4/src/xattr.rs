@@ -22,6 +22,7 @@ use crate::bytes::{
 };
 use crate::file::adjust_blocks;
 use crate::inode::EXTRA_ISIZE;
+use crate::superblock::Layout;
 use crate::{Ext4, INODE_FILE_ACL_HI, INODE_FILE_ACL_LO};
 
 const MAGIC: u32 = 0xEA02_0000;
@@ -262,10 +263,15 @@ fn block_hash(block: &[u8]) -> u32 {
     hash
 }
 
-/// The external attribute block record `raw` names, if any.
-pub(crate) fn block_of(raw: &[u8]) -> Option<u64> {
-    let block =
-        u64::from(le32(raw, INODE_FILE_ACL_LO)) | (u64::from(le16(raw, INODE_FILE_ACL_HI)) << 32);
+/// The external attribute block record `raw` names, if any: the high half
+/// is padding on a volume without `64bit`.
+pub(crate) fn block_of(raw: &[u8], layout: &Layout) -> Option<u64> {
+    let high = if layout.wide_desc() {
+        u64::from(le16(raw, INODE_FILE_ACL_HI)) << 32
+    } else {
+        0
+    };
+    let block = u64::from(le32(raw, INODE_FILE_ACL_LO)) | high;
     (block != 0).then_some(block)
 }
 
@@ -336,7 +342,7 @@ impl<B: Block> Ext4<B> {
                 return PosixAcl::decode(&raw[found.value.0..found.value.1])?.apply(sec);
             }
         }
-        let Some(block) = block_of(raw) else {
+        let Some(block) = block_of(raw, &self.layout) else {
             return Ok(());
         };
         let mut buf = scratch(self.layout.block_size as usize)?;
@@ -360,7 +366,7 @@ impl<B: Block> Ext4<B> {
                 return Ok(());
             }
         }
-        let Some(block) = block_of(raw) else {
+        let Some(block) = block_of(raw, &self.layout) else {
             return Ok(());
         };
         let mut buf = scratch(self.layout.block_size as usize)?;
@@ -395,7 +401,7 @@ impl<B: Block> Ext4<B> {
     /// Give back the attribute block of an inode being deleted: freed once no
     /// other inode shares it.
     pub(crate) fn release_xattr_block(&mut self, raw: &mut [u8]) -> Result<(), DriverError> {
-        let Some(block) = block_of(raw) else {
+        let Some(block) = block_of(raw, &self.layout) else {
             return Ok(());
         };
         let mut buf = scratch(self.layout.block_size as usize)?;

@@ -2,8 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_controls::{
@@ -34,7 +33,7 @@ fn record(
     fstype: &[u8],
     usage: VolumeStats,
     availability: MountAvailability,
-    medium: Option<BlkDeviceClass>,
+    medium: Option<BlkMedium>,
 ) -> MountRecord {
     MountRecord::new(
         source,
@@ -59,7 +58,7 @@ fn system() -> MountRecord {
         b"arxfs",
         usage(1024, 768, 768),
         MountAvailability::Available,
-        Some(BlkDeviceClass::SolidState),
+        Some(BlkMedium::SolidState),
     )
 }
 
@@ -96,7 +95,11 @@ fn a_card_is_captioned_by_its_volume_and_states_the_mount_tables_facts() {
             (String::from("Mounted at"), String::from("/System"), true),
             (String::from("Filesystem"), String::from("arxfs"), true),
             (String::from("Device"), String::from("arx0p2"), true),
-            (String::from("Medium"), String::from("solid state"), true),
+            (
+                String::from("Medium"),
+                String::from("solid-state drive"),
+                true
+            ),
             (
                 String::from("Availability"),
                 String::from("available"),
@@ -157,7 +160,7 @@ fn a_withheld_reserve_is_used_up_by_neither_figure() {
         b"arxfs",
         usage(1000, 200, 100),
         MountAvailability::Available,
-        Some(BlkDeviceClass::Rotational),
+        Some(BlkMedium::HardDisk),
     )]);
     // The reserve is unallocated, so it is not *used*; it is not offered
     // either, so it is not *available*. The bar is of the whole medium.

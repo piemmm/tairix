@@ -144,10 +144,13 @@ impl Outcome {
     }
 }
 
-/// Why the canvas is showing a reason instead of a picture.
+/// Why the viewer has no picture to show.
 ///
 /// A viewer never blanks and never fabricates: whatever went wrong, the user
-/// is told what it was, in the window and on the standard error stream.
+/// is told what it was. A document refused at its open leaves the window
+/// nothing to show, so the embedder states the reason in an alert and closes
+/// the window; a page of an open document that will not draw is stated on the
+/// canvas in its place.
 ///
 /// The decoder's own refusals arrive wrapped in [`Failed`](Self::Failed);
 /// the rest are this side of the seam, because reading the file and holding
@@ -162,9 +165,6 @@ pub enum Refusal {
     Unreadable(Errno),
     /// The document is longer than a viewer will hold resident.
     TooLong,
-    /// The session would not open a file chooser at all, so there was never
-    /// anything to choose from.
-    PickRefused(Errno),
     /// The document's pixels arrived but could not be held.
     Unholdable,
 }
@@ -175,9 +175,6 @@ impl core::fmt::Display for Refusal {
             Self::Failed(inner) => write!(f, "{inner}"),
             Self::Unreadable(err) => write!(f, "the document could not be read ({err})"),
             Self::TooLong => f.write_str("the document is larger than this viewer opens"),
-            Self::PickRefused(err) => {
-                write!(f, "the desktop offered no file chooser ({err})")
-            }
             Self::Unholdable => f.write_str("the picture could not be held in memory"),
         }
     }
@@ -1009,27 +1006,6 @@ impl View {
         } else {
             Some(Refusal::Unholdable)
         };
-        true
-    }
-
-    /// State `why` no document will arrive.
-    ///
-    /// So a window asked for one states the reason instead of staying empty,
-    /// or never appearing at all — the session refusing a chooser
-    /// ([`Refusal::PickRefused`]) especially, because nothing comes after it.
-    /// A refused optional action is an answer, not a death.
-    ///
-    /// A pick the user *cancelled* is not one of these: they chose nothing, so
-    /// the embedder closes that window rather than showing them a reason they
-    /// already know.
-    ///
-    /// Answers `false`, changing nothing, when a document is already open: the
-    /// picture on screen is still what the user is looking at.
-    pub fn no_document(&mut self, why: Refusal) -> bool {
-        if self.document.is_some() {
-            return false;
-        }
-        self.refusal = Some(why);
         true
     }
 

@@ -374,10 +374,11 @@ still need a host or the network:
 
 ### R7 — Trust
 
-- Today the system app-signing and publisher seeds are public constants
-  (deliberately, for reproducible signatures), and one anchor admits bundles
-  from any path. Any process that can write a user store can therefore mint a
-  bundle the kernel attests as first-party.
+- The system app-signing and publisher seeds are a secret key set held
+  outside the tree (`tools/signkeys`), so only its holder can sign a bundle
+  the kernel attests as first-party. One anchor still admits a Command or
+  Application bundle from any path, so a bundle the key set signed can run
+  from a user's own store.
 - Decision 12 is the change. It also adds:
   - **A signing service** that holds each user's developer key and never
     exposes it;

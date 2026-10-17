@@ -18,13 +18,14 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuRowView, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt,
-    DragItems, DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
-    MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
-    SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX,
-    WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView, BundleRunPath,
+    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
+    DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
+    PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, TerrainPlate,
+    TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
+    DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -37,7 +38,7 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, Activation, CallerIdentity, ClientRegion, CursorSetName,
+    client_frame_budget_bytes, Activation, AlertOpen, CallerIdentity, ClientRegion, CursorSetName,
     DragConclusion, DragReport, EventSink, HandOverDesk, LayerSpec, OpenEntry, PickedFile,
     PreviewSize, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState,
     WindowSizing, WINDOW_REPLY_MAX,
@@ -182,6 +183,15 @@ impl CallerIdentity for MockIdentity {
         }
     }
 
+    fn caller_mailbox(&mut self, ticket: u64) -> Result<u64, Errno> {
+        match ticket {
+            TICKET_A => Ok(EVENTS_A),
+            TICKET_B => Ok(EVENTS_B),
+            TICKET_KERNEL => Err(Errno::PermissionDenied),
+            _ => Err(Errno::NotFound),
+        }
+    }
+
     fn caller_holds(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
         if let Some(err) = self.attest_error {
             return Err(err);
@@ -248,6 +258,12 @@ struct RecordingHost {
     refuse_drag: Option<Errno>,
     verdicts: Vec<(u64, u32, Option<DropOperation>)>,
     refuse_menu_open: Option<Errno>,
+    /// Every alert put up, whether it earned the keyboard, and every one
+    /// taken down, by id.
+    alerts: Vec<(u64, ProcId, Option<u64>, AlertSpec)>,
+    alert_focus: Vec<bool>,
+    alerts_withdrawn: Vec<u64>,
+    refuse_alert: Option<Errno>,
     hand_overs: Vec<(ProcId, String, Option<HandOverDocument>)>,
     /// What the host answers a hand-over with: `NotRunning` unless a test
     /// says otherwise, so the default is "nothing to reach".
@@ -322,6 +338,10 @@ impl Default for RecordingHost {
             refuse_drag: None,
             verdicts: Vec::new(),
             refuse_menu_open: None,
+            alerts: Vec::new(),
+            alert_focus: Vec::new(),
+            alerts_withdrawn: Vec::new(),
+            refuse_alert: None,
             hand_overs: Vec::new(),
             hand_over: Ok(HandOverOutcome::NotRunning),
             desktop: Ok(sample_desktop()),
@@ -541,6 +561,20 @@ impl WindowHost for RecordingHost {
         }
         self.menu_opens.push((window_id, open_id, anchor, *menu));
         Ok(())
+    }
+
+    fn alert_opened(&mut self, open: &AlertOpen<'_>) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_alert {
+            return Err(err);
+        }
+        self.alerts
+            .push((open.alert_id, open.owner, open.window, *open.spec));
+        self.alert_focus.push(open.focus);
+        Ok(())
+    }
+
+    fn alert_withdrawn(&mut self, alert_id: u64) {
+        self.alerts_withdrawn.push(alert_id);
     }
 
     fn tooltip_declared(
@@ -1930,12 +1964,44 @@ fn a_transient_hangs_only_from_a_top_level_window_of_the_callers_own() {
         );
     }
     loopback.borrow_mut().ticket = TICKET_B;
+    let mut foreign = tool_spec(parent, 9, None);
+    foreign.transient.event_endpoint = EVENTS_B;
     assert_eq!(
-        client.create_tool(&tool_spec(parent, 9, None)),
+        client.create_tool(&foreign),
         Err(Errno::NotFound),
         "a foreign parent reads as none"
     );
     assert_eq!(loopback.borrow().server.window_count(), 3);
+}
+
+#[test]
+fn a_request_naming_another_applications_mailbox_is_refused() {
+    // Every answer goes to the mailbox the caller binds for itself: a client
+    // naming another's would have its events delivered into that one.
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    assert_eq!(
+        create_id(&mut client, 7, EVENTS_B, 1, "Files"),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        client.open_alert(EVENTS_B, None, &sample_alert()),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(loopback.borrow().server.window_count(), 0);
+    assert!(loopback.borrow().host.alerts.is_empty());
+}
+
+#[test]
+fn the_kernel_sentinel_raises_no_alert() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    loopback.borrow_mut().ticket = TICKET_KERNEL;
+    assert_eq!(
+        client.open_alert(EVENTS_A, None, &sample_alert()),
+        Err(Errno::PermissionDenied)
+    );
+    assert!(loopback.borrow().host.alerts.is_empty());
 }
 
 #[test]
@@ -5763,4 +5829,485 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
         decode_status_reply(&reply[..written.min(4)]),
         Err(Errno::NotSupported)
     );
+}
+
+/// An alert a test application raises: one sentence and one answer.
+fn sample_alert() -> AlertSpec {
+    AlertSpec::new(
+        AlertSeverity::Error,
+        "The folder could not be listed",
+        "",
+        &[AlertButton::new("OK", AlertButtonRole::Default).expect("a valid label")],
+    )
+    .expect("a valid alert")
+}
+
+/// The answers delivered to `endpoint` so far, decoded.
+fn alert_answers(sink: &QueueSink, endpoint: u64) -> Vec<WindowEvent> {
+    sink.delivered
+        .iter()
+        .filter(|(to, _)| *to == endpoint)
+        .filter_map(|(_, frame)| WindowEvent::from_bytes(frame).ok())
+        .filter(|event| matches!(event, WindowEvent::AlertClosed { .. }))
+        .collect()
+}
+
+#[test]
+fn an_alert_is_put_up_for_its_owner_and_answered_exactly_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let alert = client
+        .open_alert(EVENTS_A, Some(window), &sample_alert())
+        .expect("the alert is accepted");
+    assert_ne!(alert, 0, "an alert id is never zero");
+    {
+        let host = &loopback.borrow().host;
+        assert_eq!(host.alerts.len(), 1);
+        let (id, owner, held, spec) = &host.alerts[0];
+        assert_eq!((*id, *held), (alert, Some(window)));
+        assert_eq!(*owner, proc_id(0xA1));
+        assert_eq!(spec.headline(), "The folder could not be listed");
+    }
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .answer_alert(&mut sink, alert, 0, Activation::Withheld)
+        .expect("the answer delivers");
+    assert_eq!(
+        alert_answers(&sink, EVENTS_A),
+        [WindowEvent::AlertClosed {
+            alert_id: alert,
+            outcome: AlertOutcome::Chosen { index: 0 }
+        }]
+    );
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .answer_alert(&mut sink, alert, 0, Activation::Withheld),
+        Err(Errno::NotFound),
+        "an answered alert is answered no more"
+    );
+    let again = client
+        .open_alert(EVENTS_A, Some(window), &sample_alert())
+        .expect("a second alert is accepted");
+    assert_ne!(again, alert, "an alert id is never reused");
+}
+
+#[test]
+fn an_alert_may_hold_only_the_callers_own_top_level_window() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.open_alert(EVENTS_B, Some(window), &sample_alert()),
+        Err(Errno::NotFound)
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    let (popup, _) = client
+        .create_popup(&popup_spec(window, 8, EVENTS_A, 0, 0))
+        .expect("a popup");
+    assert_eq!(
+        client.open_alert(EVENTS_A, Some(popup), &sample_alert()),
+        Err(Errno::OutOfRange)
+    );
+    assert!(loopback.borrow().host.alerts.is_empty());
+}
+
+#[test]
+fn an_application_with_no_window_may_still_raise_an_alert() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let alert = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("an ownerless alert is accepted");
+    assert_eq!(loopback.borrow().host.alerts[0].2, None);
+    assert_ne!(alert, 0);
+}
+
+#[test]
+fn an_application_has_at_most_its_bound_of_alerts_up() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    for _ in 0..tairix_abi::window_ipc::ALERT_MAX_OPEN {
+        client
+            .open_alert(EVENTS_A, None, &sample_alert())
+            .expect("within the bound");
+    }
+    assert_eq!(
+        client.open_alert(EVENTS_A, None, &sample_alert()),
+        Err(Errno::LimitExceeded)
+    );
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert!(
+        client.open_alert(EVENTS_B, None, &sample_alert()).is_ok(),
+        "one application's alerts never use up another's"
+    );
+}
+
+#[test]
+fn a_refused_alert_spends_no_id_and_leaves_nothing_owed() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    loopback.borrow_mut().host.refuse_alert = Some(Errno::NotSupported);
+    assert_eq!(
+        client.open_alert(EVENTS_A, None, &sample_alert()),
+        Err(Errno::NotSupported)
+    );
+    loopback.borrow_mut().host.refuse_alert = None;
+    let first = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted once the host can draw it");
+    assert_eq!(first, 1, "the refusal minted nothing");
+}
+
+#[test]
+fn a_withdrawn_alert_comes_down_answered_dismissed() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let alert = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.close_alert(alert), Err(Errno::NotFound));
+    loopback.borrow_mut().ticket = TICKET_A;
+    client.close_alert(alert).expect("its owner withdraws it");
+    let looped = loopback.borrow();
+    assert_eq!(looped.host.alerts_withdrawn, [alert]);
+    assert_eq!(
+        alert_answers(&looped.sink, EVENTS_A),
+        [WindowEvent::AlertClosed {
+            alert_id: alert,
+            outcome: AlertOutcome::Dismissed
+        }]
+    );
+}
+
+#[test]
+fn closing_the_window_an_alert_holds_takes_the_alert_down_with_it() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let held = client
+        .open_alert(EVENTS_A, Some(window), &sample_alert())
+        .expect("accepted");
+    let free = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted");
+    client.close(window).expect("the owner closes");
+    let looped = loopback.borrow();
+    assert_eq!(looped.host.alerts_withdrawn, [held]);
+    assert_eq!(
+        alert_answers(&looped.sink, EVENTS_A),
+        [WindowEvent::AlertClosed {
+            alert_id: held,
+            outcome: AlertOutcome::Dismissed
+        }]
+    );
+    assert_ne!(held, free);
+}
+
+#[test]
+fn an_exiting_application_takes_its_alerts_down_unanswered() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let alert = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted");
+    let owner = proc_id(0xA1);
+    let mut looped = loopback.borrow_mut();
+    let Loopback { server, host, .. } = &mut *looped;
+    server.client_exited(host, owner);
+    assert_eq!(host.alerts_withdrawn, [alert]);
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        server.answer_alert(&mut sink, alert, 0, Activation::Withheld),
+        Err(Errno::NotFound)
+    );
+    assert!(sink.delivered.is_empty());
+}
+
+#[test]
+fn an_answer_naming_a_button_the_alert_lacks_is_never_delivered_as_a_choice() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let alert = client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted");
+    let buttons = sample_alert().button_count();
+    let past = u8::try_from(buttons).expect("a handful");
+    let mut sink = QueueSink::default();
+    let server = &mut loopback.borrow_mut().server;
+    assert_eq!(
+        server.answer_alert(&mut sink, alert, past, Activation::Withheld),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        alert_answers(&sink, EVENTS_A),
+        [WindowEvent::AlertClosed {
+            alert_id: alert,
+            outcome: AlertOutcome::Dismissed
+        }],
+        "its window is down, so it ends unanswered"
+    );
+    assert_eq!(
+        server.answer_alert(&mut sink, alert, 0, Activation::Withheld),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn answering_an_alert_lets_its_application_bring_the_next_one_forward() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mine = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().ticket = TICKET_B;
+    let theirs = create_id(&mut client, 8, EVENTS_B, 1, "b").expect("b");
+    loopback.borrow_mut().ticket = TICKET_A;
+    loopback.borrow_mut().host.focused = Some(theirs);
+    let first = client
+        .open_alert(EVENTS_A, Some(mine), &sample_alert())
+        .expect("accepted");
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .answer_alert(
+            &mut sink,
+            first,
+            0,
+            Activation::Granted {
+                focus: Some(theirs),
+            },
+        )
+        .expect("answered");
+    client
+        .open_alert(EVENTS_A, Some(mine), &sample_alert())
+        .expect("accepted");
+    client
+        .open_alert(EVENTS_A, Some(mine), &sample_alert())
+        .expect("accepted");
+    assert_eq!(
+        loopback.borrow().host.alert_focus,
+        [false, true, false],
+        "the answer earned the front once, for the question after it"
+    );
+}
+
+#[test]
+fn an_alert_takes_the_keyboard_only_when_its_application_has_earned_it() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (8, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mine = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().ticket = TICKET_B;
+    let theirs = create_id(&mut client, 8, EVENTS_B, 1, "b").expect("b");
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // The user is working in this application's window.
+    loopback.borrow_mut().host.focused = Some(mine);
+    client
+        .open_alert(EVENTS_A, Some(mine), &sample_alert())
+        .expect("accepted");
+    // The user is working in another application's.
+    loopback.borrow_mut().host.focused = Some(theirs);
+    client
+        .open_alert(EVENTS_A, Some(mine), &sample_alert())
+        .expect("accepted");
+    assert_eq!(loopback.borrow().host.alert_focus, [true, false]);
+
+    // A gesture the user aimed at this application earns it the front once.
+    client
+        .set_app_bar(&sample_app_bar(EVENTS_A))
+        .expect("declared");
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .deliver_app_event(
+            &mut sink,
+            proc_id(0xA1),
+            &WindowEvent::AppBarDefault,
+            Activation::Granted {
+                focus: Some(theirs),
+            },
+        )
+        .expect("delivered");
+    client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted");
+    client
+        .open_alert(EVENTS_A, None, &sample_alert())
+        .expect("accepted");
+    assert_eq!(
+        loopback.borrow().host.alert_focus,
+        [true, false, true, false],
+        "the activation is spent by the alert it earned"
+    );
+}
+
+#[test]
+fn a_refusal_is_an_error_alert_stating_its_reason_as_a_sentence() {
+    use crate::client::refusal_alert;
+    let stated = |reason: &str| {
+        let alert = refusal_alert("No window opened", reason).expect("an alert");
+        assert_eq!(alert.severity(), AlertSeverity::Error);
+        assert_eq!(alert.headline(), "No window opened");
+        let buttons: Vec<_> = alert.buttons().map(AlertButton::role).collect();
+        assert_eq!(
+            buttons,
+            [AlertButtonRole::Default],
+            "acknowledged, nothing to decide"
+        );
+        String::from(alert.detail())
+    };
+    assert_eq!(stated("permission denied"), "Permission denied.");
+    assert_eq!(stated("Already a sentence."), "Already a sentence.");
+    assert_eq!(stated("is it?"), "Is it?");
+    assert_eq!(
+        stated("\u{201c}a.png\u{201d} is not a PNG"),
+        "\u{201c}a.png\u{201d} is not a PNG."
+    );
+    assert_eq!(stated("élan"), "Élan.");
+    assert_eq!(stated("cut short\u{2026}"), "Cut short\u{2026}");
+    assert_eq!(stated(""), "", "no reason stays none");
+}
+
+#[test]
+fn a_window_that_could_not_be_opened_is_stated_in_an_alert_holding_none() {
+    use crate::client::refusal_alert;
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let refusal =
+        refusal_alert("No window opened", "there is not enough memory to draw it").expect("fits");
+    let alert = client
+        .open_alert(EVENTS_A, None, &refusal)
+        .expect("an application with no window is still answered");
+    let host = &loopback.borrow().host;
+    let (id, _, held, spec) = &host.alerts[0];
+    assert_eq!((*id, *held), (alert, None));
+    assert_eq!(spec.detail(), "There is not enough memory to draw it.");
+}
+
+/// Where a refusal came from, for the notice queue's tests.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum From {
+    Listing,
+    Operation,
+    Paste,
+}
+
+/// The headline and detail of the alert `alert_id` the host was asked for.
+fn noticed(loopback: &Rc<RefCell<Loopback>>, alert_id: u64) -> (String, String) {
+    let looped = loopback.borrow();
+    let (_, _, _, spec) = looped
+        .host
+        .alerts
+        .iter()
+        .find(|(id, ..)| *id == alert_id)
+        .expect("that alert was put up");
+    (spec.headline().into(), spec.detail().into())
+}
+
+#[test]
+fn a_refusal_while_another_is_up_waits_its_turn() {
+    use crate::notices::{Notices, Raised};
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut notices = Notices::default();
+    notices.refuse(From::Listing, "Not listed", "the volume went away");
+    assert!(notices.is_showing(), "the window is answering one already");
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    notices.refuse(From::Operation, "Copy stopped", "the destination is full");
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, window),
+        Raised::Nothing,
+        "nothing goes up over the first"
+    );
+    assert_eq!(
+        noticed(&loopback, 1),
+        ("Not listed".into(), "The volume went away.".into()),
+        "a reason reads as a sentence"
+    );
+    assert!(!notices.answered(2), "only its own alert answers it");
+    assert!(notices.answered(1));
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(noticed(&loopback, 2).0, "Copy stopped");
+    assert!(notices.answered(2));
+    assert!(!notices.is_showing());
+}
+
+#[test]
+fn a_source_keeps_only_its_latest_refusal_waiting() {
+    use crate::notices::{Notices, Raised};
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut notices = Notices::default();
+    notices.refuse(From::Paste, "Not moved", "shown");
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    for reason in ["stale", "newer", "newest"] {
+        notices.refuse(From::Listing, "Not listed", reason);
+    }
+    notices.refuse(From::Paste, "Not moved", "after");
+    assert!(notices.answered(1));
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(
+        noticed(&loopback, 2).1,
+        "Newest.",
+        "it keeps its place in line with what it says now"
+    );
+    assert!(notices.answered(2));
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+    assert_eq!(noticed(&loopback, 3).1, "After.");
+    assert!(notices.answered(3));
+    assert_eq!(
+        notices.raise(&mut client, EVENTS_A, window),
+        Raised::Nothing
+    );
+}
+
+#[test]
+fn a_notice_waits_while_its_application_has_every_alert_it_may() {
+    use crate::notices::{Notices, Raised};
+    use tairix_abi::window_ipc::ALERT_MAX_OPEN;
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    for _ in 0..ALERT_MAX_OPEN {
+        client
+            .open_alert(EVENTS_A, None, &sample_alert())
+            .expect("within the bound");
+    }
+    let mut notices = Notices::default();
+    notices.refuse(From::Listing, "Not listed", "the volume went away");
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Full);
+    assert!(notices.is_showing(), "it is kept, not lost");
+    let mut sink = QueueSink::default();
+    loopback
+        .borrow_mut()
+        .server
+        .answer_alert(&mut sink, 1, 0, Activation::Withheld)
+        .expect("answered");
+    assert_eq!(notices.raise(&mut client, EVENTS_A, window), Raised::Up);
+}
+
+#[test]
+fn a_notice_the_desktop_will_not_show_is_handed_back_to_be_stated() {
+    use crate::notices::{Notices, Raised};
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut notices = Notices::default();
+    notices.refuse(From::Listing, "Not listed", "the volume went away");
+    loopback.borrow_mut().host.refuse_alert = Some(Errno::NotSupported);
+    let Raised::Refused(Errno::NotSupported, notice) = notices.raise(&mut client, EVENTS_A, window)
+    else {
+        panic!("refused");
+    };
+    assert_eq!(notice.headline(), "Not listed");
+    assert!(!notices.is_showing(), "dropped once handed back");
 }

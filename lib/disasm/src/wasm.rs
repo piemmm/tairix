@@ -26,6 +26,11 @@ use crate::{sign_extend, Insn};
 /// must not make the decoder consume unbounded bytes as one "instruction".
 pub const MAX_BR_TABLE_TARGETS: u32 = 4096;
 
+/// The most bytes one wasm instruction can take: the widest `br_table`, its
+/// opcode then a LEB128 count, a target per entry and the default, each at
+/// most five bytes.
+pub const MAX_INSN_LEN: usize = 1 + 5 * (MAX_BR_TABLE_TARGETS as usize + 2);
+
 /// Two spaces of indentation per open block.
 const INDENT: &str = "  ";
 

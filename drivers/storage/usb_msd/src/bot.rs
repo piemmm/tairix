@@ -11,14 +11,13 @@
 //!
 //! Every device-supplied field — CSW signature/tag/residue/status, the LUN
 //! count — is bounds-checked fail-closed: the device is hostile input. A
-//! tag mismatch, a corrupt CSW, or a phase error runs the spec's reset
-//! recovery (Bulk-Only Mass Storage Reset; the transport below already
-//! recovers a halted endpoint per transfer) and fails the command rather
-//! than trusting the frame.
+//! transfer that fails or outruns the exchange, a tag mismatch, a corrupt
+//! CSW, or a phase error runs the spec's reset recovery and fails the
+//! command rather than trusting the frame.
 
 use tairix_abi::Errno;
 
-use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
+use crate::scsi::{after_reset, CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
 
 /// One logical USB transfer seam the wire transports drive.
 ///
@@ -31,7 +30,9 @@ use crate::scsi::{CommandOutcome, DataPhase, ScsiTransport, Sense, MAX_LUNS};
 /// so the engine may transfer again immediately. BOT uses the control and
 /// bulk operations; CBI ([`crate::cbi`]) additionally uses the control-OUT
 /// data stage (its command channel) and the interrupt-IN endpoint (its
-/// status channel).
+/// status channel). Every bulk and interrupt transfer is bounded by the
+/// exchange [`begin_exchange`](Self::begin_exchange) last started, failing
+/// [`Errno::TimedOut`] once it is spent.
 pub trait MsdTransport {
     /// Run a control-IN transfer (SETUP + IN data stage) into `data`,
     /// returning the bytes the device delivered.
@@ -83,6 +84,31 @@ pub trait MsdTransport {
     /// An [`Errno`] from the transport/device.
     fn interrupt_in(&mut self, data: &mut [u8]) -> Result<usize, Errno>;
 
+    /// Drop every interrupt the interface has buffered and not yet read, so
+    /// the next [`Self::interrupt_in`] is answered by one the device raises
+    /// after this. A CBI completion carries no tag, so one an earlier command
+    /// raised late is otherwise indistinguishable from this command's own.
+    ///
+    /// # Errors
+    ///
+    /// An [`Errno`] from the transport.
+    fn discard_interrupts(&mut self) -> Result<(), Errno>;
+
+    /// Start one command exchange: every transfer until the next begins is
+    /// bounded by what remains of the exchange's budget, so a device that
+    /// stops answering mid-command fails the command rather than holding it.
+    fn begin_exchange(&mut self);
+
+    /// Clear the halt of both bulk endpoints — bulk-IN, then bulk-OUT — on
+    /// the device and in the controller, so both pipes restart empty at
+    /// `DATA0`: the clears a BOT reset recovery and a CBI Command Block Reset
+    /// owe (BOT 1.0 §5.3.4, CBI 1.1 §2.2).
+    ///
+    /// # Errors
+    ///
+    /// An [`Errno`] from the transport/device.
+    fn clear_halts(&mut self) -> Result<(), Errno>;
+
     /// Zero every byte of the transport's shared data window, so a
     /// sensitive payload does not outlive the block operation that moved
     /// it (the zero-on-free discipline applied to the bounce window).
@@ -133,18 +159,24 @@ impl<T: MsdTransport> Bot<T> {
         &self.transport
     }
 
-    /// Run the spec's reset recovery — a Bulk-Only Mass Storage Reset on
-    /// the interface — and surface `err` (or the reset's own failure) so a
-    /// broken exchange never silently "passes".
-    fn recover(&mut self, err: Errno) -> Errno {
-        // Bulk-Only Mass Storage Reset: class-specific OUT, bRequest 0xFF,
-        // no data. The transport below already recovers halted endpoints
-        // per transfer, so no separate clear-halt step is issued here.
+    /// The spec's reset recovery (BOT 1.0 §5.3.4): a Bulk-Only Mass Storage
+    /// Reset, then the halt of each bulk pipe cleared. The reset alone leaves
+    /// both pipes' halts and data toggles as they were, so the next CBW would
+    /// still meet a pipe out of step.
+    fn reset_recovery(&mut self) -> Result<(), Errno> {
+        // Class-specific OUT, bRequest 0xFF, no data.
         let setup = [0x21, 0xFF, 0, 0, self.interface_number, 0, 0, 0];
-        match self.transport.control_no_data(setup) {
-            Ok(()) => err,
-            Err(reset_err) => reset_err,
+        self.transport.control_no_data(setup)?;
+        self.transport.clear_halts()
+    }
+
+    /// End an exchange that broke on `cause` with the reset recovery it
+    /// owes, answering what the caller may do about it.
+    fn fail(&mut self, cause: Errno) -> Errno {
+        if cause == Errno::NotFound {
+            return cause;
         }
+        after_reset(cause, self.reset_recovery())
     }
 }
 
@@ -163,9 +195,10 @@ impl<T: MsdTransport> ScsiTransport for Bot<T> {
         let data_len = u32::try_from(data.len()).map_err(|_| Errno::LengthOutOfRange)?;
         let tag = self.next_tag;
         self.next_tag = self.next_tag.wrapping_add(1);
+        self.transport.begin_exchange();
 
-        // Build and send the CBW. A STALL here means the device rejected
-        // the wrapper itself: reset the transport and fail.
+        // Build and send the CBW. Any failure here, a STALL included, means
+        // the device did not take the wrapper: reset the transport and fail.
         let mut cbw = [0u8; CBW_LEN];
         cbw[0..4].copy_from_slice(&CBW_SIGNATURE.to_le_bytes());
         cbw[4..8].copy_from_slice(&tag.to_le_bytes());
@@ -176,47 +209,42 @@ impl<T: MsdTransport> ScsiTransport for Bot<T> {
         cbw[15..15 + cb.len()].copy_from_slice(cb);
         match self.transport.bulk_out(&cbw) {
             Ok(CBW_LEN) => {}
-            Ok(_) => return Err(self.recover(Errno::NotImplemented)),
-            Err(err) => return Err(self.recover(err)),
+            Ok(_) => return Err(self.fail(Errno::NotImplemented)),
+            Err(err) => return Err(self.fail(err)),
         }
 
         // Data phase. A STALL ends the phase early (the device will report
-        // the residue in the CSW); any other fault is a hard error.
+        // the residue in the CSW); any other failure left the device
+        // mid-command, out of step with the host.
         let mut transferred = 0usize;
-        match &mut data {
-            DataPhase::In(buf) if !buf.is_empty() => match self.transport.bulk_in(buf) {
-                Ok(n) => transferred = n,
-                Err(Errno::EndpointStalled) => {}
-                Err(err) => return Err(err),
-            },
-            DataPhase::Out(buf) if !buf.is_empty() => match self.transport.bulk_out(buf) {
-                Ok(n) => transferred = n,
-                Err(Errno::EndpointStalled) => {}
-                Err(err) => return Err(err),
-            },
-            _ => {}
+        let moved = match &mut data {
+            DataPhase::In(buf) if !buf.is_empty() => Some(self.transport.bulk_in(buf)),
+            DataPhase::Out(buf) if !buf.is_empty() => Some(self.transport.bulk_out(buf)),
+            _ => None,
+        };
+        match moved {
+            Some(Ok(n)) => transferred = n,
+            Some(Err(Errno::EndpointStalled)) | None => {}
+            Some(Err(err)) => return Err(self.fail(err)),
         }
 
         // CSW, retried once across a STALL (BOT §6.7.2 figure 2), then
         // validated field by field before anything is believed.
         let mut csw = [0u8; CSW_LEN];
         let received = match self.transport.bulk_in(&mut csw) {
-            Ok(n) => n,
-            Err(Errno::EndpointStalled) => match self.transport.bulk_in(&mut csw) {
-                Ok(n) => n,
-                Err(err) => return Err(self.recover(err)),
-            },
-            Err(err) => return Err(err),
-        };
+            Err(Errno::EndpointStalled) => self.transport.bulk_in(&mut csw),
+            first => first,
+        }
+        .map_err(|err| self.fail(err))?;
         if received != CSW_LEN {
-            return Err(self.recover(Errno::LengthOutOfRange));
+            return Err(self.fail(Errno::LengthOutOfRange));
         }
         let signature = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
         let csw_tag = u32::from_le_bytes([csw[4], csw[5], csw[6], csw[7]]);
         let residue = u32::from_le_bytes([csw[8], csw[9], csw[10], csw[11]]);
         let status = csw[12];
         if signature != CSW_SIGNATURE || csw_tag != tag || residue > data_len {
-            return Err(self.recover(Errno::BadMagic));
+            return Err(self.fail(Errno::BadMagic));
         }
         // The device's honest data count: never more than the bytes that
         // actually moved, never more than the CSW says remained unmoved.
@@ -231,9 +259,13 @@ impl<T: MsdTransport> ScsiTransport for Bot<T> {
                 passed: false,
                 transferred,
             }),
-            CSW_STATUS_PHASE_ERROR => Err(self.recover(Errno::NotImplemented)),
-            _ => Err(self.recover(Errno::BadMagic)),
+            CSW_STATUS_PHASE_ERROR => Err(self.fail(Errno::NotImplemented)),
+            _ => Err(self.fail(Errno::BadMagic)),
         }
+    }
+
+    fn reset(&mut self) -> Result<(), Errno> {
+        self.reset_recovery()
     }
 
     /// Number of logical units the device exposes (`GET MAX LUN + 1`).

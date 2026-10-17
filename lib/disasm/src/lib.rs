@@ -45,14 +45,17 @@ pub mod x86_64;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Most encoding bytes ever retained on an [`Insn`].
+/// Most encoding bytes ever retained on an [`Insn`]: the longest native
+/// encoding, x86_64's.
 ///
-/// x86_64 caps a legal instruction at 15 bytes; riscv64 parcels reach 8,
-/// A64 is always 4. Only a wasm instruction can legitimately outgrow this
-/// (a `br_table` carries one LEB128 target per entry), and then
-/// [`Insn::bytes`] holds the first `MAX_INSN_BYTES` while [`Insn::length`]
-/// still reports the full span consumed.
-pub const MAX_INSN_BYTES: usize = 15;
+/// Only a wasm instruction can outgrow this (a `br_table` carries one LEB128
+/// target per entry), and then [`Insn::bytes`] holds the first
+/// `MAX_INSN_BYTES` while [`Insn::length`] still reports the full span
+/// consumed.
+pub const MAX_INSN_BYTES: usize = x86_64::MAX_INSN_LEN;
+
+const _: () =
+    assert!(aarch64::MAX_INSN_LEN <= MAX_INSN_BYTES && riscv64::MAX_INSN_LEN <= MAX_INSN_BYTES);
 
 /// Mnemonic rendered for bytes no decoder table accounts for.
 pub const BAD_MNEMONIC: &str = "(bad)";

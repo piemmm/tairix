@@ -8,8 +8,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
@@ -54,7 +53,7 @@ fn places() -> Places {
         &[Volume {
             label: "Backup".to_string(),
             target: "/Storage/Backup".to_string(),
-            medium: Some(BlkDeviceClass::Rotational),
+            medium: Some(BlkMedium::HardDisk),
         }],
     )
 }
@@ -634,13 +633,13 @@ fn a_refresh_re_reads_the_volumes_and_keeps_the_users_place_in_the_rail() {
             Volume {
                 label: "Backup".to_string(),
                 target: "/Storage/Backup".to_string(),
-                medium: Some(BlkDeviceClass::Rotational),
+                medium: Some(BlkMedium::HardDisk),
             },
             // A stick the user just plugged in: it appears without a poll.
             Volume {
                 label: "Stick".to_string(),
                 target: "/Storage/Stick".to_string(),
-                medium: Some(BlkDeviceClass::Removable),
+                medium: Some(BlkMedium::UsbFlash),
             },
         ],
     );
@@ -960,7 +959,7 @@ fn a_rebuilt_rail_lights_the_row_now_under_a_still_pointer() {
             Volume {
                 label: "Backup".to_string(),
                 target: "/Storage/Backup".to_string(),
-                medium: Some(BlkDeviceClass::Rotational),
+                medium: Some(BlkMedium::HardDisk),
             },
         ],
     );

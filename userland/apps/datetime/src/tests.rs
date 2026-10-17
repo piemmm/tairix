@@ -296,7 +296,6 @@ fn every_status_but_idle_states_something_and_marks_faults() {
     assert!(Status::Applied.message().is_some());
     for status in [
         Status::Unset,
-        Status::Denied,
         Status::Rejected(Fault::NoSuchDay),
         Status::Failed("the clock could not be read"),
     ] {

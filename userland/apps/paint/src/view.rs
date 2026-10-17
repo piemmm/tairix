@@ -804,17 +804,15 @@ enum Then {
     Act(Action),
     /// A pasted layer, floated in its place.
     Float(Floating),
-    /// The save a close asked for.
+    /// The save the user chose to make before the window closes.
     SaveThenClose,
     /// A menu's entry field committed: its id and the text it held.
     Enter(u16, String),
 }
 
-/// A modal question over the window.
+/// A modal form of settings over the window.
 #[derive(Debug)]
 enum Modal {
-    /// Save the changes before closing?
-    Close(tairix_controls::Dialog),
     /// A form of settings.
     Form(alloc::boxed::Box<Form>),
 }
@@ -851,6 +849,22 @@ enum Lands {
         /// Whether the save closes the window.
         then_close: bool,
     },
+}
+
+impl Lands {
+    /// Whether a save that closes the window follows the answer.
+    const fn closes(&self) -> bool {
+        match self {
+            Self::Tiles(Settles::PutDown(then) | Settles::Adjusted(then)) => {
+                matches!(then, Then::SaveThenClose)
+            }
+            Self::Sheet { then_close } => *then_close,
+            Self::Tiles(Settles::Nothing | Settles::Cleared)
+            | Self::Selection
+            | Self::Transform(_)
+            | Self::Merged(_) => false,
+        }
+    }
 }
 
 /// A palette entry being edited live from the colour dock: the palette it
@@ -1035,12 +1049,18 @@ impl DocumentView for View {
         layout.message()
     }
 
+    /// The Save As sheet of a save that closes the window, or the work
+    /// that save waits on.
     fn asking_to_close(&self) -> bool {
-        match &self.modal {
-            Some(Modal::Close(_)) => true,
-            Some(Modal::Form(form)) => form.purpose() == Purpose::SaveAs { then_close: true },
-            None => false,
-        }
+        let sheet = matches!(
+            &self.modal,
+            Some(Modal::Form(form)) if form.purpose() == Purpose::SaveAs { then_close: true }
+        );
+        sheet
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.lands.closes())
     }
 
     /// Busy while a worker has the picture; the arrow while a question or an
@@ -1078,6 +1098,10 @@ impl DocumentView for View {
 
     fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         View::close_requested(self, layout, damage)
+    }
+
+    fn save_then_close(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+        View::save_then_close(self, layout, damage)
     }
 
     fn chosen(&mut self, item: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
@@ -1565,12 +1589,11 @@ impl View {
         }
     }
 
-    /// The modal question showing, if any: a close question or a form.
+    /// The modal form showing, if any.
     #[must_use]
-    pub(crate) fn modal(&self) -> Option<Result<&tairix_controls::Dialog, &Form>> {
+    pub(crate) fn modal(&self) -> Option<&Form> {
         match &self.modal {
-            Some(Modal::Close(dialog)) => Some(Ok(dialog)),
-            Some(Modal::Form(form)) => Some(Err(&**form)),
+            Some(Modal::Form(form)) => Some(form),
             None => None,
         }
     }
@@ -2143,7 +2166,6 @@ mod adjust;
 #[path = "view_colour.rs"]
 mod colour;
 
-pub(crate) use input::close_rect;
 pub(crate) use panes::landing_mark;
 pub(crate) use tools::{screen_box, CROP_REACH, MARKER};
 

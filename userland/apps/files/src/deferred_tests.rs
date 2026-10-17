@@ -42,9 +42,8 @@ fn summary(name: &str) -> Properties {
     )
 }
 
-fn job(window: u64, path: &str) -> PropertyJob {
+fn job(path: &str) -> PropertyJob {
     PropertyJob {
-        window,
         path: String::from(path),
         kind: EntryKind::File,
     }
@@ -55,18 +54,18 @@ fn job(window: u64, path: &str) -> PropertyJob {
 #[test]
 fn two_properties_windows_are_answered_independently() {
     let mut desk = PropertyReads::new();
-    assert!(desk.submit(job(1, "/a")));
-    assert!(desk.submit(job(2, "/b")));
+    assert!(desk.submit(1, job("/a")));
+    assert!(desk.submit(2, job("/b")));
     assert!(desk.has_work());
 
-    let first = desk.next_job().expect("a read");
-    let second = desk.next_job().expect("a second read");
-    assert_eq!((first.window, second.window), (1, 2), "asked order, served");
+    let (first, _) = desk.next_job().expect("a read");
+    let (second, _) = desk.next_job().expect("a second read");
+    assert_eq!((first, second), (1, 2), "asked order, served");
     assert!(!desk.has_work());
 
     // Answered out of order, each lands in its own window's slot.
-    assert!(desk.deliver(second.window, Ok(summary("b"))));
-    assert!(desk.deliver(first.window, Ok(summary("a"))));
+    assert!(desk.deliver(second, Ok(summary("b"))));
+    assert!(desk.deliver(first, Ok(summary("a"))));
     assert!(desk.take_landed());
     assert_eq!(
         desk.take(1)
@@ -88,17 +87,17 @@ fn two_properties_windows_are_answered_independently() {
 #[test]
 fn a_re_read_supersedes_the_same_windows_outstanding_answer() {
     let mut desk = PropertyReads::new();
-    assert!(desk.submit(job(7, "/a")));
-    let first = desk.next_job().expect("a read");
-    assert!(desk.deliver(first.window, Ok(summary("stale"))));
+    assert!(desk.submit(7, job("/a")));
+    let (first, _) = desk.next_job().expect("a read");
+    assert!(desk.deliver(first, Ok(summary("stale"))));
 
-    assert!(desk.submit(job(7, "/a")));
+    assert!(desk.submit(7, job("/a")));
     assert!(
         desk.take(7).is_none(),
         "the stale answer went with the request it superseded"
     );
-    let again = desk.next_job().expect("the re-read");
-    assert!(desk.deliver(again.window, Ok(summary("fresh"))));
+    let (again, _) = desk.next_job().expect("the re-read");
+    assert!(desk.deliver(again, Ok(summary("fresh"))));
     assert_eq!(
         desk.take(7)
             .expect("the fresh answer")
@@ -112,9 +111,9 @@ fn a_re_read_supersedes_the_same_windows_outstanding_answer() {
 #[test]
 fn a_refused_read_is_delivered_as_the_reason_it_failed() {
     let mut desk = PropertyReads::new();
-    assert!(desk.submit(job(3, "/gone")));
-    let read = desk.next_job().expect("a read");
-    assert!(desk.deliver(read.window, Err(Errno::NotFound)));
+    assert!(desk.submit(3, job("/gone")));
+    let (read, _) = desk.next_job().expect("a read");
+    assert!(desk.deliver(read, Err(Errno::NotFound)));
     assert_eq!(desk.take(3), Some(Err(Errno::NotFound)));
 }
 
@@ -123,11 +122,11 @@ fn a_refused_read_is_delivered_as_the_reason_it_failed() {
 #[test]
 fn a_closed_windows_read_is_forgotten_and_its_answer_dropped() {
     let mut desk = PropertyReads::new();
-    assert!(desk.submit(job(4, "/a")));
-    let read = desk.next_job().expect("a read");
+    assert!(desk.submit(4, job("/a")));
+    let (read, _) = desk.next_job().expect("a read");
     desk.forget(4);
     assert!(
-        !desk.deliver(read.window, Ok(summary("a"))),
+        !desk.deliver(read, Ok(summary("a"))),
         "nothing owns the slot, so no repaint is owed"
     );
     assert!(desk.take(4).is_none());
@@ -135,7 +134,7 @@ fn a_closed_windows_read_is_forgotten_and_its_answer_dropped() {
 
     // A request not yet started is simply dropped.
     let mut desk = PropertyReads::new();
-    assert!(desk.submit(job(5, "/a")));
+    assert!(desk.submit(5, job("/a")));
     desk.forget(5);
     assert!(!desk.has_work());
     assert!(desk.next_job().is_none());
@@ -146,13 +145,32 @@ fn a_closed_windows_read_is_forgotten_and_its_answer_dropped() {
 #[test]
 fn a_stopping_property_desk_hands_out_no_work() {
     let mut desk = PropertyReads::new();
-    assert!(desk.submit(job(1, "/a")));
+    assert!(desk.submit(1, job("/a")));
     desk.stop();
     assert!(!desk.has_work());
     assert!(desk.next_job().is_none());
-    assert!(!desk.submit(job(2, "/b")));
+    assert!(!desk.submit(2, job("/b")));
     assert!(desk.take(1).is_none());
     assert!(!desk.take_landed());
+}
+
+/// With no worker to answer, a read made on the asking thread is collected
+/// exactly as a worker's would be, so the window shows its answer rather than
+/// reading for ever.
+#[test]
+fn an_answer_read_on_the_asking_thread_is_collected_like_a_workers() {
+    let mut desk = PropertyReads::new();
+    desk.stop();
+    assert!(!desk.submit(6, job("/a")), "no worker will take it");
+    desk.answer_here(6, Ok(summary("here")));
+    assert!(desk.take_landed());
+    assert_eq!(
+        desk.take(6)
+            .expect("the answer read here")
+            .map(|p| p.name().into()),
+        Ok(String::from("here"))
+    );
+    assert!(desk.take(6).is_none());
 }
 
 #[test]

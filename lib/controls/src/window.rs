@@ -693,6 +693,10 @@ pub enum TitleBarCommands {
     /// A docked pane's mini band: Close in the leading corner, and Minimize —
     /// rolling the pane up to its band and back — in the trailing one.
     Pane,
+    /// An alert's band: put-to-back alone, the title centred across the band.
+    /// An alert is answered by its own buttons, so the band seats no close,
+    /// minimise or size toggle — not even a disabled one.
+    Dialog,
 }
 
 impl TitleBarCommands {
@@ -704,6 +708,7 @@ impl TitleBarCommands {
             Self::Empty => &[],
             Self::Tool => &[WindowControlKind::Close],
             Self::Pane => &[WindowControlKind::Close, WindowControlKind::Minimize],
+            Self::Dialog => &[WindowControlKind::PutToBack],
         }
     }
 
@@ -713,7 +718,7 @@ impl TitleBarCommands {
         match self {
             Self::Window => 2,
             Self::Empty => 0,
-            Self::Tool | Self::Pane => 1,
+            Self::Tool | Self::Pane | Self::Dialog => 1,
         }
     }
 
@@ -730,6 +735,12 @@ impl TitleBarCommands {
     /// Whether this set seats `kind`.
     fn seats(self, kind: WindowControlKind) -> bool {
         self.kinds().contains(&kind)
+    }
+
+    /// Whether the title centres across the band rather than starting at the
+    /// leading cluster.
+    const fn centres_title(self) -> bool {
+        matches!(self, Self::Empty | Self::Dialog)
     }
 }
 
@@ -793,7 +804,7 @@ impl ClusterMetrics {
 const fn band_text_role(commands: TitleBarCommands) -> TextRole {
     match commands {
         TitleBarCommands::Empty => TextRole::SectionHeader,
-        TitleBarCommands::Window => TextRole::WindowTitle,
+        TitleBarCommands::Window | TitleBarCommands::Dialog => TextRole::WindowTitle,
         TitleBarCommands::Tool | TitleBarCommands::Pane => TextRole::Caption,
     }
 }
@@ -1006,6 +1017,16 @@ impl TitleBar {
     #[must_use]
     pub fn pane() -> Self {
         Self::seating(WindowFurnitureState::active_fixed(), TitleBarCommands::Pane)
+    }
+
+    /// An alert's band: put-to-back alone, and the title centred across the
+    /// whole band.
+    #[must_use]
+    pub fn dialog() -> Self {
+        Self::seating(
+            WindowFurnitureState::active_fixed(),
+            TitleBarCommands::Dialog,
+        )
     }
 
     /// A title band that seats no commands: a centred title over a band that
@@ -1327,7 +1348,22 @@ impl TitleBar {
             to_u32(trailing_left - inset - span_left),
             bounds.height,
         );
-        let (icon, title) = self.seat_identity(span, scale, theme, identity_gap, bare);
+        // A title centred beside a one-sided cluster is held off the far end
+        // by the same width, so it centres on the band and not on the span.
+        let seat = if self.commands.centres_title() && !bare {
+            let reserve = to_i32(leading_w.max(trailing_w)) + inset;
+            let left = bounds.left() + reserve;
+            Rect::new(
+                left,
+                bounds.top(),
+                to_u32(bounds.right() - reserve - left),
+                bounds.height,
+            )
+        } else {
+            span
+        };
+        let centred = self.commands.centres_title();
+        let (icon, title) = self.seat_identity(seat, scale, theme, identity_gap, centred);
 
         TitleBarLayout {
             slots,
@@ -2060,6 +2096,18 @@ impl WindowFrame {
     #[must_use]
     pub fn tool() -> Self {
         let title_bar = TitleBar::tool();
+        Self {
+            furniture: title_bar.furniture(),
+            title_bar,
+        }
+    }
+
+    /// An alert's frame: the window's rim and plate around a band seating
+    /// put-to-back alone, with its title centred. It is moved by its band and
+    /// never resized, minimised, maximised or closed from it.
+    #[must_use]
+    pub fn dialog() -> Self {
+        let title_bar = TitleBar::dialog();
         Self {
             furniture: title_bar.furniture(),
             title_bar,

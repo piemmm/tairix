@@ -94,6 +94,37 @@ fn the_overwriting_push_evicts_the_front_and_returns_it() {
 /// A zero-capacity ring is a legal, degenerate configuration: it stores
 /// nothing and refuses everything rather than indexing an empty array.
 #[test]
+fn retain_keeps_the_accepted_elements_in_order_across_the_wrap() {
+    let mut ring: RingBuf<u32, 4> = RingBuf::new();
+    for value in [9, 9, 9] {
+        ring.try_push_back(value).expect("room");
+    }
+    ring.discard_front(3);
+    for value in 1..=4 {
+        ring.try_push_back(value).expect("room");
+    }
+    ring.retain(|&value| value % 2 == 0);
+    assert_eq!(ring.iter().copied().collect::<std::vec::Vec<_>>(), [2, 4]);
+    assert_eq!(ring.remaining_capacity(), 2);
+    ring.retain(|_| false);
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn retain_drops_each_refused_element_exactly_once() {
+    let drops = Counted::counter();
+    let mut ring: RingBuf<(u8, Counted), 4> = RingBuf::new();
+    for value in 0..4u8 {
+        assert!(ring.try_push_back((value, Counted::new(&drops))).is_ok());
+    }
+    ring.retain(|(value, _)| *value < 2);
+    assert_eq!(drops.get(), 2);
+    assert_eq!(ring.len(), 2);
+    drop(ring);
+    assert_eq!(drops.get(), 4);
+}
+
+#[test]
 fn a_zero_capacity_ring_stores_nothing_and_never_panics() {
     let mut ring: RingBuf<u32, 0> = RingBuf::new();
     assert!(ring.is_empty());

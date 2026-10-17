@@ -3154,6 +3154,35 @@ fn raw_fragments_disassemble_per_chosen_isa() {
 }
 
 #[test]
+fn a_screen_longer_than_one_window_is_decoded_whole_and_paged_by_its_length() {
+    // Ten-byte `movabs` instructions: one straddles every window's end.
+    let mut blob = Vec::new();
+    for _ in 0..1000 {
+        blob.extend_from_slice(&[0x48, 0xB8, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+    let mut fs = fixture();
+    fs.set_bytes("/blob", &blob);
+    let mut m = model(&mut fs);
+    open_raw(&mut m, &mut fs, "blob", 'x');
+    refresh_viewer(&mut m, &mut fs, &mut decode(), 450, 60);
+    let view = disasm_view(&m);
+    assert_eq!(view.rows.len(), 450);
+    assert!(
+        view.rows.iter().all(|row| row.text.contains("movabs")),
+        "{:?}",
+        view.rows.iter().find(|row| !row.text.contains("movabs"))
+    );
+    assert!(!view.at_end);
+    handle_event(&mut m, &mut fs, &mut decode(), &Event::PageDown);
+    let view = disasm_view(&m);
+    assert_eq!(
+        view.place.top, 4500,
+        "a page is the screen's 450 instructions"
+    );
+    assert!(!view.at_end);
+}
+
+#[test]
 fn paging_walks_region_bounds_and_scrolls_back() {
     let mut fs = fixture();
     fs.set_bytes("/blob", &[0x90; 64]);

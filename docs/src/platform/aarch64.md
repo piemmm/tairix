@@ -1563,7 +1563,7 @@ carve request) is what the service binds.
   kernel's `SYSCALL_TABLE_HASH`, and wraps it as a `kind = UserSpace`
   `DriverManifest` requesting `lib/vcmailbox::SERVICE_CAPS` (`CAP_MMIO_MAP`
   + `CAP_MEM_DMA` + `CAP_IRQ_BIND` + `CAP_IPC_BIND_PRIVILEGED` +
-  `CAP_LOG_EMIT`), signed with the kernel's driver-signing seed — so
+  `CAP_LOG_EMIT`), signed with the build key set's driver-signing seed — so
   the booted kernel admits it through the §8 / §18.6 signed load gate. The
   autoload gate's delegatable superset (`unlock_service::autoload_caps`) carries
   `CAP_IPC_BIND_PRIVILEGED` precisely so a signed bus *service* driver like this

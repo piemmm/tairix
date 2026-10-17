@@ -12,7 +12,7 @@
 //! for the `mount(8)`-shaped listings, and prose for a desktop fact list.
 //! They are two renderings of one classification, not two classifications.
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, VolumeHealth};
 
@@ -169,15 +169,17 @@ pub const fn volume_health_name(health: VolumeHealth) -> &'static str {
     }
 }
 
-/// The medium a volume lives on, or that the mount table did not classify
-/// it.
+/// The medium a volume lives on, or that its device declared none.
 #[must_use]
-pub const fn medium_name(medium: Option<BlkDeviceClass>) -> &'static str {
+pub const fn medium_name(medium: Option<BlkMedium>) -> &'static str {
     match medium {
-        Some(BlkDeviceClass::Rotational) => "rotational",
-        Some(BlkDeviceClass::SolidState) => "solid state",
-        Some(BlkDeviceClass::Removable) => "removable",
-        Some(BlkDeviceClass::Virtual) => "virtual",
+        Some(BlkMedium::HardDisk) => "hard disk",
+        Some(BlkMedium::SolidState) => "solid-state drive",
+        Some(BlkMedium::Nvme) => "NVMe drive",
+        Some(BlkMedium::UsbFlash) => "USB flash drive",
+        Some(BlkMedium::UsbDisk) => "USB disk",
+        Some(BlkMedium::SdCard) => "SD card",
+        Some(BlkMedium::Virtual) => "virtual disk",
         None => "unclassified",
     }
 }
@@ -188,7 +190,7 @@ mod tests {
         availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
         VolumeBytes,
     };
-    use tairix_abi::blkio::BlkDeviceClass;
+    use tairix_abi::blkio::BlkMedium;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeHealth};
 
@@ -341,13 +343,16 @@ mod tests {
             assert!(!volume_health_name(health).is_empty());
         }
         assert_eq!(volume_health_name(VolumeHealth::Failing), "Failing");
-        for class in [
-            BlkDeviceClass::Rotational,
-            BlkDeviceClass::SolidState,
-            BlkDeviceClass::Removable,
-            BlkDeviceClass::Virtual,
+        for medium in [
+            BlkMedium::HardDisk,
+            BlkMedium::SolidState,
+            BlkMedium::Nvme,
+            BlkMedium::UsbFlash,
+            BlkMedium::UsbDisk,
+            BlkMedium::SdCard,
+            BlkMedium::Virtual,
         ] {
-            assert_ne!(medium_name(Some(class)), medium_name(None));
+            assert_ne!(medium_name(Some(medium)), medium_name(None));
         }
         assert_eq!(medium_name(None), "unclassified");
     }

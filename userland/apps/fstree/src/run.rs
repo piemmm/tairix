@@ -537,7 +537,7 @@ mod program {
         // this process from — argv is data, not authority), containment
         // events routed to the system log.
         let mut sandbox = ParserSandbox::new(
-            RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+            RtLauncher::own_binary(tairix_sandbox::decode::WORKER_MEMORY),
             tairix_rt::LogSink,
         );
         // The starting listing is read before the terminal is switched, so

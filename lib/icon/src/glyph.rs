@@ -20,7 +20,7 @@
 
 use alloc::vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::BlkMedium;
 use tairix_raster::Color;
 
 use crate::symbol;
@@ -167,8 +167,14 @@ pub enum IconKind {
     DiskHard,
     /// A solid-state disk; shares the disk glyph.
     DiskSolidState,
-    /// A USB mass-storage disk; shares the disk glyph.
+    /// A USB flash drive; shares the disk glyph.
     DiskUsb,
+    /// An `NVMe` drive; shares the disk glyph.
+    DiskNvme,
+    /// An SD card; shares the disk glyph.
+    DiskSdCard,
+    /// A disk in an external enclosure; shares the disk glyph.
+    DiskExternal,
     /// The fallback glyph for an unrecognised asset id: a filled diamond.
     Generic,
     /// Two upright bars, for pausing what is playing.
@@ -328,6 +334,14 @@ pub enum IconKind {
     OsApple,
     /// Android, drawn as the head of its robot.
     OsAndroid,
+    /// A cross on a red disc: something the user asked for did not happen.
+    AlertError,
+    /// An exclamation mark on an amber triangle: something will go wrong.
+    AlertWarning,
+    /// An `i` on a blue disc: something the user should know.
+    AlertInformation,
+    /// A question mark on a blue disc: something only the user can decide.
+    AlertQuestion,
 }
 
 impl IconKind {
@@ -392,6 +406,9 @@ impl IconKind {
             "disk-hard" => Self::DiskHard,
             "disk-solid-state" => Self::DiskSolidState,
             "disk-usb" => Self::DiskUsb,
+            "disk-nvme" => Self::DiskNvme,
+            "disk-sd" => Self::DiskSdCard,
+            "disk-external" => Self::DiskExternal,
             "pause" => Self::Pause,
             "resume" => Self::Resume,
             "zoom-in" => Self::ZoomIn,
@@ -466,6 +483,10 @@ impl IconKind {
             "os-windows" => Self::OsWindows,
             "os-apple" => Self::OsApple,
             "os-android" => Self::OsAndroid,
+            "alert-error" => Self::AlertError,
+            "alert-warning" => Self::AlertWarning,
+            "alert-information" => Self::AlertInformation,
+            "alert-question" => Self::AlertQuestion,
             _ => Self::Generic,
         }
     }
@@ -610,6 +631,13 @@ impl IconKind {
             Self::OsWindows => 123,
             Self::OsApple => 124,
             Self::OsAndroid => 125,
+            Self::DiskNvme => 126,
+            Self::DiskSdCard => 127,
+            Self::DiskExternal => 128,
+            Self::AlertError => 129,
+            Self::AlertWarning => 130,
+            Self::AlertInformation => 131,
+            Self::AlertQuestion => 132,
         }
     }
 
@@ -666,6 +694,9 @@ impl IconKind {
             Self::DiskHard => "disk-hard",
             Self::DiskSolidState => "disk-solid-state",
             Self::DiskUsb => "disk-usb",
+            Self::DiskNvme => "disk-nvme",
+            Self::DiskSdCard => "disk-sd",
+            Self::DiskExternal => "disk-external",
             Self::Pause => "pause",
             Self::Resume => "resume",
             Self::FolderFilled => "folder-filled",
@@ -741,6 +772,10 @@ impl IconKind {
             Self::OsWindows => "os-windows",
             Self::OsApple => "os-apple",
             Self::OsAndroid => "os-android",
+            Self::AlertError => "alert-error",
+            Self::AlertWarning => "alert-warning",
+            Self::AlertInformation => "alert-information",
+            Self::AlertQuestion => "alert-question",
             Self::FolderBack => "folder-back",
             Self::FolderFront => "folder-front",
             Self::Audio => "audio",
@@ -762,12 +797,15 @@ impl IconKind {
 /// An unknown medium and a paravirtual device both resolve to the generic
 /// drive icon rather than a guessed one.
 #[must_use]
-pub const fn disk_icon(medium: Option<BlkDeviceClass>) -> IconKind {
+pub const fn disk_icon(medium: Option<BlkMedium>) -> IconKind {
     match medium {
-        Some(BlkDeviceClass::Rotational) => IconKind::DiskHard,
-        Some(BlkDeviceClass::SolidState) => IconKind::DiskSolidState,
-        Some(BlkDeviceClass::Removable) => IconKind::DiskUsb,
-        Some(BlkDeviceClass::Virtual) | None => IconKind::Disk,
+        Some(BlkMedium::HardDisk) => IconKind::DiskHard,
+        Some(BlkMedium::SolidState) => IconKind::DiskSolidState,
+        Some(BlkMedium::Nvme) => IconKind::DiskNvme,
+        Some(BlkMedium::UsbFlash) => IconKind::DiskUsb,
+        Some(BlkMedium::UsbDisk) => IconKind::DiskExternal,
+        Some(BlkMedium::SdCard) => IconKind::DiskSdCard,
+        Some(BlkMedium::Virtual) | None => IconKind::Disk,
     }
 }
 
@@ -831,9 +869,13 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::EmptyTrash => empty_trash(color),
         IconKind::Library => library(color),
         IconKind::User => user(color),
-        IconKind::Disk | IconKind::DiskHard | IconKind::DiskSolidState | IconKind::DiskUsb => {
-            disk(color)
-        }
+        IconKind::Disk
+        | IconKind::DiskHard
+        | IconKind::DiskSolidState
+        | IconKind::DiskUsb
+        | IconKind::DiskNvme
+        | IconKind::DiskSdCard
+        | IconKind::DiskExternal => disk(color),
         IconKind::Generic => generic(color),
         IconKind::Pause => pause(color),
         IconKind::Resume => resume(color),
@@ -897,6 +939,10 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::TcpIp
         | IconKind::SoundDevices
         | IconKind::SoundEffects
+        | IconKind::AlertError
+        | IconKind::AlertWarning
+        | IconKind::AlertInformation
+        | IconKind::AlertQuestion
         | IconKind::Theme
         | IconKind::Computer
         | IconKind::Laptop

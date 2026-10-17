@@ -311,9 +311,9 @@ This is what makes "the signing may change for a new app version" work: the
 per-build signing key is free to rotate on every release, because the store
 pins the *publisher*, not the signer.
 
-**The first-party build delegates.** `SYSTEM_APP_PUBLISHER_SEED` is a pinned
-seed distinct from `SYSTEM_APP_SIGNING_SEED`, and every bundle the image build
-composes is *delegated*, not self-published. This is deliberate on three
+**The first-party build delegates.** The build key set's publisher seed
+(`tools/signkeys`) is distinct from its app-signing seed, and every bundle the
+image build composes is *delegated*, not self-published. This is deliberate on three
 counts: the two keys answer different questions (may this run here? whose app
 is this?) and only one of them is pinned by the kernel's embedded anchor, so
 only one of them costs a reflash to rotate; a first-party signing-key rotation
@@ -323,7 +323,7 @@ release uses — on the path every boot takes, rather than leaving it a form
 only tests reach.
 
 Nothing is added to `AppInfo.toml`. There is exactly one first-party
-publisher, the composer derives it from the one pinned seed, and a key
+publisher, the composer derives it from the key set's one seed, and a key
 repeated verbatim across seventy manifest sources is precisely the duplication
 the charter forbids. A third-party bundle names its own publisher through its
 own signing tooling; a manifest *source* key with one legal value would be
@@ -1586,7 +1586,7 @@ gate green (§7), and contains no stubs (§15.1).
 
 | # | Stage | Content |
 |---|---|---|
-| **AD1** ✅ | Manifest publisher identity | `publisher_pubkey`/`publisher_cert` in `AppInfoHeader`; `PublisherBinding`, the two labelled preimages, and `PublisherId`; the fourth authenticity check and `PublisherId` derivation in `lib/appload`; `LoadedApp::publisher`; `APP_PUBLISHER_INVALID`; the pinned `SYSTEM_APP_PUBLISHER_SEED` and the composer's `PublisherSource`. Regenerate the C view (`cargo xtask c-header --write`). |
+| **AD1** ✅ | Manifest publisher identity | `publisher_pubkey`/`publisher_cert` in `AppInfoHeader`; `PublisherBinding`, the two labelled preimages, and `PublisherId`; the fourth authenticity check and `PublisherId` derivation in `lib/appload`; `LoadedApp::publisher`; `APP_PUBLISHER_INVALID`; the build key set's publisher seed (`tools/signkeys`) and the composer's `PublisherSource`. Regenerate the C view (`cargo xtask c-header --write`). |
 | **AD2** ✅ | Attested app identity | `validate_bundle_id` + `BundleId`; `AppIdentity` (whole-or-absent); `TaskCapabilities::with_app_identity`/`app_identity`; `VerifiedProgram` threading it beside the manifest request; `Origin::with_app`/`app` and its wire tail; `self_origin`/`call_peer_origin` expose it. Tests prove a caller cannot forge or inflate it, that an identity-less principal reads absent, and that a malformed or half-filled wire tail is refused. |
 | **AD3** ✅ | `lib/appconf` | The format engine: parse, typed accessors, comment/unparsed-line-preserving rewrite, fixed fail-closed bounds, fuzz harness (§19.6) holding the parse/render fixed point and the one-key-per-write property. No I/O; entirely host-testable. |
 | **AD4** ✅ | `confd` + private scope | The service bundle and its `confd` account/ceiling, `APPDATA_ENDPOINT` + `lib/abi/src/appdata_ipc.rs`, `CAP_APPDATA_ADMIN`, the gated `Settings/Apps` + `Library/Apps` roots with their `required_cap` inodes and search-only transit grants across all three home provisioners, the `.owner` pin, the whole-document merged read, per-process staging and atomic commit, and the §3.5 name-gate fix the gate turned out to need. |

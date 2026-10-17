@@ -48,17 +48,18 @@ use tairix_abi::window_ipc::{
     encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
     encode_open_target_reply, encode_picked_file_reply, encode_picked_name_reply,
-    encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind,
-    CursorShape, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
-    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PickPurpose, PreviewSubject,
-    TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
-    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT,
-    DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DRAG_SPOT_REPLY_MAX,
-    WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
-    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX,
-    WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+    encode_terrain_reply, encode_wallpapers_reply, AlertOutcome, AlertSpec, AppBar, AppMenu,
+    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DragAt, DragItems, DropOperation,
+    DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PickPurpose,
+    PreviewSubject, TerrainPlate, WallpaperEntry, WindowEvent, WindowRegion, WindowRequest,
+    WindowTitle, ALERT_MAX_OPEN, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
+    DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES, WINDOW_CLIPBOARD_REPLY_LEN,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
+    WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_FOLDER_PICK_MAX,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
+    WINDOW_WALLPAPERS_REPLY_MAX,
 };
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
@@ -234,6 +235,16 @@ pub trait CallerIdentity {
     /// Any [`Errno`] the attestation surfaces (a vanished caller, a
     /// transport fault); the engine refuses the request in that case.
     fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno>;
+
+    /// The event mailbox the in-flight caller behind `ticket` binds for its
+    /// window events — [`event_endpoint_for`](tairix_abi::window_ipc::event_endpoint_for)
+    /// its attested pid — and so the only one its requests may name: one
+    /// application's events are never aimed at another's mailbox.
+    ///
+    /// # Errors
+    ///
+    /// As [`caller`](Self::caller).
+    fn caller_mailbox(&mut self, ticket: u64) -> Result<u64, Errno>;
 
     /// Whether the in-flight caller behind `ticket` holds `cap`, from the
     /// **kernel's** attestation of that caller rather than anything the
@@ -643,6 +654,31 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// A validated `OpenAlert`: put `open` up in a window of its own, and
+    /// answer it later through [`WindowServer::answer_alert`] — exactly once,
+    /// unless the engine withdraws it first ([`alert_withdrawn`]).
+    ///
+    /// The default refuses: a host with no desktop to draw on cannot honour
+    /// an alert, and saying so lets the application state its message
+    /// another way.
+    ///
+    /// [`alert_withdrawn`]: Self::alert_withdrawn
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot put the alert up for; nothing is
+    /// recorded and no id is spent.
+    fn alert_opened(&mut self, open: &AlertOpen<'_>) -> Result<(), Errno> {
+        let _ = open;
+        Err(Errno::NotSupported)
+    }
+
+    /// Take alert `alert_id` down: the engine has already answered it
+    /// (withdrawn, or its owner window closed) or its application is gone.
+    fn alert_withdrawn(&mut self, alert_id: u64) {
+        let _ = alert_id;
+    }
+
     /// A validated `SetTooltip`: the attested owner of live window
     /// `window_id` declared that `region` of its own client pixels is
     /// explained by `text`, or — with `text` empty — withdrew whatever it
@@ -1039,6 +1075,23 @@ pub struct ToolSpec {
     pub title: WindowTitle,
 }
 
+/// A validated [`WindowRequest::OpenAlert`], as the host is asked to put it up.
+pub struct AlertOpen<'a> {
+    /// The id the engine minted; the host names it when the alert is answered.
+    pub alert_id: u64,
+    /// The kernel-attested caller, whose attested identity the host titles the
+    /// alert with.
+    pub owner: ProcId,
+    /// The caller's own top-level window the alert holds, if it named one.
+    pub window: Option<u64>,
+    /// Whether the alert may take the keyboard and the front: its
+    /// application holds the keyboard, or a live activation the user gave it
+    /// (a drop, a hand-over), which accepting the alert spends.
+    pub focus: bool,
+    /// What the alert says.
+    pub spec: &'a AlertSpec,
+}
+
 /// Everything a validated [`WindowRequest::OpenLayer`] carries.
 pub struct LayerSpec {
     /// The `shm_grant`ed region holding the surface's frames, mapped once.
@@ -1325,6 +1378,16 @@ struct CommittedText {
     text: String,
 }
 
+/// One alert the host has up, and where its answer goes.
+struct AlertRecord {
+    owner: ProcId,
+    event_endpoint: u64,
+    /// The owner's window the alert holds, which takes it down when it closes.
+    window: Option<u64>,
+    /// How many buttons it offers: the choices an answer may name.
+    buttons: usize,
+}
+
 impl<R> WindowRecord<R> {
     /// Bytes of client frame region this window holds mapped in the
     /// session: every frame of it, which is what the mapping validated.
@@ -1372,6 +1435,10 @@ pub struct WindowServer<M: ShmMapper> {
     /// never interchangeable. Ids start at 1 and are never reused, so an
     /// outcome can only ever answer the open it names.
     next_menu_open: u64,
+    /// The alerts up, each owed exactly one answer.
+    alerts: BTreeMap<u64, AlertRecord>,
+    /// The next alert id to mint, never reused, so an answer names one alert.
+    next_alert: u64,
     /// Bytes of window frame one client may hold mapped here at once
     /// ([`client_frame_budget_bytes`]).
     client_frame_max: u64,
@@ -1389,6 +1456,8 @@ impl<M: ShmMapper> WindowServer<M> {
             windows: BTreeMap::new(),
             next_id: 1,
             next_menu_open: 1,
+            alerts: BTreeMap::new(),
+            next_alert: 1,
             app_bars: BTreeMap::new(),
             open_targets: BTreeMap::new(),
             activations: BTreeMap::new(),
@@ -1456,19 +1525,15 @@ impl<M: ShmMapper> WindowServer<M> {
         };
         let caller = match identity.caller(ticket) {
             Ok(caller) => caller,
-            Err(err) => {
-                return match decoded {
-                    // A request that mints an id answers with the frame that
-                    // carries it, so an attestation failure must too.
-                    WindowRequest::Create { .. }
-                    | WindowRequest::CreatePopup { .. }
-                    | WindowRequest::CreateTool { .. }
-                    | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), self.server),
-                    WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(err)),
-                    _ => status(reply, Err(err)),
-                };
-            }
+            Err(err) => return refused(&decoded, reply, err, self.server),
         };
+        if let Some(named) = named_mailbox(&decoded) {
+            let own = identity.caller_mailbox(ticket);
+            if own != Ok(named) {
+                let err = own.err().unwrap_or(Errno::PermissionDenied);
+                return refused(&decoded, reply, err, self.server);
+            }
+        }
         // The one gated group on this channel, checked before dispatch
         // touches any state and re-checked on every layer operation rather
         // than only at open, so a revoked grant stops the surface at its
@@ -1559,6 +1624,20 @@ impl<M: ShmMapper> WindowServer<M> {
                 anchor,
                 ref menu,
             } => minted_id_reply(reply, self.open_menu(host, caller, window_id, anchor, menu)),
+            WindowRequest::OpenAlert {
+                event_endpoint,
+                owner_window_id,
+                ref alert,
+            } => minted_id_reply(
+                reply,
+                self.open_alert(host, caller, event_endpoint, owner_window_id, alert),
+            ),
+            WindowRequest::CloseAlert { alert_id } => {
+                status(reply, self.close_alert(host, sink, caller, alert_id))
+            }
+            WindowRequest::Close { window_id } => {
+                status(reply, self.close(host, sink, caller, window_id))
+            }
             WindowRequest::TakeOpenTarget => {
                 let taken = self.take_open_target(caller);
                 open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
@@ -1770,9 +1849,6 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 self.present(host, caller, window_id, frame_index, &damage),
             ),
-            WindowRequest::Close { window_id } => {
-                status(reply, self.close(host, caller, window_id))
-            }
             WindowRequest::PlaceLayer {
                 window_id,
                 x,
@@ -1839,7 +1915,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
             // Likewise a menu open, which mints an open id.
-            WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(Errno::NotSupported)),
+            WindowRequest::OpenMenu { .. } | WindowRequest::OpenAlert { .. } => {
+                minted_id_reply(reply, Err(Errno::NotSupported))
+            }
             // ...and a target pull, which answers with its own frame.
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
             // ...and a catalog page, likewise.
@@ -1852,6 +1930,8 @@ impl<M: ShmMapper> WindowServer<M> {
                 notify_sources_reply(reply, Err(Errno::NotSupported))
             }
             WindowRequest::LockScreen
+            | WindowRequest::Close { .. }
+            | WindowRequest::CloseAlert { .. }
             | WindowRequest::PreviewScreensaver { .. }
             | WindowRequest::PickFile { .. }
             | WindowRequest::BeginDrag { .. }
@@ -2700,12 +2780,158 @@ impl<M: ShmMapper> WindowServer<M> {
     fn close(
         &mut self,
         host: &mut dyn WindowHost,
+        sink: &mut dyn EventSink,
         caller: ProcId,
         window_id: u64,
     ) -> Result<(), Errno> {
         owned_window(&self.windows, caller, window_id)?;
         self.remove_with_transients(host, window_id);
+        let held: Vec<u64> = self
+            .alerts
+            .iter()
+            .filter(|(_, record)| record.window == Some(window_id))
+            .map(|(&id, _)| id)
+            .collect();
+        for alert_id in held {
+            host.alert_withdrawn(alert_id);
+            // The alert is gone whether or not its answer could be sent.
+            let _ = self.dismiss_alert(sink, alert_id);
+        }
         Ok(())
+    }
+
+    /// Accept an alert for `caller`, returning the id its one answer names.
+    ///
+    /// The owner, when named, must be one of the caller's own top-level
+    /// windows: a transient comes and goes with a gesture, and a layer
+    /// surface never takes the keyboard an answer is typed with. The host
+    /// must accept before anything is recorded, so a refusal spends no id.
+    fn open_alert(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        event_endpoint: u64,
+        owner_window_id: u64,
+        spec: &AlertSpec,
+    ) -> Result<u64, Errno> {
+        if caller.is_kernel() {
+            return Err(Errno::PermissionDenied);
+        }
+        let alert_id = self.next_alert;
+        let next = alert_id.checked_add(1).ok_or(Errno::NoSpace)?;
+        let window = match owner_window_id {
+            0 => None,
+            id => {
+                let record = owned_window(&self.windows, caller, id)?;
+                if record.parent.is_some() || record.layer.is_some() {
+                    return Err(Errno::OutOfRange);
+                }
+                Some(id)
+            }
+        };
+        let open = self
+            .alerts
+            .values()
+            .filter(|record| record.owner == caller)
+            .count();
+        if open >= ALERT_MAX_OPEN {
+            return Err(Errno::LimitExceeded);
+        }
+        let focus = self.holds_the_front(host, caller);
+        host.alert_opened(&AlertOpen {
+            alert_id,
+            owner: caller,
+            window,
+            focus,
+            spec,
+        })?;
+        if focus {
+            self.activations.remove(&caller);
+        }
+        self.alerts.insert(
+            alert_id,
+            AlertRecord {
+                owner: caller,
+                event_endpoint,
+                window,
+                buttons: spec.button_count(),
+            },
+        );
+        self.next_alert = next;
+        Ok(alert_id)
+    }
+
+    /// Withdraw `caller`'s own alert `alert_id`, answering it `Dismissed`.
+    ///
+    /// An alert the caller does not own answers exactly like one that never
+    /// existed.
+    fn close_alert(
+        &mut self,
+        host: &mut dyn WindowHost,
+        sink: &mut dyn EventSink,
+        caller: ProcId,
+        alert_id: u64,
+    ) -> Result<(), Errno> {
+        if self
+            .alerts
+            .get(&alert_id)
+            .is_none_or(|record| record.owner != caller)
+        {
+            return Err(Errno::NotFound);
+        }
+        host.alert_withdrawn(alert_id);
+        self.dismiss_alert(sink, alert_id)
+    }
+
+    /// Answer alert `alert_id` with the user's choice of its button `index`,
+    /// and forget it: each alert is answered exactly once. The answer is the
+    /// user's gesture toward its application, so it lends what `activation`
+    /// allows — the question that follows, or the window it is about,
+    /// brought forward.
+    ///
+    /// The host calls this once it has taken the alert's window down.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such alert is up (already answered, or its
+    ///   application is gone).
+    /// * [`Errno::OutOfRange`] — a button the alert does not offer. Its
+    ///   window being down, it is answered as dismissed and forgotten, never
+    ///   answered as a choice it could not have been given.
+    /// * Any [`Errno`] the sink surfaces. The alert is forgotten all the same:
+    ///   its window is down, so nothing could answer it again.
+    pub fn answer_alert(
+        &mut self,
+        sink: &mut dyn EventSink,
+        alert_id: u64,
+        index: u8,
+        activation: Activation,
+    ) -> Result<(), Errno> {
+        let record = self.alerts.get(&alert_id).ok_or(Errno::NotFound)?;
+        if usize::from(index) >= record.buttons {
+            let _ = self.dismiss_alert(sink, alert_id);
+            return Err(Errno::OutOfRange);
+        }
+        let record = self.alerts.remove(&alert_id).ok_or(Errno::NotFound)?;
+        let outcome = AlertOutcome::Chosen { index };
+        sink.deliver(
+            record.event_endpoint,
+            &WindowEvent::AlertClosed { alert_id, outcome },
+        )?;
+        self.mint(record.owner, activation);
+        Ok(())
+    }
+
+    /// Take alert `alert_id` down unanswered, telling its application so.
+    fn dismiss_alert(&mut self, sink: &mut dyn EventSink, alert_id: u64) -> Result<(), Errno> {
+        let record = self.alerts.remove(&alert_id).ok_or(Errno::NotFound)?;
+        sink.deliver(
+            record.event_endpoint,
+            &WindowEvent::AlertClosed {
+                alert_id,
+                outcome: AlertOutcome::Dismissed,
+            },
+        )
     }
 
     /// Remove `window_id` and every transient keyed to it — its popups and
@@ -2773,6 +2999,17 @@ impl<M: ShmMapper> WindowServer<M> {
         // nothing; its delegation dies with the process it was minted to.
         self.open_targets.remove(&client);
         self.activations.remove(&client);
+        // Nobody is left to answer: each alert just comes down.
+        let alerts: Vec<u64> = self
+            .alerts
+            .iter()
+            .filter(|(_, record)| record.owner == client)
+            .map(|(&id, _)| id)
+            .collect();
+        for alert_id in alerts {
+            self.alerts.remove(&alert_id);
+            host.alert_withdrawn(alert_id);
+        }
     }
 
     /// Route one application-scoped event — an icon-bar click or menu
@@ -3126,17 +3363,25 @@ impl<M: ShmMapper> WindowServer<M> {
         if !self.owns(caller, window_id) {
             return Err(Errno::NotFound);
         }
-        let focused = host.focused_window();
-        let activated = self
-            .activations
-            .remove(&caller)
-            .is_some_and(|minted| minted == focused);
-        let working = focused.is_some_and(|focused| self.owns(caller, focused));
-        if !(activated || working) {
+        let earned = self.holds_the_front(host, caller);
+        self.activations.remove(&caller);
+        if !earned {
             host.raise_refused(caller, window_id);
             return Err(Errno::PermissionDenied);
         }
         host.raise_requested(window_id)
+    }
+
+    /// Whether `caller` may bring a surface of its own over the user's work:
+    /// one of its windows holds the keyboard, or it holds an activation minted
+    /// while the keyboard was where it still is.
+    fn holds_the_front(&self, host: &dyn WindowHost, caller: ProcId) -> bool {
+        let focused = host.focused_window();
+        let activated = self
+            .activations
+            .get(&caller)
+            .is_some_and(|minted| *minted == focused);
+        activated || focused.is_some_and(|focused| self.owns(caller, focused))
     }
 }
 
@@ -3453,4 +3698,37 @@ fn desktop_reply(
 ) -> usize {
     reply[..WINDOW_DESKTOP_REPLY_LEN].copy_from_slice(&encode_desktop_reply(result, server));
     WINDOW_DESKTOP_REPLY_LEN
+}
+
+/// The refusal `request` is owed for `err`, in the frame it would have been
+/// answered with: a request that mints an id answers with the frame that
+/// carries one.
+fn refused(
+    request: &WindowRequest,
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    err: Errno,
+    server: ProcId,
+) -> usize {
+    match request {
+        WindowRequest::Create { .. }
+        | WindowRequest::CreatePopup { .. }
+        | WindowRequest::CreateTool { .. }
+        | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), server),
+        WindowRequest::OpenMenu { .. } | WindowRequest::OpenAlert { .. } => {
+            minted_id_reply(reply, Err(err))
+        }
+        _ => status(reply, Err(err)),
+    }
+}
+
+/// The event mailbox `request` names for its answers, if it names one.
+const fn named_mailbox(request: &WindowRequest) -> Option<u64> {
+    match request {
+        WindowRequest::Create { event_endpoint, .. }
+        | WindowRequest::CreatePopup { event_endpoint, .. }
+        | WindowRequest::CreateTool { event_endpoint, .. }
+        | WindowRequest::OpenLayer { event_endpoint, .. }
+        | WindowRequest::OpenAlert { event_endpoint, .. } => Some(*event_endpoint),
+        _ => None,
+    }
 }

@@ -310,6 +310,8 @@
 
 extern crate alloc;
 
+pub mod about;
+pub mod alert;
 pub mod block;
 pub mod button;
 pub mod chart;
@@ -346,8 +348,10 @@ pub mod toolbar;
 pub mod value;
 pub mod window;
 
+pub use about::{AboutSheet, ABOUT_ICON_SIDE, ABOUT_MAX_WIDTH, ABOUT_MIN_WIDTH};
+pub use alert::{Alert, AlertAction, ALERT_BUTTON_MIN_WIDTH, ALERT_MARK_SIDE, ALERT_MIN_WIDTH};
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
-pub use chart::{Chart, MAX_CHART_SAMPLES};
+pub use chart::{Chart, DuplexRates, RateTrace, MAX_CHART_SAMPLES, RATE_TRACE_FLOOR};
 pub use checker::Checker;
 pub use collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
@@ -360,18 +364,18 @@ pub use credential::{
     CredentialAction, CredentialSheet, CREDENTIAL_HEIGHT, CREDENTIAL_NOT_STARTED_REASON,
     CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
-pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, SaveChanges, Tooltip};
+pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
 pub use form::{
     FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
 };
 pub use menu::{
     plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
-    PlatePlacement, PlateSide, INFO_ROW_LABEL,
+    PlatePlacement, PlateSide, RowIcon, INFO_ROW_LABEL,
 };
 pub use metric::{
-    CompositionBar, CompositionError, CompositionSegment, MetricInstrument, MetricLayout,
-    MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
+    CompositionBar, CompositionError, CompositionRing, CompositionSegment, MetricInstrument,
+    MetricLayout, MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use number::{NumberAction, NumberField, MOST_PLACES};

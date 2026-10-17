@@ -49,6 +49,9 @@ fn f(field: u32) -> &'static str {
     FREG[usize::try_from(field & 31).unwrap_or(0)]
 }
 
+/// The longest parcel the length encoding declares: the 64-bit form.
+pub const MAX_INSN_LEN: usize = 8;
+
 /// Parcel length in bytes declared by the low bits of the first parcel.
 fn declared_length(first: u16) -> usize {
     if first & 0b11 != 0b11 {

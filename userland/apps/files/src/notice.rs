@@ -1,13 +1,5 @@
-//! The refusals a window states, one at a time, in the order they arose.
-//!
-//! A refusal that arrives while another is showing waits behind it rather than
-//! replacing it or being lost. Each source keeps at most one waiting — a newer
-//! refusal replaces its own source's older one — so the queue is bounded by the
-//! sources a window has, never by how often one of them refuses.
-
-use alloc::collections::VecDeque;
-
-use tairix_controls::decision::Dialog;
+//! The sources a window's refusals come from, each keeping at most one notice
+//! waiting in the window's shared [`tairix_window::notices::Notices`] queue.
 
 /// What a refusal came from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -24,44 +16,51 @@ pub enum NoticeSource {
     Rename,
 }
 
-/// A window's refusal notices: the one showing, and those waiting behind it.
-#[derive(Debug, Default)]
-pub struct Notices {
-    showing: Option<Dialog>,
-    waiting: VecDeque<(NoticeSource, Dialog)>,
+/// A window's refusal notices, by where each came from.
+pub type Notices = tairix_window::notices::Notices<NoticeSource>;
+
+/// Which of a window's alerts goes up next, one alert a window at a time.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NextAlert {
+    /// Its delete question.
+    Question,
+    /// Its next notice, if one waits.
+    Notice,
+    /// None: the window is answering one already.
+    Nothing,
 }
 
-impl Notices {
-    /// The notice the window shows, which owns its input until dismissed.
-    #[must_use]
-    pub const fn showing(&self) -> Option<&Dialog> {
-        self.showing.as_ref()
-    }
-
-    /// Whether a notice shows.
-    #[must_use]
-    pub const fn is_showing(&self) -> bool {
-        self.showing.is_some()
-    }
-
-    /// State `notice` from `source`: at once if nothing shows, else after
-    /// those already waiting.
-    pub fn state(&mut self, source: NoticeSource, notice: Dialog) {
-        if self.showing.is_none() {
-            self.showing = Some(notice);
-        } else if let Some(waiting) = self.waiting.iter_mut().find(|(from, _)| *from == source) {
-            waiting.1 = notice;
-        } else {
-            self.waiting.push_back((source, notice));
-        }
-    }
-
-    /// Dismiss the notice showing; the oldest waiting one shows next.
-    pub fn dismiss(&mut self) {
-        self.showing = self.waiting.pop_front().map(|(_, notice)| notice);
+/// What goes up next over a window whose delete question is `question` —
+/// `Some(true)` up, `Some(false)` waiting, `None` not asked — and with a
+/// notice up when `notice_up`: the question first, since the user has just
+/// asked for it, but never over another alert.
+#[must_use]
+pub const fn next_alert(question: Option<bool>, notice_up: bool) -> NextAlert {
+    match question {
+        Some(true) => NextAlert::Nothing,
+        Some(false) if notice_up => NextAlert::Nothing,
+        Some(false) => NextAlert::Question,
+        None => NextAlert::Notice,
     }
 }
 
 #[cfg(test)]
-#[path = "notice_tests.rs"]
-mod tests;
+mod tests {
+    use super::{next_alert, NextAlert};
+
+    #[test]
+    fn a_window_answers_one_alert_at_a_time_its_question_first() {
+        assert_eq!(next_alert(Some(false), false), NextAlert::Question);
+        assert_eq!(
+            next_alert(Some(false), true),
+            NextAlert::Nothing,
+            "a question waits behind a notice already up"
+        );
+        assert_eq!(
+            next_alert(Some(true), false),
+            NextAlert::Nothing,
+            "no notice goes up over the question"
+        );
+        assert_eq!(next_alert(None, false), NextAlert::Notice);
+    }
+}

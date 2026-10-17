@@ -127,13 +127,16 @@
 #define TAIRIX_MOUNT_DEGRADED ((uint8_t)4u)
 #define TAIRIX_MOUNT_RECOVERING ((uint8_t)5u)
 /* Storage medium of the block device backing a mount (uint8_t).
-   UNKNOWN covers both a mount with no block backing and a class this
-   ABI does not define: the record never guesses a medium. */
+   UNKNOWN covers both a mount with no declared medium and a medium
+   this ABI does not define: the record never guesses one. */
 #define TAIRIX_MOUNT_MEDIUM_UNKNOWN ((uint8_t)0u)
-#define TAIRIX_MOUNT_MEDIUM_ROTATIONAL ((uint8_t)1u)
+#define TAIRIX_MOUNT_MEDIUM_HARD_DISK ((uint8_t)1u)
 #define TAIRIX_MOUNT_MEDIUM_SOLID_STATE ((uint8_t)2u)
-#define TAIRIX_MOUNT_MEDIUM_REMOVABLE ((uint8_t)3u)
-#define TAIRIX_MOUNT_MEDIUM_VIRTUAL ((uint8_t)4u)
+#define TAIRIX_MOUNT_MEDIUM_NVME ((uint8_t)3u)
+#define TAIRIX_MOUNT_MEDIUM_USB_FLASH ((uint8_t)4u)
+#define TAIRIX_MOUNT_MEDIUM_USB_DISK ((uint8_t)5u)
+#define TAIRIX_MOUNT_MEDIUM_SD_CARD ((uint8_t)6u)
+#define TAIRIX_MOUNT_MEDIUM_VIRTUAL ((uint8_t)7u)
 #define TAIRIX_MAX_USERNAME_LEN 32u
 #define TAIRIX_MAX_GROUPNAME_LEN 32u
 #define TAIRIX_MAX_DISPLAY_NAME_LEN 64u
@@ -291,7 +294,7 @@ typedef struct tairix_system_identity {
 * a TAIRIX_MOUNT_* state (a surprise-removed volume never reads as healthy).
 * `medium` is the storage medium of the block device backing the mount, a
 * TAIRIX_MOUNT_MEDIUM_* value; TAIRIX_MOUNT_MEDIUM_UNKNOWN means no block
-* device backs it or its class was not recognised -- never a guess.
+* device backs it or its medium was not recognised -- never a guess.
 * `usage` is the backing volume's space accounting (all-zero when none is
 * known). `volume_id` is the volume's stable published identity (all-zero
 * when the mount has none), the identity a volume_detach request names.

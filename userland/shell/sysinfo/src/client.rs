@@ -967,17 +967,10 @@ fn run_volume_service(transport: &dyn Transport, out: &dyn Output) -> Result<(),
         out,
         "volume            dev                 device               read-B     write-B  read-ops  write-ops     busy-ms",
     )?;
-    walk_records(
-        transport,
-        SysinfoQueryId::VOLUME_IO_STATS,
-        VolumeIoStatsRecord::WIRE_LEN,
-        VOLUME_PAGE,
-        VolumeIoStatsRecord::from_bytes,
-        |record| {
-            out.write_line(&volume_service_row(record))
-                .map(|()| WalkStep::Continue)
-        },
-    )
+    tairix_procinfo::for_each_volume_service(transport, |record| {
+        out.write_line(&volume_service_row(record))
+            .map(|()| WalkStep::Continue)
+    })
     .map_err(SysinfoError::from)
 }
 
