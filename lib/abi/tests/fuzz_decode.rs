@@ -1415,13 +1415,18 @@ fn exercise_process(bytes: &[u8]) {
 
 /// An accepted spawn attach block — untrusted syscall input — re-encodes to a
 /// block that parses back to the same selectors, and a sandbox block always
-/// holds its worker to a finite memory ceiling and thread bound.
+/// holds its worker to a finite memory ceiling and thread bound and never
+/// takes the spawner's terminal.
 fn exercise_spawn_attach(bytes: &[u8]) {
     if let Ok(attach) = SpawnAttach::parse(bytes) {
         let reparsed = SpawnAttach::parse(&attach.to_le_bytes())
             .expect("round-trip of an accepted attach block must succeed");
         assert_eq!(attach, reparsed);
         if attach.is_sandbox() {
+            assert!(
+                !attach.hands_over_foreground(),
+                "a sandbox block took the spawner's terminal"
+            );
             for kind in [
                 tairix_abi::LimitKind::AddressSpaceBytes,
                 tairix_abi::LimitKind::Threads,
@@ -1515,6 +1520,10 @@ fn spawn_attach_blocks_with_flipped_bits_round_trip_or_are_refused() {
         },
         SpawnAttach {
             session: SpawnSession::Anchored,
+            ..SpawnAttach::INHERIT
+        },
+        SpawnAttach {
+            flags: tairix_abi::SPAWN_FLAG_FOREGROUND,
             ..SpawnAttach::INHERIT
         },
         SpawnAttach {

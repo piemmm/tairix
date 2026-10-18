@@ -3202,8 +3202,22 @@ impl AddressSpaceRegistry {
     /// [`Pty`]: crate::pty::Pty
     #[must_use]
     pub fn pty_slave(&self, task: ProcessId, fd: u32) -> Option<&crate::pty::Pty> {
-        let entry = self.open_files.get(&task)?.by_fd.get(&fd)?;
-        entry.pty_slave().map(PtySlaveEnd::pty)
+        self.pty_slave_end(task, fd).map(PtySlaveEnd::pty)
+    }
+
+    /// [`Self::pty_slave`], shared rather than borrowed, for a path that acts
+    /// on the pty once this registry's lock is released. Counts as no live end.
+    #[must_use]
+    pub fn pty_slave_shared(
+        &self,
+        task: ProcessId,
+        fd: u32,
+    ) -> Option<alloc::sync::Arc<crate::pty::Pty>> {
+        self.pty_slave_end(task, fd).map(PtySlaveEnd::shared_pty)
+    }
+
+    fn pty_slave_end(&self, task: ProcessId, fd: u32) -> Option<&PtySlaveEnd> {
+        self.open_files.get(&task)?.by_fd.get(&fd)?.pty_slave()
     }
 
     /// Resolve `task`'s open descriptor `fd` to the pseudo-terminal it is a

@@ -189,6 +189,13 @@ pub trait ProcessHost {
     /// Returns the host's [`Errno`] if the signal cannot be delivered.
     fn signal(&self, pid: Pid, signal: Signal) -> Result<(), Errno>;
 
+    /// Hand the shell's terminal to the job led by `job`, which `fg` resumes
+    /// only once it holds it, or take the terminal back with `None`.
+    ///
+    /// A shell holding no terminal hands nothing over: the job runs without
+    /// `^C`/`^Z` routing, as in a non-interactive session.
+    fn foreground(&self, job: Option<Pid>);
+
     /// Report the next background job that changed state since the last
     /// call, or `None` if none have. Must not block.
     fn poll(&self) -> Option<(Pid, WaitOutcome)>;

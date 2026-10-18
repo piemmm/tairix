@@ -159,9 +159,10 @@ pub const CTRL_C_RECOVERY_BUNDLE: &str = "/System/Commands/true.app";
 /// ([`CTRL_C_RECOVERY_BUNDLE`]) is the guest's job-control witness.
 pub const TERMINAL_CTRL_C_RECOVERY: &str = "\u{3}true\n";
 
-/// The deterministic serial marker the guest kernel emits once it has
-/// witnessed the foreground `sleep` spawn (the [`TERMINAL_COMMAND`] round
-/// trip), so the host runner injects [`TERMINAL_CTRL_C_RECOVERY`] in a
-/// later wake — strictly after `sleep` is the live, parked foreground job.
-/// A guest-observed readiness point the script cannot otherwise time.
+/// The serial marker the guest kernel emits once `sleep`'s image has loaded
+/// (the [`TERMINAL_COMMAND`] round trip), so the host runner injects
+/// [`TERMINAL_CTRL_C_RECOVERY`] in a later wake, once the job exists.
+///
+/// The shell's spawn hands `sleep` the terminal before `sleep` can run, so
+/// the load, and the marker after it, follow the hand-over by construction.
 pub const CTRL_C_ARM_MARKER: &str = "PTY ctrl-c armed";

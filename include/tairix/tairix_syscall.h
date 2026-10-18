@@ -223,9 +223,13 @@ typedef struct tairix_wait_status {
 * parser sandbox: empty capability set, closed syscall allow-list, and
 * every wire must be CLOSED or HANDLE (nothing ambient flows in). A
 * sandbox child is private to its spawner: only a wait naming its pid
-* reaps it, never a wait for any child. Any reserved flag bit is
-* refused. */
+* reaps it, never a wait for any child. FOREGROUND hands the child the
+* terminal behind the spawner's stdin before it can run, as
+* tairix_sys_console_foreground would after the spawn; it needs the
+* same authority, and is refused beside SANDBOX. Any reserved flag bit
+* is refused. */
 #define TAIRIX_SPAWN_FLAG_SANDBOX 1u
+#define TAIRIX_SPAWN_FLAG_FOREGROUND 2u
 #define TAIRIX_FD_WIRE_INHERIT 1u
 #define TAIRIX_FD_WIRE_INHERIT_SLOT 2u
 #define TAIRIX_FD_WIRE_CLOSED 3u

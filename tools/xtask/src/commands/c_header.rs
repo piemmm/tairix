@@ -3678,13 +3678,21 @@ fn emit_spawn_attach_contract(out: &mut String) {
          * parser sandbox: empty capability set, closed syscall allow-list, and\n\
          * every wire must be CLOSED or HANDLE (nothing ambient flows in). A\n\
          * sandbox child is private to its spawner: only a wait naming its pid\n\
-         * reaps it, never a wait for any child. Any reserved flag bit is\n\
-         * refused. */\n",
+         * reaps it, never a wait for any child. FOREGROUND hands the child the\n\
+         * terminal behind the spawner's stdin before it can run, as\n\
+         * tairix_sys_console_foreground would after the spawn; it needs the\n\
+         * same authority, and is refused beside SANDBOX. Any reserved flag bit\n\
+         * is refused. */\n",
     );
     let _ = writeln!(
         out,
         "#define TAIRIX_SPAWN_FLAG_SANDBOX {}u",
         tairix_abi::SPAWN_FLAG_SANDBOX
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SPAWN_FLAG_FOREGROUND {}u",
+        tairix_abi::SPAWN_FLAG_FOREGROUND
     );
     let _ = writeln!(
         out,
@@ -5953,6 +5961,13 @@ mod tests {
                 tairix_abi::SPAWN_FLAG_SANDBOX
             )),
             "spawn sandbox flag: {h}"
+        );
+        assert!(
+            h.contains(&format!(
+                "#define TAIRIX_SPAWN_FLAG_FOREGROUND {}u",
+                tairix_abi::SPAWN_FLAG_FOREGROUND
+            )),
+            "spawn foreground flag: {h}"
         );
         assert!(
             h.contains("    uint64_t flags;"),

@@ -424,7 +424,10 @@ fn a_service_firmware_left_on_is_quiesced_before_it_is_repointed() {
     its.map(0, TARGET, 14, &mut [route(0x08, 0, 8192)])
         .expect("maps");
     assert_eq!(model.raise(0x08, 0), Some((8192, TARGET)));
+}
 
+#[test]
+fn a_service_firmware_left_on_that_never_stops_is_refused_and_draws_nothing() {
     let stuck = HostBlocks::default();
     let model = Model::new(
         Config {

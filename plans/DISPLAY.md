@@ -508,9 +508,12 @@ signal race:
   checked transitions `grant` (honoured only from an unowned terminal, the
   recorded granter, or the current owner delegating to its own child),
   `release` (granter/owner only; an unowned release is an idempotent no-op),
-  and `clear_dead`. Each change of hands moves a generation and reports that
-  it happened, so the terminal wakes its parked readers and its `Foreground`
-  wait-set watchers.
+  and `clear_dead`, and `undo`, which puts back what one grant replaced
+  unless the terminal has changed hands since. Each party is a
+  `ProcessInstance` — process and instance — so a later holder of a dead
+  party's number is a stranger. Each change of hands moves a generation and
+  reports that it happened, so the terminal wakes its parked readers and its
+  `Foreground` wait-set watchers.
 - `stream_read`, `stream_input_mode` and a pty slave read share one gate:
   while an owner is recorded, any other task is refused with the typed
   `Errno::NotForeground` (errno 27) before any input is consumed or the
@@ -520,19 +523,20 @@ signal race:
   inherited descriptor, the parent/child relation
   (`ProcessWait::authorise_child`), and the owner-checked transition.
 - `console_foreground` (72) takes a live child of the caller, or the caller's
-  own pid, which holds the terminal as its own. Cooked-mode `^C`/`^Z` (SP9)
-  reach a **job** — an owner the terminal was handed to — and never a process
-  holding its own terminal, which reads those bytes. elsh holds its terminal
-  from start-up, hands it to each foreground job, and takes it back after, so
-  at its prompt a background job reads nothing.
+  own pid, which holds the terminal as its own; `spawn` makes the same grant
+  to the child it admits under `SPAWN_FLAG_FOREGROUND`, before the child can
+  run. Cooked-mode `^C`/`^Z` (SP9) reach a **job** — an owner the terminal was
+  handed to — and never a process holding its own terminal, which reads those
+  bytes. elsh holds its terminal from start-up, hands it to each foreground
+  job as the job is spawned, and takes it back after, so at its prompt a
+  background job reads nothing.
 - `foreground_held` (139) answers whether the caller owns the terminal, and a
   `Foreground` wait-set member (kind 14) is an edge on the ownership
   generation, so a program draws on its terminal only while it holds the
   foreground and learns of every handover without asking on a timer.
 - A vanished owner never wedges a terminal: the `exit` handler releases the
-  exiting task's console ownership, and the gate clears an owner the process
-  bookkeeping proves dead (`ProcessWait::is_live`; the inert default reports
-  live, so an unproven death keeps denying — heal, never widen).
+  exiting task's console ownership, and the gate clears an owner whose number
+  no longer names its instance in the capability table (heal, never widen).
 
 Kernel host tests prove two tasks on one console cannot both drain (the
 refused reader consumes nothing), handoff transfers the drain right, a shell
@@ -540,8 +544,7 @@ holds its own console and takes it back, background reads and mode changes
 fail closed on the console and the pty slave alike, the `Foreground` edge is
 reported once per change of hands, bystander grant/clear steals are refused,
 and both no-wedge paths (exit release, gate healing);
-device-level transition tests and `ProcessTable::is_live` tests back
-them. Docs: `docs/src/desktop/seat.md` (D5 section),
+device-level transition tests back them. Docs: `docs/src/desktop/seat.md` (D5 section),
 `docs/src/architecture/syscalls.md` (rows 13/21/72/139), the `lib/abi` /
 `lib/rt` / `lib/abi-sys` rustdoc.
 

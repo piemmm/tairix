@@ -780,10 +780,24 @@ impl SpawnSession {
 /// exactly one definition shared by the kernel and every userland encoder.
 pub const SPAWN_FLAG_SANDBOX: u64 = 1;
 
+/// [`SpawnAttach::flags`] bit: hand the child the **foreground** of the
+/// terminal behind the spawner's [`STDIN`] as part of the spawn.
+///
+/// The [`crate::SyscallNumber::CONSOLE_FOREGROUND`] grant, made with the
+/// child's admission, so the child owns the terminal before it can run and a
+/// `^C` or `^Z` the terminal takes once `spawn` returns reaches it. It carries
+/// that grant's authority and no more: `CAP_CONSOLE_READ`, and a terminal that
+/// is open, the spawner's own, or one the spawner granted.
+///
+/// A spawn that cannot honour the hand-over is refused before the child runs.
+/// A sandbox never receives a terminal, so a block carrying this bit beside
+/// [`SPAWN_FLAG_SANDBOX`] is refused at parse.
+pub const SPAWN_FLAG_FOREGROUND: u64 = 2;
+
 /// Every [`SpawnAttach::flags`] bit with a defined meaning. A block
 /// carrying any bit outside this mask is refused — reserved bits fail
 /// closed instead of silently meaning nothing.
-pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX;
+pub const SPAWN_FLAGS_ALL: u64 = SPAWN_FLAG_SANDBOX | SPAWN_FLAG_FOREGROUND;
 
 /// Reserved `spawn` path token: re-spawn the **caller's own program**.
 ///
@@ -940,8 +954,9 @@ impl FdWire {
 /// console index is validated against the installed list, every
 /// [`FdWire::Handle`] is owner-checked against the kernel-trusted caller
 /// identity before anything is built, and the session is placed only inside
-/// the spawner's own. The flags word only ever *narrows* the child
-/// ([`SPAWN_FLAG_SANDBOX`]); no flag can widen authority.
+/// the spawner's own. No flag widens authority: [`SPAWN_FLAG_SANDBOX`]
+/// narrows the child, and [`SPAWN_FLAG_FOREGROUND`] hands it only a terminal
+/// the spawner may hand over itself.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SpawnAttach {
     /// The child's target user: [`SPAWN_UID_INHERIT`] or a concrete uid
@@ -1081,6 +1096,13 @@ impl SpawnAttach {
         self.flags & SPAWN_FLAG_SANDBOX != 0
     }
 
+    /// Whether this block hands the child the spawner's terminal
+    /// ([`SPAWN_FLAG_FOREGROUND`]).
+    #[must_use]
+    pub const fn hands_over_foreground(&self) -> bool {
+        self.flags & SPAWN_FLAG_FOREGROUND != 0
+    }
+
     /// Encode the block into its fixed-length wire form.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; SPAWN_ATTACH_LEN] {
@@ -1114,10 +1136,11 @@ impl SpawnAttach {
     /// non-canonical session selector (see [`SpawnSession`]), a
     /// non-canonical lowered limit (see [`SpawnLimits`]), or a non-canonical
     /// [`SPAWN_FLAG_SANDBOX`] block (an inherit-form wire, a uid switch, a
-    /// console index, a session other than the one anchored at the parent, or
-    /// no finite memory ceiling and thread bound — nothing ambient may flow
-    /// into a sandbox, nothing may let it outlive its owner, and nothing it
-    /// decodes may take the machine's memory). A refused block wires nothing.
+    /// console index, a session other than the one anchored at the parent, no
+    /// finite memory ceiling and thread bound, or a terminal hand-over —
+    /// nothing ambient may flow into a sandbox, nothing may let it outlive its
+    /// owner, and nothing it decodes may take the machine's memory). A refused
+    /// block wires nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -1162,6 +1185,7 @@ impl SpawnAttach {
                 || block.session != SpawnSession::Anchored
                 || !block.limits.bounds(LimitKind::AddressSpaceBytes)
                 || !block.limits.bounds(LimitKind::Threads)
+                || block.hands_over_foreground()
             {
                 return Err(Errno::OutOfRange);
             }
@@ -1871,9 +1895,10 @@ mod tests {
         LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
         PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
         PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT,
-        SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX,
-        SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN, STDERR, STDIN, STDINFO,
-        STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_FOREGROUND,
+        SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN,
+        STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED,
+        WAIT_STATUS_KIND_STOPPED,
     };
     use crate::{Errno, LimitKind, ProcId, ResourceLimit, ABI_VERSION_CURRENT, RLIMIT_INFINITY};
     use alloc::vec::Vec;
@@ -1986,6 +2011,18 @@ mod tests {
     }
 
     #[test]
+    fn spawn_attach_foreground_round_trips_and_reports_the_hand_over() {
+        let attach = SpawnAttach {
+            flags: SPAWN_FLAG_FOREGROUND,
+            ..SpawnAttach::INHERIT
+        };
+        assert!(attach.hands_over_foreground());
+        assert!(!attach.is_sandbox());
+        assert!(!SpawnAttach::INHERIT.hands_over_foreground());
+        assert_eq!(SpawnAttach::parse(&attach.to_le_bytes()), Ok(attach));
+    }
+
+    #[test]
     fn spawn_attach_sandbox_round_trips_and_reports_the_mode() {
         let attach = SpawnAttach::sandbox(
             [
@@ -2043,6 +2080,15 @@ mod tests {
         };
         assert_eq!(
             SpawnAttach::parse(&console.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        // Nor a terminal.
+        let terminal = SpawnAttach {
+            flags: SPAWN_FLAG_SANDBOX | SPAWN_FLAG_FOREGROUND,
+            ..SpawnAttach::sandbox(explicit, CEILING)
+        };
+        assert_eq!(
+            SpawnAttach::parse(&terminal.to_le_bytes()),
             Err(Errno::OutOfRange)
         );
         // A worker lives in the session anchored at its owner, so it can never

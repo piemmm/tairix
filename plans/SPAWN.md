@@ -940,8 +940,9 @@ clears the foreground job. Binding design decisions:
   `with_process_signal`). All other bytes — and every byte in raw/secret
   mode, or with no foreground set — flow to the input queue exactly as
   before. The slot carries the foreground owner's *process instance*
-  (`ForegroundOwner { process, instance }`, recorded when
-  `console_foreground` authorised it) alongside the signal, and the delivery
+  (`ProcessInstance { process, instance }`, recorded when
+  `console_foreground` or a foreground spawn authorised it) alongside the
+  signal, and the delivery
   refuses a target whose pid now names a different instance: an id whose task
   is gone may be drawn again, so a stale slot must never reach whoever
   inherited the number. A delivery whose target has exited is dropped
@@ -961,22 +962,26 @@ clears the foreground job. Binding design decisions:
   stopped job runs (`docs/src/architecture/scheduler.md`, "Job-control
   stop").
 - **Foreground marking.** New unprivileged-beyond-console syscall
-  `SyscallNumber::CONSOLE_FOREGROUND` (**70**): `(fd: u32, pid: i64)`; `fd`
+  `SyscallNumber::CONSOLE_FOREGROUND` (**72**): `(fd: u32, pid: i64)`; `fd`
   must be a `StreamMode::Read` descriptor of the caller's own table (the
   same fd-scoped authority `stream_input_mode` uses, same dispatcher
   capability gate), `pid` must be a **live child of the caller**
   (authorised through the one `KernelProcessWait::authorise_child`), and
   `pid == 0` clears the slot. No new capability (§5.2 minimalism): the
   authority is the inherited console descriptor plus the parent/child
-  relation.
-- **Shell wiring.** `RtProcessHost::wait` marks the child foreground on
-  fd 0 (`console_foreground`), issues the blocking wait with
-  `WaitFlags::STOPPED`, clears the slot on return, and decodes the record —
-  `Stopped` maps to the shell's `WaitOutcome::Stopped` with the familiar
-  POSIX numbers (`Stop` → 20, so `$?` = 148) — feeding the already-landed
-  elsh job table (`launch_foreground` stopped-job handling, `fg`/`bg`
-  resume). `ProcessHost` itself is unchanged; scripts and pipes see no
-  difference.
+  relation. `SPAWN_FLAG_FOREGROUND` makes the same grant from `spawn` to the
+  child it admits, under the capability-table lock that admits its record, so
+  the child holds the terminal before it can run and a `^C` the instant
+  `spawn` returns reaches it; a refused hand-over refuses the spawn whole.
+- **Shell wiring.** `RtProcessHost` spawns a foreground job's leader with
+  `SPAWN_FLAG_FOREGROUND` while it holds fd 0's terminal, and
+  `ProcessHost::foreground` hands a job `fg` resumes the terminal before its
+  `Continue`. `wait` issues the blocking wait with `WaitFlags::STOPPED`, takes
+  the terminal back on return, and decodes the record — `Stopped` maps to the
+  shell's `WaitOutcome::Stopped` with the familiar POSIX numbers (`Stop` →
+  20, so `$?` = 148) — feeding the elsh job table (`launch_foreground`
+  stopped-job handling, `fg`/`bg` resume). Scripts and pipes see no
+  difference: a shell whose input is no terminal hands nothing over.
 - **Proof.** Host tests: ABI round-trips (signal values, flags, record
   encode/decode + byte codec, fail-closed kinds), `ProcessTable`
   stop/report-once/continue/reap interleavings (exit supersedes a stop, a

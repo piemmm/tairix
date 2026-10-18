@@ -283,9 +283,10 @@ session; `Ctrl-L` clears and repaints; bracketed paste inserts literally and
 never auto-runs. A terminal resize adopts the new width and repaints the
 line under edit, clamped so a widened terminal shows its head rather than
 the narrow window's offset — the text is never lost, duplicated, or
-submitted, and a live reverse search stays live. Delivering
-`Ctrl-C`/`Ctrl-Z` to a *running foreground job*
-is the staged kernel work in `plans/SHELL.md` (part 3).
+submitted, and a live reverse search stays live. A *running foreground
+job* takes `Ctrl-C`/`Ctrl-Z` from the terminal's own line discipline: the
+shell spawns each job's leader already holding the terminal, so a key pressed
+the moment the job exists reaches it (`plans/SPAWN.md` SP9).
 
 Tab completion (`src/complete.rs`) locates the word under the cursor with
 the shell's own span-carrying lexer (`lexer::tokenize_with_spans`) and is
@@ -421,8 +422,9 @@ refusing (`AGENTS.md` §5.4).
 A backgrounded pipeline (`&`) is added to the `JobTable` as a running
 job and its `[N] pid` line is printed; `$?` is `0`. A foreground job that
 the host reports as `Stopped` becomes a stopped job. `fg` and `bg`
-resume a job by sending `Signal::Continue` through the host, `fg` then
-waiting on it. Finished background jobs are reported lazily, before the
+resume a job by sending `Signal::Continue` through the host; `fg` hands the
+job the terminal first, through `ProcessHost::foreground`, and then waits
+on it. Finished background jobs are reported lazily, before the
 next line, so output never interleaves mid-command.
 
 ## Failure handling (`AGENTS.md` §2.9)

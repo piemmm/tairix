@@ -169,7 +169,35 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-collections",
         description: "the open-addressed hash table's control array and iterators",
         features: &[],
-        scope: Scope::AllTargets,
+        scope: Scope::LibOnly(
+            "the library holds all but the crate's two integration tests, and naming it is what \
+             lets its tests be dealt across cores; the integration tests are enrolled beside it",
+        ),
+        spread: Spread::Sharded(
+            "interpreted, its tests cost fifteen minutes in one process, and a slower runner \
+             overran the whole budget",
+        ),
+    },
+    Target {
+        package: "tairix-collections",
+        description: "the same containers' unsafe cores driven against their models over \
+                      adversarial key streams, every value dropped exactly once",
+        features: &[],
+        scope: Scope::Test {
+            name: "fuzz_collections",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-collections",
+        description: "the indexed heap's two-table reservation failing part-way, under a \
+                      global allocator that refuses chosen requests on one thread",
+        features: &[],
+        scope: Scope::Test {
+            name: "heap_allocation_failure",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
         spread: Spread::OneProcess,
     },
     Target {
@@ -227,9 +255,12 @@ pub const TARGETS: &[Target] = &[
             skip: &[
                 "tests::entropy_seed_differs_across_calls",
                 "tests::resolve_seed_uses_the_env_when_set",
+                "tests::no_low_bit_repeats_on_a_power_of_two_period",
             ],
-            reason: "each draws an entropy seed from the realtime clock, which the isolated \
-                     stage refuses to read; the seeding carries no `unsafe`",
+            reason: "the first two draw an entropy seed from the realtime clock, which the \
+                     isolated stage refuses to read, and the seeding carries no `unsafe`; the \
+                     third is a statistic over eight thousand draws a seed, two minutes \
+                     interpreted of arithmetic that reaches no `unsafe` either",
         },
         spread: Spread::OneProcess,
     },
@@ -274,6 +305,9 @@ pub const TARGETS: &[Target] = &[
             skip: &[
                 "dma::tests::a_full_span_window_serves_a_multi_device_enclosure_lazily",
                 "dma::tests::a_translated_carve_may_exceed_the_largest_block",
+                "ramtest::tests::a_window_flushes_its_samples_a_batch_per_barrier",
+                "ramtest::tests::a_stuck_cell_past_the_first_batch_is_named",
+                "ramzip::tier::tests::band_cap_is_enforced_and_escalation_is_deterministic",
             ],
             reason: "the first reserves a full gigabyte of window and streams thirteen 32-page \
                      device regions through it; the second carves one page past the largest \
@@ -282,11 +316,17 @@ pub const TARGETS: &[Target] = &[
                      the first and, at that rate, some twenty times as long for the second. Each \
                      passes when run, and what each proves beyond the rest of the module is \
                      *capacity*: the `unsafe` they reach is the same direct-map slice the other \
-                     dma tests reach, \
-                     and `a_translated_carve_is_served_from_scattered_blocks` drives the same \
-                     multi-block mapping over a fragmented pool small enough to interpret. The \
-                     crate's integration targets are excluded too: the loom model does not build \
-                     under the interpreter and the fuzz harnesses are budgeted elsewhere",
+                     dma tests reach, and `a_translated_carve_is_served_from_scattered_blocks` \
+                     drives the same multi-block mapping over a fragmented pool small enough to \
+                     interpret. The two RAM-test windows are more than one batch of samples \
+                     because the batching is their assertion, half a mebibyte of model cells \
+                     and nearly three minutes each interpreted, through safe code the smaller \
+                     windows beside them reach too. The compressed tier's cap test compresses \
+                     page after page until a two-page compressed cap refuses one, the count \
+                     being its assertion: eight minutes interpreted, through the compressor's \
+                     safe code and the frame accesses the tier's round-trip tests reach. The \
+                     crate's integration targets are excluded too: the loom model does not \
+                     build under the interpreter and the fuzz harnesses are budgeted elsewhere",
         },
         spread: Spread::Sharded(
             "over five hundred tests, and interpreted they cost twenty minutes and more end to \
@@ -302,10 +342,23 @@ pub const TARGETS: &[Target] = &[
                       backtrace's stack reader, the block client's shared window, and the \
                       wall clock's sequence-lock writer",
         features: &[],
-        scope: Scope::LibOnly(
-            "the library holds all but one test, and naming it is what lets them be dealt \
-             across cores; the integration test is enrolled beside it",
-        ),
+        scope: Scope::LibExcept {
+            skip: &[
+                "users::tests::the_late_users_db_serves_the_installed_text",
+                "users::tests::the_source_load_holds_the_exact_text_and_authenticates",
+                "useradmin::tests::a_failed_persist_changes_nothing",
+                "useradmin::tests::create_user_provisions_home_persists_and_binds_at_next_resolution",
+                "useradmin::tests::locking_binds_at_the_next_login_and_unlock_restores",
+                "useradmin::tests::modify_user_replaces_identity_fields_and_provisions_a_changed_home",
+                "useradmin::tests::set_password_replaces_the_stored_record_and_rejects_malformed_ones",
+            ],
+            reason: "a login is each one's assertion, so each derives a password through PBKDF2 \
+                     at the minimum accepted cost — a minute and a half a derivation \
+                     interpreted, and up to four minutes a test — through the audited cipher \
+                     crates and safe code; every other account test decodes precomputed \
+                     records. The library holds all but one test, and naming it is what lets \
+                     them be dealt across cores; the integration test is enrolled beside it",
+        },
         spread: Spread::Sharded(
             "over two thousand tests, and interpreted they cost two and a half hours in one \
              single-core process",
@@ -354,13 +407,18 @@ pub const TARGETS: &[Target] = &[
                       type-erased runner and its recycled rendezvous cells, and every syscall \
                       wrapper's marshalling of borrowed buffers",
         features: &[],
-        scope: Scope::LibOnly(
-            "the library is the crate's only test target; naming it is what lets its tests be \
-             dealt across cores",
-        ),
+        scope: Scope::LibExcept {
+            skip: &["tests::a_stated_size_is_read_in_whole_transfers_into_one_reservation"],
+            reason: "its assertion is that a stated file is read in whole one-mebibyte \
+                     transfers, so the file it reads is two of them, which the reader zeroes a \
+                     byte at a time: two minutes interpreted on an idle host, through safe code \
+                     the smaller read tests beside it reach as well. The library is the crate's \
+                     only test target, and naming it is what lets its tests be dealt across \
+                     cores",
+        },
         spread: Spread::Sharded(
-            "280 tests, and interpreted they cost over three minutes in one single-core \
-             process",
+            "over three hundred tests, and interpreted they cost twenty minutes and more in \
+             one single-core process",
         ),
     },
     Target {
@@ -395,14 +453,21 @@ pub const TARGETS: &[Target] = &[
                       queue and LPI tables the ITS and the redistributors read from memory",
         features: &[],
         scope: Scope::LibExcept {
-            skip: &["gicv3::tests::a_redistributor_that_never_wakes_is_unresponsive"],
-            reason: "that test spins the redistributor wake's whole million-poll budget out \
-                     through the model's locked register file: interpreted, that costs half an \
-                     hour. It passes when run and reaches no `unsafe`, and every other GICv3 \
-                     test drives the same driver over the same model. The crate's `real_dtb_probe` \
-                     integration test is excluded too: it reads the downloaded Pi 4 firmware \
-                     blob from disk, which the interpreter refuses under isolation before the \
-                     test's own absent-file skip can run",
+            skip: &[
+                "gicv3::tests::a_redistributor_that_never_wakes_is_unresponsive",
+                "its::tests::a_service_firmware_left_on_that_never_stops_is_refused_and_draws_nothing",
+                "sidechannel::sidechannel_tests::",
+            ],
+            reason: "the first two spin a whole million-poll wait out through the model's locked \
+                     register file — the redistributor wake, then the ITS quiesce — at half an \
+                     hour and seven minutes interpreted; each passes when run and reaches no \
+                     `unsafe`, and every other GICv3 and ITS test drives the same driver over \
+                     the same model. The side-channel pins scan the port's own sources a \
+                     character at a time, nine minutes interpreted, and are text searches that \
+                     reach no `unsafe` at all. The crate's `real_dtb_probe` integration test is \
+                     excluded too: it reads the downloaded Pi 4 firmware blob from disk, which \
+                     the interpreter refuses under isolation before the test's own absent-file \
+                     skip can run",
         },
         spread: Spread::Sharded(
             "interpreted, its tests cost eleven minutes in one process, most of it the \
@@ -427,14 +492,19 @@ pub const TARGETS: &[Target] = &[
             skip: &[
                 "xstate::tests::every_return_to_ring_3_holds_the_tasks_own_state",
                 "xstate::tests::a_resume_that_ignores_where_the_area_last_lived_is_caught",
+                "sidechannel::sidechannel_tests::",
+                "interrupts::stub_align_tests::",
             ],
             reason: "the two sweeps are safe-logic models of the FP-state resume rule, each \
                      interpreting hundreds of thousands of allocating steps; the port's \
                      `unsafe` there is target-only asm the host run never compiles, the \
                      layout, init-image and state-machine tests beside them stay enrolled, \
                      and both sweeps run in full under the ordinary test matrix. The \
-                     `fuzz_acpi` harness beside the lib drives only the safe firmware-table \
-                     parsers, which the fuzz stage runs",
+                     side-channel pins and the entry-stub simulations read the port's own \
+                     sources a character at a time, twelve minutes interpreted between them, \
+                     and are text searches that reach no `unsafe` at all. The `fuzz_acpi` \
+                     harness beside the lib drives only the safe firmware-table parsers, which \
+                     the fuzz stage runs",
         },
         spread: Spread::Sharded(
             "interpreted, its tests cost thirteen minutes in one process and over twenty on a \
@@ -447,8 +517,14 @@ pub const TARGETS: &[Target] = &[
                       pointers its frame source hands out, and the host frame arena's boxed \
                       tables every family's model is walked over",
         features: &[],
-        scope: Scope::AllTargets,
-        spread: Spread::OneProcess,
+        scope: Scope::LibOnly(
+            "the library is the crate's only test target; naming it is what lets its tests be \
+             dealt across cores",
+        ),
+        spread: Spread::Sharded(
+            "interpreted, its tests cost nine minutes in one process, most of it the reference \
+             model's conformance suites and the domain tests' windows",
+        ),
     },
     Target {
         package: "tairix-kernel-iommu-vtd",
@@ -497,17 +573,21 @@ pub const TARGETS: &[Target] = &[
                 "tests::a_unit_running_commands_only_once_translating_passes",
                 "tests::a_unit_that_cannot_flush_at_once_flushes_every_device_and_passes",
                 "tests::extended_entries_deliver_32_bit_destinations",
+                "tests::a_device_s_table_pointer_is_written_again_until_its_flush_is_confirmed",
+                "tests::a_map_is_flushed_only_on_a_unit_that_may_cache_absent_entries",
             ],
-            reason: "each switches interrupt remapping, which rewrites every one of the 65,536 \
-                     device table entries and, on a unit without INVALIDATE_ALL, flushes each \
-                     device: seven to twelve minutes a test interpreted. The family carries no \
-                     `unsafe` of its own, every entry they write goes through the frame memory \
-                     accessors the kept tests interpret, and all nine run in full under the \
-                     ordinary test matrix",
+            reason: "each but the last switches interrupt remapping, which rewrites every one of \
+                     the 65,536 device table entries and, on a unit without INVALIDATE_ALL, \
+                     flushes each device; the last brings four units up, one per capability \
+                     header, whose fields safe code reads. Six to twelve minutes a test \
+                     interpreted, and a slower runner spent two thirds of its job budget on one. \
+                     The family carries no `unsafe` of its own, every entry they write goes \
+                     through the frame memory accessors the kept tests interpret, and all eleven \
+                     run in full under the ordinary test matrix",
         },
         spread: Spread::Sharded(
-            "interpreted, the kept tests take tens of minutes in one process, most of it the \
-             conformance suites and the one remapping switch kept",
+            "interpreted, the kept tests take tens of minutes in one process, each bringing a \
+             unit up over its 65,536-entry device table",
         ),
     },
     Target {
@@ -933,10 +1013,32 @@ mod tests {
 
     #[test]
     fn a_package_filter_selects_exactly_one_target() {
-        let opts = parse(&args(&["--package", "tairix-collections"])).expect("filter");
+        let opts = parse(&args(&["--package", "tairix-hash"])).expect("filter");
         let chosen = selected(&opts).expect("one");
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].package, "tairix-collections");
+        assert_eq!(chosen[0].package, "tairix-hash");
+    }
+
+    /// A crate whose library is sharded has one target per test binary, and a
+    /// filter that returned only the library would leave its integration
+    /// tests uninterpreted while reporting success.
+    #[test]
+    fn a_package_filter_selects_every_test_binary_of_that_package() {
+        let opts = parse(&args(&["--package", "tairix-collections"])).expect("filter");
+        let mut binaries: Vec<_> = selected(&opts)
+            .expect("every binary")
+            .iter()
+            .map(|t| t.scope.binary())
+            .collect();
+        binaries.sort_unstable();
+        assert_eq!(
+            binaries,
+            [
+                Some("fuzz_collections"),
+                Some("heap_allocation_failure"),
+                Some("lib")
+            ]
+        );
     }
 
     /// A crate whose `unsafe` is split across features has one target per

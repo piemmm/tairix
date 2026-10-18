@@ -35,7 +35,7 @@ use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap};
-use tairix_kernel_core::foreground::ForegroundOwner;
+use tairix_kernel_core::foreground::ProcessInstance;
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     drain_pending_foreground, install_foreground_signal, install_gate, intake_enable, intake_take,
@@ -708,14 +708,17 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if install_foreground_signal(signal_producer).is_err() {
         qemu_exit::exit_failure(FAIL_FOREGROUND);
     }
-    // No capability table is wired here, so the intake role has no distinct
+    // No capability table is wired here, so neither party has a distinct
     // process instance: the kernel sentinel is what the delivery gate will
-    // resolve for it, and recording the same value is what lets the `^C`
-    // through to the mechanics this vertical proves.
+    // resolve for the intake, and recording the same value is what lets the
+    // `^C` through to the mechanics this vertical proves.
     if CONSOLE
         .grant_foreground(
-            ProcessId(SUPERVISOR),
-            ForegroundOwner {
+            ProcessInstance {
+                process: ProcessId(SUPERVISOR),
+                instance: ProcId::KERNEL,
+            },
+            ProcessInstance {
                 process: ProcessId(intake_tid),
                 instance: ProcId::KERNEL,
             },

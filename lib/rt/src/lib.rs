@@ -9382,11 +9382,17 @@ mod tests {
     }
 
     impl FakeFile {
+        /// A file whose byte at `at` is `at % 251`, so a misplaced copy shows,
+        /// copied in a period at a time: miri interprets a per-byte fill.
         fn of(len: usize) -> Self {
+            let period: alloc::vec::Vec<u8> = (0..=250).collect();
+            let mut bytes = alloc::vec::Vec::with_capacity(len);
+            while bytes.len() < len {
+                let take = period.len().min(len - bytes.len());
+                bytes.extend_from_slice(&period[..take]);
+            }
             Self {
-                bytes: (0..len)
-                    .map(|at| u8::try_from(at % 251).expect("bounded by the modulus"))
-                    .collect(),
+                bytes,
                 reads: alloc::vec::Vec::new(),
             }
         }
@@ -9510,7 +9516,7 @@ mod tests {
     #[test]
     fn a_file_shorter_than_it_stated_ends_at_its_end() {
         let mut file = FakeFile::of(10);
-        let got = file.read(Some(1 << 20), usize::MAX).expect("a read");
+        let got = file.read(Some(4096), usize::MAX).expect("a read");
         assert_eq!(got, file.bytes);
     }
 
@@ -9540,16 +9546,17 @@ mod tests {
     #[test]
     fn a_read_refusal_part_way_surfaces_unchanged() {
         let refused = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
-        let mut calls = 0;
-        let got = read_to_end_from(Some(1 << 21), usize::MAX, |_, buf| {
-            calls += 1;
-            if calls == 1 {
-                Ok(buf.len())
+        let mut offsets = alloc::vec::Vec::new();
+        let got = read_to_end_from(Some(64 * 1024), usize::MAX, |offset, buf| {
+            offsets.push(offset);
+            if offsets.len() == 1 {
+                Ok(buf.len().min(4096))
             } else {
                 Err(refused)
             }
         });
         assert_eq!(got, Err(refused));
+        assert_eq!(offsets, [0, 4096], "the refusal came part way through");
     }
 
     #[test]

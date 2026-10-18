@@ -59,10 +59,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, InputMode, Signal, TerminalSize};
-use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
-use crate::foreground::{ForegroundOwner, ForegroundOwnership};
+use crate::foreground::{ForegroundOwnership, HandOver, ProcessInstance};
 use crate::pipe::{RingWaits, StreamWaits, PIPE_CAPACITY};
 use crate::waitq::WakeKey;
 
@@ -156,7 +155,7 @@ pub enum MasterWriteStep {
         /// Number of input bytes consumed (buffered, or turned into a signal).
         consumed: usize,
         /// `(foreground owner, signal)` pairs the caller must deliver.
-        signals: Vec<(ForegroundOwner, Signal)>,
+        signals: Vec<(ProcessInstance, Signal)>,
     },
     /// Every slave end is closed: the bytes can never be read.
     Broken,
@@ -265,15 +264,25 @@ impl Pty {
         &self.fg
     }
 
-    /// Hand the pty's foreground to `owner` (`console_foreground`).
+    /// Hand the pty's foreground to `owner` (`console_foreground`, or a spawn
+    /// handing its child the terminal).
     ///
     /// # Errors
     ///
     /// As [`ForegroundOwnership::grant`].
-    pub fn grant_foreground(&self, caller: ProcessId, owner: ForegroundOwner) -> Result<(), Errno> {
-        let moved = self.fg.grant(caller, owner)?;
-        self.foreground_moved(moved);
-        Ok(())
+    pub fn grant_foreground(
+        &self,
+        caller: ProcessInstance,
+        owner: ProcessInstance,
+    ) -> Result<HandOver, Errno> {
+        let grant = self.fg.grant(caller, owner)?;
+        self.foreground_moved(grant.moved());
+        Ok(grant)
+    }
+
+    /// Undo a hand-over, as [`ForegroundOwnership::undo`].
+    pub fn undo_foreground(&self, grant: HandOver) {
+        self.foreground_moved(self.fg.undo(grant));
     }
 
     /// Release the pty's foreground (`console_foreground` with no owner).
@@ -281,7 +290,7 @@ impl Pty {
     /// # Errors
     ///
     /// As [`ForegroundOwnership::release`].
-    pub fn release_foreground(&self, caller: ProcessId) -> Result<(), Errno> {
+    pub fn release_foreground(&self, caller: ProcessInstance) -> Result<(), Errno> {
         let moved = self.fg.release(caller)?;
         self.foreground_moved(moved);
         Ok(())
@@ -379,7 +388,7 @@ impl PtyMasterEnd {
             None
         };
         let mut consumed = 0usize;
-        let mut signals: Vec<(ForegroundOwner, Signal)> = Vec::new();
+        let mut signals: Vec<(ProcessInstance, Signal)> = Vec::new();
         for &byte in data {
             if let Some(owner) = target {
                 if let Some(signal) = tairix_tty::job_control_signal(byte) {
@@ -450,6 +459,14 @@ impl PtySlaveEnd {
     #[must_use]
     pub fn pty(&self) -> &Pty {
         &self.pty
+    }
+
+    /// The pty, shared so it outlives the registry lock this handle was found
+    /// under. It counts as no live slave end, so no reader's end-of-stream
+    /// moves.
+    #[must_use]
+    pub fn shared_pty(&self) -> Arc<Pty> {
+        Arc::clone(&self.pty)
     }
 
     /// The wake identities a blocking slave **read** uses: it parks on the
@@ -699,14 +716,14 @@ mod tests {
     }
 
     /// A foreground owner at a distinguishable process instance.
-    fn owner(process: u64) -> ForegroundOwner {
-        ForegroundOwner {
+    fn owner(process: u64) -> ProcessInstance {
+        ProcessInstance {
             process: ProcessId(process),
             instance: ProcId::from_raw([0xE1; 16]),
         }
     }
 
-    fn wrote(step: MasterWriteStep) -> (usize, Vec<(ForegroundOwner, Signal)>) {
+    fn wrote(step: MasterWriteStep) -> (usize, Vec<(ProcessInstance, Signal)>) {
         match step {
             MasterWriteStep::Wrote { consumed, signals } => (consumed, signals),
             other => panic!("expected Wrote, got {other:?}"),
@@ -874,7 +891,7 @@ mod tests {
     #[test]
     fn cooked_ctrl_c_with_a_foreground_job_is_a_signal_not_input() {
         let (m, s) = pty();
-        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(owner(1), owner(2)).unwrap();
         let (consumed, signals) = wrote(m.write(&[0x03], true));
         assert_eq!(consumed, 1);
         assert_eq!(signals, vec![(owner(2), Signal::Interrupt)]);
@@ -886,7 +903,7 @@ mod tests {
     #[test]
     fn cooked_ctrl_z_with_a_foreground_job_maps_to_stop() {
         let (m, _s) = pty();
-        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(owner(1), owner(2)).unwrap();
         let (_c, signals) = wrote(m.write(&[0x1A], true));
         assert_eq!(signals, vec![(owner(2), Signal::Stop)]);
     }
@@ -905,7 +922,7 @@ mod tests {
     #[test]
     fn intercept_false_buffers_the_control_byte_even_with_a_foreground_job() {
         let (m, s) = pty();
-        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(owner(1), owner(2)).unwrap();
         let (consumed, signals) = wrote(m.write(&[0x03], false));
         assert_eq!(consumed, 1);
         assert!(signals.is_empty());
@@ -917,7 +934,7 @@ mod tests {
     #[test]
     fn raw_mode_passes_control_bytes_through_even_with_a_foreground_job() {
         let (m, s) = pty();
-        m.pty().grant_foreground(ProcessId(1), owner(2)).unwrap();
+        m.pty().grant_foreground(owner(1), owner(2)).unwrap();
         m.pty().set_input_mode(InputMode::Raw);
         let (consumed, signals) = wrote(m.write(&[0x03], true));
         assert_eq!(consumed, 1);

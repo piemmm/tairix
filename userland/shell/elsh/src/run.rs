@@ -54,7 +54,7 @@ extern crate alloc;
 mod program {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
 
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
@@ -463,11 +463,16 @@ mod program {
     /// any other refusal (a permission or capability denial, a malformed
     /// image, a rejected wire) is final and reported verbatim. The kernel
     /// authorises every attempt — a candidate spelling grants nothing.
+    ///
+    /// A `foreground` member is handed the shell's terminal by the spawn
+    /// itself, before it can run, so a `^C` typed the moment it exists reaches
+    /// it.
     fn spawn_member(
         spec: &LaunchSpec<'_>,
         command: &ResolvedCommand,
         wires: &[PlannedWire; tairix_abi::STD_STREAM_COUNT],
         fds: &[u32],
+        foreground: bool,
     ) -> Result<i64, Errno> {
         let Some(word) = command.argv.first() else {
             return Err(Errno::NotImplemented);
@@ -496,6 +501,9 @@ mod program {
         // The attach block: the caller's own credential and console, with
         // the planned wires resolved onto the descriptors just opened.
         let mut attach = tairix_abi::SpawnAttach::INHERIT;
+        if foreground {
+            attach.flags |= tairix_abi::SPAWN_FLAG_FOREGROUND;
+        }
         for (slot, wire) in wires.iter().enumerate() {
             attach.wires[slot] = match wire {
                 PlannedWire::Inherit => tairix_abi::FdWire::Inherit,
@@ -691,6 +699,9 @@ mod program {
         /// The shell's own pid, which holds its terminal whenever no job is
         /// in the foreground; `0` (a release) when it cannot be learned.
         own_pid: i64,
+        /// Whether the shell held its terminal when it last took it, so it has
+        /// a terminal to hand a foreground job.
+        holds_terminal: Cell<bool>,
     }
 
     impl RtProcessHost {
@@ -702,6 +713,7 @@ mod program {
             Self {
                 members: RefCell::new(Vec::new()),
                 own_pid,
+                holds_terminal: Cell::new(false),
             }
         }
 
@@ -709,7 +721,8 @@ mod program {
         /// job reads nothing from it until it is brought forward. A stdin
         /// that is no terminal refuses, which is the non-interactive case.
         fn hold_terminal(&self) {
-            let _ = tairix_rt::console_foreground(tairix_abi::STDIN, self.own_pid);
+            self.holds_terminal
+                .set(tairix_rt::console_foreground(tairix_abi::STDIN, self.own_pid) >= 0);
         }
     }
 
@@ -726,9 +739,19 @@ mod program {
             let plan = tairix_elsh::lower_wire_plan(spec).map_err(LaunchError::Redirection)?;
             let fds = open_planned(&plan.opens).map_err(LaunchError::Redirection)?;
             let mut pids: Vec<i64> = Vec::with_capacity(plan.members.len());
-            for member in &plan.members {
+            // The leader is the job `wait` follows, so it is the one handed the
+            // terminal.
+            let leader = plan.members.len().saturating_sub(1);
+            let hands_over = !spec.background && self.holds_terminal.get();
+            for (at, member) in plan.members.iter().enumerate() {
                 let command = &spec.commands[member.command];
-                match spawn_member(spec, command, &member.wires, &fds) {
+                match spawn_member(
+                    spec,
+                    command,
+                    &member.wires,
+                    &fds,
+                    hands_over && at == leader,
+                ) {
                     Ok(pid) => pids.push(pid),
                     Err(err) => {
                         // Unwind whole: kill and reap what already runs,
@@ -771,26 +794,16 @@ mod program {
 
         fn wait(&self, pid: Pid) -> Result<WaitOutcome, Errno> {
             // A pid is drawn inside the non-negative signed range, so
-            // reinterpreting it for the signed `wait`/`console_foreground`
-            // argument preserves the value.
+            // reinterpreting it for the signed `wait` argument preserves the
+            // value.
             let signed_pid = pid.as_u64().cast_signed();
-            // Mark the child as this console's foreground job before
-            // blocking (the `tcsetpgrp` analogue): the kernel's cooked-mode
-            // line discipline then delivers `^C`/`^Z` to the child while
-            // the shell is parked in `wait`. A refusal (piped stdin, no
-            // console backing, an unwired kernel) is not fatal — the wait
-            // proceeds without interactive signal routing, exactly as a
-            // non-interactive session should.
-            let marked = tairix_rt::console_foreground(tairix_abi::STDIN, signed_pid) >= 0;
             let mut status = tairix_abi::WaitStatus::Exited(0);
             // `STOPPED` opts into stop reports, so a `^Z`-stopped foreground
             // job returns control to the shell instead of blocking forever.
             let ret = tairix_rt::wait(signed_pid, &mut status, tairix_abi::WaitFlags::STOPPED);
-            if marked {
-                // Take the terminal back: back at the prompt (or handling a
-                // stop), the shell reads it and a background job does not.
-                self.hold_terminal();
-            }
+            // Back at the prompt, or handling a stop, the shell reads its
+            // terminal and a background job does not.
+            self.hold_terminal();
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
             }
@@ -845,6 +858,20 @@ mod program {
                 return Err(Errno::from_syscall(ret));
             }
             Ok(())
+        }
+
+        fn foreground(&self, job: Option<Pid>) {
+            match job {
+                // A refusal leaves the job running without `^C`/`^Z` routing.
+                Some(pid) if self.holds_terminal.get() => {
+                    let _ = tairix_rt::console_foreground(
+                        tairix_abi::STDIN,
+                        pid.as_u64().cast_signed(),
+                    );
+                }
+                Some(_) => {}
+                None => self.hold_terminal(),
+            }
         }
 
         fn poll(&self) -> Option<(Pid, WaitOutcome)> {

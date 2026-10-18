@@ -29,7 +29,8 @@ encoder:
 - **No credential switch.** `target_uid` must be `SPAWN_UID_INHERIT`.
 - **No console.** The console selector must be `CONSOLE_INHERIT`; a
   console index would attach console-backed streams, which a sandbox
-  never receives.
+  never receives. Nor may the block carry `SPAWN_FLAG_FOREGROUND`: a
+  sandbox is never handed its spawner's terminal.
 - **Its owner's life.** The session selector must be `Anchored`, the session
   anchored at the owner, so a worker ends when its owner does — crash
   included — rather than lingering until the owner's whole session ends

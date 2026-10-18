@@ -877,9 +877,8 @@ const AUTOLOAD_FILES_HANDSHAKE_MARKER: &str =
 const AUTOLOAD_TERMINAL_COMMAND: &str = tairix_test_autoload_input_qemu_aarch64::TERMINAL_COMMAND;
 
 /// Serial marker after which the vertical injects the pty Ctrl-C recovery
-/// step: the test kernel prints it once it has witnessed the foreground
-/// `sleep` spawn (`plans/PTY.md`), so the `Ctrl-C` lands against a live,
-/// parked foreground job — never before one exists.
+/// step: the test kernel prints it once `sleep`'s image has loaded
+/// (`plans/PTY.md`), so the `Ctrl-C` is never sent before the job exists.
 const AUTOLOAD_CTRL_C_ARM_MARKER: &str = tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER;
 
 /// Guest marker gating the terminal command typing: the terminal window
@@ -1540,11 +1539,10 @@ const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
             AUTOLOAD_TERMINAL_COMMAND,
         ),
         // The pty Ctrl-C job-control step (`plans/PTY.md`): held behind
-        // the guest's sleep-spawn marker so the `Ctrl-C` lands against a
-        // live, parked foreground job. It interrupts the foreground
-        // `sleep` and types `true` — the recovered `true` load is the
-        // guest's pty job-control witness (the vertical's final PASS
-        // witness; no file-manager stage follows).
+        // the guest's sleep-load marker so the `Ctrl-C` is never sent
+        // before the job exists. It interrupts the foreground `sleep` and
+        // types `true` — the recovered `true` load is the guest's pty
+        // job-control witness (the vertical's final PASS witness).
         TypedStep::text(
             AUTOLOAD_CTRL_C_ARM_MARKER,
             1,

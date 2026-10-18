@@ -3753,9 +3753,11 @@ where
         // so the console returns to its open state the moment the owner
         // is gone rather than waiting for a reader to prove the owner
         // dead (`plans/DISPLAY.md` D5). Independent of the shared
-        // process-bookkeeping teardown below, so it runs first.
+        // process-bookkeeping teardown below, so it runs first, while the
+        // record naming the dying instance still stands.
+        let dying = self.foreground_owner(process);
         for device in self.consoles {
-            device.clear_dead_foreground(process);
+            device.clear_dead_foreground(dying);
         }
         // Reclaim every seat the dead task held (`plans/DISPLAY.md` D8):
         // the display surface returns to the text console, the seat
@@ -3967,8 +3969,8 @@ where
     /// only by pid could reach whoever inherited it; recording the instance
     /// at the grant — the moment the parent's authority over the target was
     /// checked — is what lets the delivery refuse a stale target instead.
-    fn foreground_owner(&self, process: ProcessId) -> crate::foreground::ForegroundOwner {
-        crate::foreground::ForegroundOwner {
+    fn foreground_owner(&self, process: ProcessId) -> crate::foreground::ProcessInstance {
+        crate::foreground::ProcessInstance {
             process,
             instance: self.caps.read().instance_of(process),
         }
@@ -3979,12 +3981,11 @@ where
     /// `plans/PTY.md`).
     ///
     /// Admits the caller when the terminal is unowned or the caller is the
-    /// recorded controlling owner. A different **live** owner refuses the
-    /// caller with the typed [`Errno::NotForeground`]; an owner the process
-    /// bookkeeping proves dead is cleared in place, so a terminal is never
-    /// wedged behind a vanished owner, and the caller proceeds. The inert
-    /// bookkeeping default reports every task live, so an unproven death
-    /// keeps denying — the gate can heal, never widen.
+    /// recorded controlling owner. A different owner refuses the caller with
+    /// the typed [`Errno::NotForeground`] while it still holds its number; one
+    /// that no longer does is dead, and is cleared in place, so a terminal is
+    /// never wedged behind a vanished owner, and the caller proceeds. A later
+    /// holder of a dead owner's number is that owner for nothing.
     fn check_terminal_foreground(
         &self,
         caller: &CallerContext<'_>,
@@ -3993,26 +3994,18 @@ where
         let Some(owner) = fg.current() else {
             return Ok(());
         };
-        if owner.process == caller.process() {
+        if owner == caller_instance(caller) {
             return Ok(());
         }
-        if self.process_wait.is_live(owner.process) {
+        if self.caps.read().instance_of(owner.process) == owner.instance {
             return Err(Errno::NotForeground);
         }
-        if fg.clear_dead(owner.process) {
+        if fg.clear_dead(owner) {
             crate::waitq::foreground_wake();
         }
         Ok(())
     }
 
-    /// Run `with` on the controlling ownership of the terminal `fd` names for
-    /// the caller: a pty slave of the caller, or the console behind one of its
-    /// readable inherited standard streams.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::NotFound`] for a descriptor naming no terminal of the caller's,
-    /// [`Errno::NotImplemented`] for a console that is not installed.
     /// The console a wait-set `Stream` member on `fd` watches: one of the
     /// caller's inherited standard streams opened for reading, on an
     /// installed console it holds `CONSOLE_READ` for. A descriptor in the
@@ -4042,24 +4035,65 @@ where
         })
     }
 
+    /// The terminal `fd` names for the caller: a pty slave of the caller, or
+    /// the console behind one of its readable inherited standard streams —
+    /// held, so it can be acted on once the registry lock is released.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a descriptor naming no terminal of the caller's,
+    /// [`Errno::NotImplemented`] for a console that is not installed.
+    fn resolve_terminal(&self, caller: &CallerContext<'_>, fd: u32) -> Result<Terminal, Errno> {
+        let aspaces = self.aspaces.read();
+        if let Some(pty) = aspaces.pty_slave_shared(caller.process(), fd) {
+            return Ok(Terminal::Pty(pty));
+        }
+        let streams = aspaces.streams(caller.process());
+        drop(aspaces);
+        if streams.mode(fd) != StreamMode::Read {
+            return Err(Errno::NotFound);
+        }
+        self.consoles
+            .get(usize::from(streams.console(fd)))
+            .map(Terminal::Console)
+            .ok_or(Errno::NotImplemented)
+    }
+
+    /// Run `with` on the controlling ownership of the terminal `fd` names for
+    /// the caller ([`Self::resolve_terminal`]).
     fn with_terminal_ownership<R>(
         &self,
         caller: &CallerContext<'_>,
         fd: u32,
         with: impl FnOnce(&crate::foreground::ForegroundOwnership) -> R,
     ) -> Result<R, Errno> {
-        if let Some(pty) = self.aspaces.read().pty_slave(caller.process(), fd) {
-            return Ok(with(pty.foreground()));
+        self.resolve_terminal(caller, fd)
+            .map(|terminal| with(terminal.ownership()))
+    }
+
+    /// The terminal behind the caller's standard input, which a
+    /// `SPAWN_FLAG_FOREGROUND` spawn hands its child, resolved and checked as
+    /// `console_foreground` would check it, before any child state exists.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] without `CAP_CONSOLE_READ`, the authority
+    /// `console_foreground` is gated on, and [`Errno::NotForeground`] where no
+    /// terminal stands behind the caller's standard input or the one there is
+    /// not the caller's to hand over — never `NotFound`, which a spawner's
+    /// command search reads as "try the next candidate".
+    fn terminal_to_hand_over(&self, caller: &CallerContext<'_>) -> Result<Terminal, Errno> {
+        if !caller.caps.has(CapabilityId::CONSOLE_READ) {
+            self.audit_spawn_denied("console_read_required");
+            return Err(Errno::PermissionDenied);
         }
-        let streams = self.aspaces.read().streams(caller.process());
-        if streams.mode(fd) != StreamMode::Read {
-            return Err(Errno::NotFound);
+        match self.resolve_terminal(caller, tairix_abi::STDIN) {
+            Ok(terminal) if terminal.ownership().may_grant(caller_instance(caller)) => Ok(terminal),
+            _ => {
+                self.audit_spawn_denied("terminal_not_held");
+                Err(Errno::NotForeground)
+            }
         }
-        let device = self
-            .consoles
-            .get(usize::from(streams.console(fd)))
-            .ok_or(Errno::NotImplemented)?;
-        Ok(with(device.foreground_ownership()))
     }
 
     /// Who `console_foreground`'s `pid` names: nobody (`0`, a release), the
@@ -4069,20 +4103,25 @@ where
     /// # Errors
     ///
     /// [`Errno::NotFound`] for a `pid` that is neither the caller nor a live
-    /// child of it.
+    /// child of it — a child whose record its teardown has already removed
+    /// included, since no instance is left to hand the terminal to.
     fn foreground_target(
         &self,
         caller: &CallerContext<'_>,
         pid: i64,
-    ) -> Result<Option<crate::foreground::ForegroundOwner>, Errno> {
+    ) -> Result<Option<crate::foreground::ProcessInstance>, Errno> {
         if pid == 0 {
             return Ok(None);
         }
         if u64::try_from(pid) == Ok(caller.process().0) {
-            return Ok(Some(self.foreground_owner(caller.process())));
+            return Ok(Some(caller_instance(caller)));
         }
         let child = self.process_wait.authorise_child(caller.process(), pid)?;
-        Ok(Some(self.foreground_owner(child)))
+        let owner = self.foreground_owner(child);
+        if owner.instance.is_kernel() {
+            return Err(Errno::NotFound);
+        }
+        Ok(Some(owner))
     }
 
     /// Copy a filesystem path of `len` bytes from the caller's address space
@@ -6688,6 +6727,11 @@ where
             self.audit_spawn_denied("proc_spawn_required");
             return Err(Errno::PermissionDenied);
         }
+        let foreground = if attach.hands_over_foreground() {
+            Some(self.terminal_to_hand_over(caller)?)
+        } else {
+            None
+        };
 
         // Where the child will live is settled before any of its state exists,
         // and once: an ending session admits nobody, and a join must stay
@@ -6882,6 +6926,10 @@ where
         )
         .with_placement(placement)
         .with_lowered_limits(attach.limits);
+        let ctx = match foreground {
+            Some(terminal) => ctx.with_foreground(terminal),
+            None => ctx,
+        };
         // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
         // boot-floor program is a **prebuilt** plan carrying its already-
         // verified `'static` image and manifest request, so the child only
@@ -6931,14 +6979,13 @@ where
         // the caller, its discipline lives on the `Pty` rather than in the
         // static console list, so route there — owner-checked exactly as the
         // console path (a background task must not flip the foreground
-        // program's echo/raw mode under it).
-        {
-            let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
-                self.check_terminal_foreground(caller, pty.foreground())?;
-                pty.set_input_mode(mode);
-                return Ok(0);
-            }
+        // program's echo/raw mode under it). The gate reads the capability
+        // table, so the registry guard is gone before it runs.
+        let pty = self.aspaces.read().pty_slave_shared(caller.process(), fd);
+        if let Some(pty) = pty {
+            self.check_terminal_foreground(caller, pty.foreground())?;
+            pty.set_input_mode(mode);
+            return Ok(0);
         }
         // Resolve `fd` against the caller's per-process descriptor table:
         // the discipline is a property of an *input* stream's console, so
@@ -6981,16 +7028,16 @@ where
         // A pty slave is a *tty* too: its retained state lives on the `Pty`
         // rather than in the static console list, so route there — owner-checked
         // exactly as the console path. The master end is a program's own
-        // emulator screen, which it clears without asking the kernel.
-        {
-            let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
-                self.check_terminal_foreground(caller, pty.foreground())?;
-                // The discard frees both rings' space, so the purge itself
-                // wakes the writers parked on them, exactly as a drain does.
-                pty.purge_session();
-                return Ok(0);
-            }
+        // emulator screen, which it clears without asking the kernel. The
+        // gate reads the capability table, so the registry guard is gone
+        // before it runs.
+        let pty = self.aspaces.read().pty_slave_shared(caller.process(), fd);
+        if let Some(pty) = pty {
+            self.check_terminal_foreground(caller, pty.foreground())?;
+            // The discard frees both rings' space, so the purge itself
+            // wakes the writers parked on them, exactly as a drain does.
+            pty.purge_session();
+            return Ok(0);
         }
         // Resolve `fd` against the caller's per-process descriptor table: a
         // terminal is named by one of its *input* streams, exactly as the
@@ -7118,70 +7165,37 @@ where
     }
 
     fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i64) -> SyscallResult {
-        // A pty slave is a *tty*: if `fd` is a pty-slave descriptor of the
-        // caller, its controlling ownership lives on the `Pty`. The
-        // transition rules are the shared `ForegroundOwnership`'s, so the
-        // grant/release below is identical to the console path — only the
-        // slot's home differs.
-        //
-        // The kind of `fd` is settled under a read of its own, and the
-        // authority and instance resolved with no registry lock held: the
+        // The terminal is resolved and held before the target is: the
         // introspection source reads the capability table and *then* the
-        // address-space registry, so holding them the other way round would
-        // let two readers of two writer-preferring locks wait on each other.
-        // The re-read then resolves `fd` again and fails closed if it has
-        // gone, which is what a concurrent close should produce anyway.
-        if self
-            .aspaces
-            .read()
-            .pty_slave(caller.process(), fd)
-            .is_some()
-        {
-            let owner = self.foreground_target(caller, pid)?;
-            let aspaces = self.aspaces.read();
-            let Some(pty) = aspaces.pty_slave(caller.process(), fd) else {
-                return Err(Errno::NotFound);
-            };
-            return match owner {
-                Some(owner) => pty.grant_foreground(caller.process(), owner),
-                None => pty.release_foreground(caller.process()),
-            }
-            .map(|()| 0);
-        }
-        // Resolve `fd` against the caller's per-process descriptor table
-        // exactly as `stream_input_mode` does: the foreground slot is a
-        // property of an *input* stream's console, so `fd` must be a
-        // readable inherited stream — anything else fails closed with
-        // `NotFound`, never leaking which case occurred.
-        let streams = self.aspaces.read().streams(caller.process());
-        if streams.mode(fd) != StreamMode::Read {
-            return Err(Errno::NotFound);
-        }
-        let Some(device) = self.consoles.get(usize::from(streams.console(fd))) else {
-            return Err(Errno::NotImplemented);
-        };
+        // address-space registry, so the target's authority and instance are
+        // read with no registry lock held, and holding the two the other way
+        // round would let two readers of two writer-preferring locks wait on
+        // each other.
+        let terminal = self.resolve_terminal(caller, fd)?;
         // The dispatcher already checked `CAP_CONSOLE_READ`. A zero `pid`
-        // releases the ownership; the release is owner/granter-checked on
-        // the device, so a background task cannot open the console by
-        // clearing the slot and then draining it (`plans/DISPLAY.md` D5).
-        // Any other `pid` is the caller itself, holding its own terminal, or
-        // a live child of it — the parent/child authority `wait`/`signal`
-        // enforce, never a caller-supplied claim. The grant is then
-        // slot-checked on the device (unowned, or the caller is the recorded
-        // granter or the current owner), so the drain right only ever moves
-        // down the spawn chain or back to whoever handed it out, and is
-        // never taken from a live foreground job by a bystander.
+        // releases the ownership; any other is the caller itself, holding its
+        // own terminal, or a live child of it — the parent/child authority
+        // `wait`/`signal` enforce, never a caller-supplied claim. The slot
+        // transition is then checked on the terminal (`plans/DISPLAY.md` D5),
+        // so the drain right only moves down the spawn chain or back to
+        // whoever handed it out, and is never taken from a live job by a
+        // bystander or opened by one clearing the slot.
         match self.foreground_target(caller, pid)? {
-            None => device.release_foreground(caller.process()),
-            Some(owner) => device.grant_foreground(caller.process(), owner),
+            Some(owner) => terminal
+                .grant_foreground(caller_instance(caller), owner)
+                .map(|_| 0),
+            None => terminal
+                .release_foreground(caller_instance(caller))
+                .map(|()| 0),
         }
-        .map(|()| 0)
     }
 
     fn foreground_held(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
         // The dispatcher already checked `CAP_CONSOLE_READ`; the answer is
         // the caller's own standing and changes nothing.
-        self.with_terminal_ownership(caller, fd, |fg| u64::from(fg.holds(caller.process())))
+        self.with_terminal_ownership(caller, fd, |fg| {
+            u64::from(fg.holds(caller_instance(caller)))
+        })
     }
 
     fn key_inject(
@@ -13022,13 +13036,20 @@ fn finish_death(
 
 /// Record `status` for the parent's `wait`, then return `process`'s number
 /// to the draw — at once, unless a parent's unreaped row now holds it, in
-/// which case the reap returns it. The last step of every death path.
+/// which case the reap returns it. A death with no status owes no reap, so its
+/// row is withdrawn first: no row outlives the number it is keyed by. The last
+/// step of every death path.
 pub(crate) fn retire_number(
     process_wait: &(dyn ProcessWait + 'static),
     process: ProcessId,
     status: Option<i32>,
 ) {
-    let awaiting_reap = status.is_some_and(|status| process_wait.record_exit(process, status));
+    let awaiting_reap = if let Some(status) = status {
+        process_wait.record_exit(process, status)
+    } else {
+        process_wait.withdraw(process);
+        false
+    };
     if !awaiting_reap {
         tairix_kernel_sched_api::release_task_id(process.leader_task().0);
     }
@@ -13140,6 +13161,72 @@ impl SpawnCredential {
             self.ceiling
                 .unwrap_or_else(|| CapabilitySet::from_words([u64::MAX; 4])),
         )
+    }
+}
+
+/// The caller as a terminal's ownership names a party: its process, at the
+/// instance its own record attests.
+fn caller_instance(caller: &CallerContext<'_>) -> crate::foreground::ProcessInstance {
+    crate::foreground::ProcessInstance {
+        process: caller.process(),
+        instance: caller.caps.proc_id(),
+    }
+}
+
+/// A terminal a kernel path acts on once it has resolved it from one of a
+/// caller's descriptors: the pty behind a slave end the caller holds, or an
+/// installed console. Held rather than borrowed, so it outlives the registry
+/// lock it was found under.
+pub(crate) enum Terminal {
+    /// A pseudo-terminal.
+    Pty(alloc::sync::Arc<crate::pty::Pty>),
+    /// An installed console.
+    Console(&'static ConsoleDevice),
+}
+
+impl Terminal {
+    /// The terminal's controlling ownership.
+    fn ownership(&self) -> &crate::foreground::ForegroundOwnership {
+        match self {
+            Self::Pty(pty) => pty.foreground(),
+            Self::Console(device) => device.foreground_ownership(),
+        }
+    }
+
+    /// Hand the terminal to `owner` on `caller`'s authority.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::foreground::ForegroundOwnership::grant`].
+    fn grant_foreground(
+        &self,
+        caller: crate::foreground::ProcessInstance,
+        owner: crate::foreground::ProcessInstance,
+    ) -> Result<crate::foreground::HandOver, Errno> {
+        match self {
+            Self::Pty(pty) => pty.grant_foreground(caller, owner),
+            Self::Console(device) => device.grant_foreground(caller, owner),
+        }
+    }
+
+    /// Undo a hand-over, as [`crate::foreground::ForegroundOwnership::undo`].
+    fn undo_foreground(&self, grant: crate::foreground::HandOver) {
+        match self {
+            Self::Pty(pty) => pty.undo_foreground(grant),
+            Self::Console(device) => device.undo_foreground(grant),
+        }
+    }
+
+    /// Release the terminal on `caller`'s authority.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::foreground::ForegroundOwnership::release`].
+    fn release_foreground(&self, caller: crate::foreground::ProcessInstance) -> Result<(), Errno> {
+        match self {
+            Self::Pty(pty) => pty.release_foreground(caller),
+            Self::Console(device) => device.release_foreground(caller),
+        }
     }
 }
 
@@ -13264,6 +13351,12 @@ where
     translation: Option<&'static crate::iommu::Translation>,
     /// The limits the spawner lowered the child to below what it inherits.
     lowered: tairix_abi::SpawnLimits,
+    /// The terminal handed to the child as it is admitted
+    /// (`SPAWN_FLAG_FOREGROUND`), already checked as one the spawner may hand
+    /// over; `None` for every other spawn. A child that dies loading leaves it
+    /// to the spawner to take back, and no gate admits the dead instance
+    /// meanwhile.
+    foreground: Option<Terminal>,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -13328,6 +13421,7 @@ where
             placement: None,
             translation: None,
             lowered: tairix_abi::SpawnLimits::INHERIT,
+            foreground: None,
         }
     }
 
@@ -13352,6 +13446,13 @@ where
     #[must_use]
     pub fn with_lowered_limits(mut self, lowered: tairix_abi::SpawnLimits) -> Self {
         self.lowered = lowered;
+        self
+    }
+
+    /// Hand the child `terminal` as it is admitted, before it can run.
+    #[must_use]
+    pub(crate) fn with_foreground(mut self, terminal: Terminal) -> Self {
+        self.foreground = Some(terminal);
         self
     }
 
@@ -13971,10 +14072,15 @@ fn audit_port_refused(audit: &(dyn Sink + Sync), task: ProcessId, port: u16, wid
     );
 }
 
-/// Audit a child refused at admission because the session it was bound for
-/// began ending while it was built: it never runs, and its parent reaps it as
-/// killed.
-fn audit_born_dead(audit: &(dyn Sink + Sync), sec_id: ProcessId, seed: &ChildRecordSeed) {
+/// Audit a child refused at admission for `cause`, before it could run: the
+/// session it was bound for began ending while it was built (`session_ending`),
+/// or the terminal it was to be handed changed hands (`terminal_changed_hands`).
+fn audit_admission_refused(
+    audit: &(dyn Sink + Sync),
+    cause: &'static str,
+    sec_id: ProcessId,
+    seed: &ChildRecordSeed,
+) {
     let mut proc_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
     crate::audit::emit(
         audit,
@@ -13983,7 +14089,7 @@ fn audit_born_dead(audit: &(dyn Sink + Sync), sec_id: ProcessId, seed: &ChildRec
         &[
             Field {
                 key: "cause",
-                value: tairix_log::FieldValue::Str("session_ending"),
+                value: tairix_log::FieldValue::Str(cause),
             },
             Field {
                 key: "task",
@@ -14183,17 +14289,17 @@ where
     /// child the placeholder record is written for is exactly the child the
     /// dispatcher finds.
     ///
-    /// Once the child is registered as its parent's to wait on, the
-    /// admission stands: its fate is reported through its exit, never also
-    /// through an error here.
+    /// Once the child can run, the admission stands: its fate is reported
+    /// through its exit, never also through an error here.
     ///
     /// # Errors
     ///
     /// [`AdmitError`] if the launch services are not installed, the
     /// scheduler refuses the admission, the node a driver is loaded for
-    /// already has one ([`AdmitError::NodeBusy`]), or the wait bookkeeping
-    /// cannot record the child ([`AdmitError::OutOfMemory`]) — fail closed,
-    /// never a panic, and leaving nothing of the child behind.
+    /// already has one ([`AdmitError::NodeBusy`]), the wait bookkeeping
+    /// cannot record the child ([`AdmitError::OutOfMemory`]), or the terminal
+    /// the child is to be handed changed hands ([`AdmitError::NotForeground`])
+    /// — fail closed, never a panic, and leaving nothing of the child behind.
     pub fn admit_loading(
         &self,
         plan: LoadPlan,
@@ -14404,30 +14510,59 @@ where
             return Err(AdmitError::OutOfMemory);
         }
 
-        self.release_admitted(task_id, sec_id, &seed, services.peer_watch());
+        self.release_admitted(task_id, sec_id, &seed, services.peer_watch())?;
         Ok(task_id)
     }
 
     /// Make a child whose every other piece of state is installed reachable
-    /// and runnable at once: its placeholder record, its place in a session
-    /// and its first wake land under one write lock of the table.
+    /// and runnable at once: the terminal it is handed, its placeholder record,
+    /// its place in a session and its first wake land under one write lock of
+    /// the table.
     ///
     /// A signal reaches a thread only through that table, so none reaches the
     /// child before it can run, and none tears down a half-admitted one. A
+    /// `^C` the handed terminal takes finds its target's instance through the
+    /// table too, so it waits for the record rather than finding none. A
     /// session that began ending while the child was built admits it no more
-    /// than it would a later spawn: the child is retired unrun, and its
-    /// parent, already told of it, reaps it as killed.
+    /// than it would a later spawn: the child is retired unrun, the hand-over
+    /// is undone, and the parent, already told of it, reaps it as killed.
+    ///
+    /// # Errors
+    ///
+    /// [`AdmitError::NotForeground`] when the terminal changed hands after the
+    /// spawn checked it, to a task the spawner has no authority over; the
+    /// child is retired unrun and the spawn is refused whole.
     fn release_admitted(
         &self,
         task_id: u64,
         sec_id: ProcessId,
         seed: &ChildRecordSeed,
         peers: &PeerWatch,
-    ) {
+    ) -> Result<(), AdmitError> {
         // Nothing is verified yet, so the placeholder carries neither a
         // manifest request nor an app identity.
         let placeholder = seed.record(sec_id, &VerifiedProgram::default(), self.audit);
         let mut caps = self.caps.write();
+        let handed = match &self.foreground {
+            Some(terminal) => {
+                let parent = crate::foreground::ProcessInstance {
+                    process: self.parent,
+                    instance: seed.parent_proc_id,
+                };
+                let child = crate::foreground::ProcessInstance {
+                    process: sec_id,
+                    instance: self.proc_id,
+                };
+                let Ok(grant) = terminal.grant_foreground(parent, child) else {
+                    drop(caps);
+                    audit_admission_refused(self.audit, "terminal_changed_hands", sec_id, seed);
+                    self.abandon_admission(task_id, sec_id, peers, None);
+                    return Err(AdmitError::NotForeground);
+                };
+                Some((terminal, grant))
+            }
+            None => None,
+        };
         let placed = self
             .placement
             .map_or_else(
@@ -14436,12 +14571,15 @@ where
             )
             .and_then(|placement| caps.admit(placeholder, placement));
         if placed.is_err() {
+            if let Some((terminal, grant)) = handed {
+                terminal.undo_foreground(grant);
+            }
             drop(caps);
             // Born dead: the session it was bound for began ending while it
             // was built. Its parent reaps it as killed, and the log says why.
-            audit_born_dead(self.audit, sec_id, seed);
+            audit_admission_refused(self.audit, "session_ending", sec_id, seed);
             self.abandon_admission(task_id, sec_id, peers, Signal::Kill.termination_status());
-            return;
+            return Ok(());
         }
         // Only a terminated task refuses a wake, and no claim on its death can
         // have been made while the lock excluded every claim.
@@ -14451,14 +14589,16 @@ where
             started.is_ok(),
             "a child no signal could reach refused its first wake"
         );
+        Ok(())
     }
 
     /// Undo an admission refused before the child could run, through the
     /// registries it installed into, so nothing the child was given outlives
     /// it — the node claim included. `status` is what the parent reaps once it
     /// has been told of the child (a child whose session ended while it was
-    /// admitted, reaped as killed with that session); before that no row holds
-    /// the child's number.
+    /// admitted, reaped as killed with that session); [`None`] for a refusal,
+    /// which the spawner learns of from the error, so no row is left for it to
+    /// wait on.
     fn abandon_admission(
         &self,
         task_id: u64,
@@ -16243,7 +16383,10 @@ mod tests {
     }
 
     /// A landing that owes no `wait` reap (a driver unload) still retires the
-    /// thread and reclaims the process, but mints no zombie for a parent.
+    /// thread and reclaims the process, but mints no zombie for a parent — and
+    /// leaves no running row either, which a parent would wait on for ever and
+    /// whose number, back in the draw, would make its next holder that
+    /// parent's child.
     #[test]
     fn a_landing_without_a_status_reclaims_but_records_no_exit() {
         install_trace_filter();
@@ -16282,8 +16425,12 @@ mod tests {
                 tairix_abi::WAIT_PID_ANY,
                 WaitFlags::empty()
             ),
-            Err(Errno::WouldBlock),
-            "no status was owed, so the child is not reapable"
+            Err(Errno::NotFound),
+            "no status was owed, so the parent has no child left to wait for"
+        );
+        assert_eq!(
+            crate::procwait::ProcessWait::authorise_child(wait, ProcessId(2), 44),
+            Err(Errno::NotFound)
         );
     }
 
@@ -22164,6 +22311,7 @@ mod tests {
         wait: &'static (dyn ProcessWait + 'static),
         table: &'static RwLock<CapTable>,
         aspaces: &'static RwLock<AddressSpaceRegistry>,
+        sink: &'static TestSink,
     ) -> KernelSpawnCtx<'static, TestArch> {
         let arch: &'static Arc<TestArch> =
             crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
@@ -22175,7 +22323,7 @@ mod tests {
             tairix_abi::DmaCoherence::Snooped,
         )]));
         KernelSpawnCtx::new(
-            make_sink(),
+            sink,
             sched,
             table,
             aspaces,
@@ -22214,7 +22362,7 @@ mod tests {
             crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         table.write().insert(session_record(1, 0x22));
         let wait = OnRegister::leaked(table, None);
-        let ctx = node_child_ctx(wait, table, aspaces);
+        let ctx = node_child_ctx(wait, table, aspaces, make_sink());
 
         let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("admitted");
         assert_eq!(*wait.claimed.lock(), Some(0), "the kill reached no thread");
@@ -22244,7 +22392,12 @@ mod tests {
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
             crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         table.write().insert(session_record(1, 0x23));
-        let ctx = node_child_ctx(&crate::procwait::NULL_PROCESS_WAIT, table, aspaces);
+        let ctx = node_child_ctx(
+            &crate::procwait::NULL_PROCESS_WAIT,
+            table,
+            aspaces,
+            make_sink(),
+        );
         let under_lock: &'static AtomicU64 = crate::forever(Box::new(AtomicU64::new(0)));
         let after_lock: &'static AtomicU64 = crate::forever(Box::new(AtomicU64::new(0)));
         ctx.arch.set_ipi_hook(move |_| {
@@ -22327,7 +22480,7 @@ mod tests {
             crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         // The requester exits as the child is registered with its parent.
         let wait = OnRegister::leaked(table, Some(ProcessId(3)));
-        let ctx = node_child_ctx(wait, table, aspaces).with_placement(placement);
+        let ctx = node_child_ctx(wait, table, aspaces, make_sink()).with_placement(placement);
 
         let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("admitted");
         assert!(wait.exits.lock().is_empty(), "the child was not born dead");
@@ -22438,7 +22591,7 @@ mod tests {
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
             crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let wait = OnRegister::leaked(table, Some(ProcessId(2)));
-        let ctx = node_child_ctx(wait, table, aspaces);
+        let ctx = node_child_ctx(wait, table, aspaces, make_sink());
 
         let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("the admission stands");
         assert_eq!(
@@ -22447,6 +22600,105 @@ mod tests {
             "one report, as killed"
         );
         assert!(table.read().caps_for(SecTaskId(pid)).is_none());
+        aspaces
+            .write()
+            .admit_driver(ProcessId(0xD00D), 0x59, crate::iommu::DmaPath::Untranslated)
+            .expect("the node claim went with it");
+    }
+
+    /// A pty to hand a child, and the ownership standing over it.
+    fn handed_pty() -> (crate::pty::PtyMasterEnd, Arc<crate::pty::Pty>) {
+        let (master, slave) =
+            crate::pty::Pty::create(TerminalSize::new(24, 80).expect("valid grid"));
+        let pty = slave.shared_pty();
+        (master, pty)
+    }
+
+    /// A child born into an ending session gives back the terminal it was
+    /// handed exactly as it stood: one its parent held returns to the parent,
+    /// and an open one stays open, not newly the parent's.
+    #[test]
+    fn a_child_born_dead_gives_its_terminal_back_as_it_stood() {
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        {
+            let mut caps = table.write();
+            place(
+                &mut caps,
+                session_record(2, 0x21),
+                ProcessId::KERNEL,
+                SpawnSession::New,
+            );
+            place(
+                &mut caps,
+                session_record(1, 0x22),
+                ProcessId(2),
+                SpawnSession::Inherit,
+            );
+        }
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let wait = OnRegister::leaked(table, Some(ProcessId(2)));
+        let parent = crate::foreground::ProcessInstance {
+            process: ProcessId(1),
+            instance: ProcId::from_raw([0x22; PROC_ID_LEN]),
+        };
+        let (_master, pty) = handed_pty();
+        pty.grant_foreground(parent, parent)
+            .expect("the parent holds its own pty");
+
+        let ctx = node_child_ctx(wait, table, aspaces, make_sink())
+            .with_foreground(Terminal::Pty(Arc::clone(&pty)));
+        let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("the admission stands");
+        assert_eq!(*wait.exits.lock(), [(pid, KILLED_STATUS)]);
+        assert_eq!(pty.foreground().current(), Some(parent));
+        assert_eq!(pty.foreground().job(), None);
+
+        pty.release_foreground(parent).expect("the parent opens it");
+        let ctx = node_child_ctx(wait, table, aspaces, make_sink())
+            .with_foreground(Terminal::Pty(Arc::clone(&pty)));
+        admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("the admission stands");
+        assert_eq!(pty.foreground().current(), None, "an open pty stays open");
+    }
+
+    /// A terminal that changes hands between the spawn's check and the child's
+    /// admission, to a party the spawner has no authority over, refuses the
+    /// spawn whole: the stranger keeps it, the node claim goes, and the parent
+    /// is left no row to wait on for a child it was never told of.
+    #[test]
+    fn a_terminal_taken_after_the_check_refuses_the_admission_whole() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        let stranger = crate::foreground::ProcessInstance {
+            process: ProcessId(0x5A),
+            instance: ProcId::from_raw([0x5A; PROC_ID_LEN]),
+        };
+        let (_master, pty) = handed_pty();
+        pty.grant_foreground(stranger, stranger)
+            .expect("the stranger takes the open pty");
+
+        let sink = make_sink();
+        let ctx = node_child_ctx(wait, table, aspaces, sink)
+            .with_foreground(Terminal::Pty(Arc::clone(&pty)));
+        assert_eq!(
+            admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM),
+            Err(AdmitError::NotForeground)
+        );
+        assert!(denied_for(sink, "terminal_changed_hands"));
+        assert_eq!(pty.foreground().current(), Some(stranger));
+        assert!(table.read().is_empty(), "no record survives the refusal");
+        assert_eq!(
+            wait.poll(ProcessId(1), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
+            Err(Errno::NotFound)
+        );
         aspaces
             .write()
             .admit_driver(ProcessId(0xD00D), 0x59, crate::iommu::DmaPath::Untranslated)
@@ -23723,7 +23975,8 @@ mod tests {
             .expect("caller registration");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
+        let caps = admitted_record(&table, 2, &[CapabilityId::CONSOLE_READ], sink);
+        let _ = admitted_record(&table, 9, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24610,6 +24863,230 @@ mod tests {
             crate::pty::PtyReadStep::Read(3)
         );
         assert_eq!(&seen[..3], b"out");
+    }
+
+    /// Run `test` against a shell — process `2` at instance `0x22`, holding
+    /// `items` — hosted on a pty, with `attach` staged as its spawn attach
+    /// block (see [`spawn_staged`]), beside the pty and its master end.
+    fn on_a_pty_hosted_shell(
+        items: &[CapabilityId],
+        attach: &SpawnAttach,
+        test: impl FnOnce(
+            &KernelSyscallHandlers<'_, TestArch>,
+            &CallerContext<'_>,
+            &RwLock<CapTable>,
+            &crate::pty::Pty,
+            &crate::pty::PtyMasterEnd,
+            &TestSink,
+        ),
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[*attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let (master_fd, slave_fd, _) = host_shell_on_a_pty(&aspaces, SecTaskId(2));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps =
+            make_caps_record(2, items, sink).with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
+        table.write().insert(caps.clone());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+        let pty = aspaces
+            .read()
+            .pty_slave_shared(ProcessId(2), slave_fd)
+            .expect("hosted on a pty");
+        let master = aspaces
+            .read()
+            .open_file_entry(ProcessId(2), master_fd)
+            .expect("master entry");
+        test(
+            &h,
+            &ctx,
+            &table,
+            &pty,
+            master.pty_master().expect("master end"),
+            sink,
+        );
+    }
+
+    /// Spawn [`SPAWN_PATH`] with the attach block a spawn-test caller staged.
+    fn spawn_staged(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+    ) -> SyscallResult {
+        h.spawn(
+            ctx,
+            0x1000,
+            SPAWN_PATH.len(),
+            attach_addr(0),
+            SPAWN_ATTACH_LEN,
+            0,
+            0,
+        )
+    }
+
+    const FOREGROUND_ATTACH: SpawnAttach = SpawnAttach {
+        flags: tairix_abi::SPAWN_FLAG_FOREGROUND,
+        ..SpawnAttach::INHERIT
+    };
+
+    /// A foreground spawn hands its child the terminal before `spawn` returns,
+    /// so a `^C` written the instant it does reaches the child. A plain spawn
+    /// leaves the shell holding it, and that `^C` is the shell's input.
+    #[test]
+    fn a_foreground_spawn_hands_the_child_its_terminal_before_spawn_returns() {
+        let shell = crate::foreground::ProcessInstance {
+            process: ProcessId(2),
+            instance: ProcId::from_raw([0x22; PROC_ID_LEN]),
+        };
+        let items = [CapabilityId::PROC_SPAWN, CapabilityId::CONSOLE_READ];
+        on_a_pty_hosted_shell(
+            &items,
+            &FOREGROUND_ATTACH,
+            |h, ctx, table, pty, master, _| {
+                assert_eq!(h.console_foreground(ctx, tairix_abi::STDIN, 2), Ok(0));
+                let pid = spawn_staged(h, ctx).expect("the foreground spawn succeeds");
+                let child = crate::foreground::ProcessInstance {
+                    process: ProcessId(pid),
+                    instance: table.read().instance_of(ProcessId(pid)),
+                };
+                assert!(
+                    !child.instance.is_kernel(),
+                    "the child's record is admitted"
+                );
+                assert_eq!(pty.foreground().job(), Some(child));
+                assert_eq!(
+                    master.write(&[0x03], true),
+                    crate::pty::MasterWriteStep::Wrote {
+                        consumed: 1,
+                        signals: alloc::vec![(child, Signal::Interrupt)],
+                    }
+                );
+                assert_eq!(h.console_foreground(ctx, tairix_abi::STDIN, 2), Ok(0));
+                assert_eq!(pty.foreground().current(), Some(shell), "and takes it back");
+            },
+        );
+        on_a_pty_hosted_shell(
+            &items,
+            &SpawnAttach::INHERIT,
+            |h, ctx, _, pty, master, _| {
+                assert_eq!(h.console_foreground(ctx, tairix_abi::STDIN, 2), Ok(0));
+                spawn_staged(h, ctx).expect("the plain spawn succeeds");
+                assert_eq!(pty.foreground().current(), Some(shell));
+                assert_eq!(
+                    master.write(&[0x03], true),
+                    crate::pty::MasterWriteStep::Wrote {
+                        consumed: 1,
+                        signals: alloc::vec![],
+                    }
+                );
+            },
+        );
+    }
+
+    /// A hand-over the kernel cannot honour refuses the spawn before the child
+    /// exists — never with `NotFound`, which a command search reads as a
+    /// missing candidate: no terminal behind the caller's standard input, a
+    /// terminal another party holds, or a caller without `CAP_CONSOLE_READ`,
+    /// whose refusal is audited.
+    #[test]
+    fn a_foreground_spawn_that_cannot_hand_over_is_refused_before_the_child_exists() {
+        let items = [CapabilityId::PROC_SPAWN, CapabilityId::CONSOLE_READ];
+        on_a_pty_hosted_shell(&items, &FOREGROUND_ATTACH, |h, ctx, table, pty, _, sink| {
+            let stranger = crate::foreground::ProcessInstance {
+                process: ProcessId(0x5A),
+                instance: ProcId::from_raw([0x5A; PROC_ID_LEN]),
+            };
+            pty.grant_foreground(stranger, stranger)
+                .expect("the stranger takes the open pty");
+            assert_eq!(spawn_staged(h, ctx), Err(Errno::NotForeground));
+            assert_eq!(table.read().len(), 1, "no child was admitted");
+            assert_eq!(pty.foreground().current(), Some(stranger));
+            assert!(denied_for(sink, "terminal_not_held"));
+        });
+        on_a_pty_hosted_shell(
+            &[CapabilityId::PROC_SPAWN],
+            &FOREGROUND_ATTACH,
+            |h, ctx, table, _, _, sink| {
+                assert_eq!(spawn_staged(h, ctx), Err(Errno::PermissionDenied));
+                assert_eq!(table.read().len(), 1);
+                assert!(denied_for(sink, "console_read_required"));
+            },
+        );
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[FOREGROUND_ATTACH]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = admitted_record(&table, 2, &items, sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+        assert_eq!(
+            spawn_staged(&h, &ctx),
+            Err(Errno::NotForeground),
+            "no terminal stands behind standard input"
+        );
+        assert_eq!(table.read().len(), 1);
+        assert!(denied_for(sink, "terminal_not_held"));
+    }
+
+    /// Whether `sink` recorded a refused spawn for `cause`.
+    fn denied_for(sink: &TestSink, cause: &str) -> bool {
+        sink.snapshot().iter().any(|event| {
+            event.id == AuditEvent::ProcessSpawnDenied.id()
+                && event.fields.iter().any(|(k, v)| k == "cause" && v == cause)
+        })
     }
 
     /// An attach block that names an **installed console** puts the child on
@@ -25600,11 +26077,12 @@ mod tests {
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = admitted_record(&table, 2, &[], sink);
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
         };
+        let child = admitted_record(&table, 9, &[], sink);
 
         let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let rx: &'static RecordingConsoleRead =
@@ -25629,11 +26107,15 @@ mod tests {
             .write()
             .set_streams(ProcessId(2), DescriptorTable::standard());
 
-        // Marking the caller's live child records it on the console.
+        // Marking the caller's live child records it on the console, at the
+        // instance that holds its number.
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Ok(0));
         assert_eq!(
-            consoles[0].foreground().map(|owner| owner.process),
-            Some(ProcessId(9))
+            consoles[0].foreground(),
+            Some(crate::foreground::ProcessInstance {
+                process: ProcessId(9),
+                instance: child.proc_id(),
+            })
         );
         // `pid == 0` clears the slot (the shell back at its prompt).
         assert_eq!(h.console_foreground(&ctx, STDIN, 0), Ok(0));
@@ -25645,6 +26127,10 @@ mod tests {
         assert_eq!(consoles[0].foreground(), None);
         // A non-readable descriptor names no console to mark on.
         assert_eq!(h.console_foreground(&ctx, STDOUT, 9), Err(Errno::NotFound));
+        // A child whose teardown has removed its record has no instance left
+        // to hand the console to, though its row still reads live.
+        let _ = table.write().remove(ProcessId(9));
+        assert_eq!(h.console_foreground(&ctx, STDIN, 9), Err(Errno::NotFound));
         // A zombie (exited, unreaped) child is not a markable target.
         wait.record_exit(ProcessId(9), 0);
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Err(Errno::NotFound));
@@ -25750,8 +26236,8 @@ mod tests {
             .write()
             .register(ProcessId(job), space, physmap)
             .expect("registration succeeds");
-        let shell_caps = make_caps_record(shell, &[CapabilityId::CONSOLE_READ], sink);
-        let job_caps = make_caps_record(job, &[CapabilityId::CONSOLE_READ], sink);
+        let shell_caps = admitted_record(&table, shell, &[CapabilityId::CONSOLE_READ], sink);
+        let job_caps = admitted_record(&table, job, &[CapabilityId::CONSOLE_READ], sink);
         let rx: &'static RecordingConsoleRead =
             crate::forever(Box::new(RecordingConsoleRead::new(b"typed")));
         let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
@@ -25890,17 +26376,17 @@ mod tests {
         // Three principals on the one console: the shell (2) and its two
         // children (9, 7), each with its own registered address space and
         // inherited standard streams.
-        let shell_caps = make_caps_record(2, &[CapabilityId::CONSOLE_READ], sink);
+        let shell_caps = admitted_record(&table, 2, &[CapabilityId::CONSOLE_READ], sink);
         let shell = CallerContext {
             task_id: SecTaskId(2),
             caps: &shell_caps,
         };
-        let fg_caps = make_caps_record(9, &[CapabilityId::CONSOLE_READ], sink);
+        let fg_caps = admitted_record(&table, 9, &[CapabilityId::CONSOLE_READ], sink);
         let fg = CallerContext {
             task_id: SecTaskId(9),
             caps: &fg_caps,
         };
-        let bg_caps = make_caps_record(7, &[CapabilityId::CONSOLE_READ], sink);
+        let bg_caps = admitted_record(&table, 7, &[CapabilityId::CONSOLE_READ], sink);
         let bg = CallerContext {
             task_id: SecTaskId(7),
             caps: &bg_caps,
@@ -25990,8 +26476,8 @@ mod tests {
 
     /// A foreground owner that vanished never wedges its console: the
     /// `exit` path releases the ownership immediately, and a reader that
-    /// proves a stale owner dead through the process bookkeeping heals the
-    /// slot in place instead of being refused forever.
+    /// finds a stale owner's number no longer held by it heals the slot in
+    /// place instead of being refused forever.
     #[test]
     fn a_dead_foreground_owner_never_wedges_the_console() {
         use crate::procwait::ProcessWait as _;
@@ -26008,12 +26494,12 @@ mod tests {
         let second_child = crate::test_boot::claim_peer_task();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let shell_caps = make_caps_record(shell_task, &[CapabilityId::CONSOLE_READ], sink);
+        let shell_caps = admitted_record(&table, shell_task, &[CapabilityId::CONSOLE_READ], sink);
         let shell = CallerContext {
             task_id: SecTaskId(shell_task),
             caps: &shell_caps,
         };
-        let fg_caps = make_caps_record(fg_task, &[], sink);
+        let fg_caps = admitted_record(&table, fg_task, &[], sink);
         let fg = CallerContext {
             task_id: SecTaskId(fg_task),
             caps: &fg_caps,
@@ -26060,10 +26546,11 @@ mod tests {
         assert_eq!(consoles[0].foreground(), None);
         assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
 
-        // A stale slot healed at the gate: re-mark a second child, record
-        // its death behind the console's back (a kill that never ran the
-        // exit handler), and the next refused reader proves it dead and
-        // proceeds instead of being wedged.
+        // A stale slot healed at the gate: re-mark a second child, end it
+        // behind the console's back (a teardown that skips the console, as a
+        // child dying in its load does), and the next refused reader finds
+        // it gone and proceeds instead of being wedged.
+        let _ = admitted_record(&table, second_child, &[], sink);
         wait.register_child(
             ProcessId(shell_task),
             ProcessId(second_child),
@@ -26072,9 +26559,93 @@ mod tests {
         .expect("registered");
         let second_pid = i64::try_from(second_child).expect("a claimed id fits a pid");
         assert_eq!(h.console_foreground(&shell, STDIN, second_pid), Ok(0));
+        let _ = table.write().remove(ProcessId(second_child));
         wait.record_exit(ProcessId(second_child), 0);
         assert_eq!(h.stream_read(&shell, STDIN, 0x1000, 16, 0), Ok(5));
         assert_eq!(consoles[0].foreground(), None);
+    }
+
+    /// A process that draws a dead owner's number is no owner of its
+    /// terminal: it does not hold it, cannot release or re-target it, and the
+    /// owner's granter can still take it back. By number alone it was both.
+    #[test]
+    fn a_later_holder_of_a_dead_owners_number_is_no_owner() {
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let shell_task = crate::test_boot::claim_task();
+        let job_task = crate::test_boot::claim_peer_task();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let shell_caps = admitted_record(&table, shell_task, &[CapabilityId::CONSOLE_READ], sink);
+        let shell = CallerContext {
+            task_id: SecTaskId(shell_task),
+            caps: &shell_caps,
+        };
+        let _ = admitted_record(&table, job_task, &[], sink);
+        for task in [shell_task, job_task] {
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[]);
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+            aspaces
+                .write()
+                .set_streams(ProcessId(task), DescriptorTable::standard());
+        }
+        let rx: &'static RecordingConsoleRead =
+            crate::forever(Box::new(RecordingConsoleRead::new(b"secret")));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            rx,
+        )]));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
+        let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+        wait.register_child(
+            ProcessId(shell_task),
+            ProcessId(job_task),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(wait);
+        let job_pid = i64::try_from(job_task).expect("a claimed id fits a pid");
+        assert_eq!(h.console_foreground(&shell, STDIN, job_pid), Ok(0));
+
+        // The job ends behind the console's back, and a successor is admitted
+        // under its number.
+        let _ = table.write().remove(ProcessId(job_task));
+        wait.record_exit(ProcessId(job_task), 0);
+        let successor_caps = make_caps_record(job_task, &[CapabilityId::CONSOLE_READ], sink)
+            .with_proc_id(ProcId::from_raw([0x5C; PROC_ID_LEN]));
+        table.write().insert(successor_caps.clone());
+        let successor = CallerContext {
+            task_id: SecTaskId(job_task),
+            caps: &successor_caps,
+        };
+        assert_eq!(h.foreground_held(&successor, STDIN), Ok(0));
+        assert_eq!(
+            h.console_foreground(&successor, STDIN, 0),
+            Err(Errno::NotForeground)
+        );
+        let shell_pid = i64::try_from(shell_task).expect("a claimed id fits a pid");
+        assert_eq!(h.console_foreground(&shell, STDIN, shell_pid), Ok(0));
+        assert_eq!(h.foreground_held(&shell, STDIN), Ok(1));
+        assert_eq!(
+            h.stream_read(&successor, STDIN, 0x1000, 16, 0),
+            Err(Errno::NotForeground)
+        );
     }
 
     /// The read line discipline belongs to the foreground owner exactly as
@@ -26093,12 +26664,12 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let shell_caps = make_caps_record(2, &[], sink);
+        let shell_caps = admitted_record(&table, 2, &[], sink);
         let shell = CallerContext {
             task_id: SecTaskId(2),
             caps: &shell_caps,
         };
-        let fg_caps = make_caps_record(9, &[], sink);
+        let fg_caps = admitted_record(&table, 9, &[], sink);
         let fg = CallerContext {
             task_id: SecTaskId(9),
             caps: &fg_caps,
@@ -26249,12 +26820,12 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let both = [CapabilityId::CONSOLE_READ, CapabilityId::CONSOLE_WRITE];
-        let shell_caps = make_caps_record(2, &both, sink);
+        let shell_caps = admitted_record(&table, 2, &both, sink);
         let shell = CallerContext {
             task_id: SecTaskId(2),
             caps: &shell_caps,
         };
-        let fg_caps = make_caps_record(9, &both, sink);
+        let fg_caps = admitted_record(&table, 9, &both, sink);
         let fg = CallerContext {
             task_id: SecTaskId(9),
             caps: &fg_caps,
@@ -47596,12 +48167,14 @@ mod tests {
                 crate::procwait::ChildListing::Listed,
             )
             .expect("registered");
-        let shell_caps = make_caps_record(shell, &[CapabilityId::CONSOLE_READ], sink);
+        let shell_caps =
+            admitted_record(&harness.table, shell, &[CapabilityId::CONSOLE_READ], sink);
         let shell_ctx = CallerContext {
             task_id: SecTaskId(shell),
             caps: &shell_caps,
         };
-        let child_caps = make_caps_record(child, &[CapabilityId::CONSOLE_READ], sink);
+        let child_caps =
+            admitted_record(&harness.table, child, &[CapabilityId::CONSOLE_READ], sink);
         let child_ctx = CallerContext {
             task_id: SecTaskId(child),
             caps: &child_caps,

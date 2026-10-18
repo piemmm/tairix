@@ -37,7 +37,7 @@ use tairix_sync::once::OnceCell;
 use tairix_sync::{IrqSafeSpinLock, RwLock, SpinLock};
 
 use crate::dispatch_slot::RescheduleAction;
-use crate::foreground::ForegroundOwner;
+use crate::foreground::ProcessInstance;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 
 /// Per-task signal-intake state (`plans/STRESSTEST.md` ST3): key present
@@ -1043,7 +1043,7 @@ pub trait ForegroundSignal: Sync {
     /// [`Errno::NotFound`] when the target no longer exists, or the pid now
     /// names a different process instance; [`Errno::OutOfRange`] for a signal
     /// the line discipline never maps.
-    fn deliver(&self, owner: ForegroundOwner, signal: Signal) -> Result<(), Errno>;
+    fn deliver(&self, owner: ProcessInstance, signal: Signal) -> Result<(), Errno>;
 }
 
 /// The boot-installed [`ForegroundSignal`] hook (set-once per boot).
@@ -1116,7 +1116,7 @@ pub struct TaskReclaimAlreadyInstalled;
 /// Written from the UART receive interrupt and drained in dispatcher
 /// context, so the lock masks the writing CPU for the store rather than
 /// risking a self-deadlock against the task it interrupted.
-static PENDING_FOREGROUND: IrqSafeSpinLock<Option<(ForegroundOwner, Signal)>> =
+static PENDING_FOREGROUND: IrqSafeSpinLock<Option<(ProcessInstance, Signal)>> =
     IrqSafeSpinLock::new(None);
 
 /// Whether [`PENDING_FOREGROUND`] holds a signal, for the preemption gate's
@@ -1135,7 +1135,7 @@ static FOREGROUND_QUEUED: AtomicBool = AtomicBool::new(false);
 /// the UART RX handler that maps `^C` cannot deadlock against the task it
 /// interrupted, and it takes no scheduler lock at all — the delivery that
 /// does runs later, in dispatcher context.
-pub fn queue_foreground_signal(owner: ForegroundOwner, signal: Signal) {
+pub fn queue_foreground_signal(owner: ProcessInstance, signal: Signal) {
     *PENDING_FOREGROUND.lock() = Some((owner, signal));
     FOREGROUND_QUEUED.store(true, Ordering::Release);
 }
@@ -1746,7 +1746,7 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn deliver(&self, owner: ForegroundOwner, signal: Signal) -> Result<(), Errno> {
+    fn deliver(&self, owner: ProcessInstance, signal: Signal) -> Result<(), Errno> {
         // The ownership was granted to one *instance* of that pid, and an id
         // whose task is gone may be drawn again, so a target whose pid now
         // names a different instance is refused outright: a `^C` must never
@@ -1800,7 +1800,7 @@ pub(crate) fn running_kill_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// line-discipline tests can assert what the filter queued without invoking
 /// whichever process-global hook another test may have installed.
 #[cfg(test)]
-pub(crate) fn take_pending_foreground_for_test() -> Option<(ForegroundOwner, Signal)> {
+pub(crate) fn take_pending_foreground_for_test() -> Option<(ProcessInstance, Signal)> {
     FOREGROUND_QUEUED.store(false, Ordering::Release);
     PENDING_FOREGROUND.lock().take()
 }
@@ -1812,7 +1812,7 @@ pub(crate) fn take_pending_foreground_for_test() -> Option<(ForegroundOwner, Sig
 pub(crate) fn ensure_foreground_hook_for_test() {
     struct InertHook;
     impl ForegroundSignal for InertHook {
-        fn deliver(&self, _owner: ForegroundOwner, _signal: Signal) -> Result<(), Errno> {
+        fn deliver(&self, _owner: ProcessInstance, _signal: Signal) -> Result<(), Errno> {
             Ok(())
         }
     }
@@ -1892,8 +1892,8 @@ mod tests {
     /// resolves: no distinct process instances exist on such a build, so both
     /// sides carry the kernel sentinel and the delivery gate lets the signal
     /// through to the mechanics under test.
-    fn fg(process: u64) -> ForegroundOwner {
-        ForegroundOwner {
+    fn fg(process: u64) -> ProcessInstance {
+        ProcessInstance {
             process: ProcessId(process),
             instance: ProcId::KERNEL,
         }
@@ -3384,7 +3384,7 @@ mod tests {
         caps: &RwLock<CapTable>,
         process: ProcessId,
         instance: ProcId,
-    ) -> ForegroundOwner {
+    ) -> ProcessInstance {
         let sink = crate::test_sink::TestSink::new();
         let record = tairix_kernel_sec::TaskCapabilities::derive(
             process,
@@ -3395,7 +3395,7 @@ mod tests {
         )
         .with_proc_id(instance);
         caps.write().insert(record);
-        ForegroundOwner { process, instance }
+        ProcessInstance { process, instance }
     }
 
     /// A `^C` aimed at one process instance is refused once the pid names a

@@ -713,13 +713,11 @@ implementation fixed):
   stamped the system user, which locked creators out of their own
   private-mode files — the scratch tree under `$HOME/Library/stress`
   depends on the fix.
-- **Reconciliation — orphans strand no zombies, without lying about
-  liveness.** The one shared task reclaim gained
-  `ProcessWait::parent_exited`: a dead parent's unreaped zombie rows are
-  dropped and its running children become orphans (`parent: None`) whose
-  rows survive so `is_live` stays honest for the console-foreground
-  gate; an orphan's own exit removes its row instead of minting an
-  unreapable zombie. `--background` builds on this: the front process
+- **Reconciliation — orphans strand no zombies.** The one shared task
+  reclaim gained `ProcessWait::parent_exited`: every row a dead parent
+  owned goes — an unreaped zombie's returning its number — so an orphan's
+  own exit owes no reap instead of minting an unreapable zombie.
+  `--background` builds on this: the front process
   re-spawns `@self` (options minus `--background`, `--quiet` implied,
   `HOME` threaded), prints the controller PID, and exits — the detached
   run continues as a safe orphan until the login session it was started in
@@ -756,8 +754,8 @@ implementation fixed):
   all-refused end, monitor policy, no phase regression), kernel host
   tests for the widened `@self` (plain spawn serves, no-path refusal),
   `stamp_creation` (creator-owned file + directory), and
-  `parent_exited` (zombie drop, honest orphan liveness, no stranded
-  zombie, sibling isolation, stop discard), and the
+  `parent_exited` (zombie drop, a running child's row dropped, no
+  stranded zombie, sibling isolation, stop discard), and the
   `stress_qemu_aarch64` full-boot vertical reproduces the reported metal
   sequence exactly on four CPUs: login → wait one second at the first shell
   prompt → `stress --cpu 10 --timeout 120s --background` → returned prompt

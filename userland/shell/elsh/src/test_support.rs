@@ -66,6 +66,15 @@ pub(crate) struct LaunchRecord {
     pub background: bool,
 }
 
+/// One job-control act the [`ScriptedHost`] was asked for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum JobControl {
+    /// The terminal handed to a job, or taken back with `None`.
+    Foreground(Option<Pid>),
+    /// A signal delivered to a job.
+    Signal(Pid, Signal),
+}
+
 /// A programmable [`ProcessHost`].
 pub(crate) struct ScriptedHost {
     next_pid: RefCell<u64>,
@@ -73,7 +82,8 @@ pub(crate) struct ScriptedHost {
     fail_launch: RefCell<Option<(String, Errno)>>,
     fail_redirection: RefCell<Option<Errno>>,
     waits: RefCell<BTreeMap<u64, WaitOutcome>>,
-    signals: RefCell<Vec<(Pid, Signal)>>,
+    refuse_signals: RefCell<bool>,
+    job_control: RefCell<Vec<JobControl>>,
     directories: RefCell<Vec<String>>,
     poll_queue: RefCell<Vec<(Pid, WaitOutcome)>>,
 }
@@ -86,7 +96,8 @@ impl ScriptedHost {
             fail_launch: RefCell::new(None),
             fail_redirection: RefCell::new(None),
             waits: RefCell::new(BTreeMap::new()),
-            signals: RefCell::new(Vec::new()),
+            refuse_signals: RefCell::new(false),
+            job_control: RefCell::new(Vec::new()),
             directories: RefCell::new(Vec::new()),
             poll_queue: RefCell::new(Vec::new()),
         }
@@ -130,8 +141,14 @@ impl ScriptedHost {
         self.launches.borrow().clone()
     }
 
-    pub(crate) fn last_signal(&self) -> Option<(Pid, Signal)> {
-        self.signals.borrow().last().copied()
+    /// Every job-control act so far, in the order it was asked for.
+    pub(crate) fn job_control(&self) -> Vec<JobControl> {
+        self.job_control.borrow().clone()
+    }
+
+    /// Make every `signal` fail, as for a job that has already gone.
+    pub(crate) fn refuse_signals(&self) {
+        *self.refuse_signals.borrow_mut() = true;
     }
 }
 
@@ -170,8 +187,19 @@ impl ProcessHost for ScriptedHost {
     }
 
     fn signal(&self, pid: Pid, signal: Signal) -> Result<(), Errno> {
-        self.signals.borrow_mut().push((pid, signal));
+        if *self.refuse_signals.borrow() {
+            return Err(Errno::NotFound);
+        }
+        self.job_control
+            .borrow_mut()
+            .push(JobControl::Signal(pid, signal));
         Ok(())
+    }
+
+    fn foreground(&self, job: Option<Pid>) {
+        self.job_control
+            .borrow_mut()
+            .push(JobControl::Foreground(job));
     }
 
     fn poll(&self) -> Option<(Pid, WaitOutcome)> {

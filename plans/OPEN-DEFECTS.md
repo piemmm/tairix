@@ -22,15 +22,15 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 392 open, 755 closed, 1147 total.
+**closed**, and a partial fix stays **open**. 395 open, 759 closed, 1154 total.
 
-### Open (392)
+### Open (395)
 
 | ID | Subject | Note |
 |---|---|---|
 | D1 | FIX-SYSCALL residual per-arch verticals (x86_64, riscv64) | design and code done; verticals not written |
 | D3 | hard-lockup watchdog parity on x86_64 and riscv64 | aarch64 is the only port wired |
-| D15 | `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage | — |
+| D15 | `autoload-input-qemu-aarch64` intermittently never finishes on the runner: the guest stays alive with its desktop idle until the ceiling | not reproduced locally in 54 runs; a killed run now names the script step it stalled at, which the 2026-10-17 runner occurrence predates |
 | D17 | riscv64 loader performs no instruction-cache maintenance for loaded code | does not reproduce under QEMU; real silicon can fetch stale code |
 | D27 | ARXFS has no persistent deduplication index | correctness-safe |
 | D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
@@ -421,8 +421,11 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1151 | `audiod` completes draining streams per sink: a draining stream reaches `Idle` only once every stream on its endpoint has drained and the device's one `Drained` notify arrives (`finish_drain`, `settle_streams`), so a short sound overlapping a longer one on the same sink is reported played out only when the longer one ends — late, and past its deadline, so `soundd` cuts a sound already heard — and `settle_streams` marks a stream that joined in the drain's last period `Idle` though it never sounded. Per-stream completion needs the driver to report the ring position played through, distinct from its clock position, which counts the silence it pads with | high; found tracing D1138; escalated: an `audiochan-v1` change every audio driver implements |
 | D1152 | the cyclic audio channel (`lib/audiochan/src/cyclic.rs`) mishandles drains: a stream that joins a draining endpoint does not cancel the drain (`start` returns early while the device runs), the drain pads ahead with silent periods later frames queue behind, and a drain asked with nothing queued, or of a stopped endpoint, parks without the `Drained` the `Audio::drain` contract promises from the next `service` — none follows a parked device — so `audiod` keeps `active.running` set and no later stream on that sink plays | high; found tracing D1138; escalated with D1151: the drain contract every audio driver implements changes with it |
 | D1153 | `soundd` performs blocking store I/O on its serve loop for every admitted cue — the settings refresh's open and stat, the asset's stat, a whole-file read on a cache miss — before the concurrency cap is checked, and dates a cue's deadline from the turn's wake rather than from its stream's start, so a slow volume delays every other caller and spends a cue's slack before it sounds | medium; found tracing D1138; escalated: the store moves behind a worker and the deadline is taken at start |
+| D1157 | a kernel body that enters user mode never returns to drop what it owns: the kthread trampoline moves the boxed body onto its own frame and calls it, and `UserThreadEntry::enter` diverges, so every spawned process, every `thread_create` thread and PID 1 leak the box and its captures for good — for a spawn its argument vector, environment, record seed and load plan, with the body's `Arc<ThreadGate>` clone and argument-reference vectors | **high**: kernel heap an unprivileged user exhausts by spawning in a loop; noticed fixing D1155; escalated: the fix is the kthread body contract — a body hands its `UserThreadEntry` back and the trampoline enters it only once the body is dropped — and touches every user-entering body and the QEMU fixtures that spawn one. `kernel/core/src/kthread.rs` (`trampoline`), `kernel/core/src/syscalls.rs` (`admit_loading`), `kernel/core/src/threads.rs`, `kernel/core/src/init.rs` (`admit_init`) |
+| D1158 | foreground ownership names one process, so a pipeline's terminal goes only to its leader: `^C`/`^Z` reach the leader alone, and an earlier member reading the terminal (`cat \| grep x`) is refused `NotForeground` for the job's whole life | medium; noticed fixing D1155; escalated: the fix is a job-level owner — a set of processes, the process-group analogue — which the ownership, the read gate and the signal delivery all take, and which the shell hands each job. `kernel/core/src/foreground.rs`, `userland/shell/elsh/src/run.rs` (`launch`) |
+| D1160 | a foreground job's death opens its terminal instead of returning it to its granter: the exit path and the read gate clear the slot to unowned, so until the shell takes it back a background job reading the same terminal takes the keystrokes typed in between; and an owner re-granting itself the terminal replaces its granter, so a nested shell's death leaves the outer one unable to take the terminal back until a read heals the slot | medium; noticed fixing D1155; escalated rather than absorbed, because it changes the open-on-death behaviour `plans/DISPLAY.md` D5 states: a dead owner should hand the terminal back to a live granter, and an owner re-granting itself should keep its granter. `kernel/core/src/foreground.rs` (`clear_dead`, `grant`) |
 
-### Closed (755)
+### Closed (759)
 
 | ID | Subject |
 |---|---|
@@ -1181,6 +1184,10 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1148 | Settings' credential question stayed editable while its elevation ran, so a second Enter asked for a second run; the shared sheet now has a checking state (`CredentialSheet::check`) that erases the handed-over password and takes no input until it is refused; `a_sheet_being_checked_takes_no_input_until_it_is_refused`, `a_question_being_checked_asks_for_no_second_run` |
 | D1149 | `audiod` programmed an endpoint's period as half its first stream's latency target with no ceiling, so a cue queueing its whole 0.76 s sound made every later stream on the HDMI sink wait behind 16 384-frame (341 ms) periods; the period is at most 20 ms; `a_deep_first_client_does_not_make_the_period_long`, `a_shallow_client_keeps_its_short_period_within_the_endpoints_bounds` |
 | D1150 | `soundd` acted on every notification in a cue's mailbox whatever stream it named, though a stream inherits a closed one's mailbox, so a closed stream's `Idle` could end the next cue at once and record it played out; a cue reads only notifications naming its own stream (`AudioNotify::stream_id`); `a_closed_streams_notification_ends_no_later_cue` |
+| D1154 | the miri stage overran a slower runner's 45-minute per-job budget again: `lib/collections` still interpreted its whole suite in one process (877 s on a 24-core host), and single tests cost up to ten minutes interpreted — `lib/rt`'s two-mebibyte read over a fixture filled a byte at a time, the ports' scans of their own sources, AMD-Vi's remapping switch and four-unit header sweep, `kernel/mem`'s compressed-tier cap, RAM-test batch windows and 64-case frame properties, `kernel/core`'s PBKDF2 logins, the LRU's largest size, a PRNG statistic, the ITS quiesce spun out — so a runner shard holding one spent four fifths of its budget. `lib/collections`' and the DMA translation API's libraries are dealt across cores, collections' integration tests enrolled beside its library; samples are scaled under `cfg(miri)`, and the extents that are their test's assertion leave the interpreter by name with their reasons; `a_package_filter_selects_every_test_binary_of_that_package` |
+| D1155 | the shell handed its foreground job the terminal only in `wait`, after `spawn` had returned, so a `^C` written between the two reached no job; `SPAWN_FLAG_FOREGROUND` hands the child the terminal behind the spawner's stdin under the capability-table lock that admits its record, refusing the spawn whole when it cannot, a child born dead gives it back exactly as it stood (`HandOver`, `ForegroundOwnership::undo`), and elsh spawns each foreground job's leader with it and hands a job `fg` resumes the terminal before its `Continue`; pinned by `a_foreground_spawn_hands_the_child_its_terminal_before_spawn_returns`, `a_foreground_spawn_that_cannot_hand_over_is_refused_before_the_child_exists`, `a_terminal_taken_after_the_check_refuses_the_admission_whole`, `a_child_born_dead_gives_its_terminal_back_as_it_stood`, `an_undone_grant_restores_what_it_replaced`, `an_undo_leaves_a_later_change_of_hands_alone`, `spawn_attach_foreground_round_trips_and_reports_the_hand_over`, `fg_resumes_waits_and_reaps_on_exit` and `fg_takes_the_terminal_back_when_the_job_cannot_resume` |
+| D1156 | a teardown owing no reap left its process's wait row standing while its number went back to the draw — a driver unload, an admission refused after `register_child` — so the parent's wait for any child slept on a child that was gone, and the number's next holder read as that parent's child, signallable and grantable a terminal by it; `retire_number` withdraws a statusless death's row first (`ProcessWait::withdraw`), waking the parent to re-check; pinned by `a_landing_without_a_status_reclaims_but_records_no_exit`, `a_withdrawn_child_leaves_no_row_behind`, `a_childs_exit_or_stop_wakes_only_its_own_parents_waiters` and `a_terminal_taken_after_the_check_refuses_the_admission_whole` |
+| D1159 | foreground ownership named its owner by instance but its granter and every caller by pid, and the read gate admitted any process holding the owner's pid, so a process drawing a dead owner's number read the terminal as its owner and could release or re-target it, and one drawing a dead granter's could take it; every party is a `ProcessInstance`, the read gate proves an owner dead by its number no longer naming its instance (`ProcessWait::is_live`, and the orphan rows only it read, went with the old test), and a child whose record is gone is no `console_foreground` target; pinned by `a_later_holder_of_a_partys_number_is_a_stranger`, `a_later_holder_of_a_dead_owners_number_is_no_owner` and `console_foreground_authorises_and_records_the_foreground_child` |
 
 ## Scope
 
@@ -1782,72 +1789,22 @@ The open items, in priority order:
   dispatcher check that a suspension point lies on the task's own kernel stack.
   See the full entry below.
 
-- **D15 — `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage,
-  timing-perturbable by an unrelated binary-size change — OPEN (for the
-  PTY owner).** While landing the RFC 3168 TCP ECN engine (`plans/NETWORK.md`
-  N13 — pure `lib/net`/`netstack` changes, nothing on the terminal/pty/
-  shell/signal path, `enable_ecn` off by default so netstack behaviour is
-  byte-identical), this vertical began freezing at the **AW4 PTY Ctrl-C
-  job-control sub-stage** (`plans/PTY.md`): the guest emits `PTY ctrl-c
-  armed`, spawns the recovery tasks, then the single CPU stops advancing
-  (~60 s guest-time) with **no** kernel WARN/ERROR/panic/OOM — the desktop's
-  own IPC loop stops too. A/B confirmed: with the ECN change the vertical
-  freezes 4/4 runs (300 s **and** an 1800 s budget — a real freeze, not
-  slowness); with the ECN change `git stash`ed it **passes**. Because ECN
-  cannot reach the pty path, the correlation is a **timing perturbation**
-  (the slightly larger `netstack`/driver binaries shift load/spawn timing),
-  which points at a **D10-class fragile test-harness readiness gate** in the
-  Ctrl-C stage — the same failure mode D10 fixed for the terminal-focus
-  click (a gate keyed on a global window-endpoint `CallReplied`/occurrence
-  count rather than a monotonic creation event). D10 fixed the terminal
-  *focus* gate but the newer PTY Ctrl-C sub-stage appears to carry the same
-  fragility. The ECN change is otherwise fully green (host tests,
-  integration, `fuzz --secs 5`, clippy `-D warnings`, docs, fmt) and was
-  accepted with this recorded for the PTY owner. Recommended fix
-  (structural, per §7/§2.17): re-gate the Ctrl-C stage on a monotonic,
-  count-independent readiness marker (as D10 did with `sc=shm_map` window
-  creation), **not** a timeout bump or retry; reproduce with
-  `cargo xtask test --qemu --only autoload-input-qemu-aarch64` on this
-  branch. The subsequent RFC 8511 ABE change (`plans/NETWORK.md` N13,
-  `lib/net::tcp::cc`) reproduces the identical freeze for the identical
-  reason — a few added `lib/net` constants/helpers shift the same load/spawn
-  timing; ABE cannot reach the pty path (`enable_ecn` off, `on_ecn`
-  unreachable without a negotiated-ECN connection) — and was likewise
-  accepted with this recorded for the PTY owner. The subsequent DHCPv4
-  D2 change (`plans/DHCP.md` — the `lib/net::Stack`/`netstack` interface
-  integration of the DHCP client) reproduces the identical 300 s timeout at
-  the same PTY Ctrl-C stage (the last bundle of the store scan loaded — the
-  transcripts name `viewer.app`, since deleted — desktop still pumping, no
-  WARN/panic/OOM) for the identical reason — a few added `lib/net`/`netstack`
-  bytes shift the same load/spawn timing; DHCP cannot reach the pty path — and
-  was likewise accepted (User-confirmed) with this recorded for the PTY owner.
-  The subsequent DHCPv6 D4a change (`plans/DHCP.md` — the pure
-  `lib/net::dhcpv6` RFC 8415 client engine) reproduces the identical 300 s
-  timeout at the same stage (the store scan's last bundle loaded ~87 s
-  guest-time, desktop still pumping IPC, no WARN/panic/OOM) for the identical reason — the new
-  `lib/net` module adds compiled bytes that shift the same load/spawn
-  timing; DHCPv6 is inert at runtime here (D4a is engine-only, no netstack
-  wiring) so it cannot reach the pty path — and was likewise recorded for
-  the PTY owner. The subsequent DHCPv6 **D4c** change (`plans/DHCP.md` — the
-  live two-process QEMU verticals; production `lib/net`/`netstack` untouched,
-  all new code test-only in `netpeer`/`netstack_wire`/the three `dhcp6` test
-  crates) reproduces the identical 300 s PTY-Ctrl-C-stage freeze for the
-  identical reason and is likewise recorded for the PTY owner. That increment
-  *did* land part of the §7/§2.17 structural recommendation — it bound the QEMU
-  matrix concurrency harder (`qemu_host_budget_for`: one-quarter → one-**sixth**
-  of logical CPUs) so co-scheduled single-CPU TCG guests get more host headroom;
-  that rescued the new heavier `netstack-dhcp6-qemu-aarch64` full-boot vertical
-  (which had briefly tripped a load-dependent 240 s timeout, now a 360 s budget
-  sized to DHCPv6's larger work), but this desktop/PTY vertical still freezes on
-  the D10-class readiness gate above, which only the marker re-gate will fix.
-  Any small binary-size change is expected to keep tripping this gate until that
-  structural fix lands. The subsequent DNS **DNS1** change (`plans/DNS.md` — the
-  pure `lib/net::dns` RFC 1035/RFC 5452 stub-resolver engine, engine-only with no
-  netstack wiring) reproduces the identical 300 s PTY-Ctrl-C-stage freeze for the
-  identical reason — the new `lib/net` module adds compiled bytes that shift the
-  same load/spawn timing, and DNS is inert at runtime here so it cannot reach the
-  pty path — and was likewise accepted (User-confirmed) with this recorded for the
-  PTY owner.
+- **D15 — `autoload-input-qemu-aarch64` intermittently never finishes on the
+  runner — OPEN.** The vertical scripts the whole desktop round trip
+  (`tests/integration/autoload_input_qemu_aarch64/src/lib.rs`), and on the
+  runner a run occasionally stops part-way with the guest alive and its desktop
+  idle. On 2026-10-17 the PCI variant reached its 600 s ceiling silent for
+  1.7 s, the Switchboard's two-second sampling being the only output; earlier
+  occurrences sat at the pty Ctrl-C stage and followed binary-size changes
+  that only shift timing. That points at a gate racing its subject rather than
+  a deadlock: D10 and D19/D20 fixed gates of that kind, and D1155 was another,
+  closed by the spawn making the foreground hand-over itself. Not reproduced
+  locally in 54 runs, 30 beside a
+  20-process interpreter load and 24 with QEMU confined to two busy cores. A
+  run killed at either deadline now reports where each script stopped — the
+  step its cursor was on and how often that step's marker had appeared
+  (`tools/qemu` `InjectionState::incomplete_report`) — so the next occurrence
+  names the stalled step; the cause stays open until one does.
 
 - **D16 — Raspberry Pi 4 near-every-boot hard lockup ~10 s after USB-HID
   bring-up — DONE.** On real BCM2711 (never QEMU, which uses virtio and a

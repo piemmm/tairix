@@ -765,6 +765,7 @@ pub fn admit_errno(err: AdmitError) -> Errno {
         AdmitError::NodeBusy => Errno::Busy,
         AdmitError::NodeGone => Errno::DeviceOffline,
         AdmitError::GrantsWithoutNode => Errno::PermissionDenied,
+        AdmitError::NotForeground => Errno::NotForeground,
     }
 }
 
@@ -991,6 +992,9 @@ pub enum AdmitError {
     NodeGone,
     /// Device grants were asked for with no node to revoke them through.
     GrantsWithoutNode,
+    /// The terminal the spawn was to hand its child changed hands while the
+    /// child was admitted, to a task the spawner has no authority over.
+    NotForeground,
 }
 
 /// The hardware-tree node a driver is loaded for, and the tree that must
@@ -1788,6 +1792,7 @@ mod tests {
             admit_errno(AdmitError::GrantsWithoutNode),
             Errno::PermissionDenied
         );
+        assert_eq!(admit_errno(AdmitError::NotForeground), Errno::NotForeground);
     }
 
     /// The shared caller-errno mapping keeps the stable codes: a denied

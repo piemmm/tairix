@@ -1830,10 +1830,12 @@ host passes a command's words and the shell's exported variables (with any
 `NAME=v cmd` prefix overrides layered on top) to every launched program.
 Job control is live end to end (`plans/SPAWN.md` SP7/SP9): the runtime host
 delivers `Continue`/`Terminate`/`Kill` through the `signal` syscall, holds
-its terminal on fd 0 from start-up, hands it to its foreground child
-(`console_foreground`) around every blocking wait so the kernel's cooked-mode
-line discipline routes `^C`/`^Z` to the running job, and takes it back after,
-so at the prompt a background job reads nothing. It waits with
+its terminal on fd 0 from start-up, hands it to each foreground job's leader
+as part of that leader's spawn (`SPAWN_FLAG_FOREGROUND`) and to a job `fg`
+resumes before resuming it, so the kernel's cooked-mode line discipline
+routes `^C`/`^Z` to the job from the moment it exists, and takes it back after
+every wait, so at the prompt a background job reads nothing. Only the leader
+is handed the terminal (`plans/OPEN-DEFECTS.md` D1158). It waits with
 `WaitFlags::STOPPED` so a `^Z`-stopped job returns to the prompt as
 `WaitOutcome::Stopped` (`$?` = 148) and `fg`/`bg` resume it. Pipes and redirections run end to end (`plans/SPAWN.md` SP10):
 the pure `tairix_elsh::wireplan` planner lowers each pipeline into

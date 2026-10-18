@@ -1885,6 +1885,10 @@ mod tests {
     use std::format;
     use std::vec::Vec;
 
+    /// Generated cases per property: the interpreter needs each path once,
+    /// not the search.
+    const PROPERTY_CASES: u32 = if cfg!(miri) { 8 } else { 64 };
+
     /// A map whose single usable region starts at frame 16 — clear of the
     /// permanently reserved zero page, and aligned for the largest order
     /// the merge test draws — so `usable_pages` frames enter the pool.
@@ -3129,7 +3133,7 @@ mod tests {
 
         let strat = proptest::collection::vec(any::<u8>(), 1..200);
         let mut runner = TestRunner::new(Config {
-            cases: 64,
+            cases: PROPERTY_CASES,
             ..Config::default()
         });
         runner
@@ -3448,7 +3452,7 @@ mod tests {
         const END: usize = 80;
         let strat = proptest::collection::vec((any::<u8>(), 0u32..=4, 0usize..=96), 1..160);
         let mut runner = TestRunner::new(Config {
-            cases: 64,
+            cases: PROPERTY_CASES,
             ..Config::default()
         });
         runner

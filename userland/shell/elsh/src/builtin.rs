@@ -219,7 +219,10 @@ fn fg(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
     };
     let pid = job.pid;
     let command = job.command.clone();
+    // Handed over first, so the job never runs a moment without its terminal.
+    ctx.host.foreground(Some(pid));
     if ctx.host.signal(pid, Signal::Continue).is_err() {
+        ctx.host.foreground(None);
         ctx.console.write_stderr("fg: cannot resume job\n");
         return USAGE_ERROR;
     }
@@ -280,7 +283,7 @@ fn help(ctx: &mut BuiltinContext<'_>) -> i32 {
 mod tests {
     use super::{is_builtin, BUILTIN_NAMES};
     use crate::job::{JobState, Pid, Signal, WaitOutcome};
-    use crate::test_support::Fixture;
+    use crate::test_support::{Fixture, JobControl};
 
     /// The single name list and the dispatch match cannot drift apart: every
     /// listed name is a builtin and actually dispatches (with no operands —
@@ -383,8 +386,9 @@ mod tests {
         let id = fx.jobs.add(Pid::new(20), "build", JobState::Stopped);
         assert_eq!(fx.run(&["bg", "%1"]), Some(0));
         assert_eq!(
-            fx.host.last_signal(),
-            Some((Pid::new(20), Signal::Continue))
+            fx.host.job_control(),
+            [JobControl::Signal(Pid::new(20), Signal::Continue)],
+            "a background job is not handed the terminal"
         );
         assert_eq!(fx.jobs.by_id(id).map(|j| j.state), Some(JobState::Running));
         assert_eq!(fx.console.stdout(), "[1] build &\n");
@@ -398,6 +402,31 @@ mod tests {
         assert_eq!(fx.run(&["fg"]), Some(0));
         assert!(fx.jobs.by_id(id).is_none());
         assert!(fx.console.stdout().contains("make\n"));
+        assert_eq!(
+            fx.host.job_control(),
+            [
+                JobControl::Foreground(Some(Pid::new(30))),
+                JobControl::Signal(Pid::new(30), Signal::Continue),
+            ],
+            "the job holds the terminal before it resumes"
+        );
+    }
+
+    #[test]
+    fn fg_takes_the_terminal_back_when_the_job_cannot_resume() {
+        let mut fx = Fixture::new();
+        let id = fx.jobs.add(Pid::new(32), "gone", JobState::Stopped);
+        fx.host.refuse_signals();
+        assert_eq!(fx.run(&["fg"]), Some(1));
+        assert_eq!(
+            fx.host.job_control(),
+            [
+                JobControl::Foreground(Some(Pid::new(32))),
+                JobControl::Foreground(None),
+            ]
+        );
+        assert_eq!(fx.jobs.by_id(id).map(|j| j.state), Some(JobState::Stopped));
+        assert_eq!(fx.console.stderr(), "fg: cannot resume job\n");
     }
 
     #[test]

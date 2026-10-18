@@ -52,7 +52,7 @@ produced, which names the test it was in. A measured warm run:
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `kernel/mem`, `kernel/core`'s library, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `lib/collections`'s and `kernel/core`'s libraries, `kernel/mem`, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the DMA translation API and its RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host
@@ -79,7 +79,11 @@ allocator's zone tests drain a zone a block at a time, not a frame at a time —
 and a fixture is carried rather than made where making it is the cost: one
 PBKDF2 derivation at the minimum accepted cost takes minutes interpreted, so
 the account suites decode precomputed password records and derive only where a
-login is the assertion.
+login is the assertion, and those few leave the interpreter. A slower runner
+found the cost again: `lib/collections` still ran whole in one process and
+overran, and single tests took up to ten minutes interpreted, a shard holding
+one spending four fifths of its job budget there (`plans/OPEN-DEFECTS.md`
+D1154).
 
 The cost that remains is the aliasing model, not the code: a zero-on-free clear
 is a volatile write per byte, and the same `dma` test costs 716 s under Stacked
@@ -88,14 +92,17 @@ stands — it is the stricter of the two, and the one intrusive pointer code is
 likeliest to violate — so where the interpreted extent is a sample rather than
 the assertion it is scaled under `cfg(miri)`. Where the extent is the assertion
 and the `unsafe` it reaches is reached elsewhere, the test is excluded by name
-instead: `kernel/mem`'s two `dma` capacity tests, one streaming thirteen
-32-page device regions through a full-gigabyte window (four hours interpreted)
-and one carving a page past the largest 32 MiB buddy block (some twenty times
-that); `lib/abi`'s single-byte sweep of the 2.8 KiB machine report, seventeen
-thousand decodes through safe code, costing half an hour; and the aarch64
-port's redistributor that never wakes, whose assertion is the exhaustion of a
-million-poll budget, also half an hour, through safe code. The registry names
-every exclusion and carries its reason.
+instead — a capacity, a whole one-mebibyte transfer, a poll budget spun out, a
+batch of samples, a login's derivation, an AMD-Vi device table rewritten for
+interrupt remapping — and so is a test that reaches no `unsafe` at all, such as
+a port's scan of its own assembly sources. A fixture built a byte at a time,
+free natively but minutes interpreted, is built in bulk instead. The heaviest were `kernel/mem`'s two
+`dma` capacity tests, one streaming thirteen 32-page device regions through a
+full-gigabyte window (four hours interpreted) and one carving a page past the
+largest 32 MiB buddy block (some twenty times that), then `lib/abi`'s
+single-byte sweep of the 2.8 KiB machine report and the aarch64 port's
+redistributor that never wakes, half an hour each through safe code. The
+registry names every exclusion and carries its reason.
 
 Figures in this table are wall clock, taken from outside. Miri's own clock is
 virtual: the `finished in …` line a test binary prints under the interpreter is
@@ -339,7 +346,10 @@ and kept beside the transcript as `<binary>.hang.txt`. That is what separates a
 machine whose cores are all halted in a wait-for-interrupt — nothing runnable,
 so a wake-up was lost — from one still executing inside an interrupt-masked
 section. Without it a hang can only be diagnosed by re-running it, which
-[§7][test] forbids as a diagnosis.
+[§7][test] forbids as a diagnosis. The transcript then ends with a
+`tairix-qemu:` line naming where each scripted exchange stopped: the step each
+cursor was on and how often that step's marker had appeared. A choreography
+that waited on a witness that never came names it in the report itself.
 
 Other subcommands (`build`, `clean`, `prune`, `coverage`) exist for
 development and release flows; they are documented by `cargo xtask --help`.

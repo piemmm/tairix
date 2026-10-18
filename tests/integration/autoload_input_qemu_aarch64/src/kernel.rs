@@ -115,15 +115,12 @@ impl AutoloadInputSink {
     /// * loading [`TERMINAL_ROUND_TRIP_BUNDLE`] (`sleep`) is the AW4 round
     ///   trip — the shell resolved and ran the typed command. On that
     ///   latch the guest emits [`CTRL_C_ARM_MARKER`] so the host runner
-    ///   injects its `Ctrl-C` recovery step against a live, parked
-    ///   foreground job (never before one exists).
+    ///   injects its `Ctrl-C` recovery step only once the job exists.
     /// * loading [`CTRL_C_RECOVERY_BUNDLE`] (`true`) *after* that is the
     ///   recovered job the shell could reach only once `Ctrl-C`
     ///   interrupted the parked `sleep` (it is blocked in `wait` until
     ///   then), so it witnesses the pty cooked-mode job-control path end
-    ///   to end (`plans/PTY.md`). On that latch the guest emits
-    ///   [`CTRL_C_RECOVERED_MARKER`], the readiness boundary the whole FM9
-    ///   file-manager stage waits on. `sleep` is loaded only by the typed
+    ///   to end (`plans/PTY.md`). `sleep` is loaded only by the typed
     ///   command and `true` only by the recovery, so each witness is
     ///   uniquely attributable — no overlapping `≥` threshold.
     fn note_bundle_loaded(&self, event: &Event<'_>) {
@@ -138,8 +135,6 @@ impl AutoloadInputSink {
         if bundle == tairix_test_autoload_input_qemu_aarch64::TERMINAL_ROUND_TRIP_BUNDLE
             && !self.shell_round_trip.swap(true, Ordering::AcqRel)
         {
-            // Arm the runner's Ctrl-C injection: a parked foreground job
-            // (`sleep`) now exists to interrupt.
             emit_marker(tairix_test_autoload_input_qemu_aarch64::CTRL_C_ARM_MARKER);
         } else if bundle == tairix_test_autoload_input_qemu_aarch64::CTRL_C_RECOVERY_BUNDLE
             && self.shell_round_trip.load(Ordering::Acquire)

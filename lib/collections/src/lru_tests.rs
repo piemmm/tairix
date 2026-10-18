@@ -338,7 +338,14 @@ fn a_hit_at_maximum_load_stays_inside_the_probe_budget() {
 /// map holds, which a tick-keyed index cannot claim.
 #[test]
 fn a_touch_and_an_eviction_cost_the_same_at_every_size() {
-    for entries in [16u64, 1_024, 16_384] {
+    // Interpreted, the largest size costs minutes and reaches no path the
+    // smaller two do not.
+    let sizes: &[u64] = if cfg!(miri) {
+        &[16, 1_024]
+    } else {
+        &[16, 1_024, 16_384]
+    };
+    for &entries in sizes {
         let mut map = map();
         for key in 0..entries {
             insert(&mut map, key, key);

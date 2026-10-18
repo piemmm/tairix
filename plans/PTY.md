@@ -209,7 +209,7 @@ exercises cooked mode + foreground ownership + the signal path at once): the
 AW4 command becomes the *blocking* `sleep 3600`, and once the guest witnesses
 its spawn it emits `CTRL_C_ARM_MARKER`, gating a `Ctrl-C` injection whose
 cooked `^C` signals the foreground `sleep` dead; the shell — parked in `wait`
-until then — recovers and spawns `true`, and that second spawn is a twelfth
+until then — recovers and spawns `true`, and that second spawn is the final
 PASS witness (`ctrl_c_recovered`), reachable only if the interrupt worked
 (else the run times out, fail loud).
 
@@ -279,12 +279,12 @@ recovery = 40, `FM9_TYPING_DONE` = 41); `qkeycode_for` gains `\u{3}` →
   the master. `elsh` is unchanged — over the console-like slave it runs its
   full interactive editor. Host tests updated; docs
   (`docs/src/architecture/syscalls.md`) updated.
-- **PTY5 — the QEMU vertical. `[x]` landed (pty mechanism); vertical
-  currently RED on an unrelated harness drift.** The `autoload_input`
+- **PTY5 — the QEMU vertical. `[x]` landed; its intermittent runner stall
+  is `plans/OPEN-DEFECTS.md` D15.** The `autoload_input`
   aarch64 vertical proves the pty discipline end to end via the `Ctrl-C`
   job-control witness (see "QEMU vertical" above): the AW4 command is the
   blocking `sleep 3600`, the guest arms a `Ctrl-C` injection on its spawn,
-  and the recovered `true` spawn is the twelfth PASS witness. Echo/`ONLCR`
+  and the recovered `true` spawn is the final PASS witness. Echo/`ONLCR`
   stay covered by the `lib/tty` + `kernel/core/pty.rs` host tests (no
   robust graphical serial witness exists for them; fragile pixel-OCR was
   rejected). `qkeycode_for` gained `\u{3}`→`ctrl-c`.

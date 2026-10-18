@@ -2493,7 +2493,8 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             return Ok(done);
         }
         if let Some(status) = child.try_wait()? {
-            return Ok(exit_reason(spec, serial_script, &*injections, status));
+            let owed = unfinished_scripts(spec, serial_script, injections, captured);
+            return Ok(exit_reason(owed, status));
         }
         if let Some(result) = completed_drain_result(reader, "serial output") {
             serial_closed = result.is_ok();
@@ -2554,7 +2555,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             return Ok(DoneReason::CeilingExceeded {
                 silent_for,
                 cpu_state,
-                script_pending: serial_script.incomplete_reason(&spec.serial_input),
+                script_pending: unfinished_scripts(spec, serial_script, injections, captured),
             });
         }
         if heartbeat.idle_for(Instant::now()) >= spec.timeout {
@@ -2568,7 +2569,7 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
             } else {
                 DoneReason::TimedOut {
                     cpu_state,
-                    script_pending: serial_script.incomplete_reason(&spec.serial_input),
+                    script_pending: unfinished_scripts(spec, serial_script, injections, captured),
                 }
             });
         }
@@ -3593,13 +3594,6 @@ impl InjectionState {
         }
     }
 
-    /// `true` once every requested screendump has been read back and
-    /// fully parsed — the fact [`exit_reason`] requires of a spec that
-    /// asked for any.
-    fn screendumps_verified(&self, spec: &Spec) -> bool {
-        self.dump_step >= spec.screendumps.len()
-    }
-
     /// `true` once every requested pointer step has been sent — or, for a
     /// bounded script ([`Spec::with_bounded_pointer_script`]), once it has
     /// sent at least one.
@@ -3610,47 +3604,68 @@ impl InjectionState {
         self.pointer_step >= spec.pointer_script.len()
     }
 
-    /// `true` once every requested typed-text step has been fully sent.
-    fn typing_done(&self, spec: &Spec) -> bool {
-        self.typed_step >= spec.input_typing.len()
-    }
-
-    /// `true` once every requested raw monitor command has been sent.
-    fn monitor_done(&self, spec: &Spec) -> bool {
-        self.monitor_step >= spec.monitor_commands.len()
-    }
-
-    /// The message for the first ordered injection script that had not
-    /// completed when the guest exited, or `None` when every requested
-    /// injection finished. [`exit_reason`] fails the run on a `Some`, so a
-    /// vertical whose device-driven exchange never happened cannot pass on
-    /// the guest's own exit status alone.
-    fn incomplete_reason(&self, spec: &Spec) -> Option<&'static str> {
-        if !self.pointer_done(spec) {
-            return Some(
-                "pointer script incomplete: a step's readiness marker was not seen (or a dump \
-                 it waited on never verified) before exit",
-            );
+    /// Where every ordered injection script that has not finished stands —
+    /// the step its cursor is on and how often `log` holds that step's marker
+    /// — or `None` when every requested injection finished.
+    ///
+    /// [`exit_reason`] fails the run on a `Some`, so a vertical whose
+    /// device-driven exchange never happened cannot pass on the guest's own
+    /// exit status alone; a run cut short at a deadline reports it, so a
+    /// stalled choreography names the step it stalled at.
+    fn incomplete_report(&self, spec: &Spec, log: &str) -> Option<String> {
+        let gate = |marker: &str, needed: u32| {
+            let mut seen = MarkerProgress::default();
+            seen.advance(log, marker);
+            format!(
+                "its marker {marker:?} seen {} of {needed} times",
+                seen.found
+            )
+        };
+        let mut pending = Vec::new();
+        if let Some(step) = spec
+            .pointer_script
+            .get(self.pointer_step)
+            .filter(|_| !self.pointer_done(spec))
+        {
+            pending.push(format!(
+                "pointer step {} of {} unsent, {}",
+                self.pointer_step + 1,
+                spec.pointer_script.len(),
+                gate(&step.ready_marker, step.ready_occurrences),
+            ));
         }
-        if !self.typing_done(spec) {
-            return Some(
-                "typed-text script incomplete: its readiness marker was not seen (or the guest \
-                 exited mid-script)",
-            );
+        if let Some(step) = spec.input_typing.get(self.typed_step) {
+            pending.push(format!(
+                "typed step {} of {} has {} of {} keys sent, {}",
+                self.typed_step + 1,
+                spec.input_typing.len(),
+                self.typed_in_step,
+                step.keys.len(),
+                gate(&step.ready_marker, step.ready_occurrences),
+            ));
         }
-        if !spec.screendumps.is_empty() && !self.screendumps_verified(spec) {
-            return Some(
-                "screendumps incomplete: a dump's readiness marker was not seen, or the guest \
-                 exited before its dumped image parsed completely",
-            );
+        if let Some(dump) = spec.screendumps.get(self.dump_step) {
+            let taken = match self.dump_state {
+                DumpState::NotSent => "not taken",
+                DumpState::Sent => "taken but its image is not yet complete",
+            };
+            pending.push(format!(
+                "screendump {} of {} {taken}, {}",
+                self.dump_step + 1,
+                spec.screendumps.len(),
+                gate(&dump.ready_marker, dump.ready_occurrences),
+            ));
         }
-        if !self.monitor_done(spec) {
-            return Some(
-                "monitor command script incomplete: a command's readiness marker was not seen \
-                 before the guest exited",
-            );
+        if let Some(command) = spec.monitor_commands.get(self.monitor_step) {
+            pending.push(format!(
+                "monitor command {} of {} unsent, {}",
+                self.monitor_step + 1,
+                spec.monitor_commands.len(),
+                gate(&command.ready_marker, command.ready_occurrences),
+            ));
         }
-        None
+        (!pending.is_empty())
+            .then(|| format!("injection script incomplete: {}", pending.join("; ")))
     }
 
     /// Send the next raw monitor command if its readiness marker has
@@ -3954,20 +3969,33 @@ impl InjectionState {
 /// requested screendump was taken and verified, means the exchange the
 /// vertical was meant to prove never happened — the run fails even when
 /// the guest itself reported success. Otherwise the guest's own exit
-/// status decides the outcome.
-fn exit_reason(
+/// status decides the outcome. `owed` is [`unfinished_scripts`]' answer.
+fn exit_reason(owed: Option<String>, status: std::process::ExitStatus) -> DoneReason {
+    match owed {
+        Some(reason) => DoneReason::InjectionFailed(reason),
+        None => DoneReason::Exited(status.code().unwrap_or(-1)),
+    }
+}
+
+/// What a run still owed its scripts — the serial script's cursor, then every
+/// unfinished injection script's — or `None` when nothing was left.
+fn unfinished_scripts(
     spec: &Spec,
     serial_script: &SerialScriptState,
     injections: &InjectionState,
-    status: std::process::ExitStatus,
-) -> DoneReason {
-    if let Some(reason) = serial_script.incomplete_reason(&spec.serial_input) {
-        return DoneReason::InjectionFailed(reason);
-    }
-    if let Some(reason) = injections.incomplete_reason(spec) {
-        return DoneReason::InjectionFailed(reason.into());
-    }
-    DoneReason::Exited(status.code().unwrap_or(-1))
+    captured: &Mutex<String>,
+) -> Option<String> {
+    let log = captured
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let notes: Vec<String> = [
+        serial_script.incomplete_reason(&spec.serial_input),
+        injections.incomplete_report(spec, &log),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!notes.is_empty()).then(|| notes.join("; "))
 }
 
 /// Helper exported for downstream consumers (e.g. `cargo xtask`) that need to
@@ -4018,6 +4046,48 @@ mod tests {
         // Nothing requested is nothing to leave unsent, either way.
         let empty = Spec::for_aarch64_kernel("/kernel").with_bounded_pointer_script();
         assert!(at(0).pointer_done(&empty));
+    }
+
+    /// A run cut short mid-choreography names every cursor that stopped and
+    /// how far each one's gate had got, so the report alone says which
+    /// witness never came; a finished run owes nothing.
+    #[test]
+    fn an_unfinished_injection_report_names_each_stalled_step_and_its_gate() {
+        let spec = Spec::for_aarch64_kernel("/kernel")
+            .with_pointer_step("shown", 1, PointerAction::Click(MouseButton::Primary))
+            .with_pointer_step("shown", 2, PointerAction::Click(MouseButton::Primary))
+            .with_typed_keys("focused", 1, "sleep 3600\n")
+            .with_typed_keys("armed", 1, "\u{3}true\n")
+            .with_screendump("revealed", 1, "/tmp/dump.ppm")
+            .with_monitor_command("down", 1, "set_link net0 off");
+        let stalled = InjectionState {
+            pointer_step: 1,
+            typed_step: 1,
+            typed_in_step: 2,
+            dump_state: DumpState::Sent,
+            ..InjectionState::new(&spec, None)
+        };
+        let report = stalled
+            .incomplete_report(&spec, "shown focused revealed")
+            .expect("every script was left unfinished");
+        for part in [
+            "pointer step 2 of 2 unsent, its marker \"shown\" seen 1 of 2 times",
+            "typed step 2 of 2 has 2 of 6 keys sent, its marker \"armed\" seen 0 of 1 times",
+            "screendump 1 of 1 taken but its image is not yet complete, its marker \
+             \"revealed\" seen 1 of 1 times",
+            "monitor command 1 of 1 unsent, its marker \"down\" seen 0 of 1 times",
+        ] {
+            assert!(report.contains(part), "{part:?} missing from {report:?}");
+        }
+
+        let finished = InjectionState {
+            pointer_step: 2,
+            typed_step: 2,
+            dump_step: 1,
+            monitor_step: 1,
+            ..InjectionState::new(&spec, None)
+        };
+        assert_eq!(finished.incomplete_report(&spec, ""), None);
     }
 
     #[test]

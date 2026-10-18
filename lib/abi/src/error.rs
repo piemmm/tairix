@@ -215,6 +215,10 @@ pub enum Errno {
     /// a console's input queue or changes its line discipline; a background
     /// reader is refused with this code instead of being stopped by an
     /// asynchronous signal, so there is no `SIGTTIN`-style race to exploit.
+    /// A `spawn` asking to hand its child the spawner's terminal
+    /// ([`crate::SPAWN_FLAG_FOREGROUND`]) is refused with it too when there
+    /// is no terminal behind the spawner's standard input, or one it may not
+    /// hand over.
     NotForeground = 27,
     /// A write was issued to a pipe whose every read end is closed.
     ///

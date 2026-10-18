@@ -34,7 +34,6 @@ use tairix_abi::{Errno, InputMode, TerminalSize};
 use tairix_fbcon::Surface;
 use tairix_inline::SecretRing;
 use tairix_kernel_sched_api::SchedulerArch;
-use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 use tairix_vt::control;
 use tairix_vt::line::EraseSeq;
@@ -876,14 +875,15 @@ impl ConsoleDevice {
     /// Hand this console's controlling (foreground) ownership to `owner`,
     /// recording `caller` as the granter (`plans/DISPLAY.md` D5).
     ///
-    /// The `console_foreground` handler has already authorised `owner` as a
-    /// live child of `caller`, so the ownership only ever moves down the
-    /// spawn chain — inherited and intersected, never widened. The
-    /// transition itself is permitted only from a position of authority
-    /// over the slot: the console is unowned, or `caller` is the recorded
-    /// granter (re-targeting between its own children), or `caller` is the
-    /// current owner (delegating onward to its own child). Anyone else is
-    /// refused, so a background task can never take the drain right.
+    /// Its caller has already authorised `owner` as `caller` itself or a child
+    /// of it — `console_foreground`, or a spawn handing the child it admits
+    /// the terminal — so the ownership only ever moves down the spawn chain,
+    /// inherited and intersected, never widened. The transition itself is
+    /// permitted only from a position of authority over the slot: the console
+    /// is unowned, or `caller` is the recorded granter (re-targeting between
+    /// its own children), or `caller` is the current owner (delegating onward
+    /// to its own child). Anyone else is refused, so a background task can
+    /// never take the drain right.
     ///
     /// # Errors
     ///
@@ -891,12 +891,17 @@ impl ConsoleDevice {
     /// and `caller` is neither its granter nor the owner.
     pub fn grant_foreground(
         &self,
-        caller: ProcessId,
-        owner: crate::foreground::ForegroundOwner,
-    ) -> Result<(), Errno> {
-        let moved = self.fg.grant(caller, owner)?;
-        foreground_moved(moved);
-        Ok(())
+        caller: crate::foreground::ProcessInstance,
+        owner: crate::foreground::ProcessInstance,
+    ) -> Result<crate::foreground::HandOver, Errno> {
+        let grant = self.fg.grant(caller, owner)?;
+        foreground_moved(grant.moved());
+        Ok(grant)
+    }
+
+    /// Undo a hand-over, as [`crate::foreground::ForegroundOwnership::undo`].
+    pub fn undo_foreground(&self, grant: crate::foreground::HandOver) {
+        foreground_moved(self.fg.undo(grant));
     }
 
     /// Release this console's foreground ownership (the granting shell back
@@ -913,28 +918,24 @@ impl ConsoleDevice {
     ///
     /// [`Errno::NotForeground`] when another task's ownership is in place
     /// and `caller` is neither its granter nor the owner.
-    pub fn release_foreground(&self, caller: ProcessId) -> Result<(), Errno> {
+    pub fn release_foreground(
+        &self,
+        caller: crate::foreground::ProcessInstance,
+    ) -> Result<(), Errno> {
         let moved = self.fg.release(caller)?;
         foreground_moved(moved);
         Ok(())
     }
 
-    /// Clear the foreground slot if `dead` is its recorded owner.
-    ///
-    /// The exit path calls this for every console when a task ends, and the
-    /// read gate calls it when it proves a recorded owner dead, so a
-    /// console is never wedged behind a task that can no longer read it. The
-    /// slot is cleared while the dying process is still reclaiming, before
-    /// its task id is released back to the draw, so clearing on a
-    /// proven-dead owner can never displace a live successor. A slot naming
-    /// any other task is left untouched (idempotent).
-    pub fn clear_dead_foreground(&self, dead: ProcessId) {
+    /// Clear the foreground slot if `dead` owns it, as
+    /// [`crate::foreground::ForegroundOwnership::clear_dead`].
+    pub fn clear_dead_foreground(&self, dead: crate::foreground::ProcessInstance) {
         foreground_moved(self.fg.clear_dead(dead));
     }
 
     /// This console's current controlling (foreground) owner, if any.
     #[must_use]
-    pub fn foreground(&self) -> Option<crate::foreground::ForegroundOwner> {
+    pub fn foreground(&self) -> Option<crate::foreground::ProcessInstance> {
         self.fg.current()
     }
 
@@ -2630,13 +2631,13 @@ mod tests {
     /// Grant `device`'s foreground ownership of task `owner` from `granter`.
     fn grant(device: &ConsoleDevice, granter: u64, owner: u64) {
         device
-            .grant_foreground(tairix_kernel_sec::ProcessId(granter), fg_owner(owner))
+            .grant_foreground(fg_owner(granter), fg_owner(owner))
             .expect("grant foreground");
     }
 
     /// A foreground owner at a distinguishable process instance.
-    fn fg_owner(process: u64) -> crate::foreground::ForegroundOwner {
-        crate::foreground::ForegroundOwner {
+    fn fg_owner(process: u64) -> crate::foreground::ProcessInstance {
+        crate::foreground::ProcessInstance {
             process: tairix_kernel_sec::ProcessId(process),
             instance: tairix_abi::ProcId::from_raw([0xC0; 16]),
         }
@@ -2734,7 +2735,7 @@ mod tests {
         // The shell released the slot after its wait returned: bytes flow
         // again.
         device
-            .release_foreground(tairix_kernel_sec::ProcessId(1))
+            .release_foreground(fg_owner(1))
             .expect("granter releases");
         assert_eq!(device.push(b"\x03"), Ok(1));
         assert_eq!(drain(queue), b"\x03");
@@ -2839,7 +2840,7 @@ mod tests {
         assert_eq!(device.foreground(), Some(fg_owner(20)));
         // The delegating owner can reclaim as the new grant's granter.
         device
-            .release_foreground(tairix_kernel_sec::ProcessId(9))
+            .release_foreground(fg_owner(9))
             .expect("delegating owner releases");
         assert_eq!(device.foreground(), None);
     }
@@ -2851,7 +2852,7 @@ mod tests {
         // A task that is neither the granter nor the owner is refused; the
         // recorded ownership is untouched.
         assert_eq!(
-            device.grant_foreground(tairix_kernel_sec::ProcessId(7), fg_owner(8)),
+            device.grant_foreground(fg_owner(7), fg_owner(8)),
             Err(Errno::NotForeground)
         );
         assert_eq!(device.foreground(), Some(fg_owner(9)));
@@ -2862,7 +2863,7 @@ mod tests {
         let (device, _queue) = filter_device();
         grant(device, 1, 9);
         assert_eq!(
-            device.release_foreground(tairix_kernel_sec::ProcessId(7)),
+            device.release_foreground(fg_owner(7)),
             Err(Errno::NotForeground)
         );
         assert_eq!(device.foreground(), Some(fg_owner(9)));
@@ -2873,7 +2874,7 @@ mod tests {
         let (device, _queue) = filter_device();
         grant(device, 1, 9);
         device
-            .release_foreground(tairix_kernel_sec::ProcessId(9))
+            .release_foreground(fg_owner(9))
             .expect("owner releases");
         assert_eq!(device.foreground(), None);
     }
@@ -2884,7 +2885,7 @@ mod tests {
         // The granter clears after its child exited (the exit path already
         // cleared the slot): a benign no-op for any caller.
         device
-            .release_foreground(tairix_kernel_sec::ProcessId(7))
+            .release_foreground(fg_owner(7))
             .expect("idempotent release");
         assert_eq!(device.foreground(), None);
     }
@@ -2894,11 +2895,11 @@ mod tests {
         let (device, _queue) = filter_device();
         grant(device, 1, 9);
         // Another task's death leaves the recorded ownership in place …
-        device.clear_dead_foreground(ProcessId(7));
+        device.clear_dead_foreground(fg_owner(7));
         assert_eq!(device.foreground(), Some(fg_owner(9)));
         // … and the owner's death clears it, so the console is never
         // wedged behind a task that can no longer read it.
-        device.clear_dead_foreground(ProcessId(9));
+        device.clear_dead_foreground(fg_owner(9));
         assert_eq!(device.foreground(), None);
     }
 }

@@ -272,14 +272,16 @@ asynchronous signals.
   (delegating onward to its own child); a release (`pid = 0`) only from
   the granter or the owner. A bystander can neither take the drain right
   nor open the console by clearing the slot — both are refused with
-  `NotForeground`.
+  `NotForeground`. A spawn can make the same grant to the child it admits
+  (`SPAWN_FLAG_FOREGROUND`), before the child can run, which is how the
+  shell starts each foreground job.
+- **Parties are instances, not numbers.** Owner, granter and caller are each
+  named by process and instance, so a process that draws a dead party's
+  number can neither read as the owner nor act as one.
 - **No wedged consoles.** A vanished owner never strands its console: the
   `exit` path releases any console ownership the exiting task held, and
-  the read gate clears a recorded owner the process bookkeeping proves
-  dead (`ProcessWait::is_live`). The inert bookkeeping default reports every
-  task live,
-  so a gate that cannot prove death keeps denying — it can heal, never
-  widen.
+  the read gate clears a recorded owner whose number no longer names its
+  instance — it can heal, never widen.
 - **Signal routing rides the same slot.** The cooked-mode `^C`/`^Z`
   delivery to the foreground job (SP9) targets the same recorded owner when
   it is a **job** — a process the terminal was handed to — so "who gets the
