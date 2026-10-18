@@ -1215,7 +1215,7 @@ fn a_press_within_the_focused_form_moves_its_cursor_and_reports_it() {
         DemoWidget::FieldGroup(group) => group.clone(),
         _ => panic!("the Forms tab shows a field group"),
     };
-    let slot_centre = |gallery: &Gallery, theme: &Theme, row: usize| {
+    let control_centre = |gallery: &Gallery, theme: &Theme, row: usize| {
         let rect = gallery
             .widget_rect_for_test(0, window(), Scale::ONE, theme)
             .expect("the group is laid out");
@@ -1224,22 +1224,22 @@ fn a_press_within_the_focused_form_moves_its_cursor_and_reports_it() {
         let bounds = group
             .row_rect(row, layout, Scale::ONE, theme)
             .expect("the row is drawn");
-        let slot = group.rows()[row]
-            .slot_rect(
+        let control = group.rows()[row]
+            .control_rect(
                 tairix_controls::FieldLayout { bounds, ..layout },
                 Scale::ONE,
                 theme,
             )
             .expect("its control");
         Point::new(
-            slot.left() + i32::try_from(slot.width / 2).unwrap_or(0),
-            slot.top() + i32::try_from(slot.height / 2).unwrap_or(0),
+            control.left() + i32::try_from(control.width / 2).unwrap_or(0),
+            control.top() + i32::try_from(control.height / 2).unwrap_or(0),
         )
     };
-    let mute = slot_centre(&prover.gallery, &prover.theme, 4);
+    let mute = control_centre(&prover.gallery, &prover.theme, 4);
     prover.prove_click("the mute checkbox", mute);
     assert_eq!(group(&prover.gallery).focus(), Some(4));
-    let host = slot_centre(&prover.gallery, &prover.theme, 5);
+    let host = control_centre(&prover.gallery, &prover.theme, 5);
     prover.prove_click("the host name field", host);
     assert_eq!(
         group(&prover.gallery).focus(),

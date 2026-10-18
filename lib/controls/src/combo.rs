@@ -206,8 +206,9 @@ impl ComboBox {
     }
 
     /// Collapse the list, reporting the `popup` rectangle it vacates — what the
-    /// popup covered is drawn again by whatever lies beneath it.
-    fn close(&mut self, popup: Rect, damage: &mut Region) -> Option<ComboAction> {
+    /// popup covered is drawn again by whatever lies beneath it. A list that is
+    /// not on screen vacates [`Rect::EMPTY`].
+    pub(crate) fn close(&mut self, popup: Rect, damage: &mut Region) -> Option<ComboAction> {
         if !self.expanded {
             return None;
         }

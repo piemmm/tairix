@@ -2465,13 +2465,13 @@ fn a_footnoted_plate_as_tall_as_it_measures_draws_every_row_at_every_width() {
     }
 }
 
-/// The centre of row `row`'s slot in `group` laid out as `layout`.
-fn slot_centre(group: &FieldGroup, row: usize, layout: FieldLayout, theme: &Theme) -> Point {
+/// The centre of row `row`'s drawn control in `group` laid out as `layout`.
+fn control_centre(group: &FieldGroup, row: usize, layout: FieldLayout, theme: &Theme) -> Point {
     let rect = group
         .row_rect(row, layout, Scale::ONE, theme)
         .expect("a row rect");
-    let slot = group.rows()[row]
-        .slot_rect(
+    let control = group.rows()[row]
+        .control_rect(
             FieldLayout {
                 bounds: rect,
                 ..layout
@@ -2479,10 +2479,10 @@ fn slot_centre(group: &FieldGroup, row: usize, layout: FieldLayout, theme: &Them
             Scale::ONE,
             theme,
         )
-        .expect("a slot");
+        .expect("a control");
     Point::new(
-        slot.left() + to_i32(slot.width) / 2,
-        slot.top() + to_i32(slot.height) / 2,
+        control.left() + to_i32(control.width) / 2,
+        control.top() + to_i32(control.height) / 2,
     )
 }
 
@@ -2540,7 +2540,7 @@ fn a_primary_press_gives_the_keyboard_to_the_row_it_lands_on() {
         &theme,
     );
 
-    let name = slot_centre(&group, 1, layout, &theme);
+    let name = control_centre(&group, 1, layout, &theme);
     click_group(&mut group, layout, &theme, (name, PointerButton::Primary));
     assert_eq!(
         group.focus(),
@@ -2560,7 +2560,7 @@ fn a_primary_press_gives_the_keyboard_to_the_row_it_lands_on() {
     };
     assert_eq!(field.text(), "x", "the typing reaches the field pressed");
 
-    let login = slot_centre(&group, 2, layout, &theme);
+    let login = control_centre(&group, 2, layout, &theme);
     click_group(
         &mut group,
         layout,
@@ -2578,7 +2578,7 @@ fn a_primary_press_gives_the_keyboard_to_the_row_it_lands_on() {
         Scale::ONE,
         &theme,
     );
-    let toggle = slot_centre(&group, 0, open, &theme);
+    let toggle = control_centre(&group, 0, open, &theme);
     click_group(&mut group, open, &theme, (toggle, PointerButton::Primary));
     assert_eq!(
         group.focus(),
@@ -2601,7 +2601,7 @@ fn an_open_list_takes_every_key_wherever_the_cursor_stands() {
     let bounds = Rect::new(0, 0, W, 240);
     let viewport = Rect::new(0, 0, W, 480);
     let layout = group.layout(bounds, viewport, Scale::ONE, &theme);
-    let login = slot_centre(&group, 2, layout, &theme);
+    let login = control_centre(&group, 2, layout, &theme);
     click_group(&mut group, layout, &theme, (login, PointerButton::Primary));
     // An owner carrying its cursor elsewhere does not take the keys from it.
     group.adopt_focus(Some(0));
@@ -2638,4 +2638,62 @@ fn an_open_list_takes_every_key_wherever_the_cursor_stands() {
         })
     );
     assert!(!group.rows()[2].popup_open());
+}
+
+/// A list its layout cannot draw is not on screen, so it holds no input: the
+/// next event closes it and reaches what it was meant for, rather than every
+/// press and key going to a list the reader cannot see.
+#[test]
+fn a_list_its_layout_cannot_draw_holds_no_input() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let viewport = Rect::new(0, 0, W, 480);
+    let rows = || {
+        vec![
+            toggle_row("Reduce motion", false),
+            FieldRow::new(
+                "Login",
+                FieldControl::Combo(ComboBox::new(choices(&["Text", "Graphical"]))),
+            ),
+        ]
+    };
+    let mut group = FieldGroup::new("GENERAL", rows());
+    let tall = group.layout(Rect::new(0, 0, W, 200), viewport, scale, &theme);
+    let login = control_centre(&group, 1, tall, &theme);
+    click_group(&mut group, tall, &theme, (login, PointerButton::Primary));
+    assert!(group.rows()[1].popup_open());
+
+    let first_only = FieldGroup::new("GENERAL", rows().into_iter().take(1).collect());
+    let short = Rect::new(0, 0, W, own_height(&first_only, W, scale, &theme));
+    let cut = group.layout(short, viewport, scale, &theme);
+    assert_eq!(
+        group.row_rect(1, cut, scale, &theme),
+        None,
+        "the list's row is cut"
+    );
+    assert_eq!(cut.popup, Rect::EMPTY, "so its list is not drawn");
+    let toggle = control_centre(&group, 0, cut, &theme);
+    assert_eq!(
+        click_group(&mut group, cut, &theme, (toggle, PointerButton::Primary)),
+        Some(FieldGroupAction {
+            row: 0,
+            action: FieldAction::Set { on: true },
+        }),
+        "the press reaches the row it lands on"
+    );
+    assert!(!group.rows()[1].popup_open(), "the unseen list closed");
+    assert_eq!(group.focus(), Some(0));
+
+    click_group(&mut group, tall, &theme, (login, PointerButton::Primary));
+    assert!(group.rows()[1].popup_open());
+    let mut damage = sink();
+    group.on_key(
+        keystroke(Key::Named(NamedKey::Up)),
+        cut,
+        scale,
+        &theme,
+        &mut damage,
+    );
+    assert!(!group.rows()[1].popup_open(), "a key closes it too");
+    assert_eq!(group.focus(), Some(0), "and moves the cursor as meant");
 }

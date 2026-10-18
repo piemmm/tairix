@@ -2068,11 +2068,12 @@ a `FieldGroup` is the captioned plate its rows sit on.
   its natural size, and a height that holds them all — so no surface carries
   its own copy of the gaps. A column taller than its pane scrolls by pixels
   (§11.28), a plate its edge crosses drawn cut.
-- **An open choice list is modal.** It hangs over the rows and plates beneath
-  it, so while it is up only the row holding it sees the pointer and every key,
-  wherever the keyboard cursor stands, a press on it never reaches what it
-  covers, and it is painted above the rest of the window it shares — a footer
-  band or a scrollbar included.
+- **An open choice list is modal while it is drawn.** It hangs over the rows
+  and plates beneath it, so while it is up only the row holding it sees the
+  pointer and every key, wherever the keyboard cursor stands, a press on it
+  never reaches what it covers, and it is painted above the rest of the window
+  it shares — a footer band or a scrollbar included. A list its layout cannot
+  place is not on screen and holds no input: the next event closes it.
 - **A group draws one plate, not a plate per row** (§10's plate seating), and
   its caption and footnote begin exactly where a row's label does, so the three
   read as one column rather than three indents. The footnote is where a setting

@@ -223,9 +223,10 @@ about the machine:
   opens into or vacates, placed by the same rule: no owner reports a list.
 - **The keyboard follows the press.** A primary press gives the group's
   keyboard cursor to the row or picture choice it lands on, so the field
-  pressed is the field typed into, and an open list takes every key until it
+  pressed is the field typed into, and a drawn list takes every key until it
   resolves, wherever the cursor stands; an owner of several groups carries the
-  cursor between them.
+  cursor between them. A list its layout cannot place is not on screen, so it
+  holds no input: the next event closes it and reaches what it was meant for.
 
 A group may also carry a **badge** on its caption's own line
 (`FieldGroup::with_badge`): the `StatusPill` naming the state of the thing the

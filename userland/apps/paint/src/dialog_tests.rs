@@ -404,8 +404,8 @@ fn click_row(form: &mut Form, row: usize) {
         .group
         .row_rect(row, layout, Scale::ONE, theme)
         .expect("the row");
-    let slot = form.group.rows()[row]
-        .slot_rect(
+    let control = form.group.rows()[row]
+        .control_rect(
             tairix_controls::FieldLayout {
                 bounds: rect,
                 ..layout
@@ -415,8 +415,8 @@ fn click_row(form: &mut Form, row: usize) {
         )
         .expect("its control");
     let centre = Point::new(
-        slot.left() + i32::try_from(slot.width / 2).expect("narrow"),
-        slot.top() + i32::try_from(slot.height / 2).expect("short"),
+        control.left() + i32::try_from(control.width / 2).expect("narrow"),
+        control.top() + i32::try_from(control.height / 2).expect("short"),
     );
     let mut damage = Region::new();
     for event in [

@@ -1031,6 +1031,16 @@ impl FieldRow {
         matches!(&self.control, FieldControl::Combo(combo) if combo.is_expanded())
     }
 
+    /// Collapse an expanded choice list without a selection, answering whether
+    /// one was open. For a list its layout does not draw, so nothing on screen
+    /// is vacated.
+    fn collapse_popup(&mut self, damage: &mut Region) -> bool {
+        if let FieldControl::Combo(combo) = &mut self.control {
+            return combo.close(Rect::EMPTY, damage).is_some();
+        }
+        false
+    }
+
     /// Where the row's expanded choice list is drawn for `layout`: against
     /// its slot, inside the layout's viewport, by the control's own rule.
     fn popup_rect(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> Option<Rect> {
@@ -1798,6 +1808,39 @@ impl FieldGroup {
             })
     }
 
+    /// The row whose open choice list `layout` draws. A list it does not draw
+    /// is not on screen, so it is collapsed rather than left holding every
+    /// event, and the field whose look that changes is reported.
+    fn listing(
+        &mut self,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<usize> {
+        let open = self.rows.iter().position(FieldRow::popup_open)?;
+        if !layout.popup.is_empty() {
+            return Some(open);
+        }
+        let field = self
+            .row_rect(open, layout, scale, theme)
+            .and_then(|bounds| {
+                self.rows
+                    .get(open)?
+                    .control_rect(FieldLayout { bounds, ..layout }, scale, theme)
+            });
+        if self
+            .rows
+            .get_mut(open)
+            .is_some_and(|row| row.collapse_popup(damage))
+        {
+            if let Some(field) = field {
+                damage.add(field);
+            }
+        }
+        None
+    }
+
     /// `layout` with this group's expanded choice list, if any, placed
     /// against its row's slot inside `layout.viewport` — for an owner lining
     /// several groups' controls up on one column of its own.
@@ -1959,8 +2002,8 @@ impl FieldGroup {
     /// the item it left, the item it entered, and any item holding a press —
     /// a row, or the picture choice beneath them. A primary press gives the
     /// keyboard to the item it lands on. A row with an open choice list is the
-    /// only one that sees the stream while the list is up: the list hangs over
-    /// what is beneath it, so a press on it must never reach it.
+    /// only one that sees the stream while the list is drawn: the list hangs
+    /// over what is beneath it, so a press on it must never reach it.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1975,7 +2018,7 @@ impl FieldGroup {
         let rects = self.row_rects(layout, scale, theme);
         let pictures = self.pictures_rect(layout, scale, theme);
         let choice = self.rows.len();
-        let route = if let Some(open) = self.rows.iter().position(FieldRow::popup_open) {
+        let route = if let Some(open) = self.listing(layout, scale, theme, damage) {
             *self.armed = grab_after(*self.armed, event, Some(open));
             [Some(open), None, None]
         } else {
@@ -2034,7 +2077,7 @@ impl FieldGroup {
     /// clamping at the first and last rather than wrapping (a group is a fixed
     /// set of settings, not a cycling ring), Home/End jump to the ends unless
     /// the focused row is editing text, and every other key goes to the
-    /// focused row's control. While a choice list is open every key is its
+    /// focused row's control. While a choice list is drawn every key is its
     /// row's.
     ///
     /// Down from the last row reaches the picture choice, whose own cursor
@@ -2056,7 +2099,7 @@ impl FieldGroup {
         }
         // An open choice list is modal: every key is its row's until the list
         // resolves, wherever the keyboard cursor stands.
-        if let Some(open) = self.rows.iter().position(FieldRow::popup_open) {
+        if let Some(open) = self.listing(layout, scale, theme, damage) {
             return self.row_key(open, stroke, layout, scale, theme, damage);
         }
         let key = stroke.key;
