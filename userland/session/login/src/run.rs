@@ -109,7 +109,7 @@ mod program {
         ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad, InputWait,
         InputWake, LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView,
         SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
-        GREETER_SERVICE_PATH,
+        ZoneStoreGrant, GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -581,6 +581,7 @@ mod program {
                 self.own_console,
                 directory,
                 authenticator,
+                &RtZoneGrant { to: peer.instance },
                 budget,
                 monotonic_now(),
                 &sink,
@@ -782,6 +783,26 @@ mod program {
                 instance: origin.proc_id(),
             },
         )
+    }
+
+    /// Delegates the zone store to the caller `to` from a descriptor opened
+    /// for the delegation and closed at once: the delegation names the path
+    /// and re-opens it under this process's identity.
+    struct RtZoneGrant {
+        to: ProcId,
+    }
+
+    impl ZoneStoreGrant for RtZoneGrant {
+        fn grant(&self) -> Result<core::num::NonZeroU64, Errno> {
+            let file = tairix_rt::File::open(
+                tairix_tz::STORE_PATH.as_bytes(),
+                tairix_abi::fs::OpenFlags::READ,
+            )
+            .map_err(Errno::from_syscall)?;
+            let handle = Errno::syscall_result(tairix_rt::fd_grant(file.fd(), 0, self.to))?;
+            // The kernel mints handles from one: zero is no delegation.
+            core::num::NonZeroU64::new(handle).ok_or(Errno::OutOfRange)
+        }
     }
 
     /// Posts the authority's wake messages through the `ipc_send` syscall.

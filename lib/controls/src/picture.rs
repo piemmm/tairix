@@ -22,7 +22,7 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     foreground, heavy_contrast, paint_bead, paint_icon_slot, paint_run, plate_border,
-    rail_thickness, resolve_bead, role_font, surface_rect, to_i32, withheld, FULL_COLOUR,
+    rail_thickness, resolve_bead, role_font, surface_rect, to_i32, withheld, ArtworkTone,
 };
 use crate::state::{ControlDisposition, ControlState, RenderInvariant};
 
@@ -660,7 +660,7 @@ impl PictureChoice {
                     side,
                 );
                 let ink = Color::from(palette.on_surface_muted);
-                paint_icon_slot(surface, slot, *glyph, ink, None, FULL_COLOUR);
+                paint_icon_slot(surface, slot, *glyph, ink, None, ArtworkTone::FULL);
             }
         }
         if self.state.disposition() == ControlDisposition::DisabledByState {

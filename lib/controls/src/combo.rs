@@ -27,6 +27,7 @@ use crate::paint::{
     ChevronDir, Measured, PlateStyle,
 };
 use crate::state::{ControlRole, ControlState, PointerState, RenderInvariant, SelectionState};
+use crate::text::Keystroke;
 
 /// The outcome of feeding input to a [`ComboBox`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -478,19 +479,28 @@ impl ComboBox {
         }
     }
 
-    /// Feed a key event. When expanded, keys drive the popup menu (Up/Down move,
-    /// Enter/Space choose, Escape closes). When collapsed and focused, Down /
-    /// Up / Enter / Space open the list on the current choice.
+    /// Feed a key event. When expanded, keys drive the popup menu (Up/Down and
+    /// the paging keys move, typing seeks a choice by its label, Enter/Space
+    /// choose, Escape closes). When collapsed and focused, Down / Up / Enter /
+    /// Space open the list on the current choice.
     pub fn on_key(
         &mut self,
-        key: Key,
+        stroke: Keystroke,
         field_bounds: Rect,
         popup_bounds: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<ComboAction> {
+        let key = stroke.key;
         if self.expanded {
+            if let Key::Char(typed) = key {
+                if typed != ' ' {
+                    self.menu
+                        .seek(typed, stroke.at_ns, popup_bounds, scale, theme, damage);
+                    return None;
+                }
+            }
             return match self.menu.on_key(key, popup_bounds, scale, theme, damage) {
                 Some(MenuAction::Activated { index } | MenuAction::OpenSubmenu { index }) => {
                     Some(self.take_choice(index, field_bounds, popup_bounds, damage))

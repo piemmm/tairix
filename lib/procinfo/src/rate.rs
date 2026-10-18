@@ -19,15 +19,23 @@ const NANOS_PER_SEC: u128 = tairix_abi::time::NANOS_PER_SEC as u128;
 /// division brings it back into range.
 #[must_use]
 pub fn rate_per_sec(now: u64, previous: u64, elapsed_ns: Option<u64>) -> Option<u64> {
+    per_sec(now.saturating_sub(previous), elapsed_ns)
+}
+
+/// A per-second rate from `delta` events counted over the interval, for a
+/// caller that sums several counters' deltas itself — each saturated on its
+/// own, so one counter going backwards cannot cancel another's progress — or
+/// `None` when the interval is unmeasured or zero.
+#[must_use]
+pub fn per_sec(delta: u64, elapsed_ns: Option<u64>) -> Option<u64> {
     let elapsed_ns = elapsed_ns.filter(|ns| *ns > 0)?;
-    let delta = u128::from(now.saturating_sub(previous));
-    let per_sec = delta.saturating_mul(NANOS_PER_SEC) / u128::from(elapsed_ns);
+    let per_sec = u128::from(delta).saturating_mul(NANOS_PER_SEC) / u128::from(elapsed_ns);
     Some(u64::try_from(per_sec).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::rate_per_sec;
+    use super::{per_sec, rate_per_sec};
 
     const SECOND: u64 = 1_000_000_000;
 
@@ -36,6 +44,15 @@ mod tests {
         assert_eq!(rate_per_sec(3_000, 1_000, Some(SECOND)), Some(2_000));
         assert_eq!(rate_per_sec(3_000, 1_000, Some(SECOND / 2)), Some(4_000));
         assert_eq!(rate_per_sec(1_000, 1_000, Some(SECOND)), Some(0));
+    }
+
+    #[test]
+    fn a_summed_delta_is_divided_by_the_interval_alike() {
+        assert_eq!(per_sec(2_000, Some(SECOND)), Some(2_000));
+        assert_eq!(per_sec(2_000, Some(SECOND / 2)), Some(4_000));
+        assert_eq!(per_sec(2_000, None), None);
+        assert_eq!(per_sec(2_000, Some(0)), None);
+        assert_eq!(per_sec(u64::MAX, Some(1)), Some(u64::MAX));
     }
 
     #[test]

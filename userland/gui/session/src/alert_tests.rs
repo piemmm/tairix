@@ -8,6 +8,7 @@ use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertS
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Surface, WindowId};
 
 use super::{alert_title, extent, Alerts, Answer, Speaker, ALERT_ARM_NS};
+use crate::about::{SystemFacts, ABOUT_TITLE};
 use crate::hold::Holds;
 use crate::shell::DesktopShell;
 use crate::tests::headless_desktop;
@@ -752,4 +753,93 @@ fn a_click_begun_before_the_buttons_armed_answers_nothing() {
             index: 0
         })
     );
+}
+
+fn facts() -> SystemFacts {
+    SystemFacts {
+        version: Some(tairix_abi::sysinfo::OsVersion {
+            major: 0,
+            minor: 4,
+            patch: 12,
+        }),
+        processor: Some(alloc::string::String::from("4 \u{d7} Cortex-A72")),
+        memory_bytes: Some(4 << 30),
+    }
+}
+
+#[test]
+fn about_this_system_is_one_window_titled_for_itself_that_draws_the_about_picture() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    assert!(alerts.about(&facts(), &mut shell, &mut comp));
+    let wm = alerts.up[0].window.wm();
+    let title = comp
+        .window(wm)
+        .and_then(tairix_wm::Window::frame)
+        .map(|frame| frame.title_bar().title());
+    assert_eq!(title, Some(ABOUT_TITLE));
+    assert_eq!(
+        alerts.up[0].window.alert.mark_kind(),
+        tairix_icon::IconKind::About
+    );
+    assert_eq!(shell.router().focused(), Some(wm), "asked for, so focused");
+
+    assert!(alerts.about(&facts(), &mut shell, &mut comp));
+    assert_eq!(alerts.up.len(), 1, "asking again shows the same window");
+}
+
+#[test]
+fn asking_again_brings_it_forward_and_it_hands_the_keyboard_back_there() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    assert!(alerts.about(&facts(), &mut shell, &mut comp));
+    let about = alerts.up[0].window.wm();
+    let work = work(&mut shell, &mut comp);
+    assert_eq!(shell.router().focused(), Some(work));
+    let origin = comp.window(about).expect("up").bounds().origin;
+    assert_eq!(comp.window_at(origin), Some(work), "covered by the work");
+
+    assert!(alerts.about(&facts(), &mut shell, &mut comp));
+    assert_eq!(shell.router().focused(), Some(about));
+    assert_eq!(comp.window_at(origin), Some(about), "in front again");
+
+    alerts.stamp(0);
+    let answer = alerts.key(
+        about,
+        &pressed(NamedKeyCode::Escape),
+        ALERT_ARM_NS,
+        &mut holds,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(answer, None, "answered, and owed to no application");
+    assert!(
+        comp.window(about).is_none(),
+        "Escape answers its one button"
+    );
+    assert_eq!(
+        shell.router().focused(),
+        Some(work),
+        "back to the window it last took the keyboard from"
+    );
+}
+
+#[test]
+fn no_run_of_notices_takes_the_about_window_down() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    assert!(alerts.about(&facts(), &mut shell, &mut comp));
+    let about = alerts.up[0].window.wm();
+    for _ in 0..=super::DESKTOP_NOTICES_MAX {
+        assert!(alerts.notify(
+            &ok(),
+            "Error from Desktop",
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ));
+    }
+    assert!(alerts.owns(about), "it is not a notice to give way");
 }

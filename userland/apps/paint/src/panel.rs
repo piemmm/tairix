@@ -885,7 +885,7 @@ impl Panel {
     /// A key while a list is open, which takes them all.
     fn listing_key(
         &mut self,
-        key: Key,
+        stroke: Keystroke,
         placements: &[(usize, Placed)],
         viewport: Rect,
         scale: Scale,
@@ -895,7 +895,10 @@ impl Panel {
         self.open_combo(placements, viewport, scale, theme).map_or(
             PanelOutcome::Taken,
             |(part, combo, field, popup)| {
-                listed(part, combo.on_key(key, field, popup, scale, theme, damage))
+                listed(
+                    part,
+                    combo.on_key(stroke, field, popup, scale, theme, damage),
+                )
             },
         )
     }
@@ -1052,14 +1055,7 @@ impl Panel {
         }
         let placements = self.placements(bounds, faces, scale, theme);
         if self.listing() {
-            return self.listing_key(
-                stroke.key,
-                placements.list(),
-                viewport,
-                scale,
-                theme,
-                damage,
-            );
+            return self.listing_key(stroke, placements.list(), viewport, scale, theme, damage);
         }
         let Some((part, stop)) = self.focus else {
             return PanelOutcome::Ignored;
@@ -1121,7 +1117,7 @@ impl Panel {
             Part::Choice { combo, .. } => {
                 let field = placed.controls[0];
                 let popup = combo.popup_rect(field, viewport, scale, theme);
-                match combo.on_key(stroke.key, field, popup, scale, theme, damage) {
+                match combo.on_key(stroke, field, popup, scale, theme, damage) {
                     Some(ComboAction::Selected { index }) => {
                         PanelOutcome::Event(PanelEvent::Chosen { part, index })
                     }

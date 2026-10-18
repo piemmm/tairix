@@ -64,6 +64,10 @@ pub enum AlertAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Alert {
     severity: AlertSeverity,
+    /// The picture drawn in place of the severity's mark, which only the
+    /// desktop sets: the wire spec has no field for it, so no application
+    /// can wear the desktop's own picture.
+    picture: Option<IconKind>,
     headline: String,
     detail: String,
     buttons: Vec<Button>,
@@ -244,6 +248,7 @@ impl Alert {
             .unwrap_or(0);
         let mut alert = Self {
             severity: spec.severity(),
+            picture: None,
             headline: String::from(spec.headline()),
             detail: String::from(spec.detail()),
             buttons,
@@ -294,9 +299,20 @@ impl Alert {
         self.focus
     }
 
-    /// The kind the severity mark is drawn as.
+    /// This alert drawing `picture`'s badge in place of its severity's mark,
+    /// for a statement the desktop makes about itself — its About window.
+    #[must_use]
+    pub const fn with_picture(mut self, picture: IconKind) -> Self {
+        self.picture = Some(picture);
+        self
+    }
+
+    /// The kind the mark is drawn as: the picture set, else the severity's.
     #[must_use]
     pub const fn mark_kind(&self) -> IconKind {
+        if let Some(picture) = self.picture {
+            return picture;
+        }
         match self.severity {
             AlertSeverity::Error => IconKind::AlertError,
             AlertSeverity::Warning => IconKind::AlertWarning,

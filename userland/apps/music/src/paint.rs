@@ -12,7 +12,7 @@ use alloc::vec;
 use tairix_controls::{HeaderColumn, TableCell, TableHeader, TableRow};
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Rect, Scale};
-use tairix_icon::{builtin_icon, IconKind};
+use tairix_icon::{glyph_mask, IconKind};
 use tairix_player::{describe, EntryId, Span, Transport};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
@@ -327,17 +327,18 @@ fn text(surface: &mut Surface, font: BitmapFont, bounds: Rect, text: &str, color
     }
 }
 
-/// The built-in glyph for `kind`, centred in `bounds`.
+/// The built-in glyph for `kind` in `color`, centred in `bounds`.
 fn glyph(surface: &mut Surface, bounds: Rect, kind: IconKind, color: Color) {
     let side = bounds.width.min(bounds.height) * 2 / 3;
-    let Some(picture) = builtin_icon(kind, color).rasterise(side) else {
+    let Some(mask) = glyph_mask(kind, side) else {
         return;
     };
     let inset = |extent: u32| i32::try_from(extent.saturating_sub(side) / 2).unwrap_or(0);
-    surface.blit(
+    surface.blit_tinted(
         bounds.left() + inset(bounds.width),
         bounds.top() + inset(bounds.height),
-        &picture,
+        &mask,
+        color,
     );
 }
 

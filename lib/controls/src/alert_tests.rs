@@ -4,6 +4,7 @@
 
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -589,4 +590,22 @@ fn a_held_arrow_on_the_alerts_bar_steps_and_repeats_and_chooses_nothing() {
         "letting go of the bar answers nothing"
     );
     assert_eq!(alert.repeat_deadline(due), None, "let go, nothing repeats");
+}
+
+/// A picture the desktop sets replaces the severity's mark; an alert built
+/// from a spec alone wears its severity's.
+#[test]
+fn a_desktop_picture_replaces_the_severity_mark() {
+    let plain = alert("", &[ok()]);
+    assert_eq!(plain.mark_kind(), IconKind::AlertError);
+    let about = alert("", &[ok()]).with_picture(IconKind::About);
+    assert_eq!(about.mark_kind(), IconKind::About);
+    assert!(
+        about.mark(Scale::ONE).is_some(),
+        "the picture draws as a badge"
+    );
+    assert_ne!(
+        about.mark(Scale::ONE).map(|mark| mark.pixels().to_vec()),
+        plain.mark(Scale::ONE).map(|mark| mark.pixels().to_vec())
+    );
 }

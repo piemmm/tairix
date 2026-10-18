@@ -84,6 +84,11 @@ pub struct Palette {
     /// theme rather than derived from [`accent`](Self::accent) at the draw
     /// site so a theme can tune the fill's weight against its own surfaces.
     pub selection_fill: Rgba,
+    /// What a selected item's picture is washed with, through the picture's
+    /// own coverage: heavier than [`selection_fill`](Self::selection_fill),
+    /// because it marks a picture rather than tinting a plate under a name.
+    /// Authored per theme for the same reason.
+    pub selection_tint: Rgba,
     /// Window and control borders / separators.
     pub border: Rgba,
 
@@ -168,6 +173,10 @@ pub struct Palette {
     pub scroll_track: Rgba,
     /// The scrollbar thumb.
     pub scroll_thumb: Rgba,
+    /// The scrollbar thumb and end buttons while hovered, pressed or dragged:
+    /// a neutral step from [`scroll_thumb`](Self::scroll_thumb), never the
+    /// accent, so a bar in use reads as handled rather than as selected.
+    pub scroll_thumb_active: Rgba,
     /// The Frame Rim every window wears: one quiet neutral, a step lighter
     /// than [`surface`](Self::surface) on a dark appearance and a step deeper
     /// on a light one, so a window's edge separates it from the desktop

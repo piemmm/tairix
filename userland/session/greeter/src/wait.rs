@@ -7,7 +7,7 @@
 
 use alloc::string::{String, ToString};
 
-use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::time::Duration64;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_theme::Timeline;
 
@@ -16,9 +16,6 @@ const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// Milliseconds in one second, the unit a theme authors a duration in.
 const MILLIS_PER_SEC: u64 = 1_000;
-
-/// Seconds in one minute.
-pub(crate) const SECS_PER_MINUTE: i64 = 60;
 
 /// How long the login screen waits without input before it puts its display
 /// to sleep.
@@ -112,12 +109,12 @@ impl Idle {
 /// The relative nanosecond timeout for the next park before the clock or a
 /// lockout needs a repaint.
 ///
-/// [`WAITSET_TIMEOUT_NONE`] means neither does: nothing they draw changes until an input
-/// event arrives. `now` is `None` when no trusted wall time is held, in which
-/// case there is no clock on the backdrop to keep current either.
+/// `clock` is the nanoseconds until the clock next changes, or `None` where
+/// it shows nothing that will: no trusted wall time is held, or the range
+/// holds no later minute. [`WAITSET_TIMEOUT_NONE`] means nothing either draws
+/// changes until an input event arrives.
 #[must_use]
-pub fn park_timeout(now: Option<Time64>, cooldown_remaining: Duration64) -> u64 {
-    let clock = now.map(nanos_to_next_minute);
+pub fn park_timeout(clock: Option<u64>, cooldown_remaining: Duration64) -> u64 {
     let remaining = cooldown_remaining.saturating_total_nanos();
     let tick = (remaining > 0).then(|| remaining.min(NANOS_PER_SEC));
     match (clock, tick) {
@@ -140,18 +137,6 @@ pub fn frame_budget(duration_ms: u16) -> u32 {
     u32::try_from(span / Timeline::FRAME_NS)
         .unwrap_or(u32::MAX)
         .saturating_add(1)
-}
-
-/// Nanoseconds from `now` to the next whole minute.
-///
-/// Never zero: a reading exactly on a minute boundary has just been drawn,
-/// so its next repaint is a whole minute away and a zero timeout would spin.
-fn nanos_to_next_minute(now: Time64) -> u64 {
-    let into_minute = now.secs().rem_euclid(SECS_PER_MINUTE);
-    let secs_left = (SECS_PER_MINUTE - into_minute).unsigned_abs();
-    secs_left
-        .saturating_mul(NANOS_PER_SEC)
-        .saturating_sub(u64::from(now.subsec_nanos()))
 }
 
 #[cfg(test)]

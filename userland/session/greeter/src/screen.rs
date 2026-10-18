@@ -26,6 +26,7 @@ use tairix_raster::Surface;
 use tairix_ribbon::SKY;
 use tairix_theme::{MotionInteraction, Theme};
 use tairix_touch::{Gesture, Recogniser, SurfacePoint, TouchPress, TouchSettings};
+use tairix_tz::CivilClock;
 use tairix_window::pointer_input_events;
 
 use crate::chrome::Teller;
@@ -186,7 +187,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         scanout: Scanout,
         theme: Theme,
         scale: Scale,
-        identity: String,
+        (identity, civil): (String, CivilClock<'static>),
         accounts: Vec<AccountTile>,
         courier: C,
     ) -> Self {
@@ -202,7 +203,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
             verifier: Asking::new(courier),
             theme,
             scale,
-            teller: Teller::new(identity),
+            teller: Teller::new(identity, civil),
             scene: None,
             cursor,
             pointer: None,
@@ -553,6 +554,13 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         let remaining = self
             .cooldown
             .remaining(now_ns, self.surface.selected_account());
+        let clock = wall.and_then(|wall| {
+            let next = self.teller.next_minute(wall)?;
+            Some(
+                next.saturating_duration_since(wall)
+                    .saturating_total_nanos(),
+            )
+        });
         [
             self.surface.motion_due(now_ns),
             self.scene.as_ref().and_then(|scene| scene.due_in(now_ns)),
@@ -563,7 +571,7 @@ impl<C: Courier<Answer = Checked>> LoginScreen<C> {
         ]
         .into_iter()
         .flatten()
-        .fold(park_timeout(wall, remaining), u64::min)
+        .fold(park_timeout(clock, remaining), u64::min)
     }
 
     /// Put `display` to sleep once the screen has been left alone for the

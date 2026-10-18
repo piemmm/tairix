@@ -55,6 +55,7 @@ pub mod artwork;
 pub mod badge;
 mod command;
 pub mod desk;
+mod fit;
 pub mod folder;
 pub mod glyph;
 pub mod load;

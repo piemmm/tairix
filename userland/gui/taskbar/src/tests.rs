@@ -185,6 +185,7 @@ fn painted_network_readout(
 use tairix_controls::{ChainChild, ChainModel, ChainRow, INFO_ROW_LABEL};
 
 use crate::apps::{AppIdentity, AppSlot};
+use crate::clock::{ClockFaces, ClockLines};
 use crate::edge::{Edge, Orientation};
 use crate::input::{TaskbarInput, TaskbarResponse, LONG_PRESS_AFTER_NS};
 use crate::layout::{local_rect, Hit};
@@ -308,6 +309,17 @@ fn identity(name: &str) -> AppIdentity {
         purpose: Some(String::from("Does one thing well")),
         author: Some(String::from("TAIRiX")),
     }
+}
+
+/// Show `time` alone on `bar`'s clock, stated so in its menu.
+fn show_time(bar: &mut Taskbar, time: &str) {
+    bar.clock_mut().set_reading(
+        ClockLines {
+            time: String::from(time),
+            date: String::new(),
+        },
+        time,
+    );
 }
 
 /// A bottom-bar taskbar over the standard fixture with its popup closed,
@@ -5482,7 +5494,7 @@ fn app_strip_and_menu_actions_latch_repaints() {
 fn the_clock_is_set_a_step_larger_than_a_caption() {
     let theme = Theme::dark();
     let mut bar = bottom_bar();
-    bar.clock_mut().set_label("12:34");
+    show_time(&mut bar, "12:34");
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
@@ -5505,6 +5517,147 @@ fn the_clock_is_set_a_step_larger_than_a_caption() {
         u32::try_from(inked).expect("row count fits"),
         face(TextRole::Body).pixel_height()
     );
+}
+
+fn lines(time: &str, date: &str) -> ClockLines {
+    ClockLines {
+        time: String::from(time),
+        date: String::from(date),
+    }
+}
+
+/// The rows, then the columns, of `region` that `bar`'s painted `surface`
+/// inks in the clock's colour.
+fn clock_ink(surface: &Surface, bar: &Taskbar, region: Rect) -> (Vec<i32>, Vec<i32>) {
+    let theme = Theme::dark();
+    let fg = role(theme.palette().on_surface);
+    let bg = floating_ground(&theme, theme.palette().surface_raised);
+    let frame = bar.layout(Scale::ONE).bar;
+    let inked = |x: i32, y: i32| is_coverage_blend(pixel_at(surface, frame, x, y), fg, bg);
+    let rows = (region.top()..region.bottom())
+        .filter(|&y| (region.left()..region.right()).any(|x| inked(x, y)))
+        .collect();
+    let columns = (region.left()..region.right())
+        .filter(|&x| (region.top()..region.bottom()).any(|y| inked(x, y)))
+        .collect();
+    (rows, columns)
+}
+
+/// Whether `run` has a gap: two inked bands with blank between them.
+fn has_gap(run: &[i32]) -> bool {
+    run.windows(2).any(|pair| pair[1] > pair[0] + 1)
+}
+
+fn painted_clock_bar(bar: &Taskbar) -> Surface {
+    painted_bar(
+        &mut TaskbarRenderer::new(test_icon_cache()),
+        bar,
+        Scale::ONE,
+        &mut NoArtwork,
+    )
+    .expect("bar renders")
+}
+
+#[test]
+fn the_date_stands_beneath_the_time_on_a_bar_deep_enough_for_both() {
+    let mut bar = bottom_bar();
+    bar.clock_mut()
+        .set_widest(alloc::vec![lines("22:58", "28/12/2088")]);
+    bar.clock_mut()
+        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    let layout = bar.layout(Scale::ONE);
+    let faces = ClockFaces::of(bar.theme(), Scale::ONE);
+    assert!(
+        faces.stacks(layout.clock.height),
+        "the default bar holds two lines"
+    );
+    let (rows, columns) = clock_ink(&painted_clock_bar(&bar), &bar, layout.clock);
+    assert!(!columns.is_empty());
+    let first = rows.first().copied().expect("ink");
+    let last = rows.last().copied().expect("ink");
+    let time_line = i32::try_from(faces.time.line_height()).expect("small");
+    assert!(
+        last >= first + time_line,
+        "the date stands below the time's line: {rows:?}"
+    );
+    let both = faces.time.line_height() + faces.date.line_height();
+    assert!(u32::try_from(rows.len()).expect("small") <= both);
+    let middle = layout.clock.top() + i32::try_from(layout.clock.height / 2).expect("small");
+    assert!(
+        first < middle && last >= middle,
+        "the block centred about the middle"
+    );
+}
+
+#[test]
+fn the_date_stands_beside_the_time_on_a_bar_too_thin_for_two_lines() {
+    let theme = Theme::dark().floating();
+    let faces = ClockFaces::of(&theme, Scale::ONE);
+    let one_line = faces.time.line_height() + 4;
+    let config = TaskbarConfig {
+        thickness: one_line,
+        ..TaskbarConfig::bottom_bar(1000, 800)
+    };
+    let mut bar = Taskbar::new(config, &theme);
+    bar.clock_mut()
+        .set_widest(alloc::vec![lines("22:58", "28/12/2088")]);
+    bar.clock_mut()
+        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    let layout = bar.layout(Scale::ONE);
+    assert!(!faces.stacks(layout.clock.height));
+    let pair = faces.time.text_width("14:05") + faces.gap + faces.date.text_width("18/10/2026");
+    assert!(layout.clock.width >= pair, "room for the pair side by side");
+    let (rows, columns) = clock_ink(&painted_clock_bar(&bar), &bar, layout.clock);
+    assert!(!has_gap(&rows), "one line: {rows:?}");
+    assert!(has_gap(&columns), "the time, a gap, then the date");
+}
+
+#[test]
+fn the_clock_keeps_room_for_its_widest_reading_as_minutes_and_days_turn() {
+    let mut bar = bottom_bar();
+    bar.clock_mut().set_widest(alloc::vec![
+        lines("10:58 AM", "12/28/2088"),
+        lines("10:58 PM", "12/28/2088"),
+    ]);
+    bar.clock_mut()
+        .set_reading(lines("9:05 AM", "1/8/2026"), "1/8/2026 9:05 AM EST");
+    let first = bar.layout(Scale::ONE).clock;
+    bar.clock_mut()
+        .set_reading(lines("11:59 PM", "12/31/2026"), "12/31/2026 11:59 PM EST");
+    assert_eq!(bar.layout(Scale::ONE).clock, first, "the clock holds still");
+    let faces = ClockFaces::of(bar.theme(), Scale::ONE);
+    assert!(first.width >= faces.time.text_width("11:59 PM"));
+    assert!(first.width >= faces.date.text_width("12/31/2026"));
+}
+
+#[test]
+fn a_date_the_clock_cannot_hold_whole_leaves_the_time_alone() {
+    let theme = Theme::dark().floating();
+    let faces = ClockFaces::of(&theme, Scale::ONE);
+    let config = TaskbarConfig {
+        edge: Edge::Left,
+        thickness: faces.time.text_width("14:05") + 8,
+        ..TaskbarConfig::bottom_bar(1000, 800)
+    };
+    let mut bar = Taskbar::new(config, &theme);
+    bar.clock_mut()
+        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    let layout = bar.layout(Scale::ONE);
+    assert!(faces.time.text_width("14:05") <= layout.clock.width);
+    assert!(faces.date.text_width("18/10/2026") > layout.clock.width);
+    let (rows, _) = clock_ink(&painted_clock_bar(&bar), &bar, layout.clock);
+    assert!(!rows.is_empty(), "the time is drawn");
+    assert!(!has_gap(&rows), "and nothing beneath it");
+}
+
+#[test]
+fn the_clock_menu_states_the_heading_the_caller_wrote() {
+    let mut bar = bottom_bar();
+    bar.clock_mut()
+        .set_reading(lines("14:05", "18/10/2026"), "18/10/2026 14:05 BST");
+    let mut input = TaskbarInput::new();
+    let request = ask_clock_menu(&mut input, &mut bar);
+    assert_eq!(offered_row(&request, 0).label(), "18/10/2026 14:05 BST");
 }
 
 /// At the largest text size a person can choose, the clock's region still
@@ -5542,7 +5695,7 @@ fn a_time_the_clock_cannot_hold_whole_is_not_drawn() {
         ..TaskbarConfig::bottom_bar(1920, 1080)
     };
     let mut bar = Taskbar::new(config, &theme);
-    bar.clock_mut().set_label("12:34");
+    show_time(&mut bar, "12:34");
     let layout = bar.layout(Scale::ONE);
     let face = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     assert!(face.text_width("12:34") > layout.clock.width, "too narrow");
@@ -5587,7 +5740,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
 
     // An unset wall clock is not an empty label: the clock is pressable and
     // its menu is where a time is set, so the placeholder must be visible.
-    bar.clock_mut().set_label(crate::clock::UNSET_LABEL);
+    show_time(&mut bar, crate::clock::UNSET_LABEL);
     let unset = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
         &bar,
@@ -5606,7 +5759,7 @@ fn clock_label_paints_and_an_empty_clock_paints_nothing() {
         "the unset placeholder is drawn"
     );
 
-    bar.clock_mut().set_label("12:34");
+    show_time(&mut bar, "12:34");
     let drawn = painted_bar(
         &mut TaskbarRenderer::new(test_icon_cache()),
         &bar,
@@ -6123,7 +6276,7 @@ fn a_bar_with_no_artwork_at_all_still_draws_every_element() {
     let theme = Theme::dark();
     let mut bar = bar_with_status_signals();
     bar.set_apps(alloc::vec![app("App")], Scale::ONE);
-    bar.clock_mut().set_label("12:34");
+    show_time(&mut bar, "12:34");
 
     let layout = bar.layout(Scale::ONE);
     let surface = painted_bar(
@@ -8237,7 +8390,7 @@ fn library_mut_latches_the_popup_and_the_bar() {
 #[test]
 fn clock_mut_latches_the_bar() {
     let mut bar = bottom_bar();
-    bar.clock_mut().set_label("12:34");
+    show_time(&mut bar, "12:34");
     assert_eq!(
         bar.take_repaint(),
         TaskbarRepaint::BAR,
@@ -8271,7 +8424,7 @@ fn reading_through_an_immutable_accessor_latches_nothing() {
 
     assert_eq!(bar.tasks().len(), 1);
     assert!(!bar.library().is_open());
-    assert!(bar.clock().label().is_empty());
+    assert!(bar.clock().lines().time.is_empty());
     assert!(!bar.tray().is_expanded());
     assert_eq!(bar.notifications().signal_count(), 0);
     assert_eq!(bar.apps().len(), 0);
@@ -8523,9 +8676,7 @@ fn a_secondary_press_elsewhere_on_the_bar_asks_for_no_system_menu() {
 #[test]
 fn every_row_maps_to_exactly_its_expected_response() {
     let expected = alloc::vec![
-        Some(TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Resources,
-        }),
+        Some(TaskbarResponse::AboutSystem),
         Some(TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Resources,
         }),
@@ -8717,7 +8868,7 @@ fn the_switch_user_row_is_absent_until_the_session_can_be_resumed() {
 #[test]
 fn the_clock_menu_states_the_reading_the_bar_is_drawing() {
     let mut bar = bottom_bar();
-    bar.clock_mut().set_label("09:41");
+    show_time(&mut bar, "09:41");
     let mut input = TaskbarInput::new();
     let request = ask_clock_menu(&mut input, &mut bar);
 
@@ -8732,7 +8883,7 @@ fn an_unset_clock_menu_says_so_rather_than_showing_a_fabricated_time() {
     // Nothing has set the wall clock this boot, so the bar draws its
     // placeholder — which a heading repeating it would read as a time.
     let mut bar = bottom_bar();
-    bar.clock_mut().set_label(crate::clock::UNSET_LABEL);
+    show_time(&mut bar, crate::clock::UNSET_LABEL);
     let mut input = TaskbarInput::new();
     let request = ask_clock_menu(&mut input, &mut bar);
 
@@ -8747,7 +8898,7 @@ fn the_set_time_row_is_denied_until_the_session_attests_a_broker() {
     // Nothing attested yet: setting the clock needs an account that may,
     // and this session has nothing to authenticate one against.
     let mut bar = bottom_bar();
-    bar.clock_mut().set_label("09:41");
+    show_time(&mut bar, "09:41");
     let mut input = TaskbarInput::new();
     let request = ask_clock_menu(&mut input, &mut bar);
 

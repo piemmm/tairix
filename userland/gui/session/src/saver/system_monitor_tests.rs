@@ -29,7 +29,7 @@ fn board() -> SystemMonitor {
         &identity,
         &Theme::dark(),
         SCREEN,
-        (Some(after(0)), 0),
+        (Some(after(0)), tairix_tz::CivilClock::UTC, 0),
         SystemMonitorOptions::default(),
     )
     .expect("a board")

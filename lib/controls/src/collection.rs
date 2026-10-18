@@ -47,8 +47,8 @@ use crate::paint::{
     paint_count_badge, paint_drop_target, paint_icon_slot, paint_row, paint_run,
     paint_surface_plate, plate_border, plate_corner, pointer_activation, press_latch,
     rail_thickness, resolve_bead, role_font, route_pointer, row_content_span, run_width,
-    seam_thickness, seam_width, surface_rect, to_i32, withheld, ChevronDir, ChromeLayer,
-    PlateInterior, TextAlign, TextBlock, FULL_COLOUR,
+    seam_thickness, seam_width, surface_rect, to_i32, withheld, ArtworkTone, ChevronDir,
+    ChromeLayer, PlateInterior, TextAlign, TextBlock,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -301,7 +301,7 @@ impl ListRow {
                     kind,
                     fg,
                     artwork,
-                    FULL_COLOUR,
+                    ArtworkTone::FULL,
                 );
             }
             left = left.saturating_add(icon_slot).saturating_add(pad);
@@ -512,7 +512,7 @@ impl TableCell {
         // The leading identity icon, on a fixed slot ahead of the text
         // regardless of the cell's own alignment (spec §11.14).
         if let (Some(slot), Some(kind)) = (layout.icon, self.icon) {
-            paint_icon_slot(surface, slot, kind, fg, picture, FULL_COLOUR);
+            paint_icon_slot(surface, slot, kind, fg, picture, ArtworkTone::FULL);
         }
 
         let Some((left, right)) = layout.text else {
@@ -2102,16 +2102,17 @@ impl Card {
 /// state-and-actions surface* and wears a plate to bound the group it owns; a
 /// tile is one item among many and would only add a box per picture.
 ///
-/// State is what makes a tile paint anything behind its picture, over its body
-/// ([`TileLayout::body_rect`]) — the picture and the name's drawn lines — so the
-/// rest of its bounds stays the ground between tiles:
+/// State is what makes a tile paint anything behind its name
+/// ([`TileLayout::parts`]) — the name's drawn lines, or the picture of a tile
+/// drawing no name — so the rest of its bounds stays the ground between tiles:
 /// * the pointer wash while hovered or pressed, in the shared plate colours;
 /// * the selection fill, the palette's accent at three tenths opacity, rounded
 ///   like every other plate and laid crisply over a
 ///   frosted backdrop, so a selected item is plainly the accent while the
 ///   surface or wallpaper under it still reads through — the pointer washes
-///   are different colours entirely, so neither can imitate it. An owner
-///   animating a selection draws the mark part-way through
+///   are different colours entirely, so neither can imitate it — while the
+///   picture itself is washed with the palette's `selection_tint`. An owner
+///   animating a selection draws both part-way through
 ///   [`with_selection_fade`](Self::with_selection_fade);
 /// * the keyboard Focus Ring, through the one shared outline every row and tab
 ///   family draws, so a focused tile reads distinctly from a hovered one. A
@@ -2135,6 +2136,7 @@ pub struct IconTile {
     label_shadow: Option<TextShadow>,
     name_cut: Cut,
     casts_shadow: bool,
+    name_withheld: bool,
     layout: TileLayout,
 }
 
@@ -2151,8 +2153,18 @@ impl IconTile {
             label_shadow: None,
             name_cut: Cut::End,
             casts_shadow: false,
+            name_withheld: false,
             layout: TileLayout::new(1),
         }
+    }
+
+    /// This tile with its name withheld, for an owner laying an editor where
+    /// the name is — the file manager's in-place rename — so nothing of the
+    /// old name shows around or under it.
+    #[must_use]
+    pub fn with_name_withheld(mut self) -> Self {
+        self.name_withheld = true;
+        self
     }
 
     /// This tile divided by `layout`.
@@ -2252,12 +2264,14 @@ impl IconTile {
             return;
         }
         let ink = self.label_color(theme);
-        let body = self
+        let parts = self
             .layout
-            .body_rect(bounds, scale, theme, &self.label, self.name_cut)
+            .parts(bounds, scale, theme, &self.label, self.name_cut);
+        let plate = parts
+            .and_then(|parts| self.plate_part(parts))
             .and_then(surface_rect);
-        if let Some(body) = body {
-            self.paint_backdrop(surface, body, scale, theme);
+        if let Some(plate) = plate {
+            self.paint_backdrop(surface, plate, scale, theme);
         }
         if let Some(slot) = self.layout.icon_slot(bounds, scale, theme) {
             // Without a cache the built-in picture is rasterised here, once, so
@@ -2274,14 +2288,60 @@ impl IconTile {
             if let Some(picture) = picture {
                 let at = centred_in(slot, picture.surface());
                 self.paint_picture_shadow(surface, picture, at, scale, theme);
-                paint_icon_slot(surface, slot, self.icon, ink, Some(picture), FULL_COLOUR);
+                paint_icon_slot(
+                    surface,
+                    slot,
+                    self.icon,
+                    ink,
+                    Some(picture),
+                    ArtworkTone::FULL,
+                );
+                self.paint_picture_tint(surface, picture, at, theme);
                 if let Some(frame) = picture.frame() {
                     paint_frame(surface, at, frame, scale, theme);
                 }
             }
         }
-        self.paint_label(surface, bounds, scale, theme, font, ink);
-        self.paint_bead(surface, body.unwrap_or((x, y, w, h)), scale, theme);
+        if !self.name_withheld {
+            self.paint_label(surface, bounds, scale, theme, font, ink);
+        }
+        let corner = parts
+            .and_then(|parts| parts.picture.or(parts.name))
+            .and_then(surface_rect);
+        self.paint_bead(surface, corner.unwrap_or((x, y, w, h)), scale, theme);
+    }
+
+    /// The part the tile's state marks are drawn behind: its name, or its
+    /// picture when it draws no name. A withheld name has an editor standing
+    /// in its place, which is the mark.
+    fn plate_part(&self, parts: TileParts) -> Option<Rect> {
+        if self.name_withheld {
+            return None;
+        }
+        parts.name.or(parts.picture)
+    }
+
+    /// Wash the picture drawn at `at` with the selection tint through its own
+    /// coverage, at the strength the selection mark is drawn at, or whole for a
+    /// drop target, so a picked item's picture reads as lit.
+    fn paint_picture_tint(
+        &self,
+        surface: &mut Surface,
+        picture: IconPicture<'_>,
+        at: (i32, i32),
+        theme: &Theme,
+    ) {
+        let strength = if self.state.pointer == PointerState::DragTarget {
+            u8::MAX
+        } else {
+            self.mark_strength(theme)
+        };
+        if strength == 0 {
+            return;
+        }
+        let tint = theme.palette().selection_tint;
+        let tint = tint.with_alpha(div255(u32::from(tint.a) * u32::from(strength)));
+        surface.blit_tinted(at.0, at.1, picture.surface(), Color::from(tint));
     }
 
     /// Paint the shadow `picture`, drawn at `at`, casts: the one it brings, or
@@ -2329,11 +2389,11 @@ impl IconTile {
         })
     }
 
-    /// Paint whatever the tile's state puts *behind* its picture over its body
-    /// ([`TileLayout::body_rect`]): the pointer wash or the selection fill, then
-    /// the keyboard Focus Ring. A resting, unselected, unfocused tile paints
-    /// nothing at all, which is what keeps an icon view a field of pictures
-    /// rather than a grid of plates.
+    /// Paint whatever the tile's state puts behind its name over `rect`
+    /// ([`plate_part`](Self::plate_part)): the pointer wash or the selection
+    /// fill, then the keyboard Focus Ring. A resting, unselected, unfocused
+    /// tile paints nothing at all, which is what keeps an icon view a field of
+    /// pictures rather than a grid of plates.
     fn paint_backdrop(
         &self,
         surface: &mut Surface,
@@ -2392,19 +2452,32 @@ impl IconTile {
         scale: Scale,
         theme: &Theme,
     ) -> bool {
-        if heavy_contrast(theme) {
-            if !self.is_selected() {
-                return false;
-            }
-            fill_panel(surface, rect, scale, theme, theme.palette().accent);
-            return true;
-        }
-        let fade = self.selection_mark();
-        if fade == 0 {
+        let strength = self.mark_strength(theme);
+        if strength == 0 {
             return false;
         }
-        paint_selection_fill(surface, rect, scale, theme, fade);
+        if heavy_contrast(theme) {
+            fill_panel(surface, rect, scale, theme, theme.palette().accent);
+        } else {
+            paint_selection_fill(surface, rect, scale, theme, strength);
+        }
         true
+    }
+
+    /// How strongly the selection is drawn — its plate and its picture's
+    /// tint alike: the mark's strength, or under a heavier contrast whole the
+    /// moment the item is selected, since a half-arrived mark is the very
+    /// contrast that policy exists to rule out.
+    fn mark_strength(&self, theme: &Theme) -> u8 {
+        if heavy_contrast(theme) {
+            if self.is_selected() {
+                u8::MAX
+            } else {
+                0
+            }
+        } else {
+            self.selection_mark()
+        }
     }
 
     /// Paint the tile's name under its picture: wrapped over as many whole
@@ -2500,6 +2573,36 @@ impl IconTile {
     }
 }
 
+/// What an [`IconTile`] is made of, each part with a half inset of margin: its
+/// picture and its name's drawn lines ([`TileLayout::parts`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TileParts {
+    /// The picture, with its margin; `None` when the tile has no room for one.
+    pub picture: Option<Rect>,
+    /// The name's drawn lines, with their margin; `None` when none is drawn.
+    pub name: Option<Rect>,
+}
+
+impl TileParts {
+    /// Whether `point` lies on either part.
+    #[must_use]
+    pub fn contains(&self, point: Point) -> bool {
+        [self.picture, self.name]
+            .into_iter()
+            .flatten()
+            .any(|part| part.contains(point))
+    }
+
+    /// Whether `area` touches either part.
+    #[must_use]
+    pub fn meets(&self, area: &Rect) -> bool {
+        [self.picture, self.name]
+            .into_iter()
+            .flatten()
+            .any(|part| !part.intersection(area).is_empty())
+    }
+}
+
 /// How an [`IconTile`] divides its bounds: a square picture, and a band of
 /// whole name lines either below it or beside it.
 ///
@@ -2589,33 +2692,34 @@ impl TileLayout {
             .map_or(0, |band| band.lines)
     }
 
-    /// What a tile occupying `bounds` and named `label`, cut as `cut` says,
-    /// truly covers: its picture and its name's drawn lines, each with a half
-    /// inset of margin, within `bounds`. `None` when the tile draws nothing.
+    /// What a tile occupying `bounds` and named `label`, cut as `cut` says, is
+    /// made of: its picture and its name's drawn lines, each with a half inset
+    /// of margin, within `bounds`. `None` when the tile draws nothing.
     ///
-    /// The press target, the plate the tile's state paints, and what a band
-    /// must touch to select the tile; the rest of `bounds` is the ground the
-    /// tile stands on, so a short name leaves the space beside it as ground.
+    /// The press target and what a band must touch to select the tile are
+    /// either part, never the box around both; the rest of `bounds` — beside a
+    /// narrow picture above a wide name, beside a short name — is the ground
+    /// the tile stands on.
     #[must_use]
-    pub fn body_rect(
+    pub fn parts(
         self,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
         label: &str,
         cut: Cut,
-    ) -> Option<Rect> {
+    ) -> Option<TileParts> {
         let (_, margin) = tile_insets(scale, theme);
-        let core = self.core_rect(bounds, scale, theme).unwrap_or(Rect::EMPTY);
+        let picture = self.core_rect(bounds, scale, theme);
         let name = self
             .name_rect(bounds, scale, theme, label, cut)
-            .map_or(Rect::EMPTY, |name| grown(name, margin));
-        let body = core.union(&name).intersection(&bounds);
-        (!body.is_empty()).then_some(body)
+            .map(|name| grown(name, margin).intersection(&bounds))
+            .filter(|name| !name.is_empty());
+        (picture.is_some() || name.is_some()).then_some(TileParts { picture, name })
     }
 
-    /// The part of [`body_rect`](Self::body_rect) every tile occupying `bounds`
-    /// has whatever it is named: its picture, with the body's margin.
+    /// The part of a tile occupying `bounds` it has whatever it is named: its
+    /// picture, with the half inset of margin [`parts`](Self::parts) gives it.
     #[must_use]
     pub fn core_rect(self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
         let (x, y, side) = self.icon_slot(bounds, scale, theme)?;
@@ -2626,8 +2730,8 @@ impl TileLayout {
     }
 
     /// Where a press on `label`'s drawn lines lands, for a tile occupying
-    /// `bounds` and named as [`body_rect`](Self::body_rect) is: the lines with
-    /// the body's margin, below the picture's. `None` when no name is drawn.
+    /// `bounds` and named as [`parts`](Self::parts) is: the lines with their
+    /// margin, below the picture's. `None` when no name is drawn.
     ///
     /// The picture's margin and the name's overlap between them, and that strip
     /// is the picture's, so a press meant for the picture never edits the name.
@@ -2886,7 +2990,7 @@ fn fill_panel(
 /// The corner radius an [`IconTile`]'s plate is rounded by, in physical pixels
 /// at the active density. One definition, so the shape a mark's frost is
 /// confined to is the shape its fill is drawn in.
-fn plate_radius(scale: Scale, theme: &Theme) -> u32 {
+pub(crate) fn plate_radius(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().control_corner_radius)
 }
 

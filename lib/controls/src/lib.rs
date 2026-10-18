@@ -355,7 +355,7 @@ pub use chart::{Chart, DuplexRates, RateTrace, MAX_CHART_SAMPLES, RATE_TRACE_FLO
 pub use checker::Checker;
 pub use collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
-    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout,
+    PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow, TileLayout, TileParts,
 };
 pub use colour_model::{ChannelSpec, ColourModel, PickerView, MOST_CHANNELS};
 pub use colour_picker::{ColourPicker, PickerOutcome};
@@ -371,7 +371,7 @@ pub use form::{
 };
 pub use menu::{
     plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
-    PlatePlacement, PlateSide, RowIcon, INFO_ROW_LABEL,
+    PlatePlacement, PlateSide, RowIcon, INFO_ROW_LABEL, SEEK_PAUSE_NS,
 };
 pub use metric::{
     CompositionBar, CompositionError, CompositionRing, CompositionSegment, MetricInstrument,
@@ -382,7 +382,7 @@ pub use number::{NumberAction, NumberField, MOST_PLACES};
 pub use paint::{
     blend_area, fill_area, ground_fill, inset, paint_framed_surface_plate, paint_icon_slot,
     paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, plate_content_inset,
-    run_width, withheld, ChromeLayer, Measured, Run, FULL as FULL_PERMILLE, FULL_COLOUR,
+    run_width, withheld, ArtworkTone, ChromeLayer, Measured, Run, FULL as FULL_PERMILLE,
 };
 pub use picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
 pub use rail::{ActionRail, RailAction};
@@ -406,7 +406,10 @@ pub use state::{
 };
 pub use swatch_grid::{SwatchAction, SwatchGrid, SwatchMark};
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
-pub use text::{owner_chord, Keystroke, SearchField, SecretField, TextAction, TextArea, TextField};
+pub use text::{
+    owner_chord, ClipboardChord, Keystroke, SearchField, SecretField, TextAction, TextArea,
+    TextField,
+};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{
@@ -435,6 +438,8 @@ mod disclosure_tests;
 mod form_tests;
 #[cfg(test)]
 mod menu_tests;
+#[cfg(test)]
+mod menu_window_tests;
 #[cfg(test)]
 mod metric_tests;
 #[cfg(test)]

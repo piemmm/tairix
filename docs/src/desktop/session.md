@@ -467,7 +467,35 @@ new sort order is neither: the desktop re-sorts the icons it shows as it adopts
 the settings, keeping the selection on its icon. Changing the sort order
 therefore reads nothing and decodes no wallpaper, changing the wallpaper never
 re-reads the folder or re-themes, and a new backdrop colour costs one
-repaint.
+repaint. `clock` says the region or the zone moved: the clocks are read again
+in the new ones at once, rather than at the next minute.
+
+### The clock and the zone store
+
+The session reads the zone store (`/System/Zoneinfo/zones.tzx`, `lib/tz`) once
+at bring-up, before its serve loop, and holds it — and the descriptor it read it
+through — for the life of the session; a store that cannot be read is stated
+once and the clocks read UTC with ISO 8601 dates. The desktop's own Settings
+application, which may open no file, lists the store's regions and places from
+a read-only delegation of that descriptor (`WindowRequest::TakeZoneStore`,
+answered to Settings alone), so handing it over costs no filesystem operation
+on the serve loop. `DesktopShell` holds the icon bar clock (`SessionClock`) and resolves it
+with `civil_clock`: the `time.zone` and `region` keys where the store holds
+them, else the store's own zone and region (Europe/London and the United
+Kingdom as shipped). A stored choice the store does not hold reads as the
+default and is said so once. An apply that *changes* either key to one the
+store does not hold is refused (`PinboardRefusal::NotInStore`), so a mistyped
+choice is rejected while the person making it is looking at it.
+
+The clock is read in its own zone and written in its region's conventions
+(`CivilClock`): the time, the numeric date, and a heading for the clock's menu
+— `18/10/2026 14:05 BST`. Its one deadline is the instant its zone next turns
+the minute (`Zone::next_minute`: the next *local* minute, or a change of offset
+before it), folded into the park; on adopting a new zone or region it is due
+at once. With each change of conventions the shell hands the bar the widest
+lines those conventions can write (`tairix_tz::WIDEST`: every field at its most
+digits, before noon and after), so the bar's clock keeps the room it needs and
+never shifts; a change that moves that room presents the bar once.
 
 `adopt_appearance` is the one place the appearance half is put into effect —
 the theme registry, the output's density, and the republish every open
@@ -758,10 +786,17 @@ the same kind of typed outcome — the bar decides nothing and holds no
 authority for any of them:
 
 - `OpenSwitchboard { section }` — both the capsule's own press *and* the
-  menu's two inspection rows (*About This System* → `System`, *System
-  Monitor* → `Tasks`). Relayed to the live monitor; with none live the press
-  is itself the demand for one, so an instance is brought up and the section
-  held until its first publish proves it is listening.
+  menu's *System Monitor* row (→ `Resources`). Relayed to the live monitor;
+  with none live the press is itself the demand for one, so an instance is
+  brought up and the section held until its first publish proves it is
+  listening.
+- `AboutSystem` — the *About This System* row. The session puts up its one
+  About window, an alert of its own carrying the About picture, which states
+  the system's name and version and the machine's processors and memory. The
+  three readings are taken once before the serve loop starts, so opening it
+  reads nothing; asking again brings the open window forward with the
+  keyboard rather than opening a second, and a reading the service refused
+  reads *not measured*.
 - `LibraryLaunch { entry }` — the *Task Shell* row, which reuses the bar's
   one launch path rather than inventing a second. The row is actionable only
   while the terminal bundle resolves in the catalog the session handed the
@@ -1890,7 +1925,8 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   with no preparer leaves it black rather than decoding on the serve loop. A
   category the store no longer holds shows every picture rather than none.
 - **A clock** (`saver::clock`): the icon bar's own reading and spelling of the
-  time, so the two never disagree, over the date and *account · machine*,
+  time, so the two never disagree, over the date as the bar writes it and
+  *account · machine*,
   either of which the options may leave out. The machine's name is read once
   at bring-up, since the loop may not make a service call. Each minute the
   block fades out, moves somewhere new on the screen so no pixel stays lit,
@@ -1898,8 +1934,8 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   it simply moves.
 - **A minimal clock** (`saver::ribbon`): the same reading of the time, set in
   a hairline weight with tabular figures so no digit shifts as the minutes
-  turn, over the date spelled out (`Mon 28 Sep 2026`, which the options may
-  leave out). The text never moves. A ribbon of orange light roams the screen
+  turn, over the local date spelled out (`Mon 28 Sep 2026`, which the options
+  may leave out). The text never moves. A ribbon of orange light roams the screen
   from edge to edge, each of its five soft strands one smooth Bézier curve
   that runs on past both edges, so every line is seen passing through them.
   The ribbon's course rises and falls on travelling waves, and each strand

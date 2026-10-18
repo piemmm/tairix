@@ -120,6 +120,8 @@ that key's own closed vocabulary:
 | `screensaver.retro_games.speed` | `slow` \| `normal` \| `fast`       | `normal`                                      |
 | `screensaver.system_monitor.tasks` | `true` \| `false`               | `true`                                        |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
+| `region` | empty, or an ISO 3166-1 alpha-2 code (two capitals); a region the zone store no longer holds is kept and reads as its default | empty: the zone store's own |
+| `time.zone` | empty, or an IANA zone name in the shape `lib/tz` checks; a zone the store no longer holds is kept and reads as its default | empty: the zone store's own |
 
 Keys and values are case-sensitive: each has one canonical spelling.
 
@@ -132,7 +134,13 @@ starts never switches its display off.
 The keys fall into groups, which is a reader's distinction rather than the
 document's, and each surface posts only its own: `SettingsKey::PINBOARD` (the
 backdrop and the icons standing on it), `APPEARANCE` (how every surface is
-drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER` and `LOCK`.
+drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER`, `LOCK` and
+`CIVIL` (the region the clocks are written in and the zone they read). Only the
+shape of a region code or zone name is checked here: the session refuses an
+apply that changes either to one its zone store does not hold. `civil_clock` is
+the one answer to which clock the document asks for — its zone and region where
+the store holds them, else the store's own, else UTC — read by the session for
+its clocks and by Settings for its Date & Time pane.
 They share one document because they share one owner and one published scope,
 and a desktop half-adopted from several documents is a desktop nobody chose.
 `merge_within` is the strict reading confined to one group: a document naming

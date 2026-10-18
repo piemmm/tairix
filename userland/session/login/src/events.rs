@@ -129,6 +129,9 @@ pub const TEXT_ROUND_SUPERSEDED: EventId = EventId(10_030);
 /// The text prompt could not watch for a graphical login becoming available,
 /// so only the next round will offer one.
 pub const TEXT_ROUND_UNWATCHED: EventId = EventId(10_031);
+/// The login screen asked for the civil-time store and none was delegated:
+/// the store could not be opened, or the kernel refused the delegation.
+pub const ZONE_STORE_WITHHELD: EventId = EventId(10_032);
 
 #[cfg(test)]
 mod tests {
@@ -140,10 +143,10 @@ mod tests {
         SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT,
         SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED,
         SESSION_RESUMED, SESSION_STARTED, TEXT_ROUND_SUPERSEDED, TEXT_ROUND_UNWATCHED,
-        VERIFY_GRANTED, VERIFY_REFUSED,
+        VERIFY_GRANTED, VERIFY_REFUSED, ZONE_STORE_WITHHELD,
     };
 
-    const ALL: [u32; 29] = [
+    const ALL: [u32; 30] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -173,6 +176,7 @@ mod tests {
         ROUND_CHOSEN.0,
         TEXT_ROUND_SUPERSEDED.0,
         TEXT_ROUND_UNWATCHED.0,
+        ZONE_STORE_WITHHELD.0,
     ];
 
     #[test]

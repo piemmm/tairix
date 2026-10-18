@@ -14,6 +14,7 @@ use tairix_abi::Errno;
 use tairix_greeter::{Asking, Courier, Ticket, Verdict, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point};
 
+use crate::clipboard::TextClipboard;
 use crate::drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
 use crate::lock::{LockOutcome, ScreenLock};
@@ -54,6 +55,9 @@ pub struct Seat<'a> {
     pub menu: &'a mut MenuChain,
     /// The screen lock, which takes the seat while it is engaged.
     pub lock: &'a mut ScreenLock,
+    /// The desktop clipboard a menu chain's quick-entry field cuts, copies
+    /// and pastes through.
+    pub clipboard: &'a mut dyn TextClipboard,
 }
 
 /// Where a seat drain hands what only the session program can act on.
@@ -225,7 +229,7 @@ where
         };
         moved |= matches!(event, InputEvent::PointerMoved { .. });
         seat.shell
-            .route_to_chain(seat.compositor, seat.menu, &event, now_ns);
+            .route_to_chain(seat.compositor, seat.menu, &event, seat.clipboard, now_ns);
         handled = true;
     };
     if moved {
@@ -244,7 +248,7 @@ where
         };
         if matches!(event, InputEvent::KeyPressed { .. }) {
             seat.shell
-                .route_to_chain(seat.compositor, seat.menu, &event, now_ns);
+                .route_to_chain(seat.compositor, seat.menu, &event, seat.clipboard, now_ns);
             handled = true;
         }
     }

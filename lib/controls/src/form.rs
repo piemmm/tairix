@@ -1165,7 +1165,7 @@ impl FieldRow {
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
             FieldControl::Flags(c) => c.on_key(key, rect, scale, theme, damage),
             FieldControl::Combo(c) => c
-                .on_key(key, rect, layout.popup, scale, theme, damage)
+                .on_key(stroke, rect, layout.popup, scale, theme, damage)
                 .map(combo_action),
             FieldControl::Slider(c) => c.on_key(key, rect, damage).map(slider_action),
             FieldControl::Text(c) => c

@@ -3,7 +3,9 @@
 
 use alloc::string::String;
 
-use tairix_abi::time::{Time64, WallClockReading};
+use tairix_abi::time::WallClockReading;
+use tairix_fsmeta::calendar::long_date;
+use tairix_tz::CivilClock;
 use tairix_wm::{Point, Rect, Surface};
 
 use crate::clock::SessionClock;
@@ -18,7 +20,13 @@ pub(super) fn lettered_rect(block: Option<&Surface>, at: Point) -> Rect {
 }
 
 /// How a face spells the date beneath its time.
-pub(super) type DateSpelling = fn(Time64) -> String;
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum DateSpelling {
+    /// The region's numeric date, as the icon bar shows it.
+    Numeric,
+    /// Written out: `Mon 28 Sep 2026`.
+    Long,
+}
 
 /// The time a clock face tells, and when it next changes.
 pub(super) struct Telling {
@@ -31,13 +39,14 @@ pub(super) struct Telling {
 }
 
 impl Telling {
-    /// A telling of `wall` as of `now_ns`, spelling the date with `spelling`.
+    /// A telling of `wall` in `civil` as of `now_ns`, spelling the date with
+    /// `spelling`.
     pub(super) fn new(
         spelling: Option<DateSpelling>,
-        (wall, now_ns): (Option<WallClockReading>, u64),
+        (wall, civil, now_ns): (Option<WallClockReading>, CivilClock<'static>, u64),
     ) -> Self {
         let mut telling = Self {
-            clock: SessionClock::new(),
+            clock: SessionClock::new(civil),
             spelling,
             date: String::new(),
             tick_ns: now_ns,
@@ -48,7 +57,7 @@ impl Telling {
 
     /// The time as the icon bar spells it.
     pub(super) fn time(&self) -> &str {
-        self.clock.label()
+        &self.clock.lines().time
     }
 
     /// The date, empty when it is not told or the clock is not set.
@@ -68,8 +77,12 @@ impl Telling {
             Some(reading) => {
                 let _ = self.clock.adopt(reading, now_ns);
                 self.date = match self.spelling {
-                    Some(spell) if reading.state().is_set() => spell(reading.time()),
-                    _ => String::new(),
+                    _ if !reading.state().is_set() => String::new(),
+                    Some(DateSpelling::Numeric) => self.clock.lines().date.clone(),
+                    Some(DateSpelling::Long) => {
+                        long_date(&self.clock.civil().local(reading.time()).civil)
+                    }
+                    None => String::new(),
                 };
             }
             None => self.clock.missed(now_ns),

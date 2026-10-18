@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use tairix_abi::time::days_from_civil;
+use tairix_abi::time::{days_from_civil, days_in_month};
 
 use super::sbom::{parse_cargo_lock, parse_key, LockedPackage};
 
@@ -362,10 +362,11 @@ pub fn parse_date(text: &str) -> Result<i64, String> {
     if !(1..=12).contains(&month) {
         return Err(format!("`{text}`: month {month} out of range 1..=12"));
     }
-    if !(1..=31).contains(&day) {
-        return Err(format!("`{text}`: day {day} out of range 1..=31"));
+    let length = days_in_month(year, month);
+    if !(1..=length).contains(&day) {
+        return Err(format!("`{text}`: day {day} out of range 1..={length}"));
     }
-    Ok(days_from_civil(year, month, day))
+    days_from_civil(year, month, day).ok_or_else(|| format!("`{text}`: year {year} out of range"))
 }
 
 /// Derive the `[[source-pin]]` set from the resolved lockfile packages.
@@ -648,8 +649,18 @@ reason = "fix queued in PR #42"
     fn parse_date_rejects_malformed_input() {
         assert!(parse_date("2024-13-01").is_err());
         assert!(parse_date("2024-01-32").is_err());
+        assert!(parse_date("2023-02-29").is_err(), "not a leap year");
+        assert!(parse_date("2024-04-31").is_err(), "April has thirty days");
+        assert_eq!(
+            parse_date("2024-02-29").map(|days| days - parse_date("2024-02-28").unwrap_or(0)),
+            Ok(1)
+        );
         assert!(parse_date("2024-01").is_err());
         assert!(parse_date("not-a-date").is_err());
+        assert!(
+            parse_date("99999999999999999-01-01").is_err(),
+            "a year past the calendar"
+        );
         assert_eq!(parse_date("1970-01-01").unwrap(), 0);
     }
 
@@ -665,7 +676,7 @@ reason = "fix queued in PR #42"
 
     #[test]
     fn advisory_within_sla_passes() {
-        let today = days_from_civil(2024, 1, 20);
+        let today = days_from_civil(2024, 1, 20).expect("a representable date");
         // General: 30-day SLA, published 19 days ago.
         let advisories = vec![advisory(
             "RUSTSEC-2024-0001",
@@ -677,7 +688,7 @@ reason = "fix queued in PR #42"
 
     #[test]
     fn crypto_advisory_past_seven_days_fails() {
-        let today = days_from_civil(2024, 1, 20);
+        let today = days_from_civil(2024, 1, 20).expect("a representable date");
         let advisories = vec![advisory(
             "RUSTSEC-2024-0002",
             "2024-01-01",
@@ -690,7 +701,7 @@ reason = "fix queued in PR #42"
 
     #[test]
     fn general_advisory_at_exactly_thirty_days_passes() {
-        let published = days_from_civil(2024, 1, 1);
+        let published = days_from_civil(2024, 1, 1).expect("a representable date");
         let advisories = vec![advisory(
             "RUSTSEC-2024-0003",
             "2024-01-01",
@@ -703,7 +714,7 @@ reason = "fix queued in PR #42"
 
     #[test]
     fn future_dated_advisory_is_not_a_violation() {
-        let today = days_from_civil(2024, 1, 1);
+        let today = days_from_civil(2024, 1, 1).expect("a representable date");
         let advisories = vec![advisory(
             "RUSTSEC-2024-0004",
             "2024-06-01",

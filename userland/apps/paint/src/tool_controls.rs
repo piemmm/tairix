@@ -9,12 +9,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    owner_chord, paint_run, Button, Checkbox, ComboAction, ComboBox, NumberAction, NumberField,
-    SelectionState, SelectorAction,
+    owner_chord, paint_run, Button, Checkbox, ComboAction, ComboBox, Keystroke, NumberAction,
+    NumberField, SelectionState, SelectorAction,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
@@ -506,12 +506,13 @@ impl ToolControls {
     /// and a switch take what opens or flips them.
     pub fn on_key(
         &mut self,
-        (key, modifiers): (Key, Modifiers),
+        stroke: Keystroke,
         placement: &Placement,
         options: &mut Options,
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> BarOutcome {
+        let Keystroke { key, modifiers, .. } = stroke;
         let Some(index) = self.focus else {
             return BarOutcome::Ignored;
         };
@@ -528,7 +529,7 @@ impl ToolControls {
                 return BarOutcome::Taken;
             };
             let popup = combo.popup_rect(rect, viewport, scale, theme);
-            return match combo.on_key(key, rect, popup, scale, theme, damage) {
+            return match combo.on_key(stroke, rect, popup, scale, theme, damage) {
                 Some(ComboAction::Selected { index }) => choose(options, *setting, index),
                 _ => BarOutcome::Taken,
             };
@@ -562,7 +563,7 @@ impl ToolControls {
                 } else {
                     Rect::EMPTY
                 };
-                match combo.on_key(key, rect, popup, scale, theme, damage) {
+                match combo.on_key(stroke, rect, popup, scale, theme, damage) {
                     Some(ComboAction::Selected { index }) => choose(options, setting, index),
                     Some(ComboAction::Opened | ComboAction::Closed) => BarOutcome::Taken,
                     None => BarOutcome::Ignored,

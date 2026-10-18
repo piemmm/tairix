@@ -67,7 +67,7 @@ use crate::badge::badge_picture;
 use crate::folder::{
     card_slots, paper_card, print_card, DrawnSample, FolderSample, MIN_COMPOSITE_SIDE,
 };
-use crate::glyph::{builtin_icon, IconKind};
+use crate::glyph::{builtin_icon_at, IconKind};
 use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
 use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Reading, Thumbnail};
 
@@ -1478,7 +1478,7 @@ fn folder_picture<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
 /// would not be the same pixels.
 #[must_use]
 pub fn glyph_mask(kind: IconKind, side: u32) -> Option<Surface> {
-    builtin_icon(kind, MASK_COLOR).rasterise(side)
+    builtin_icon_at(kind, MASK_COLOR, side).rasterise(side)
 }
 
 /// `kind`'s built-in picture at `side` pixels, the last tier every request

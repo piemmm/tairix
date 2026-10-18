@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
@@ -18,6 +18,7 @@ use crate::combo::{ComboAction, ComboBox};
 use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, PointerState};
 use crate::testkit::{has_pixel, marks_elision, premul};
+use crate::text::Keystroke;
 
 const W: u32 = 160;
 const H: u32 = 28;
@@ -30,6 +31,15 @@ fn choices() -> Vec<alloc::string::String> {
 
 fn combo() -> ComboBox {
     ComboBox::new(choices())
+}
+
+/// `key` pressed at monotonic instant zero.
+fn stroke(key: Key) -> Keystroke {
+    Keystroke {
+        key,
+        modifiers: Modifiers::default(),
+        at_ns: 0,
+    }
 }
 
 fn field_bounds() -> Rect {
@@ -189,7 +199,7 @@ fn focused_field_opens_on_down_and_navigates_then_selects() {
     combo.set_focused(true);
     assert_eq!(
         combo.on_key(
-            Key::Named(NamedKey::Down),
+            stroke(Key::Named(NamedKey::Down)),
             field,
             popup,
             Scale::ONE,
@@ -202,7 +212,7 @@ fn focused_field_opens_on_down_and_navigates_then_selects() {
     // Now expanded: Down moves the menu current (starts at 0), Enter chooses.
     assert_eq!(
         combo.on_key(
-            Key::Named(NamedKey::Down),
+            stroke(Key::Named(NamedKey::Down)),
             field,
             popup,
             Scale::ONE,
@@ -213,7 +223,7 @@ fn focused_field_opens_on_down_and_navigates_then_selects() {
     );
     assert_eq!(
         combo.on_key(
-            Key::Named(NamedKey::Enter),
+            stroke(Key::Named(NamedKey::Enter)),
             field,
             popup,
             Scale::ONE,
@@ -225,6 +235,31 @@ fn focused_field_opens_on_down_and_navigates_then_selects() {
     assert!(!combo.is_expanded());
 }
 
+/// Letters typed into an open list seek a choice and never take one: the
+/// choice is still the reader's Enter.
+#[test]
+fn typing_in_an_open_list_seeks_a_choice_by_its_label() {
+    let theme = Theme::dark();
+    let mut combo = combo();
+    let field = field_bounds();
+    let popup = popup_bounds(&combo, &theme);
+    combo.set_focused(true);
+    let key = |combo: &mut ComboBox, key: Key| {
+        combo.on_key(stroke(key), field, popup, Scale::ONE, &theme, &mut sink())
+    };
+    assert_eq!(
+        key(&mut combo, Key::Named(NamedKey::Down)),
+        Some(ComboAction::Opened)
+    );
+    assert_eq!(key(&mut combo, Key::Char('h')), None);
+    assert_eq!(combo.menu().current(), Some(2), "High");
+    assert!(combo.is_expanded());
+    assert_eq!(
+        key(&mut combo, Key::Named(NamedKey::Enter)),
+        Some(ComboAction::Selected { index: 2 })
+    );
+}
+
 #[test]
 fn escape_closes_an_open_list() {
     let theme = Theme::dark();
@@ -233,7 +268,7 @@ fn escape_closes_an_open_list() {
     let popup = popup_bounds(&combo, &theme);
     combo.set_focused(true);
     combo.on_key(
-        Key::Named(NamedKey::Down),
+        stroke(Key::Named(NamedKey::Down)),
         field,
         popup,
         Scale::ONE,
@@ -242,7 +277,7 @@ fn escape_closes_an_open_list() {
     );
     assert_eq!(
         combo.on_key(
-            Key::Named(NamedKey::Escape),
+            stroke(Key::Named(NamedKey::Escape)),
             field,
             popup,
             Scale::ONE,
@@ -262,7 +297,7 @@ fn unfocused_field_ignores_keys() {
     let popup = popup_bounds(&combo, &theme);
     assert_eq!(
         combo.on_key(
-            Key::Named(NamedKey::Down),
+            stroke(Key::Named(NamedKey::Down)),
             field,
             popup,
             Scale::ONE,
@@ -539,7 +574,7 @@ fn opening_reports_the_popup_not_the_field() {
 
     let mut damage = sink();
     combo.on_key(
-        Key::Named(NamedKey::Down),
+        stroke(Key::Named(NamedKey::Down)),
         field_bounds(),
         popup,
         Scale::ONE,
@@ -564,7 +599,7 @@ fn choosing_reports_the_popup_and_the_field() {
 
     let mut damage = sink();
     combo.on_key(
-        Key::Named(NamedKey::Down),
+        stroke(Key::Named(NamedKey::Down)),
         field_bounds(),
         popup,
         Scale::ONE,
@@ -572,7 +607,7 @@ fn choosing_reports_the_popup_and_the_field() {
         &mut sink(),
     );
     combo.on_key(
-        Key::Named(NamedKey::Enter),
+        stroke(Key::Named(NamedKey::Enter)),
         field_bounds(),
         popup,
         Scale::ONE,

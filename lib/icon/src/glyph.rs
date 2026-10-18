@@ -19,10 +19,13 @@
 //! the same icon for the same medium rather than each guessing.
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkMedium, BlkRotation, BlkTransport};
-use tairix_raster::Color;
+use tairix_raster::{Affine, Color};
+use tairix_svg::geom::{place, SubPath};
 
+use crate::fit::{GridFit, Phase};
 use crate::symbol;
 use crate::vector::{IconLayer, VectorIcon};
 
@@ -106,11 +109,14 @@ pub enum IconKind {
     NetworkOffline,
     /// A run/bolt mark, for an executable.
     Executable,
-    /// A left arrow, for the file manager's Back navigation command.
+    /// A chevron pointing left, for the file manager's Back navigation
+    /// command.
     NavBack,
-    /// A right arrow, for the file manager's Forward navigation command.
+    /// A chevron pointing right, for the file manager's Forward navigation
+    /// command.
     NavForward,
-    /// An up arrow, for the file manager's Up (climb-to-parent) command.
+    /// A chevron pointing up, for the file manager's Up (climb-to-parent)
+    /// command.
     NavUp,
     /// A circular arrow, for the file manager's Refresh command.
     Refresh,
@@ -305,7 +311,7 @@ pub enum IconKind {
     ToolCrop,
     /// An open hand, for dragging the view about.
     ToolHand,
-    /// A magnifier with an empty lens, for magnifying where it is pressed.
+    /// A magnifier centred on a point, for magnifying where it is pressed.
     ToolZoom,
     /// A desktop computer: a monitor on its stand beside a tower.
     Computer,
@@ -1398,15 +1404,80 @@ pub const fn disk_icon(medium: Option<BlkMedium>) -> IconKind {
 
 /// Build the built-in glyph for `kind`, tinted with `color`.
 ///
-/// The returned [`VectorIcon`] is authored on a fixed square design grid; the
-/// caller rasterises it to whatever pixel size the notification slot needs.
+/// The returned [`VectorIcon`] is authored on a fixed square design grid, for
+/// a caller that scales it; one drawn at a known pixel side is fitted to that
+/// side's grid instead ([`glyph_mask`](crate::artwork::glyph_mask)).
 #[must_use]
+pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
+    match polygons(kind, color) {
+        Some(layers) => VectorIcon::new(DESIGN, layers),
+        None => {
+            symbol::glyph(kind, color).unwrap_or_else(|| VectorIcon::new(DESIGN, generic(color)))
+        }
+    }
+}
+
+/// [`builtin_icon`] for a picture `side` pixels square, fitted to that side's
+/// pixel grid: a symbol's strokes a whole number of pixels wide and every edge
+/// on the grid, a polygon's edges on pixel boundaries.
+pub(crate) fn builtin_icon_at(kind: IconKind, color: Color, side: u32) -> VectorIcon {
+    match polygons(kind, color) {
+        Some(layers) => fitted_polygons(&layers, side),
+        None => symbol::glyph_at(kind, color, side)
+            .unwrap_or_else(|| fitted_polygons(&generic(color), side)),
+    }
+}
+
+/// `layers`, authored on the [`DESIGN`] grid, fitted to a `side`-pixel
+/// square's pixel grid together, so each part still meets the next.
+fn fitted_polygons(layers: &[IconLayer], side: u32) -> VectorIcon {
+    if side == 0 {
+        return VectorIcon::new(DESIGN, layers.to_vec());
+    }
+    let px = f64::from(side) / f64::from(DESIGN);
+    let mut parts: Vec<Vec<SubPath>> = layers
+        .iter()
+        .map(|layer| {
+            layer
+                .contours
+                .iter()
+                .map(|ring| {
+                    SubPath::closed(
+                        ring.iter()
+                            .map(|&(x, y)| (f64::from(x) * px, f64::from(y) * px))
+                            .collect(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let fit = GridFit::new(
+        side,
+        parts.iter().map(|part| (part.as_slice(), Phase::Boundary)),
+    );
+    let to_design = Affine::scale(
+        f64::from(symbol::DESIGN) / f64::from(side),
+        f64::from(symbol::DESIGN) / f64::from(side),
+    );
+    let fitted = layers
+        .iter()
+        .zip(&mut parts)
+        .map(|(layer, part)| {
+            fit.apply(part);
+            IconLayer::filled(layer.paint.clone(), layer.rule, place(part, to_design))
+        })
+        .collect();
+    VectorIcon::new(symbol::DESIGN, fitted)
+}
+
+/// `kind`'s glyph as filled polygons on the [`DESIGN`] grid, tinted with
+/// `color`, or `None` for a kind drawn as a [`symbol`] mark.
 #[allow(
     clippy::too_many_lines,
     reason = "one arm a kind; splitting it would part the kinds from the one table they are drawn by"
 )]
-pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
-    let layers = match kind {
+fn polygons(kind: IconKind, color: Color) -> Option<Vec<IconLayer>> {
+    Some(match kind {
         IconKind::Network => network(color),
         IconKind::Volume => volume(color),
         IconKind::Battery => battery(color),
@@ -1445,9 +1516,6 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::VolumeMuted => volume_muted(color),
         IconKind::NetworkOffline => network_offline(color),
         IconKind::Executable => executable(color),
-        IconKind::NavBack => nav_back(color),
-        IconKind::NavForward => nav_forward(color),
-        IconKind::NavUp => nav_up(color),
         IconKind::ViewToggle => view_toggle(color),
         IconKind::Sort => sort(color),
         IconKind::NewFolder => new_folder(color),
@@ -1465,9 +1533,6 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Generic => generic(color),
         IconKind::Pause => pause(color),
         IconKind::Resume => resume(color),
-        IconKind::ZoomIn => magnifier(color, Lens::Plus),
-        IconKind::ZoomOut => magnifier(color, Lens::Minus),
-        IconKind::ZoomFit => zoom_fit(color),
         IconKind::RotateRight => rotate(color, true),
         IconKind::RotateLeft => rotate(color, false),
         IconKind::Mirror => mirror(color),
@@ -1488,7 +1553,6 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::ToolPolygon => tool_polygon(color),
         IconKind::ToolCrop => tool_crop(color),
         IconKind::ToolHand => tool_hand(color),
-        IconKind::ToolZoom => magnifier(color, Lens::Clear),
         // A settings category or pane is drawn with its symbol, the same one
         // its badge carries; one that could not be built is a defect in the
         // compiled-in table, and draws the placeholder rather than nothing.
@@ -1660,12 +1724,15 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::LevelEasy
         | IconKind::LevelMedium
         | IconKind::LevelHard
-        | IconKind::DoorOpen => {
-            return symbol::glyph(kind, color)
-                .unwrap_or_else(|| VectorIcon::new(DESIGN, generic(color)));
-        }
-    };
-    VectorIcon::new(DESIGN, layers)
+        | IconKind::DoorOpen
+        | IconKind::NavBack
+        | IconKind::NavForward
+        | IconKind::NavUp
+        | IconKind::ZoomIn
+        | IconKind::ZoomOut
+        | IconKind::ZoomFit
+        | IconKind::ToolZoom => return None,
+    })
 }
 
 /// Three rising signal bars.
@@ -1958,48 +2025,6 @@ fn executable(color: Color) -> alloc::vec::Vec<IconLayer> {
     vec![IconLayer::from_points(color, BOLT)]
 }
 
-/// A left-pointing arrow (a shaft ending in a head), for Back.
-fn nav_back(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const ARROW: &[(i32, i32)] = &[
-        (4, 12),
-        (11, 5),
-        (11, 9),
-        (20, 9),
-        (20, 15),
-        (11, 15),
-        (11, 19),
-    ];
-    vec![IconLayer::from_points(color, ARROW)]
-}
-
-/// A right-pointing arrow, the mirror of [`nav_back`], for Forward.
-fn nav_forward(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const ARROW: &[(i32, i32)] = &[
-        (20, 12),
-        (13, 5),
-        (13, 9),
-        (4, 9),
-        (4, 15),
-        (13, 15),
-        (13, 19),
-    ];
-    vec![IconLayer::from_points(color, ARROW)]
-}
-
-/// An up-pointing arrow, for Up (climb to parent).
-fn nav_up(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const ARROW: &[(i32, i32)] = &[
-        (12, 4),
-        (19, 11),
-        (15, 11),
-        (15, 20),
-        (9, 20),
-        (9, 11),
-        (5, 11),
-    ];
-    vec![IconLayer::from_points(color, ARROW)]
-}
-
 /// A two-by-two grid of tiles, for the list/grid view toggle.
 fn view_toggle(color: Color) -> alloc::vec::Vec<IconLayer> {
     const TL: &[(i32, i32)] = &[(4, 4), (10, 4), (10, 10), (4, 10)];
@@ -2176,72 +2201,6 @@ fn resume(color: Color) -> alloc::vec::Vec<IconLayer> {
     vec![IconLayer::from_points(color, PLAY)]
 }
 
-/// What a magnifier's lens holds.
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum Lens {
-    Plus,
-    Minus,
-    Clear,
-}
-
-/// A magnifier over a plus, a minus or nothing: for magnifying or reducing
-/// what a window displays, and for the painter's zoom tool.
-///
-/// One table for all three, because the glyphs differ only in what the lens
-/// holds; drawing them as separate coordinate sets would be three lenses to
-/// keep identical.
-fn magnifier(color: Color, lens: Lens) -> alloc::vec::Vec<IconLayer> {
-    // Lens: an octagonal annulus, outer then inner in one even-odd ring.
-    const LENS: &[(i32, i32)] = &[
-        (10, 3),
-        (15, 5),
-        (17, 10),
-        (15, 15),
-        (10, 17),
-        (5, 15),
-        (3, 10),
-        (5, 5),
-        (10, 5),
-        (13, 7),
-        (14, 10),
-        (13, 13),
-        (10, 14),
-        (7, 13),
-        (6, 10),
-        (7, 7),
-    ];
-    const HANDLE: &[(i32, i32)] = &[(14, 16), (16, 14), (22, 20), (20, 22)];
-    const BAR: &[(i32, i32)] = &[(7, 9), (13, 9), (13, 11), (7, 11)];
-    const STEM: &[(i32, i32)] = &[(9, 7), (11, 7), (11, 13), (9, 13)];
-    let mut layers = alloc::vec![
-        IconLayer::from_points(color, LENS),
-        IconLayer::from_points(color, HANDLE),
-    ];
-    if lens != Lens::Clear {
-        layers.push(IconLayer::from_points(color, BAR));
-    }
-    if lens == Lens::Plus {
-        layers.push(IconLayer::from_points(color, STEM));
-    }
-    layers
-}
-
-/// Four corner brackets facing outward, for scaling a picture to fill the
-/// window it is shown in.
-fn zoom_fit(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const TOP_LEFT: &[(i32, i32)] = &[(3, 3), (11, 3), (11, 6), (6, 6), (6, 11), (3, 11)];
-    const TOP_RIGHT: &[(i32, i32)] = &[(21, 3), (21, 11), (18, 11), (18, 6), (13, 6), (13, 3)];
-    const BOTTOM_LEFT: &[(i32, i32)] = &[(3, 21), (3, 13), (6, 13), (6, 18), (11, 18), (11, 21)];
-    const BOTTOM_RIGHT: &[(i32, i32)] =
-        &[(21, 21), (13, 21), (13, 18), (18, 18), (18, 13), (21, 13)];
-    vec![
-        IconLayer::from_points(color, TOP_LEFT),
-        IconLayer::from_points(color, TOP_RIGHT),
-        IconLayer::from_points(color, BOTTOM_LEFT),
-        IconLayer::from_points(color, BOTTOM_RIGHT),
-    ]
-}
-
 /// A half-turn arrow, for turning what a window displays a quarter turn.
 ///
 /// The arc is shared and only the head moves, so the two directions cannot
@@ -2286,8 +2245,8 @@ fn mirror(color: Color) -> alloc::vec::Vec<IconLayer> {
 }
 
 /// A dashed rectangle: four corners and a dash midway along each side, so it
-/// reads as a boundary still being drawn rather than as [`zoom_fit`]'s
-/// brackets.
+/// reads as a boundary still being drawn rather than as
+/// [`IconKind::ZoomFit`]'s brackets.
 fn tool_select(color: Color) -> alloc::vec::Vec<IconLayer> {
     const TOP_LEFT: &[(i32, i32)] = &[(3, 4), (8, 4), (8, 6), (5, 6), (5, 9), (3, 9)];
     const TOP_RIGHT: &[(i32, i32)] = &[(16, 4), (21, 4), (21, 9), (19, 9), (19, 6), (16, 6)];

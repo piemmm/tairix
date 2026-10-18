@@ -171,7 +171,7 @@ plan's ledger. A `blocked` row names its blocker.
 | NOTICE | System notices (`plans/NOTICE.md`) | in progress |
 | SYSLOG | The system log specification; its build state is H1, H2 and LOG (`plans/SYSLOG.md`) | in progress |
 | TIMESYNC | The NTP client, RTC drivers and clock provenance (`plans/TIMESYNC.md`) | in progress |
-| TIMEZONES | Civil time zones (`plans/TIMEZONES.md`) | planned |
+| TIMEZONES | Civil time zones (`plans/TIMEZONES.md`) | in progress |
 | SHELL | The `elsh` shell specification (`plans/SHELL.md`) | in progress |
 | CURSES | `lib/vt`, `lib/termcap` and `lib/curses` (`plans/CURSES.md`) | in progress |
 | PTY | Pseudo-terminals and the shared line discipline (`plans/PTY.md`) | done |

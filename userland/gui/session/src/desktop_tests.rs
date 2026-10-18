@@ -1745,6 +1745,25 @@ fn changing_the_arrangement_relays_the_icons_out_without_relisting() {
     assert_ne!(before.left(), after.left(), "the column moved edge");
 }
 
+/// A new region or zone is the clocks' to read again, and moves no pixel of
+/// the desktop layer.
+#[test]
+fn a_civil_change_owes_the_clocks_and_nothing_else() {
+    for (zone, region) in [(Some("America/New_York"), None), (None, Some("US"))] {
+        let mut desktop = desktop_of(vec![file("a.txt")]);
+        let mut settings = desktop.settings().clone();
+        settings.time_zone = zone.and_then(tairix_wallpaper::ZoneName::new);
+        settings.region = region.and_then(tairix_wallpaper::RegionCode::new);
+        assert_eq!(
+            desktop.apply_settings(settings),
+            Some(PinboardChange {
+                clock: true,
+                ..PinboardChange::default()
+            })
+        );
+    }
+}
+
 #[test]
 fn each_sort_order_lists_the_folder_in_the_shared_order_it_names() {
     let entries = vec![

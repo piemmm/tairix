@@ -2718,7 +2718,7 @@ impl View {
         damage: &mut Region,
     ) -> Option<Outcome> {
         let outcome = self.bar.on_key(
-            (stroke.key, stroke.modifiers),
+            stroke,
             layout.bar(),
             &mut self.options,
             (scale, theme),

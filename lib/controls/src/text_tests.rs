@@ -1176,32 +1176,45 @@ fn an_empty_masked_field_still_shows_its_placeholder() {
     );
 }
 
+/// The column a caret standing after the text occupies: the last column
+/// holding an unbroken run of the caret's colour a whole line tall. The host
+/// test face draws each glyph as a solid box of the line's height in the same
+/// colour, so only a caret past the last glyph is told apart from the text.
+fn caret_after_text(surface: &Surface, caret: Pixel) -> Option<u32> {
+    let line = font().glyph_height();
+    (0..surface.width()).rev().find(|&x| {
+        let mut run = 0;
+        (0..surface.height()).any(|y| {
+            run = if surface.get(x, y) == Some(caret) {
+                run + 1
+            } else {
+                0
+            };
+            run >= line
+        })
+    })
+}
+
 #[test]
 fn a_plain_fields_caret_stands_at_the_measured_width_of_the_text_before_it() {
     let theme = Theme::dark();
     let font = font();
     let caret = premul(theme.palette().on_surface);
-    let mut field = TextField::new().with_text("iMxW");
+    let mut field = TextField::new();
     field.set_focused(true);
-    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink());
     // The text origin is where an empty field's caret stands, so the two
     // together pin the caret against the face's own measurement rather than
     // against a figure this test picked.
-    let surface = field_surface(&field, &theme);
-    let origin = (0..W)
-        .find(|&x| surface.get(x, 0) == Some(caret))
+    let origin = caret_after_text(&field_surface(&field, &theme), caret)
         .expect("a focused field draws its caret");
-    for before in ["i", "iM", "iMx", "iMxW"] {
-        field.on_key(
-            Key::Named(NamedKey::Right),
-            NONE_MODS,
-            bounds(),
-            &mut sink(),
-        );
+    let mut typed = String::new();
+    for ch in "iMxW".chars() {
+        typed.push(ch);
+        field.on_key(Key::Char(ch), NONE_MODS, bounds(), &mut sink());
         assert_eq!(
-            field_surface(&field, &theme).get(origin + font.text_width(before), 0),
-            Some(caret),
-            "the caret after {before:?} stands at that text's own width"
+            caret_after_text(&field_surface(&field, &theme), caret),
+            Some(origin + font.text_width(&typed)),
+            "the caret after {typed:?} stands at that text's own width"
         );
     }
 }
@@ -1211,16 +1224,83 @@ fn a_masked_fields_caret_stands_after_the_marker() {
     let theme = Theme::dark();
     let caret = premul(theme.palette().on_surface);
     let mut field = masked(8);
-    // The caret spans the whole row while a glyph only covers its middle, so
-    // the field's top row shows the caret alone.
-    let origin = (0..W)
-        .find(|&x| masked_surface(&field, &theme).get(x, 0) == Some(caret))
+    let origin = caret_after_text(&masked_surface(&field, &theme), caret)
         .expect("a focused empty field draws its caret at the text origin");
     type_secret(&mut field, "abc", 0);
     assert_eq!(
-        masked_surface(&field, &theme).get(origin + font().text_width("[input active.]"), 0),
-        Some(caret)
+        caret_after_text(&masked_surface(&field, &theme), caret),
+        Some(origin + font().text_width("[input active.]"))
     );
+}
+
+/// Everything a field draws for its text — the glyphs, the selection, the
+/// caret — stays strictly inside its focus ring, at every contrast: the rim
+/// and the ring are the field's frame, never a surface its contents paint.
+#[test]
+fn a_fields_text_selection_and_caret_stay_inside_its_frame() {
+    for theme in [Theme::dark(), high_contrast()] {
+        let height = TextField::height(Scale::ONE, &theme);
+        let frame = Rect::new(0, 0, W, height);
+        let render = |field: &TextField| {
+            let mut surface = Surface::new(W, height).expect("surface");
+            field.render(&mut surface, frame, Scale::ONE, &theme);
+            surface
+        };
+        let mut empty = TextField::new();
+        empty.set_focused(true);
+        let bare = render(&empty);
+
+        let ring = premul(theme.palette().rim_active);
+        let middle = W / 2;
+        let ring_rows: alloc::vec::Vec<u32> = (0..height)
+            .filter(|&y| bare.get(middle, y) == Some(ring))
+            .collect();
+        let inner_top = ring_rows
+            .iter()
+            .copied()
+            .filter(|&y| y < height / 2)
+            .max()
+            .expect("a focused field draws its ring above the text");
+        let inner_bottom = ring_rows
+            .iter()
+            .copied()
+            .filter(|&y| y >= height / 2)
+            .min()
+            .expect("and below it");
+
+        let mut selected = TextField::new()
+            .with_text("Kept name.txt")
+            .with_selection(0..8);
+        selected.set_focused(true);
+        let mut caret = TextField::new().with_text("Kept name.txt");
+        caret.set_focused(true);
+        for field in [&selected, &caret] {
+            let drawn = render(field);
+            for y in 0..height {
+                for x in 0..W {
+                    if drawn.get(x, y) != bare.get(x, y) {
+                        assert!(
+                            y > inner_top && y < inner_bottom,
+                            "{:?}: the field painted ({x}, {y}), outside the ring's rows \
+                             {inner_top}..{inner_bottom}",
+                            theme.contrast()
+                        );
+                    }
+                }
+            }
+        }
+        let accent = premul(theme.palette().accent);
+        let marked = render(&selected);
+        let band = (0..height)
+            .filter(|&y| (0..W).any(|x| marked.get(x, y) == Some(accent)))
+            .count();
+        assert_eq!(
+            u32::try_from(band).expect("a row count"),
+            font().glyph_height(),
+            "{:?}: the selection is exactly the line's height",
+            theme.contrast()
+        );
+    }
 }
 
 #[test]

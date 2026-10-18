@@ -1909,6 +1909,54 @@ fn the_idle_panes_post_only_their_own_keys() {
     }
 }
 
+/// The Language & Region pane offers the delegated store's regions and
+/// places, posts its own two keys alone, and a region's row says how that
+/// region writes a date.
+#[test]
+fn the_language_pane_offers_the_stores_regions_and_places_and_posts_its_own_keys() {
+    let category = Pane::Language.locate().expect("a located pane").0;
+    let mut shell = shell_at(Location {
+        category,
+        pane: Pane::Language,
+    });
+    shell.adopt_zones(Some(crate::test_support::zones()));
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 1, 5) else {
+        panic!("choosing a place posts a document");
+    };
+    assert!(
+        document.contains("time.zone = America/New_York"),
+        "{document}"
+    );
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 0, 4) else {
+        panic!("choosing a region posts a document");
+    };
+    assert!(document.contains("region = US"), "{document}");
+    for key in SettingsKey::ALL
+        .iter()
+        .filter(|key| !SettingsKey::CIVIL.contains(key))
+    {
+        assert!(
+            !document.contains(&alloc::format!("{} =", key.name())),
+            "posted {key}: {document}"
+        );
+    }
+    let described = crate::test_support::rows(&shell)
+        .into_iter()
+        .find(|row| row.label() == "Region")
+        .and_then(|row| row.description().map(String::from))
+        .expect("the region row");
+    assert!(
+        described.contains("12/31/2026 and times 11:30 PM"),
+        "{described}"
+    );
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 0, 0) else {
+        panic!("choosing the default posts a document");
+    };
+    assert!(document.contains("region = \"\"\n"), "{document}");
+}
+
 #[test]
 fn a_pane_that_states_an_absence_composes_no_form() {
     let shell = shell_at(Location {
@@ -2520,6 +2568,7 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
         (Pane::Keyboard, Composition::Keyboard),
         (Pane::Screensaver, Composition::Screensaver),
         (Pane::LockScreen, Composition::LockScreen),
+        (Pane::Language, Composition::Language),
     ] {
         let row = pane.locate().expect("a located pane").1;
         assert_eq!(row.settings, composition.labels().as_slice(), "{pane:?}");

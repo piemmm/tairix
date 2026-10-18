@@ -129,6 +129,7 @@
   - [`tairix-terrain`](./lib/terrain.md)
   - [`tairix-timesync`](./lib/timesync.md)
   - [`tairix-touch`](./lib/touch.md)
+  - [`tairix-tz`](./lib/tz.md)
   - [`tairix-usb`](./lib/usb.md)
   - [`tairix-useradmin`](./lib/useradmin.md)
   - [`tairix-users`](./lib/users.md)

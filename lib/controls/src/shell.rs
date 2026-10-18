@@ -29,8 +29,8 @@ use crate::paint::{
     paint_count_badge, paint_icon_slot, paint_plate, paint_run, paint_surface_plate,
     paint_text_line, plate_border, plate_content_inset, plate_corner, pointer_activation,
     rail_thickness, resolve_bead, resolve_frame, resolve_rail, role_font, seam_thickness,
-    seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChromeLayer,
-    PlateStyle, FULL_COLOUR,
+    seam_width, surface_rect, text_plate_height, to_i32, withheld, ArtworkTone, BeadShape,
+    ChromeLayer, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -466,7 +466,14 @@ impl TaskbarItem {
         tint: Color,
         artwork: Option<IconPicture<'_>>,
     ) {
-        paint_icon_slot(surface, (x, y, side), self.icon, tint, artwork, FULL_COLOUR);
+        paint_icon_slot(
+            surface,
+            (x, y, side),
+            self.icon,
+            tint,
+            artwork,
+            ArtworkTone::FULL,
+        );
     }
 
     /// Paint the item's status marks: the activity Heat Seam on the lower
@@ -730,7 +737,7 @@ impl WindowPreview {
                 self.icon,
                 frame.label,
                 artwork,
-                FULL_COLOUR,
+                ArtworkTone::FULL,
             );
         }
 
@@ -1228,7 +1235,7 @@ impl TrayCapsule {
                 self.icon,
                 frame.label,
                 artwork,
-                FULL_COLOUR,
+                ArtworkTone::FULL,
             );
         }
 

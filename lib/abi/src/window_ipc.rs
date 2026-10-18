@@ -731,6 +731,91 @@ pub struct AppMenuEntry {
     pub id: AppMenuItemId,
     /// What the field starts out holding. Empty is legitimate.
     pub initial: AppMenuEntryText,
+    /// What of `initial` the field opens with selected. A selection that does
+    /// not lie on `initial`'s character boundaries refuses the row.
+    pub selected: AppMenuEntrySelection,
+}
+
+impl AppMenuEntry {
+    /// A field answering with `id`, holding `initial` with the caret at its
+    /// end and nothing selected.
+    #[must_use]
+    pub fn new(id: AppMenuItemId, initial: AppMenuEntryText) -> Self {
+        Self {
+            id,
+            initial,
+            selected: AppMenuEntrySelection::end_of(&initial),
+        }
+    }
+
+    /// This entry opening with `range` of its text selected — a rename's
+    /// stem, so typing replaces the name and keeps its ending.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a range that is reversed, runs past the text,
+    /// or splits a character.
+    pub fn with_selection(self, range: core::ops::Range<usize>) -> Result<Self, Errno> {
+        Ok(Self {
+            selected: AppMenuEntrySelection::of(&self.initial, range)?,
+            ..self
+        })
+    }
+}
+
+/// The bytes of a quick-entry field's initial text it opens with selected,
+/// the caret standing at the selection's end; equal ends select nothing.
+///
+/// Byte offsets fit a byte each because the text they index is bounded by
+/// [`APP_MENU_ENTRY_MAX`].
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct AppMenuEntrySelection {
+    start: u8,
+    end: u8,
+}
+
+impl AppMenuEntrySelection {
+    /// `range` of `initial`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a range that is reversed, runs past the text,
+    /// or splits a character.
+    pub fn of(initial: &AppMenuEntryText, range: core::ops::Range<usize>) -> Result<Self, Errno> {
+        let text = initial.as_str();
+        if range.start > range.end
+            || !text.is_char_boundary(range.start)
+            || !text.is_char_boundary(range.end)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            start: u8::try_from(range.start).map_err(|_| Errno::OutOfRange)?,
+            end: u8::try_from(range.end).map_err(|_| Errno::OutOfRange)?,
+        })
+    }
+
+    /// The caret at the end of `initial`, nothing selected.
+    #[must_use]
+    pub fn end_of(initial: &AppMenuEntryText) -> Self {
+        Self {
+            start: initial.len_byte(),
+            end: initial.len_byte(),
+        }
+    }
+
+    /// The selected bytes.
+    #[must_use]
+    pub const fn range(self) -> core::ops::Range<usize> {
+        self.start as usize..self.end as usize
+    }
+
+    /// Whether this selection lies on `initial`'s character boundaries.
+    fn fits(self, initial: &str) -> bool {
+        self.start <= self.end
+            && initial.is_char_boundary(usize::from(self.start))
+            && initial.is_char_boundary(usize::from(self.end))
+    }
 }
 
 /// The mark an [`AppMenuItem`] draws beside its label.
@@ -1040,6 +1125,8 @@ pub struct AppMenuEntryView<'a> {
     pub id: AppMenuItemId,
     /// What the field starts out holding.
     pub initial: &'a str,
+    /// What of `initial` the field opens with selected.
+    pub selected: AppMenuEntrySelection,
 }
 
 /// One row of a built menu, with its text borrowed from the menu
@@ -1116,9 +1203,10 @@ impl RowKind {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct RowRecord {
     kind: RowKind,
-    enabled: bool,
-    mark: AppMenuMark,
-    role: AppMenuRole,
+    /// The row's flag byte exactly as the wire carries it: enabled, its mark,
+    /// a destructive role, an asset-named icon. One byte rather than four
+    /// keeps the record, and so every decoded request, as small as it is.
+    flags: u8,
     parent: u8,
     /// Where this row's label, shortcut, reason, entry text and icon source
     /// lie, in that order, within the menu's text block. Follows from the rows
@@ -1129,15 +1217,56 @@ struct RowRecord {
     reason_len: u8,
     entry_len: u8,
     icon_len: u8,
-    /// Whether the icon source names a class asset rather than a bundle.
-    icon_asset: bool,
     /// The id a commit of this row's quick-entry field answers with; zero
     /// when the row declares no field, which is what makes the field
     /// optional with no second flag to fall out of step with it.
     entry_id: u16,
+    /// What of the field's initial text it opens with selected; zero with
+    /// no field.
+    entry_selected: AppMenuEntrySelection,
 }
 
 impl RowRecord {
+    const fn enabled(&self) -> bool {
+        self.flags & APP_MENU_ROW_FLAG_ENABLED != 0
+    }
+
+    const fn mark(&self) -> AppMenuMark {
+        match (self.flags & APP_MENU_ROW_MARK_MASK) >> APP_MENU_ROW_MARK_SHIFT {
+            1 => AppMenuMark::Check,
+            2 => AppMenuMark::Radio,
+            _ => AppMenuMark::None,
+        }
+    }
+
+    const fn role(&self) -> AppMenuRole {
+        if self.flags & APP_MENU_ROW_FLAG_DESTRUCTIVE == 0 {
+            AppMenuRole::Neutral
+        } else {
+            AppMenuRole::Destructive
+        }
+    }
+
+    /// Whether the icon source names a class asset rather than a bundle.
+    const fn icon_asset(&self) -> bool {
+        self.flags & APP_MENU_ROW_FLAG_ASSET != 0
+    }
+
+    /// The flag byte of a row stating these four things.
+    const fn flags_of(enabled: bool, mark: AppMenuMark, role: AppMenuRole, asset: bool) -> u8 {
+        let mut flags = (mark as u8) << APP_MENU_ROW_MARK_SHIFT;
+        if enabled {
+            flags |= APP_MENU_ROW_FLAG_ENABLED;
+        }
+        if matches!(role, AppMenuRole::Destructive) {
+            flags |= APP_MENU_ROW_FLAG_DESTRUCTIVE;
+        }
+        if asset {
+            flags |= APP_MENU_ROW_FLAG_ASSET;
+        }
+        flags
+    }
+
     /// Whether a row may name this one as its parent.
     ///
     /// A submenu row is one by definition; a chooseable row becomes one by
@@ -1155,9 +1284,7 @@ impl RowRecord {
     /// The record an unfilled slot holds.
     const VACANT: Self = Self {
         kind: RowKind::Separator,
-        enabled: false,
-        mark: AppMenuMark::None,
-        role: AppMenuRole::Neutral,
+        flags: 0,
         parent: PARENT_NONE,
         text_at: 0,
         label_len: 0,
@@ -1165,8 +1292,8 @@ impl RowRecord {
         reason_len: 0,
         entry_len: 0,
         icon_len: 0,
-        icon_asset: false,
         entry_id: 0,
+        entry_selected: AppMenuEntrySelection { start: 0, end: 0 },
     };
 }
 
@@ -1307,7 +1434,7 @@ impl AppMenu {
         let entry_at = reason_at.saturating_add(usize::from(record.reason_len));
         let icon_at = entry_at.saturating_add(usize::from(record.entry_len));
         let icon_text = self.text_field(icon_at, record.icon_len);
-        let icon = match (record.icon_len, record.icon_asset) {
+        let icon = match (record.icon_len, record.icon_asset()) {
             (0, _) => AppMenuIconView::None,
             (_, false) => AppMenuIconView::Bundle(icon_text),
             (_, true) => AppMenuIconView::Asset(icon_text),
@@ -1317,23 +1444,24 @@ impl AppMenu {
                 id,
                 label,
                 symbol,
-                enabled: record.enabled,
-                mark: record.mark,
+                enabled: record.enabled(),
+                mark: record.mark(),
                 shortcut,
                 reason: self.text_field(reason_at, record.reason_len),
-                role: record.role,
+                role: record.role(),
                 entry: AppMenuItemId::new(record.entry_id)
                     .ok()
                     .map(|id| AppMenuEntryView {
                         id,
                         initial: self.text_field(entry_at, record.entry_len),
+                        selected: record.entry_selected,
                     }),
                 icon,
             }),
             RowKind::Separator => AppMenuRowView::Separator,
             RowKind::Submenu(symbol) => AppMenuRowView::Submenu {
                 label,
-                enabled: record.enabled,
+                enabled: record.enabled(),
                 symbol,
                 reason: self.text_field(reason_at, record.reason_len),
             },
@@ -1367,14 +1495,17 @@ impl AppMenu {
         };
         let mut entry_text = AppMenuEntryText::EMPTY;
         let mut icon = AppMenuIcon::None;
+        let (mut enabled, mut mark, mut role) = (false, AppMenuMark::None, AppMenuRole::Neutral);
         let (label, shortcut, reason) = match *row {
             AppMenuRow::Item(item) => {
-                record.enabled = item.enabled;
-                record.mark = item.mark;
+                (enabled, mark, role) = (item.enabled, item.mark, item.role);
                 record.kind = RowKind::Item(item.id, item.symbol);
-                record.role = item.role;
                 if let Some(entry) = item.entry {
+                    if !entry.selected.fits(entry.initial.as_str()) {
+                        return Err(Errno::OutOfRange);
+                    }
                     record.entry_id = entry.id.get();
+                    record.entry_selected = entry.selected;
                     entry_text = entry.initial;
                 }
                 icon = item.icon;
@@ -1387,12 +1518,12 @@ impl AppMenu {
             ),
             AppMenuRow::Submenu {
                 label,
-                enabled,
+                enabled: opens,
                 symbol,
                 reason,
             } => {
                 record.kind = RowKind::Submenu(symbol);
-                record.enabled = enabled;
+                enabled = opens;
                 (label, AppMenuShortcut::EMPTY, reason)
             }
             AppMenuRow::Info => {
@@ -1442,7 +1573,8 @@ impl AppMenu {
         record.reason_len = reason.len_byte();
         record.entry_len = entry_text.len_byte();
         record.icon_len = u8::try_from(icon_text.len()).map_err(|_| Errno::NoSpace)?;
-        record.icon_asset = icon_asset && !icon_text.is_empty();
+        record.flags =
+            RowRecord::flags_of(enabled, mark, role, icon_asset && !icon_text.is_empty());
         self.rows[at] = record;
         self.text_len = u16::try_from(end).map_err(|_| Errno::NoSpace)?;
         self.len = self.len.saturating_add(1);
@@ -2736,6 +2868,16 @@ pub enum WindowRequest {
     /// to keep the user out of their own desktop. The reply is the shared
     /// status frame.
     LockScreen,
+    /// Take a read-only delegation of the shipped civil-time store, which the
+    /// caller reads with no filesystem capability of its own.
+    ///
+    /// Answered only for the desktop's own Settings application, which lists
+    /// the store's regions and places for the user to choose from. The reply
+    /// is a minted-id frame ([`decode_minted_id_reply`]) carrying the
+    /// `fd_grant` handle the session minted to the caller from the descriptor
+    /// it opened at bring-up, so answering costs no filesystem operation;
+    /// `NotFound` when this desktop holds no store.
+    TakeZoneStore,
     /// Ask the session to show the screensaver `document` describes, now, as
     /// a preview.
     ///
@@ -3143,6 +3285,8 @@ const OP_OPEN_ALERT: u16 = 38;
 const OP_CLOSE_ALERT: u16 = 39;
 /// Wire operation discriminant of [`WindowRequest::CreateDialog`].
 const OP_CREATE_DIALOG: u16 = 40;
+/// Wire operation discriminant of [`WindowRequest::TakeZoneStore`].
+const OP_TAKE_ZONE_STORE: u16 = 41;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3248,6 +3392,9 @@ const QUERY_NOTIFY_SOURCES_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
 /// Encoded size of a [`WindowRequest::LockScreen`]: the header alone.
 const LOCK_SCREEN_WIRE_LEN: usize = REQUEST_HEADER_LEN;
+
+/// Encoded size of a [`WindowRequest::TakeZoneStore`]: the header alone.
+const TAKE_ZONE_STORE_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
 /// Byte offset of a [`WindowRequest::RenderPreview`]'s granted region.
 const RENDER_PREVIEW_SHM_OFFSET: usize = REQUEST_HEADER_LEN + 8;
@@ -3460,12 +3607,12 @@ const APP_BAR_ROWS_OFFSET: usize = APP_BAR_TEXT_LEN_OFFSET + 2;
 
 /// Encoded size, in bytes, of one menu row record: its kind, flag byte,
 /// parent, the lengths of its text fields, its item id, its quick-entry
-/// field's id, and its function.
+/// field's id, its function, and the selection its field opens with.
 ///
 /// The text itself is not here — it lies in the declaration's one trailing
 /// text block, in row order — so a row costs what it says rather than the
 /// widest label, caption and reason it could have said.
-const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_SYMBOL_OFFSET + 2;
+const APP_MENU_ROW_WIRE_LEN: usize = APP_MENU_ROW_ENTRY_SELECTED_OFFSET + 2;
 /// Byte offset, within one row record, of its flag byte.
 const APP_MENU_ROW_FLAGS_OFFSET: usize = 1;
 /// Byte offset, within one row record, of the 0-based index of the row whose
@@ -3490,6 +3637,10 @@ const APP_MENU_ROW_ENTRY_ID_OFFSET: usize = APP_MENU_ROW_ID_OFFSET + 2;
 /// Byte offset, within one row record, of its [`AppMenuSymbol`] (zero for a
 /// separator or the information row, which state no function).
 const APP_MENU_ROW_SYMBOL_OFFSET: usize = APP_MENU_ROW_ENTRY_ID_OFFSET + 2;
+/// Byte offset, within one row record, of the first and last-plus-one bytes of
+/// its quick-entry field's opening selection ([`AppMenuEntrySelection`]); both
+/// zero when it declares no field.
+const APP_MENU_ROW_ENTRY_SELECTED_OFFSET: usize = APP_MENU_ROW_SYMBOL_OFFSET + 2;
 
 /// Encoded size of the menu block a request carries: one fixed-width record
 /// per declared row, then those rows' text in row order.
@@ -3672,6 +3823,7 @@ impl WindowRequest {
             Self::QueryCursorSets => QUERY_CURSOR_SETS_WIRE_LEN,
             Self::QueryNotifySources => QUERY_NOTIFY_SOURCES_WIRE_LEN,
             Self::LockScreen => LOCK_SCREEN_WIRE_LEN,
+            Self::TakeZoneStore => TAKE_ZONE_STORE_WIRE_LEN,
             Self::PreviewScreensaver { ref document } => {
                 preview_screensaver_wire_len(document.len_u16() as usize)
             }
@@ -3774,6 +3926,7 @@ impl WindowRequest {
             Self::QueryCursorSets => OP_QUERY_CURSOR_SETS,
             Self::QueryNotifySources => OP_QUERY_NOTIFY_SOURCES,
             Self::LockScreen => OP_LOCK_SCREEN,
+            Self::TakeZoneStore => OP_TAKE_ZONE_STORE,
             Self::PreviewScreensaver { .. } => OP_PREVIEW_SCREENSAVER,
             Self::RenderPreview { .. } => OP_RENDER_PREVIEW,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
@@ -3948,7 +4101,8 @@ impl WindowRequest {
             | Self::QueryDesktop
             | Self::QueryCursorSets
             | Self::QueryNotifySources
-            | Self::LockScreen => {}
+            | Self::LockScreen
+            | Self::TakeZoneStore => {}
             Self::QueryWallpapers { .. }
             | Self::RenderPreview { .. }
             | Self::PreviewScreensaver { .. } => self.write_preview_operands(out),
@@ -4288,6 +4442,9 @@ impl WindowRequest {
                 exact_len(bytes, QUERY_NOTIFY_SOURCES_WIRE_LEN).map(|()| Self::QueryNotifySources)
             }
             OP_LOCK_SCREEN => exact_len(bytes, LOCK_SCREEN_WIRE_LEN).map(|()| Self::LockScreen),
+            OP_TAKE_ZONE_STORE => {
+                exact_len(bytes, TAKE_ZONE_STORE_WIRE_LEN).map(|()| Self::TakeZoneStore)
+            }
             OP_OPEN_ALERT => read_open_alert(bytes),
             OP_CLOSE_ALERT => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
@@ -4725,11 +4882,7 @@ fn write_menu_block(out: &mut [u8], at: usize, menu: &AppMenu) -> usize {
     for (index, record) in menu.rows[..menu.len()].iter().enumerate() {
         let record_at = at + index * APP_MENU_ROW_WIRE_LEN;
         out[record_at] = record.kind.wire();
-        out[record_at + APP_MENU_ROW_FLAGS_OFFSET] = (u8::from(record.enabled)
-            * APP_MENU_ROW_FLAG_ENABLED)
-            | ((record.mark as u8) << APP_MENU_ROW_MARK_SHIFT)
-            | (u8::from(record.role == AppMenuRole::Destructive) * APP_MENU_ROW_FLAG_DESTRUCTIVE)
-            | (u8::from(record.icon_asset) * APP_MENU_ROW_FLAG_ASSET);
+        out[record_at + APP_MENU_ROW_FLAGS_OFFSET] = record.flags;
         out[record_at + APP_MENU_ROW_PARENT_OFFSET] = record.parent;
         out[record_at + APP_MENU_ROW_LABEL_LEN_OFFSET] = record.label_len;
         out[record_at + APP_MENU_ROW_SHORTCUT_LEN_OFFSET] = record.shortcut_len;
@@ -4751,6 +4904,8 @@ fn write_menu_block(out: &mut [u8], at: usize, menu: &AppMenu) -> usize {
             record_at + APP_MENU_ROW_SYMBOL_OFFSET,
             record.kind.wire_symbol(),
         );
+        out[record_at + APP_MENU_ROW_ENTRY_SELECTED_OFFSET] = record.entry_selected.start;
+        out[record_at + APP_MENU_ROW_ENTRY_SELECTED_OFFSET + 1] = record.entry_selected.end;
     }
     let len = usize::from(menu.text_len);
     out[text..text + len].copy_from_slice(&menu.text[..len]);
@@ -4927,6 +5082,8 @@ fn read_app_menu_row(
     let id = read_u16(record, APP_MENU_ROW_ID_OFFSET);
     let entry_id = read_u16(record, APP_MENU_ROW_ENTRY_ID_OFFSET);
     let symbol = read_u16(record, APP_MENU_ROW_SYMBOL_OFFSET);
+    let selected = usize::from(record[APP_MENU_ROW_ENTRY_SELECTED_OFFSET])
+        ..usize::from(record[APP_MENU_ROW_ENTRY_SELECTED_OFFSET + 1]);
     let label = read_app_menu_text::<0, APP_MENU_LABEL_MAX>(
         text,
         cursor,
@@ -4967,6 +5124,7 @@ fn read_app_menu_row(
         && initial.is_empty()
         && icon == AppMenuIcon::None
         && entry_id == 0
+        && selected == (0..0)
         && mark == AppMenuMark::None
         && role == AppMenuRole::Neutral;
     let bare =
@@ -4981,13 +5139,13 @@ fn read_app_menu_row(
                 .with_role(role);
             item.icon = icon;
             if entry_id != 0 {
-                item = item.with_entry(AppMenuEntry {
-                    id: AppMenuItemId::new(entry_id)?,
-                    initial,
-                });
-            } else if !initial.is_empty() {
-                // Initial text with no id to answer with names a field
-                // nothing could commit.
+                item = item.with_entry(
+                    AppMenuEntry::new(AppMenuItemId::new(entry_id)?, initial)
+                        .with_selection(selected)?,
+                );
+            } else if !initial.is_empty() || selected != (0..0) {
+                // Initial text or a selection with no id to answer with names
+                // a field nothing could commit.
                 return Err(Errno::OutOfRange);
             }
             AppMenuRow::Item(if enabled { item } else { item.disabled() })
@@ -8259,32 +8417,33 @@ mod tests {
         APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ASSET_MAX,
         APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX,
         APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
-        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET,
-        APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET,
-        APP_MENU_ROW_PARENT_OFFSET, APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET,
-        APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET,
-        CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET,
-        DRAG_EVENT_KIND_OFFSET, DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET,
-        DRAG_EVENT_WINDOW_OFFSET, DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET,
-        DROP_TARGET_REPLY_FLAGS_OFFSET, HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET,
-        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
-        HAND_OVER_RUN_PATH_MAX, HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH,
-        MENU_CLOSED_ITEM_OFFSET, MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET,
-        MENU_CLOSED_WIRE_END, MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET,
-        MENU_TEXT_REPLY_LEN_OFFSET, MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET,
-        NAME_LIST_NAMES_OFFSET, OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET,
-        OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET,
-        OPEN_MENU_TEXT_LEN_OFFSET, OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET,
-        PICK_NAME_LEN_OFFSET, PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN,
-        PINCH_MODIFIERS_OFFSET, PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN,
-        PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
-        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
-        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
-        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX,
-        SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
-        SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
-        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_ENTRY_SELECTED_OFFSET,
+        APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ASSET, APP_MENU_ROW_FLAG_ENABLED,
+        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_SYMBOL_OFFSET, APP_MENU_ROW_WIRE_LEN,
+        APP_MENU_SHORTCUT_MAX, APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES,
+        CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_COUNT_OFFSET, DRAG_EVENT_KIND_OFFSET,
+        DRAG_EVENT_SERIAL_OFFSET, DRAG_EVENT_SHIFT_OFFSET, DRAG_EVENT_WINDOW_OFFSET,
+        DRAG_EVENT_X_OFFSET, DRAG_FLAGS_OFFSET, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
+        HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
+        HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
+        HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
+        MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
+        MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
+        MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET,
+        OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
+        OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
+        OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
+        PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET,
+        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_RECT_LEN, PRESENT_WIRE_LEN,
+        PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
+        PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
+        RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
+        REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET,
+        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
+        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
         TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
@@ -8924,6 +9083,7 @@ mod tests {
         visit(WindowRequest::QueryDesktop);
         visit(WindowRequest::QueryNotifySources);
         visit(WindowRequest::LockScreen);
+        visit(WindowRequest::TakeZoneStore);
         each_seat_request(&mut visit);
     }
 
@@ -9602,6 +9762,59 @@ mod tests {
         );
     }
 
+    /// A quick-entry field's opening selection lies on its text's character
+    /// boundaries, in order, inside the text, and a row with no field states
+    /// none — whether built or decoded, so a selection has one encoding.
+    #[test]
+    fn an_entry_selection_off_its_text_is_refused() {
+        let initial = AppMenuEntryText::new("na\u{ef}ve.txt").expect("a valid name");
+        let entry = AppMenuEntry::new(AppMenuItemId::new(9).expect("a valid id"), initial);
+        let reversed = core::ops::Range { start: 5, end: 2 };
+        for refused in [3..3, 0..12, reversed] {
+            assert_eq!(
+                entry.with_selection(refused.clone()),
+                Err(Errno::OutOfRange),
+                "building with {refused:?}"
+            );
+        }
+        let mut menu = AppMenu::titled(label("Files"));
+        menu.push(AppMenuRow::Item(
+            AppMenuItem::new(
+                AppMenuItemId::new(1).expect("a valid id"),
+                label("Rename"),
+                AppMenuSymbol::Rename,
+            )
+            .with_entry(entry.with_selection(0..6).expect("the stem")),
+        ))
+        .expect("room for the rename row");
+        menu.push(AppMenuRow::Item(AppMenuItem::new(
+            AppMenuItemId::new(2).expect("a valid id"),
+            label("Plain"),
+            AppMenuSymbol::Open,
+        )))
+        .expect("room for the row");
+        let frame = opening(&menu).frame();
+        assert!(
+            WindowRequest::from_bytes(&frame).is_ok(),
+            "the frame itself decodes"
+        );
+        let selected_at = |record: usize| {
+            OPEN_MENU_ROWS_OFFSET
+                + record * APP_MENU_ROW_WIRE_LEN
+                + APP_MENU_ROW_ENTRY_SELECTED_OFFSET
+        };
+        for (record, start, end) in [(0, 3, 3), (0, 0, 12), (0, 5, 2), (1, 0, 1), (1, 1, 1)] {
+            let mut altered = frame;
+            altered[selected_at(record)] = start;
+            altered[selected_at(record) + 1] = end;
+            assert_eq!(
+                WindowRequest::from_bytes(&altered),
+                Err(Errno::OutOfRange),
+                "row {record} selecting {start}..{end}"
+            );
+        }
+    }
+
     /// A row may be chooseable *and* open a plate, and a chooseable row may
     /// carry a quick-entry field and name the bundle its icon comes from —
     /// all of it surviving the wire unchanged.
@@ -9619,10 +9832,14 @@ mod tests {
                 AppMenuSymbol::Open,
             )
             .with_shortcut(AppMenuShortcut::new("F2").expect("a valid caption"))
-            .with_entry(AppMenuEntry {
-                id: AppMenuItemId::new(90).expect("a valid id"),
-                initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
-            }),
+            .with_entry(
+                AppMenuEntry::new(
+                    AppMenuItemId::new(90).expect("a valid id"),
+                    AppMenuEntryText::new("report.txt").expect("a valid name"),
+                )
+                .with_selection(0..6)
+                .expect("the stem lies on the name's boundaries"),
+            ),
         ))
         .expect("room for the rename row");
         menu.push(AppMenuRow::Item(AppMenuItem::new(
@@ -9659,6 +9876,11 @@ mod tests {
         assert_eq!(rename.id.get(), 1, "the row keeps its own id");
         assert_eq!(entry.id.get(), 90, "and the field carries its own");
         assert_eq!(entry.initial, "report.txt");
+        assert_eq!(
+            entry.selected.range(),
+            0..6,
+            "opening with its stem selected"
+        );
         assert_eq!(rename.shortcut, "F2", "beside the caption it already had");
         assert_eq!(rename.icon, AppMenuIconView::None);
 
@@ -9682,9 +9904,11 @@ mod tests {
     /// to answer with.
     #[test]
     fn a_dual_row_refuses_an_ambiguous_shape() {
-        let entry = |id: u16, initial: &str| AppMenuEntry {
-            id: AppMenuItemId::new(id).expect("a valid id"),
-            initial: AppMenuEntryText::new(initial).expect("a valid name"),
+        let entry = |id: u16, initial: &str| {
+            AppMenuEntry::new(
+                AppMenuItemId::new(id).expect("a valid id"),
+                AppMenuEntryText::new(initial).expect("a valid name"),
+            )
         };
         let renaming = |row: u16, field: u16| {
             AppMenuRow::Item(
@@ -12351,8 +12575,12 @@ mod tests {
     }
 
     #[test]
-    fn the_notify_source_query_and_the_lock_request_are_bare_headers() {
-        for request in [WindowRequest::QueryNotifySources, WindowRequest::LockScreen] {
+    fn the_settings_only_requests_are_bare_headers() {
+        for request in [
+            WindowRequest::QueryNotifySources,
+            WindowRequest::LockScreen,
+            WindowRequest::TakeZoneStore,
+        ] {
             assert_eq!(request.wire_len(), REQUEST_HEADER_LEN);
             assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
             let mut wide = [0u8; REQUEST_HEADER_LEN + 1];

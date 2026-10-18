@@ -16302,8 +16302,8 @@ fn reconstruct_manager_item_menu(
     // The app holds no clipboard, so the model is the one a freshly opened
     // window offers over a selected regular file: `Open` enabled and first.
     //
-    // The quick actions carry the selection's name — which the app takes from
-    // the same browser — and no candidate applications. The candidate list is
+    // The quick actions carry the chosen entry — which the app takes from the
+    // same browser — and no candidate applications. The candidate list is
     // a bundle scan the app keeps warm on a worker, and the host cannot
     // observe whether it has landed, so reconstructing one would assert a
     // plate the guest may not be drawing. Leaving it empty takes the
@@ -16315,7 +16315,7 @@ fn reconstruct_manager_item_menu(
         tairix_browse::ContextMenuModel::for_browser(&browser, false),
         tairix_browse::MANAGER_MENU_TITLE,
         tairix_browse::ContextQuick {
-            name,
+            chosen: browser.chosen_entry(),
             candidates: &[],
             documents: &[],
         },
@@ -19569,7 +19569,7 @@ mod tests {
             tairix_browse::ContextMenuModel::for_browser(&browser, false),
             tairix_browse::MANAGER_MENU_TITLE,
             tairix_browse::ContextQuick {
-                name,
+                chosen: browser.chosen_entry(),
                 candidates: &candidates,
                 documents: &[],
             },

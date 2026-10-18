@@ -329,6 +329,14 @@ impl DuplexRates {
     /// so the halves of a duplex trace compare by eye.
     #[must_use]
     pub fn trace(&self) -> RateTrace {
+        self.trace_floored(RATE_TRACE_FLOOR)
+    }
+
+    /// [`trace`](Self::trace), floored at `floor` units per second rather
+    /// than [`RATE_TRACE_FLOOR`]'s bytes: a count of events has its own least
+    /// full scale worth drawing.
+    #[must_use]
+    pub fn trace_floored(&self, floor: u64) -> RateTrace {
         if self.is_empty() {
             return RateTrace::default();
         }
@@ -340,7 +348,7 @@ impl DuplexRates {
             .max()
             .unwrap_or(0);
         let full_scale = peak
-            .max(RATE_TRACE_FLOOR)
+            .max(floor.max(1))
             .checked_next_power_of_two()
             .unwrap_or(u64::MAX);
         let scaled = |rates: &VecDeque<u64>| {

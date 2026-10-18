@@ -709,6 +709,7 @@ mod grid {
                 tool_model: ManagerToolModel::none(),
                 sidebar: None,
                 toolbar: ToolbarBand::Hidden,
+                renaming: None,
             };
             let mut tally = Tally {
                 source: self.pipeline.source(),

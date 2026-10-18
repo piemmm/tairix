@@ -425,16 +425,43 @@ fn a_child_hangs_edge_adjacent_to_its_parent_and_flips_at_the_far_edge() {
 }
 
 #[test]
-fn a_child_hangs_at_its_parent_rows_height_and_slides_to_stay_on_screen() {
+fn a_submenus_first_row_lies_level_with_the_row_that_opened_it() {
+    let themes = [
+        theme(),
+        tairix_controls::testkit::high_contrast().floating(),
+    ];
+    for theme in &themes {
+        for percent in [100, 125, 200] {
+            let scale = Scale::from_percent(percent).expect("a supported scale");
+            let g = ChainGeometry {
+                screen: SCREEN,
+                scale,
+                theme,
+                epoch: (100, 0),
+            };
+            let mut chain = MenuChain::new();
+            open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
+            let row = chain.row_rect(0, 1, &g).expect("the submenu row");
+            settle_on(&mut chain, 0, 1, &g);
+            let first = chain.row_rect(1, 0, &g).expect("the submenu's first row");
+            assert_eq!(
+                first.top(),
+                row.top(),
+                "at {percent}%, {:?}: the first row, not the band, lies beside its parent row",
+                theme.contrast()
+            );
+            assert!(
+                plate(&chain, 1).top() < row.top(),
+                "the band stands above the row that opened it"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_child_near_the_bottom_slides_up_to_stay_on_screen() {
     let theme = theme();
     let g = geom(&theme);
-    let mut chain = MenuChain::new();
-    open(&mut chain, APP, nested_model(), Point::new(40, 40), &g);
-    let row = chain.row_rect(0, 1, &g).expect("the submenu row");
-    settle_on(&mut chain, 0, 1, &g);
-    assert_eq!(plate(&chain, 1).top(), row.top(), "hung at its parent row");
-
-    // Near the bottom the same rule slides the child up rather than off.
     let mut chain = MenuChain::new();
     open(
         &mut chain,
@@ -883,7 +910,7 @@ fn settling_on_a_plain_row_closes_the_entry_field_and_asks_for_a_redraw() {
     ));
     model.push(ChainRow::entry(
         (id(2), id(3)),
-        "name",
+        ("name", 0..4),
         AppMenuSymbol::Rename,
         MenuItem::new("Name"),
     ));
@@ -1007,7 +1034,17 @@ fn the_information_panel_hangs_where_a_submenu_would_and_dies_with_the_chain() {
     assert_eq!(acted, ChainAction::Redraw);
     let placed = info(&chain).expect("the panel hangs");
     assert_eq!(placed.left(), plate(&chain, 0).right(), "edge-adjacent");
-    assert_eq!(placed.top(), row.top(), "at its own row's height");
+
+    let mut nested = MenuChain::new();
+    open(&mut nested, APP, nested_model(), Point::new(40, 40), &g);
+    let submenu_row = nested.row_rect(0, 1, &g).expect("the submenu row");
+    settle_on(&mut nested, 0, 1, &g);
+    let lift = submenu_row.top() - plate(&nested, 1).top();
+    assert_eq!(
+        row.top() - placed.top(),
+        lift,
+        "lifted above its row exactly as a submenu is"
+    );
 
     // Settling on another row of the same plate takes it down with the rest
     // of what hung there.

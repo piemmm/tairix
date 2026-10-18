@@ -19,6 +19,7 @@ use tairix_taskbar::TaskbarResponse;
 use tairix_window::DragConclusion;
 use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 
+use crate::clipboard::SessionClipboard;
 use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport, SlotAnswer};
 use crate::drain::{
     adopt_unlocks, drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake,
@@ -237,6 +238,7 @@ struct Desk {
     comp: Compositor,
     menu: MenuChain,
     lock: ScreenLock,
+    clipboard: SessionClipboard<()>,
 }
 
 impl Desk {
@@ -246,6 +248,7 @@ impl Desk {
             comp,
             menu: MenuChain::new(),
             lock: ScreenLock::new(),
+            clipboard: SessionClipboard::new(()),
         }
     }
 
@@ -255,6 +258,7 @@ impl Desk {
             compositor: &mut self.comp,
             menu: &mut self.menu,
             lock: &mut self.lock,
+            clipboard: &mut self.clipboard,
         }
     }
 
@@ -697,6 +701,58 @@ fn keys_after_the_key_that_closes_a_chain_reach_the_shell() {
     assert_eq!(queued_keys(&keys), 0);
     assert_eq!(program.routed.len(), 1, "{:?}", program.routed);
     assert_eq!(program.routed[0].1, Some(char_key('a')));
+}
+
+/// A clipboard chord under a chain's open quick-entry field reaches the field
+/// through the desktop clipboard rather than typing its letter or leaving the
+/// chain.
+#[test]
+fn a_clipboard_chord_reaches_a_chains_open_entry_field() {
+    use crate::clipboard::TextClipboard;
+    use crate::tests::renaming_menu;
+
+    let mut desk = Desk::new(bar_desktop());
+    let geom_theme = desk.shell.session().floating_theme().clone();
+    let geom = crate::menu::ChainGeometry {
+        screen: desk.comp.screen_rect(),
+        scale: desk.comp.scale(),
+        theme: &geom_theme,
+        epoch: desk.comp.chrome_epoch(),
+    };
+    desk.menu
+        .open(
+            ChainOwner::Window {
+                window_id: 1,
+                open_id: 7,
+            },
+            renaming_menu(),
+            crate::windows::window_menu_placement(tairix_geometry::Rect::new(100, 100, 0, 0)),
+            &geom,
+        )
+        .expect("the model opens");
+    let row = desk.menu.row_rect(0, 0, &geom).expect("the rename row");
+    let at = Point::new(
+        row.left() + i32::try_from(row.width / 2).expect("fits"),
+        row.top() + i32::try_from(row.height / 2).expect("fits"),
+    );
+    desk.menu
+        .handle(&InputEvent::PointerMoved { to: at }, at, &geom, 0);
+    let copy = KeyInput::Pressed {
+        key: KeyValue::Char('c'),
+        modifiers: AbiModifiers {
+            ctrl: true,
+            ..AbiModifiers::default()
+        },
+    };
+    let mut program = Program::new();
+    desk.wake(
+        &mut MemoryInput::new(&[]),
+        &mut keyboard(&[copy]),
+        &mut program,
+    )
+    .expect("in-memory sources do not fault");
+    assert_eq!(desk.clipboard.text(), Some("report"), "the stem was copied");
+    assert!(desk.menu.is_open(), "and the chain is still up");
 }
 
 /// A modifier edge reaches the seat's modifier state whoever holds the seat,

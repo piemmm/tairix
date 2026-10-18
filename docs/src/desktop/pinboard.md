@@ -104,7 +104,7 @@ wrong:
 
 - The session serves a request only from a caller whose kernel-attested
   origin carries the session's own uid. Anything else is refused and
-  logged.
+  recorded on the audit trail (`PINBOARD_UNATTESTED`, naming both uids).
 - The document is configuration data and **carries no authority**. It
   *names* a wallpaper path; the session then reads that path under its own
   identity. A caller therefore cannot use the pinboard to reach a file it

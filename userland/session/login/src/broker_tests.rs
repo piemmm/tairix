@@ -4,7 +4,7 @@
 
 extern crate std;
 
-use super::{handle_session_request, DbAccounts, SessionDirectory};
+use super::{handle_session_request, DbAccounts, SessionDirectory, ZoneStoreGrant};
 use crate::budget::{AttemptBudget, FREE_ATTEMPTS};
 use crate::events;
 use crate::session::{AuthenticatedUser, Authenticator, Credentials, Gid, Uid};
@@ -15,9 +15,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::Write as _;
+use core::num::NonZeroU64;
 use tairix_abi::session_ipc::{
-    decode_account_page, SessionAccount, SessionRequest, SessionVerdict, SESSION_ACCOUNTS_PER_PAGE,
-    SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
+    decode_account_page, decode_zone_store_reply, SessionAccount, SessionRequest, SessionVerdict,
+    SESSION_ACCOUNTS_PER_PAGE, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
@@ -33,6 +34,29 @@ const OWN_CONSOLE: u64 = 1;
 /// The password the fixture account authenticates with. No reply, log
 /// field, or audit message may ever contain it.
 const SECRET: &str = "correct-horse";
+
+/// A machine with no zone store to delegate.
+struct NoStore;
+
+impl ZoneStoreGrant for NoStore {
+    fn grant(&self) -> Result<NonZeroU64, Errno> {
+        Err(Errno::NotFound)
+    }
+}
+
+/// The handle [`CountedGrant`] mints.
+const ZONE_GRANT: u64 = 33;
+
+/// Mints [`ZONE_GRANT`], counting every delegation made.
+#[derive(Default)]
+struct CountedGrant(core::cell::Cell<usize>);
+
+impl ZoneStoreGrant for CountedGrant {
+    fn grant(&self) -> Result<NonZeroU64, Errno> {
+        self.0.set(self.0.get() + 1);
+        NonZeroU64::new(ZONE_GRANT).ok_or(Errno::OutOfRange)
+    }
+}
 
 /// Authenticator accepting exactly `ada`/[`SECRET`], as uid 1000.
 struct FixedAuth;
@@ -182,6 +206,7 @@ struct Harness {
     sink: RecordingSink,
     /// Whether the last served request stepped the caller's session aside.
     stepped_aside: bool,
+    zones: CountedGrant,
 }
 
 impl Harness {
@@ -190,6 +215,7 @@ impl Harness {
             budget: AttemptBudget::new(),
             sink: RecordingSink::default(),
             stepped_aside: false,
+            zones: CountedGrant::default(),
         }
     }
 
@@ -212,6 +238,7 @@ impl Harness {
             OWN_CONSOLE,
             directory,
             authenticator,
+            &self.zones,
             &mut self.budget,
             now,
             &self.sink,
@@ -334,6 +361,7 @@ fn a_malformed_request_is_answered_without_touching_any_state() {
         OWN_CONSOLE,
         &mut MockDirectory::of(4),
         &FixedAuth,
+        &NoStore,
         &mut harness.budget,
         Duration64::ZERO,
         &harness.sink,
@@ -460,6 +488,7 @@ fn repeated_failures_start_reporting_a_cooldown_and_a_success_clears_it() {
         OWN_CONSOLE,
         &mut directory,
         &FixedAuth,
+        &NoStore,
         &mut harness.budget,
         later,
         &harness.sink,
@@ -757,6 +786,7 @@ fn the_request_buffer_is_wiped_after_the_decision() {
         OWN_CONSOLE,
         &mut MockDirectory::of(0),
         &FixedAuth,
+        &NoStore,
         &mut budget,
         Duration64::ZERO,
         &sink,
@@ -765,6 +795,81 @@ fn the_request_buffer_is_wiped_after_the_decision() {
     // The `Run` binary's serve step, in the same order it performs it.
     tairix_util::secret::wipe(&mut request[..]);
     assert_eq!(*request, [0u8; SESSION_MAX_REQUEST]);
+}
+
+// --- The zone store ----------------------------------------------------
+
+/// The greeter on login's own console is delegated the store, once per ask.
+#[test]
+fn the_greeter_is_delegated_the_zone_store() {
+    let mut harness = Harness::new();
+    let reply = harness.serve_as_greeter(
+        &SessionRequest::ZoneStore,
+        &mut MockDirectory::of(0),
+        &FixedAuth,
+    );
+    assert_eq!(
+        decode_zone_store_reply(&reply),
+        Ok(NonZeroU64::new(ZONE_GRANT))
+    );
+    assert_eq!(harness.zones.0.get(), 1);
+    assert_eq!(harness.sink.count(events::SESSION_REQUEST_REFUSED), 0);
+    assert_eq!(harness.sink.count(events::ZONE_STORE_WITHHELD), 0);
+}
+
+/// Anyone but the greeter, and the greeter on another console, is answered
+/// none before anything is delegated, and the refusal is on the audit trail.
+#[test]
+fn the_zone_store_is_delegated_to_the_greeter_alone() {
+    let mut harness = Harness::new();
+    for (uid, console) in [
+        (Some(1000), OWN_CONSOLE),
+        (None, OWN_CONSOLE),
+        (Some(GREETER_UID.0), OWN_CONSOLE + 1),
+    ] {
+        let reply = harness.serve(
+            &SessionRequest::ZoneStore,
+            uid,
+            console,
+            &mut MockDirectory::of(0),
+            &FixedAuth,
+            Duration64::ZERO,
+        );
+        assert_eq!(decode_zone_store_reply(&reply), Ok(None));
+    }
+    assert_eq!(harness.zones.0.get(), 0);
+    assert_eq!(harness.sink.count(events::SESSION_REQUEST_REFUSED), 3);
+}
+
+/// A machine with no store answers none, which the greeter reads as UTC, and
+/// the audit trail keeps why.
+#[test]
+fn a_machine_with_no_zone_store_answers_none() {
+    let mut harness = Harness::new();
+    let mut encoded = [0u8; SESSION_MAX_REQUEST];
+    let len = SessionRequest::ZoneStore
+        .encode(&mut encoded)
+        .expect("encodes");
+    let mut reply = [0u8; SESSION_MAX_REPLY];
+    let answer = handle_session_request(
+        &encoded[..len],
+        Some(GREETER_UID.0),
+        OWN_CONSOLE,
+        OWN_CONSOLE,
+        &mut MockDirectory::of(0),
+        &FixedAuth,
+        &NoStore,
+        &mut harness.budget,
+        Duration64::ZERO,
+        &harness.sink,
+        &mut reply,
+    );
+    assert_eq!(decode_zone_store_reply(&reply[..answer.len]), Ok(None));
+    assert_eq!(harness.sink.count(events::ZONE_STORE_WITHHELD), 1);
+    assert!(harness.sink.transcript().contains(&alloc::format!(
+        "error={:?}",
+        FieldValue::Error(Errno::NotFound)
+    )));
 }
 
 // --- Paging -------------------------------------------------------------

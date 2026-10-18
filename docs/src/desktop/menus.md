@@ -24,9 +24,10 @@ A menu is a **chain of session-owned plates**.
   sizes to its content, so a title it has the freedom to show is never
   truncated to fit rows that happen to be shorter.
 - A **chain** is a root plate and the descendants open beneath it. A child is
-  placed edge-adjacent to its parent at its parent row's top, flipped to the
-  parent's other side when the screen edge leaves no room, and slid to stay on
-  screen.
+  placed edge-adjacent to its parent with its body level with the row that
+  opened it — a submenu's first row beside that row, its title band above —
+  flipped to the parent's other side when the screen edge leaves no room, and
+  slid to stay on screen.
 - A **child** is a **submenu** — more rows from the same model — or one of the
   two surfaces the session draws itself: the **information panel** and the
   **quick-entry field**. All three hang where a submenu's plate would.
@@ -179,9 +180,13 @@ line of session-drawn text field under the plate band, pre-filled with text the
 declaring row supplied. It is how a menu asks for a short answer — a new name —
 without the application drawing anything or seeing a keystroke.
 
-While it is up it **owns the keyboard**. Every key is text, so a name
-containing `h` is typed rather than moving a highlight; its own `Escape` closes
-the field before the chain's would dismiss the chain; and `Enter` **commits**,
+It opens with the part of its text the row declared selected — the file
+manager selects a name's stem, so typing replaces the name and keeps its
+ending. While it is up it **owns the keyboard**. Every key is text, so a name
+containing `h` is typed rather than moving a highlight; Shift extends the
+selection and cut, copy and paste go through the desktop's clipboard, as in any
+field; its own `Escape` closes the field before the chain's would dismiss the
+chain; and `Enter` **commits**,
 ending the chain and answering with the *field's own id*, which is not the
 row's. That distinction is what lets one row mean two things: the file
 manager's Rename row opens the in-place editor when clicked and commits a typed
@@ -219,7 +224,11 @@ foreground, and a disabled row's is muted — while its label keeps the plate's
 foreground and its danger rail stays. A plate holding a ticked or bulleted row
 keeps a gutter for the mark before the picture column, so a toggle or a choice
 still shows its function and every label on the plate lines up; a plate with no
-mark reserves none. A glyph is rasterised once per chain
+mark reserves none. The tick is drawn on whole pixels as the submenu chevron
+is, and the bullet is a disc half the column across. A glyph is fitted to the
+pixel grid of the side it is drawn at — its strokes whole pixels wide, its
+edges on pixel boundaries or centres — so it is as crisp as the label beside it
+([lib/icon](../lib/icon.md)). It is rasterised once per chain
 (`ChainModel::resolve_glyphs`, at the side every plate draws it at, which a
 change of scale or theme ends the chain over), so a highlight move tints two
 retained masks and a submenu reopened rasterises nothing.
@@ -233,7 +242,9 @@ application's slot show the same picture. The artwork layer reads the bundle's
 own *signed* manifest and draws only the icon that manifest declares, so a row
 naming something that is not a bundle resolves to nothing and falls back to its
 built-in glyph, then to its symbol's picture. Resolution happens before the
-paint; the paint itself reads nothing.
+paint; the paint itself reads nothing. A row that cannot act draws its icon
+grey and faded as its label is, so a full-colour picture never invites a choice
+the row refuses.
 
 ## The grab
 

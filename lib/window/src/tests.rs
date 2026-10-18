@@ -314,6 +314,8 @@ struct RecordingHost {
     notify_sources: Vec<BundleId>,
     asked_by: Vec<Option<AppIdentity>>,
     locks: usize,
+    /// Every process the zone store was delegated to.
+    zone_grants: Vec<ProcId>,
     /// Every screensaver preview document this host was handed.
     previews: Vec<String>,
 }
@@ -342,6 +344,7 @@ impl Default for RecordingHost {
             notify_sources: Vec::new(),
             asked_by: Vec::new(),
             locks: 0,
+            zone_grants: Vec::new(),
             previews: Vec::new(),
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
@@ -700,6 +703,15 @@ impl WindowHost for RecordingHost {
         }
         self.locks += 1;
         Ok(())
+    }
+
+    fn zone_store(&mut self, to: ProcId, caller: Option<&AppIdentity>) -> Result<u64, Errno> {
+        self.asked_by.push(caller.copied());
+        if caller.is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        self.zone_grants.push(to);
+        Ok(ZONE_GRANT)
     }
 
     fn preview_render_requested(
@@ -3025,6 +3037,51 @@ fn a_notify_source_query_reaches_the_host_with_the_attested_application() {
     assert_eq!(loopback.borrow().host.locks, 1);
 }
 
+/// The handle the recording host mints for a zone-store delegation.
+const ZONE_GRANT: u64 = 41;
+
+/// The zone store is delegated to the process the kernel attests is asking,
+/// never one the request names, and the minted handle reaches it whole.
+#[test]
+fn a_zone_store_request_is_delegated_to_the_attested_caller() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let settings = AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity");
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+
+    assert_eq!(client.zone_store(), Ok(ZONE_GRANT));
+    assert_eq!(
+        loopback.borrow().host.zone_grants,
+        alloc::vec![proc_id(0xA1)]
+    );
+    assert_eq!(loopback.borrow().host.asked_by, alloc::vec![Some(settings)]);
+}
+
+/// A host holding no store refuses with the minted-id frame's own shape, so
+/// the client reads the refusal rather than a malformed reply.
+#[test]
+fn a_host_with_no_zone_store_refuses_it_whole() {
+    let mapper = MockMapper::with_regions(&[(7, FRAME_LEN)]);
+    let mut server = WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX);
+    let mut host = MinimalHost;
+    let mut identity = MockIdentity::holding_layer(&[]);
+    let mut reply = [0u8; WINDOW_REPLY_MAX];
+    let request = request_frame(&WindowRequest::TakeZoneStore);
+    let len = server.serve(
+        &mut host,
+        &mut QueueSink::default(),
+        &mut identity,
+        TICKET_A,
+        &request,
+        &mut reply,
+    );
+    assert_eq!(
+        tairix_abi::window_ipc::decode_minted_id_reply(&reply[..len]),
+        Err(Errno::NotSupported)
+    );
+}
+
 /// A caller running no verified bundle is handed to the host as exactly that,
 /// and the host's refusal reaches the caller whole.
 #[test]
@@ -3037,8 +3094,13 @@ fn a_caller_with_no_application_is_refused_by_the_host() {
         Err(Errno::PermissionDenied)
     );
     assert_eq!(client.lock_screen(), Err(Errno::PermissionDenied));
-    assert_eq!(loopback.borrow().host.asked_by, alloc::vec![None, None]);
+    assert_eq!(client.zone_store(), Err(Errno::PermissionDenied));
+    assert_eq!(
+        loopback.borrow().host.asked_by,
+        alloc::vec![None, None, None]
+    );
     assert_eq!(loopback.borrow().host.locks, 0);
+    assert!(loopback.borrow().host.zone_grants.is_empty());
 }
 
 /// An attestation that fails refuses the request before the host is asked.

@@ -83,6 +83,7 @@ pub mod scene;
 pub mod screen;
 pub mod verify;
 pub mod wait;
+pub mod zones;
 
 #[cfg(test)]
 mod test_courier;
@@ -94,3 +95,4 @@ pub use frame::{Present, Scanout};
 pub use screen::{LoginScreen, Step};
 pub use verify::{exchange, Answer, Check, Checked};
 pub use wait::{park_timeout, Cooldown};
+pub use zones::{zone_store_grant, ZoneStoreRefusal};

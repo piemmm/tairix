@@ -615,6 +615,9 @@ const NOTIFICATION_SETTINGS: &[&str] = &[Setting::NotifyEnabled.label(), SOURCE_
 /// The Lock Screen pane's setting labels: its setting, and its command.
 const LOCK_SETTINGS: &[&str] = &[Setting::LockAfter.label(), Action::LockNow.label()];
 
+/// The Language & Region pane's setting labels.
+const LANGUAGE_SETTINGS: &[&str] = &[Setting::Region.label(), Setting::TimeZone.label()];
+
 /// The Screensaver pane's setting labels: every screensaver's own options,
 /// though the pane shows the chosen one's alone, so a search for one reaches
 /// the pane that sets it.
@@ -1026,12 +1029,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             name: "language",
             title: "Language & Region",
             icon: None,
-            backing: PaneBacking::None {
-                missing: "This system ships its help in several languages but keeps no language, \
-                          region or time-zone setting, and holds no civil time-zone data.",
-                needs: "A language and region setting, and a compiled time-zone store.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Language)),
+            settings: LANGUAGE_SETTINGS,
         }],
     },
     CategoryRow {

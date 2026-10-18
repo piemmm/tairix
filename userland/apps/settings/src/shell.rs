@@ -11,6 +11,7 @@
 //! state afterwards, so a burst of pointer motion costs one frame rather than
 //! one per sample.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -32,11 +33,13 @@ use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Fonts, Grounds, Theme};
+use tairix_tz::ZoneInfo;
 use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::accounts::{AccountFacts, Roster};
 use crate::body::{self, Body};
+use crate::civil::CivilChoices;
 use crate::effects::{EffectsAsk, EffectsReading};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
@@ -419,6 +422,9 @@ pub struct Shell {
     cursor_sets: Vec<CursorSetId>,
     /// The output the desktop is drawn on, once the desktop has said.
     output: Option<(u32, u32)>,
+    /// The delegated zone store's regions and places, kept for the life of
+    /// the process; `None` until it has arrived, or where it could not.
+    civil: Option<&'static CivilChoices>,
     /// The font store's families and the theme's own text, once listed.
     text: Option<TextChoices>,
     /// The mounted volumes the caller last read for the Storage pane, empty
@@ -519,6 +525,7 @@ impl Shell {
             catalog: Vec::new(),
             cursor_sets: Vec::new(),
             output: None,
+            civil: None,
             text: None,
             volumes: Vec::new(),
             wanted: Wanted::default(),
@@ -554,6 +561,24 @@ impl Shell {
     pub fn adopt_cursor_sets(&mut self, sets: Vec<CursorSetId>) {
         self.cursor_sets = sets;
         self.restate_body();
+    }
+
+    /// Adopt the zone store the desktop delegated, whose regions and places
+    /// the Language & Region rows offer and whose zones the Date & Time pane
+    /// reads in.
+    ///
+    /// Until it arrives those rows offer the default and whatever the
+    /// document already names, and the clock reads UTC.
+    ///
+    /// The choices are sorted once, here; the store is delegated once per
+    /// process, so they are kept for its life as the store is.
+    pub fn adopt_zones(&mut self, zones: Option<&'static ZoneInfo<'static>>) {
+        self.civil = zones.map(|zones| &*Box::leak(Box::new(CivilChoices::of(zones))));
+        let reads = matches!(self.body, Body::Facts(_))
+            || self.body.composition() == Some(Composition::Language);
+        if reads {
+            self.restate_body();
+        }
     }
 
     /// Adopt the size of the output the desktop is drawn on, which decides
@@ -1198,6 +1223,7 @@ impl Shell {
             catalog: &self.catalog,
             text: self.text.as_ref(),
             output: self.output,
+            civil: self.civil,
             volumes: &self.volumes,
             config: self.config.as_ref(),
             machine: &self.machine,

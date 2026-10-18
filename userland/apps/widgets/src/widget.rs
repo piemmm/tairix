@@ -454,7 +454,8 @@ impl DemoWidget {
             DemoWidget::SearchField(w) => w.on_key(key, modifiers, rect, damage).is_some(),
             DemoWidget::ComboBox(w) => {
                 let popup = w.popup_rect(rect, viewport, scale, theme);
-                w.on_key(key, rect, popup, scale, theme, damage).is_some()
+                w.on_key(stroke, rect, popup, scale, theme, damage)
+                    .is_some()
             }
             DemoWidget::Menu(w) => w.on_key(key, rect, scale, theme, damage).is_some(),
             DemoWidget::Sidebar(w) => w.on_key(key, rect, scale, theme, damage),

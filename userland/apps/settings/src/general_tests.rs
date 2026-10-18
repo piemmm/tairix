@@ -539,7 +539,8 @@ fn a_clock_that_was_never_set_says_so_rather_than_showing_the_epoch() {
     });
     let unset = stated(&shell);
     assert_eq!(unset[0], "not set");
-    assert_eq!(unset[1], "nothing yet");
+    assert_eq!(unset[1], "UTC", "no zone store has been delegated");
+    assert_eq!(unset[2], "nothing yet");
 
     // A clock somebody set says where the reading came from, so a user can
     // tell a validated network sample from this machine's own chip.
@@ -551,8 +552,38 @@ fn a_clock_that_was_never_set_says_so_rather_than_showing_the_epoch() {
         ..MachineFacts::default()
     });
     let set = stated(&shell);
-    assert_eq!(set[1], "the network");
+    assert_eq!(set[2], "the network");
     assert_ne!(set[0], "not set");
+}
+
+/// The clock is stated in the user's zone and region, from the store the
+/// desktop delegated, and follows a new choice of either.
+#[test]
+fn the_clock_is_read_in_the_users_zone_and_region() {
+    let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");
+    let mut sink = damage();
+    shell.go_to_pane("date-time", WIDE, Scale::ONE, &theme(), &mut sink);
+    shell.adopt_machine(MachineFacts {
+        clock: Some(WallClockReading::new(
+            // 2023-11-14 22:13:20 UTC.
+            Time64::from_secs(1_700_000_000),
+            WallTimeState::Trusted,
+        )),
+        ..MachineFacts::default()
+    });
+    shell.adopt_zones(Some(crate::test_support::zones()));
+    let stated_now = stated(&shell);
+    assert_eq!(stated_now[0], "Tuesday 14 November 2023 22:13");
+    assert_eq!(stated_now[1], "London, United Kingdom, GMT (UTC+00:00)");
+
+    shell.adopt_settings(DesktopSettings {
+        time_zone: tairix_wallpaper::ZoneName::new("America/New_York"),
+        region: tairix_wallpaper::RegionCode::new("US"),
+        ..DesktopSettings::default()
+    });
+    let stated_now = stated(&shell);
+    assert_eq!(stated_now[0], "Tuesday 14 November 2023 5:13 PM");
+    assert_eq!(stated_now[1], "New York, United States, EST (UTC-05:00)");
 }
 
 #[test]

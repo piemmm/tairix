@@ -17,7 +17,9 @@
 #   CAP_LOG_EMIT      its own audit records.
 #
 # It stops there on purpose. No CAP_FS_ACCESS: the ribbon behind the column
-# is drawn rather than loaded, so the greeter reads no file at all. No
+# is drawn rather than loaded, and the one file it reads, the zone store its
+# clock tells the time by, is delegated read-only by the authority, so it can
+# open no file itself. No
 # CAP_USERS_READ: it never sees a credential store, only the display/login
 # names the authority chose to publish. No CAP_PROC_SPAWN, CAP_SPAWN_AS_USER
 # or CAP_SANDBOX_SPAWN: it decodes no untrusted image, so it starts no process

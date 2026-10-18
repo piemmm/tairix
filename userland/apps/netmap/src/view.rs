@@ -27,7 +27,7 @@ use tairix_abi::Errno;
 use tairix_controls::{wheel_steps, Fact, FactList, WHEEL_STEP};
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{badge, builtin_icon, BadgeHue, IconKind, PlateShape};
+use tairix_icon::{badge, glyph_mask, BadgeHue, IconKind, PlateShape};
 use tairix_input::{past_drag_slop, InputEvent, Key, NamedKey, PinchPhase, PointerButton};
 use tairix_procinfo::{render_ip, render_mac};
 use tairix_raster::{Canvas, Color, ScanScratch, Surface, SUBPIXEL};
@@ -185,7 +185,7 @@ pub struct MapView {
 #[derive(Default)]
 struct Painter {
     plates: BTreeMap<(IconKind, BadgeHue, u32), Surface>,
-    glyphs: BTreeMap<(IconKind, u32, [u8; 4]), Surface>,
+    glyphs: BTreeMap<(IconKind, u32), Surface>,
     /// What the map's own names keep clear of.
     occupancy: Occupancy,
     /// What a spread's names keep clear of.
@@ -1333,8 +1333,8 @@ impl Painter {
             self.disc(surface, unit_circle, at, sticker, EMBLEM_PLATE);
             let side = sticker * 8 / 5;
             let inset = i32::try_from(side / 2).unwrap_or(0);
-            if let Some(glyph) = self.glyph(emblem, side, EMBLEM_INK) {
-                surface.blit(at.x - inset, at.y - inset, glyph);
+            if let Some(mask) = self.glyph(emblem, side) {
+                surface.blit_tinted(at.x - inset, at.y - inset, mask, EMBLEM_INK);
             }
         }
 
@@ -1397,14 +1397,15 @@ impl Painter {
         self.plates.get(&key)
     }
 
-    /// `kind` at `side` pixels in `ink`, rasterised once and kept.
-    fn glyph(&mut self, kind: IconKind, side: u32, ink: Color) -> Option<&Surface> {
-        let key = (kind, side, [ink.r, ink.g, ink.b, ink.a]);
+    /// `kind`'s coverage mask at `side` pixels, rasterised once and kept: the
+    /// ink is applied as it is drawn, so one mask serves every colour.
+    fn glyph(&mut self, kind: IconKind, side: u32) -> Option<&Surface> {
+        let key = (kind, side);
         if !self.glyphs.contains_key(&key) {
             if self.glyphs.len() >= MAX_CACHED_RASTERS {
                 self.glyphs.clear();
             }
-            let raster = builtin_icon(kind, ink).rasterise(side)?;
+            let raster = glyph_mask(kind, side)?;
             self.glyphs.insert(key, raster);
         }
         self.glyphs.get(&key)

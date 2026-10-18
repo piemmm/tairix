@@ -76,7 +76,7 @@ use tairix_reclaim::{
 };
 use tairix_theme::Palette;
 
-use crate::clock::CLOCK_ROLE;
+use crate::clock::{ClockFaces, ClockLines};
 use crate::layout::{local_rect, BarLayout};
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
 use crate::notifications::{NotificationArea, NotifySeverity, TransientNotification};
@@ -320,7 +320,7 @@ impl TaskbarRenderer {
             generation: self.icon_generation,
         };
         let origin = layout.bar.origin;
-        let clock_font = BitmapFont::for_role(theme.fonts(), CLOCK_ROLE, scale);
+        let clock_faces = ClockFaces::of(theme, scale);
 
         // The bar wears the same plate as the popups it opens; its regions are
         // laid out in screen space, so the interior the plate reports is moot.
@@ -369,9 +369,8 @@ impl TaskbarRenderer {
                     surface,
                     &layout,
                     taskbar.notifications(),
-                    taskbar.clock().label(),
+                    (taskbar.clock().lines(), clock_faces),
                     theme.palette(),
-                    clock_font,
                     &mut icons,
                 );
 
@@ -721,9 +720,8 @@ fn paint_trailing(
     surface: &mut Surface,
     layout: &BarLayout,
     notifications: &NotificationArea,
-    clock_label: &str,
+    (clock, faces): (&ClockLines, ClockFaces),
     palette: &Palette,
-    clock_font: BitmapFont,
     icons: &mut IconContext<'_>,
 ) {
     let origin = layout.bar.origin;
@@ -738,18 +736,80 @@ fn paint_trailing(
         );
     }
 
-    // A time cut short reads as a different time, so a label the region
-    // cannot hold whole is not drawn at all.
-    if clock_font.text_width(clock_label) <= layout.clock.width {
-        draw_label(
-            surface,
-            origin,
-            layout.clock,
-            clock_label,
-            palette.on_surface.into(),
-            clock_font,
-        );
+    paint_clock(
+        surface,
+        origin,
+        layout.clock,
+        clock,
+        faces,
+        palette.on_surface.into(),
+    );
+}
+
+/// Draw the clock's lines in its screen-space `rect`: the date beneath the
+/// time where both lines fit, beside it where they do not.
+///
+/// A time or date cut short reads as a different one, so a line the region
+/// cannot hold whole is not drawn. The time comes first: the date is drawn
+/// only with it, and the time alone where the date does not fit.
+fn paint_clock(
+    surface: &mut Surface,
+    origin: Point,
+    rect: Rect,
+    lines: &ClockLines,
+    faces: ClockFaces,
+    ink: Color,
+) {
+    let whole =
+        |font: BitmapFont, text: &str| !text.is_empty() && font.text_width(text) <= rect.width;
+    if !whole(faces.time, &lines.time) {
+        return;
     }
+    let top = rect.top().saturating_sub(origin.y);
+    let line_at = |font: BitmapFont, text: &str, y: i32, surface: &mut Surface| {
+        let x_offset = rect.width.saturating_sub(font.text_width(text)) / 2;
+        let x = rect
+            .left()
+            .saturating_sub(origin.x)
+            .saturating_add(to_i32(x_offset));
+        font.draw_text(surface, x, y, text, ink);
+    };
+    if whole(faces.date, &lines.date) {
+        if faces.stacks(rect.height) {
+            let time_height = faces.time.line_height();
+            let block = time_height.saturating_add(faces.date.line_height());
+            let block_top = top.saturating_add(to_i32(rect.height.saturating_sub(block) / 2));
+            line_at(faces.time, &lines.time, block_top, surface);
+            line_at(
+                faces.date,
+                &lines.date,
+                block_top.saturating_add(to_i32(time_height)),
+                surface,
+            );
+            return;
+        }
+        let time_width = faces.time.text_width(&lines.time);
+        let pair = time_width
+            .saturating_add(faces.gap)
+            .saturating_add(faces.date.text_width(&lines.date));
+        if pair <= rect.width {
+            // Side by side on one baseline, the pair centred.
+            let x = rect
+                .left()
+                .saturating_sub(origin.x)
+                .saturating_add(to_i32(rect.width.saturating_sub(pair) / 2));
+            let time_top = faces.time.centred_top(top, rect.height);
+            let baseline = time_top.saturating_add(to_i32(faces.time.baseline()));
+            faces.time.draw_text(surface, x, time_top, &lines.time, ink);
+            let date_x = x.saturating_add(to_i32(time_width.saturating_add(faces.gap)));
+            let date_top = baseline.saturating_sub(to_i32(faces.date.baseline()));
+            faces
+                .date
+                .draw_text(surface, date_x, date_top, &lines.date, ink);
+            return;
+        }
+    }
+    draw_label(surface, origin, rect, &lines.time, ink, faces.time);
 }
 
 /// Draw `text` centred inside the screen-space `rect`, clipped to it. Text

@@ -555,11 +555,11 @@ can never diverge in navigation semantics, listing policy, or look.
   laid out in a frame as long as all its lines, and its view rests on the
   trailing edge at offset zero; the desktop never scrolls it.
 - **Column formatting** (`format`): `format_size` (binary units — `1.5
-  MiB`), `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
-  epoch so a stampless file is never given a fabricated date), and
-  `format_datetime` (the properties view's `YYYY-MM-DD HH:MM:SS`
-  date-and-time spelling, blank at the epoch for the same reason) — the
-  file-listing convention shared by both views.
+  MiB`), `format_minute` (the listing's modified column, `YYYY-MM-DD
+  HH:MM`, blank at the epoch so a stampless file is never given a
+  fabricated date), and `format_datetime` (the properties view's
+  `YYYY-MM-DD HH:MM:SS` date-and-time spelling, blank at the epoch for the
+  same reason) — the file-listing convention shared by both views.
 - **Properties** (`properties`, `plans/NEW-FILEMANAGER.md` FM8): the pure
   view model behind the Properties panel. `Properties::from_stat` turns an
   entry's name, its browser

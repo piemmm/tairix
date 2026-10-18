@@ -370,7 +370,7 @@ fn resolve_info_value(
         ["system", "kernel"] => (
             InfoValue::new_str(
                 Sensitivity::Public,
-                &query_identity(transport)?.version().to_string(),
+                &system_identity(transport)?.version().to_string(),
             ),
             Authorization::Unprivileged,
         ),
@@ -378,7 +378,7 @@ fn resolve_info_value(
         ["system", "machine-id"] => (
             InfoValue::new_str(
                 Sensitivity::Sensitive,
-                &hex_lower(&query_identity(transport)?.machine_id),
+                &hex_lower(&system_identity(transport)?.machine_id),
             ),
             Authorization::Unprivileged,
         ),
@@ -1034,7 +1034,7 @@ fn resolve_cpu_leaf(
 /// The query's refusal, or [`ResolveInfoError::Malformed`] for a reply that
 /// does not decode.
 pub fn hostname(transport: &dyn Transport) -> Result<String, ResolveInfoError> {
-    Ok(field_lossy(query_identity(transport)?.hostname_bytes()))
+    Ok(field_lossy(system_identity(transport)?.hostname_bytes()))
 }
 
 /// Records [`cpu_info`] asks for per page: as many as one reply holds, which
@@ -1769,8 +1769,15 @@ fn walk_resolved<R, const N: usize>(
     })
 }
 
-/// Issue [`SysinfoQueryId::SYSTEM_IDENTITY`] and decode the reply.
-fn query_identity(transport: &dyn Transport) -> Result<SystemIdentity, ResolveInfoError> {
+/// This machine's identity — its name, its OS version, its machine id —
+/// through the ungated `SYSTEM_IDENTITY` query: one round trip for every
+/// surface that names the machine.
+///
+/// # Errors
+///
+/// The query's refusal, or [`ResolveInfoError::Malformed`] for a reply that
+/// does not decode.
+pub fn system_identity(transport: &dyn Transport) -> Result<SystemIdentity, ResolveInfoError> {
     let reply = call(transport, SysinfoQueryId::SYSTEM_IDENTITY, &[])
         .map_err(|err| map_call_error(SysinfoQueryId::SYSTEM_IDENTITY, err))?;
     SystemIdentity::from_bytes(&reply).map_err(|_| ResolveInfoError::Malformed)

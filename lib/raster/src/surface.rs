@@ -1508,22 +1508,33 @@ impl Surface {
     }
 
     /// [`blit`](Self::blit), with every source pixel pulled toward its own
-    /// luminance as it lands — `saturation` exactly as
-    /// [`Pixel::desaturate`](crate::color::Pixel::desaturate) reads it, so
-    /// `255` is a plain blit and `0` lays the sprite down greyscale.
+    /// luminance and weakened as it lands — `saturation` exactly as
+    /// [`Pixel::desaturate`](crate::color::Pixel::desaturate) reads it and
+    /// `strength` as [`blit_faded`](Self::blit_faded) does, so `(255, 255)` is
+    /// a plain blit and `(0, 255)` lays the sprite down greyscale.
     ///
-    /// Desaturating on the way in leaves the source untouched, so one cached
+    /// Toning on the way in leaves the source untouched, so one cached
     /// full-colour sprite serves every state a caller draws it in without a
     /// second copy of it in memory.
-    pub fn blit_desaturated(&mut self, x: i32, y: i32, src: &Surface, saturation: u8) {
-        // Full saturation is the plain blit, taken here rather than per pixel
+    pub fn blit_desaturated(
+        &mut self,
+        x: i32,
+        y: i32,
+        src: &Surface,
+        saturation: u8,
+        strength: u8,
+    ) {
+        // Full saturation is the fade alone, taken there rather than per pixel
         // so the common caller pays nothing for the option.
         if saturation == 255 {
-            self.blit(x, y, src);
+            self.blit_faded(x, y, src, strength);
+            return;
+        }
+        if strength == 0 {
             return;
         }
         self.blit_with(x, y, src, |dst, source| {
-            blend_span_mapped(dst, source, 255, DitherRow::NEAREST, 0, |pixel| {
+            blend_span_mapped(dst, source, strength, DitherRow::NEAREST, 0, |pixel| {
                 pixel.desaturate(saturation)
             });
         });

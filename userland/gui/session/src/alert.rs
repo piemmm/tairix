@@ -14,12 +14,14 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::{AlertSeverity, AlertSpec};
 use tairix_controls::{damage, Alert, AlertAction};
+use tairix_icon::IconKind;
 use tairix_theme::Theme;
 use tairix_wm::{
     Compositor, InputEvent, Key, Modifiers, NamedKey, Point, PointerButton, Rect, Region, Scale,
     Surface, WindowId,
 };
 
+use crate::about::{SystemFacts, ABOUT_TITLE};
 use crate::hold::Holds;
 use crate::shell::DesktopShell;
 
@@ -125,19 +127,18 @@ pub struct AlertWindow {
 }
 
 impl AlertWindow {
-    /// Put `spec` up in a window titled `title`, holding `owner` when it is
+    /// Put `alert` up in a window titled `title`, holding `owner` when it is
     /// some, set `cascade` alerts down from the centre, taking the keyboard
     /// when `focus`, and beneath the window holding it when `behind`. `None`
     /// when its surface or its window cannot be had.
     pub fn open(
-        spec: &AlertSpec,
+        alert: Alert,
         title: &str,
         owner: Option<WindowId>,
         (cascade, focus, behind): (u32, bool, bool),
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Self> {
-        let alert = Alert::from_spec(spec);
         let extent = extent(
             &alert,
             compositor.screen_rect(),
@@ -171,6 +172,20 @@ impl AlertWindow {
     #[must_use]
     pub const fn wm(&self) -> WindowId {
         self.wm
+    }
+
+    /// Bring the alert to the front with the keyboard, which goes back on
+    /// close to the window that held it until now. Returns `false` for a
+    /// window the compositor no longer knows.
+    pub fn bring_forward(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) -> bool {
+        let before = shell.router().focused();
+        if !shell.focus_holder(compositor, self.wm) {
+            return false;
+        }
+        if before != Some(self.wm) {
+            self.returns_to = before;
+        }
+        true
     }
 
     /// Where its buttons sit in its client, in spec order.
@@ -489,6 +504,8 @@ enum Origin {
     /// The desktop itself, stating a refusal: answered by its one button and
     /// relayed to no one.
     Desktop,
+    /// The desktop's one *About This System* window, answered like a notice.
+    About,
 }
 
 /// The alerts up — each application's, by the id the window server minted,
@@ -529,7 +546,7 @@ impl Alerts {
     ) -> bool {
         let cascade = u32::try_from(self.up.len()).unwrap_or(u32::MAX);
         match AlertWindow::open(
-            spec,
+            Alert::from_spec(spec),
             title,
             owner,
             (cascade, focus, behind),
@@ -577,13 +594,60 @@ impl Alerts {
                 self.take_down(oldest, holds, shell, compositor);
             }
         }
+        self.open_own(
+            Alert::from_spec(spec),
+            title,
+            Origin::Desktop,
+            shell,
+            compositor,
+        )
+    }
+
+    /// Put up the *About This System* window stating `facts`, or bring the
+    /// one already up to the front: asking again shows the same window, never
+    /// a second. It answers the user's own gesture, so it takes the keyboard.
+    /// Returns whether it is up.
+    pub fn about(
+        &mut self,
+        facts: &SystemFacts,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> bool {
+        if let Some(up) = self
+            .up
+            .iter_mut()
+            .find(|alert| alert.origin == Origin::About)
+        {
+            return up.window.bring_forward(shell, compositor);
+        }
+        let Some(spec) = facts.spec() else {
+            return false;
+        };
+        let alert = Alert::from_spec(&spec).with_picture(IconKind::About);
+        self.open_own(alert, ABOUT_TITLE, Origin::About, shell, compositor)
+    }
+
+    /// Put up `alert`, one of the desktop's own speaking as `origin`, titled
+    /// `title`, holding no window and taking the keyboard.
+    fn open_own(
+        &mut self,
+        alert: Alert,
+        title: &str,
+        origin: Origin,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> bool {
         let cascade = u32::try_from(self.up.len()).unwrap_or(u32::MAX);
-        match AlertWindow::open(spec, title, None, (cascade, true, false), shell, compositor) {
+        match AlertWindow::open(
+            alert,
+            title,
+            None,
+            (cascade, true, false),
+            shell,
+            compositor,
+        ) {
             Some(window) => {
-                self.up.push(AppAlert {
-                    origin: Origin::Desktop,
-                    window,
-                });
+                self.up.push(AppAlert { origin, window });
                 true
             }
             None => false,

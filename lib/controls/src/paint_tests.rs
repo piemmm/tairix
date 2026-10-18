@@ -35,7 +35,7 @@ use crate::nav::{Breadcrumb, Crumb};
 use crate::number::NumberField;
 use crate::paint::{
     blend_area, fill_area, grab_after, ground_fill, paint_icon_slot, paint_surface_plate,
-    plate_corner, resolve_frame, route_pointer, ChromeLayer, FrameColors, FULL_COLOUR,
+    paint_tick, plate_corner, resolve_frame, route_pointer, ArtworkTone, ChromeLayer, FrameColors,
 };
 use crate::picture::{Aspect, PictureChoice, PictureItem, PictureSection, Swatch};
 use crate::rail::ActionRail;
@@ -1312,7 +1312,7 @@ fn an_uncached_slot_draws_the_same_badge_a_cache_would() {
             IconKind::Power,
             Color::rgb(255, 255, 255),
             picture,
-            FULL_COLOUR,
+            ArtworkTone::FULL,
         );
         surface
     };
@@ -1375,40 +1375,124 @@ fn an_area_starting_off_the_surface_paints_nothing() {
 /// fractional triangle it replaced smeared into a grey dot four pixels wide.
 #[test]
 fn a_small_chevron_is_whole_pixels_across_every_row() {
-    for dir in [
-        crate::paint::ChevronDir::Up,
-        crate::paint::ChevronDir::Down,
-        crate::paint::ChevronDir::Left,
-        crate::paint::ChevronDir::Right,
-    ] {
-        let mut surface = Surface::new(14, 14).expect("a surface");
-        crate::paint::paint_chevron(
-            &mut surface,
-            Rect::new(0, 0, 14, 14),
-            dir,
-            Color::rgb(255, 255, 255),
-        );
-        let solid = |at: &dyn Fn(u32) -> (u32, u32)| {
-            (0..14)
-                .filter(|&i| {
-                    let (x, y) = at(i);
-                    surface.get(x, y).is_some_and(|pixel| pixel.a >= 128)
-                })
-                .count()
-        };
-        let lines: Vec<usize> = (0..14)
-            .map(|line| match dir {
-                crate::paint::ChevronDir::Up | crate::paint::ChevronDir::Down => {
-                    solid(&|i| (i, line))
-                }
-                crate::paint::ChevronDir::Left | crate::paint::ChevronDir::Right => {
-                    solid(&|i| (line, i))
-                }
-            })
-            .filter(|&count| count > 0)
-            .collect();
-        let mut widening = lines.clone();
-        widening.sort_unstable();
-        assert_eq!(widening, [1, 3, 5, 7], "{dir:?}: {lines:?}");
+    // An odd box takes a pointed apex and an even one a one-pixel flat apex,
+    // so the rows are whole pixels either way.
+    for (side, widths) in [(15, [1, 3, 5, 7]), (14, [2, 4, 6, 8])] {
+        for dir in CHEVRONS {
+            let lines = chevron_lines(side, dir);
+            let mut widening: Vec<usize> = lines
+                .iter()
+                .map(|&(first, last)| last - first + 1)
+                .collect();
+            widening.sort_unstable();
+            assert_eq!(widening, widths, "{side}px {dir:?}: {lines:?}");
+        }
     }
+}
+
+/// A chevron is centred exactly across its axis in an even box as in an odd
+/// one, every row symmetric about the box's centre; along its axis it leans
+/// toward its apex, centred by its weight.
+#[test]
+fn a_chevron_centres_exactly_across_its_axis_whatever_the_boxes_parity() {
+    for side in [14, 15, 16, 28, 29] {
+        for dir in CHEVRONS {
+            for (first, last) in chevron_lines(side, dir) {
+                assert_eq!(
+                    first + last,
+                    usize::try_from(side - 1).expect("small"),
+                    "{side}px {dir:?}: a row from {first} to {last} is off-centre"
+                );
+            }
+        }
+    }
+    // Up in a 14-pixel box: four rows, lifted one row above the box centre.
+    let mut surface = Surface::new(14, 14).expect("a surface");
+    crate::paint::paint_chevron(
+        &mut surface,
+        Rect::new(0, 0, 14, 14),
+        crate::paint::ChevronDir::Up,
+        Color::rgb(255, 255, 255),
+    );
+    let rows: Vec<u32> = (0..14)
+        .filter(|&y| (0..14).any(|x| surface.get(x, y).is_some_and(|pixel| pixel.a >= 128)))
+        .collect();
+    assert_eq!(rows, [4, 5, 6, 7], "the apex leads by a sixth of its depth");
+}
+
+const CHEVRONS: [crate::paint::ChevronDir; 4] = [
+    crate::paint::ChevronDir::Up,
+    crate::paint::ChevronDir::Down,
+    crate::paint::ChevronDir::Left,
+    crate::paint::ChevronDir::Right,
+];
+
+/// The first and last solid column of each painted line across a chevron
+/// drawn in a `side`-pixel square, lines running across its axis.
+fn chevron_lines(side: u32, dir: crate::paint::ChevronDir) -> Vec<(usize, usize)> {
+    let mut surface = Surface::new(side, side).expect("a surface");
+    crate::paint::paint_chevron(
+        &mut surface,
+        Rect::new(0, 0, side, side),
+        dir,
+        Color::rgb(255, 255, 255),
+    );
+    let solid = |x: u32, y: u32| surface.get(x, y).is_some_and(|pixel| pixel.a >= 128);
+    let vertical = matches!(
+        dir,
+        crate::paint::ChevronDir::Up | crate::paint::ChevronDir::Down
+    );
+    (0..side)
+        .filter_map(|line| {
+            let mut hit = (0..side)
+                .filter(|&i| {
+                    if vertical {
+                        solid(i, line)
+                    } else {
+                        solid(line, i)
+                    }
+                })
+                .map(|i| usize::try_from(i).expect("small"));
+            let first = hit.next()?;
+            Some((first, hit.next_back().unwrap_or(first)))
+        })
+        .collect()
+}
+
+#[test]
+fn a_tick_is_two_whole_pixel_arms_ending_square_on_pixel_columns() {
+    let mut surface = Surface::new(14, 14).expect("a surface");
+    paint_tick(&mut surface, (0, 0, 14), Color::rgba(255, 255, 255, 255));
+    let alpha = |x: u32, y: u32| surface.get(x, y).map_or(0, |p| p.a);
+    // At fourteen pixels: a short arm of three and a long arm of six, each two
+    // pixels deep down its column, the knee at column five.
+    assert_eq!(alpha(10, 4), 255, "the long arm covers its column whole");
+    assert_eq!(alpha(3, 8), 255, "and so does the short one");
+    assert_eq!(
+        alpha(11, 4),
+        0,
+        "the long arm ends square on a pixel column"
+    );
+    assert_eq!(alpha(1, 7), 0, "and so does the short one");
+    assert!(
+        (0..5).all(|x| (0..6).all(|y| alpha(x, y) == 0)),
+        "nothing above the short arm"
+    );
+    assert_eq!(alpha(10, 8), 0, "a tick is not mirror symmetric");
+}
+
+#[test]
+fn a_disabled_tone_is_grey_and_fades_as_far_as_the_muted_label_does() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let tone = ArtworkTone::disabled(palette, Color::from(palette.surface_raised));
+        assert_eq!(tone.saturation, 0, "{}", theme.name());
+        assert!(
+            tone.strength > 0 && tone.strength < u8::MAX,
+            "{}: {}",
+            theme.name(),
+            tone.strength
+        );
+    }
+    assert_eq!(ArtworkTone::desaturated(40).strength, u8::MAX);
 }

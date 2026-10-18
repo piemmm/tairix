@@ -1972,11 +1972,12 @@ fn a_declared_entry_field_becomes_the_rows_child() {
     let mut wire = wire_menu("App");
     wire.push(AppMenuRow::Item(
         AppMenuItem::new(wire_id(1), wire_label("Rename"), AppMenuSymbol::Rename).with_entry(
-            tairix_abi::window_ipc::AppMenuEntry {
-                id: wire_id(90),
-                initial: tairix_abi::window_ipc::AppMenuEntryText::new("report.txt")
-                    .expect("a valid name"),
-            },
+            tairix_abi::window_ipc::AppMenuEntry::new(
+                wire_id(90),
+                tairix_abi::window_ipc::AppMenuEntryText::new("report.txt").expect("a valid name"),
+            )
+            .with_selection(0..6)
+            .expect("the stem lies on the name's boundaries"),
         ),
     ))
     .expect("a row");
@@ -1986,9 +1987,14 @@ fn a_declared_entry_field_becomes_the_rows_child() {
     assert_eq!(row.id(), Some(wire_id(1)), "clicking it still answers");
     assert!(row.drawn().is_submenu(), "and it draws the chevron");
     match row.child() {
-        ChainChild::Entry(id, initial) => {
+        ChainChild::Entry {
+            id,
+            initial,
+            selected,
+        } => {
             assert_eq!(*id, wire_id(90), "the field answers its own id");
             assert_eq!(initial, "report.txt");
+            assert_eq!(*selected, 0..6, "opening with its declared selection");
         }
         other => panic!("the child is a field, not {other:?}"),
     }
@@ -2178,4 +2184,68 @@ fn a_plate_is_measured_with_the_icon_column_its_rows_draw() {
             "at {percent}%"
         );
     }
+}
+
+/// The mark slot of the first row of a plate without pictures, as `(x, y,
+/// side)`.
+fn first_mark_slot(theme: &Theme) -> (u32, u32, u32) {
+    let (left, _) = picture_column(theme, false);
+    let side = Menu::icon_side(Scale::ONE, theme);
+    (left, BORDER + (ROW_H - side) / 2, side)
+}
+
+#[test]
+fn a_checked_row_draws_a_tick_rather_than_a_disc() {
+    let theme = Theme::dark();
+    let menu = Menu::new(vec![
+        MenuItem::new("Show hidden files").with_mark(MenuMark::Check)
+    ]);
+    let surface = render(&menu, &theme, menu.preferred_height(Scale::ONE, &theme));
+    let (x, y, side) = first_mark_slot(&theme);
+    let third = side / 3;
+    let ink = |columns: core::ops::Range<u32>, rows: core::ops::Range<u32>| {
+        rows.clone().any(|py| {
+            columns
+                .clone()
+                .any(|px| surface.get(px, py).is_some_and(|p| p.g > 150))
+        })
+    };
+    assert!(
+        ink(x + side - third..x + side, y..y + third + 1),
+        "the long arm reaches the slot's upper right"
+    );
+    assert!(
+        !ink(x..x + third, y..y + third),
+        "and nothing reaches the upper left, which a disc's edge would"
+    );
+}
+
+#[test]
+fn a_row_that_cannot_act_greys_and_fades_its_artwork() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let art = || {
+        let mut art = Surface::new(8, 8).expect("a small picture");
+        art.fill_rect(0, 0, 8, 8, Color::from(palette.danger));
+        art
+    };
+    let menu = Menu::new(vec![MenuItem::new("Unavailable")
+        .with_artwork(art())
+        .with_state(ControlState::disabled())]);
+    let surface = render(&menu, &theme, menu.preferred_height(Scale::ONE, &theme));
+    let (x, y, side) = first_mark_slot(&theme);
+    let at = surface
+        .get(x + side / 2, y + side / 2)
+        .expect("the picture's middle");
+    assert!(
+        at.r.abs_diff(at.g) <= 2 && at.g.abs_diff(at.b) <= 2,
+        "grey, as its muted label is: {at:?}"
+    );
+    let ground = premul(palette.surface_raised);
+    let grey = premul(palette.danger).desaturate(0);
+    let reach = |p: tairix_raster::Pixel| u32::from(p.g.abs_diff(ground.g));
+    assert!(
+        reach(at) > 0 && reach(at) < reach(grey),
+        "and faded toward the plate: {at:?} against grey {grey:?} on {ground:?}"
+    );
 }

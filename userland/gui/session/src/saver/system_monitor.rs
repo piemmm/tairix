@@ -23,8 +23,8 @@ use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{MachineHost, MachineReport};
 use tairix_abi::time::WallClockReading;
-use tairix_browse::format_date;
 use tairix_theme::{Accessibility, DesktopText, Motion, Theme};
+use tairix_tz::CivilClock;
 use tairix_wallpaper::SystemMonitorOptions;
 use tairix_wm::{Compositor, Rect, Region, Surface, WindowId};
 
@@ -88,19 +88,19 @@ impl SystemMonitor {
         identity: &SaverIdentity,
         active: &Theme,
         screen: (u32, u32),
-        (wall, now_ns): (Option<WallClockReading>, u64),
+        time: (Option<WallClockReading>, CivilClock<'static>, u64),
         options: SystemMonitorOptions,
     ) -> Option<Self> {
+        let now_ns = time.2;
         let theme = board_theme(active);
         let board = Board::new(screen, shifted(0), &theme)?;
-        let spelling: DateSpelling = format_date;
         Some(Self {
             theme,
             board,
             screen,
             host: identity.host.clone(),
             name_tasks: options.tasks,
-            telling: Telling::new(Some(spelling), (wall, now_ns)),
+            telling: Telling::new(Some(DateSpelling::Numeric), time),
             report: None,
             arrived: None,
             started_ns: now_ns,

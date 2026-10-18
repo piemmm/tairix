@@ -535,8 +535,14 @@ again inside itself.
 
   - **CPU** (`02-cpu.png`) — the per-core grid: one cell per logical CPU
     carrying the core's own trace, its busy percentage, its live measured
-    clock and its performance class. Then the processor fact columns, which
-    include the ISA extensions a program may rely on: the *intersection* over
+    clock and its performance class. Then the scheduler's two rates as one
+    duplex trace across the pane — tasks dispatched a second above the
+    midline, timer preemptions a second below, against the least power of two
+    seating the window's peak and floored at `SCHEDULER_TRACE_FLOOR` — each the
+    counters' growth over the sample's own interval, summed over the CPUs both
+    samples name (`SchedulerMeters`). Then the processor fact columns, which
+    state those two rates as `/s` and include the ISA extensions a program may
+    rely on: the *intersection* over
     every reported core, because a heterogeneous machine schedules a task on
     whichever core is free, so an extension only the performance cores
     implement is one no unpinned program may use. Zero bits reads as

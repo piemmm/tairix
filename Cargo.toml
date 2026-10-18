@@ -147,6 +147,7 @@ members = [
     "lib/timesync",
     "lib/touch",
     "lib/tty",
+    "lib/tz",
     "lib/usb",
     "lib/useradmin",
     "lib/users",
@@ -354,6 +355,7 @@ members = [
     "tools/mkimage",
     "tools/signkeys",
     "tools/syshelp",
+    "tools/tzcompile",
 
     # Shared host test-support: the per-run PRNG seed / start-of-test seed
     # logging / smoke-iteration + soak-budget seam used by the fuzz,

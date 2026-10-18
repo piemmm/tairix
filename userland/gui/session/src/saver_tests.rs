@@ -108,6 +108,7 @@ impl Fixture {
             ground: None,
             catalog: &self.catalog,
             wall: None,
+            civil: tairix_tz::CivilClock::UTC,
             identity: &self.identity,
             theme: &self.theme,
             options: &self.options,

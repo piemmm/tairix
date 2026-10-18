@@ -98,6 +98,7 @@ for filesystems, the feature section below.
 | Network map (`netmap.app`): topology, advertised services, hardware makers, passive device and OS inference | ✓ | ✓ | ✓ | — |
 | Network map active reachability probing (`netmap.app`: polite ICMP-echo sweep + TCP well-known-port check, posture-configurable, audited) | ✓ | ✓ | ✓ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
+| Civil time zones (`lib/tz`, the IANA 2026e store held to `zic`): the desktop's and login screen's clocks local, in the region's date and time formats, chosen in Settings | ✓ | ✓ | ✓ | ▢ |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |
 | DMA-engine drivers (cyclic channels, `dmaengine-v1`) | — | ◐ bcm2835 | — | — |

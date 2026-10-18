@@ -42,9 +42,11 @@ use tairix_abi::input::KeyInput;
 use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
+use tairix_abi::time::WallClockReading;
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
 use tairix_browse::{DirectorySource, GridView};
 use tairix_controls::damage::{self, Repaint};
+use tairix_controls::ClipboardChord;
 use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Region;
 use tairix_icon::{
@@ -59,6 +61,7 @@ use tairix_taskbar::{
     TaskbarResponse, TransientNotification,
 };
 use tairix_theme::{Appearance, CursorSetId, MotionInteraction, Theme};
+use tairix_tz::{CivilClock, ZoneInfo};
 use tairix_wallpaper::{
     merge_within, Backdrop, CursorSize, DesktopSettings, NotifyPolicy, ScreensaverKind,
     ScreensaverOptions, SettingsKey,
@@ -71,6 +74,8 @@ use tairix_wm::{
 
 use crate::aids::{AidPolicy, PointerAids};
 use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail};
+use crate::clipboard::TextClipboard;
+use crate::clock::{CivilAdoption, HeldZones, SessionClock};
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
@@ -266,6 +271,11 @@ pub struct DesktopShell {
     /// A screensaver preview the desktop's Settings application asked for,
     /// which the embedder shows once the request that asked is answered.
     preview_requested: Option<ScreensaverPreview>,
+    /// The icon bar clock's reading.
+    clock: SessionClock,
+    /// The zone store the user's zone and region are resolved against, or
+    /// `None` where none is planted and the clock reads UTC.
+    zones: Option<HeldZones>,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -443,6 +453,8 @@ impl DesktopShell {
             can_lock: false,
             lock_requested: false,
             preview_requested: None,
+            clock: SessionClock::new(CivilClock::UTC),
+            zones: None,
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -976,8 +988,9 @@ impl DesktopShell {
     }
 
     /// Raise `holder` — an alert or an owner-modal dialog — with its owner's
-    /// family and give it the keyboard: the user pressed the window it holds.
-    /// Returns `false` for a window the compositor does not know.
+    /// family and give it the keyboard: the user pressed the window it holds,
+    /// or asked again for what it shows. Returns `false` for a window the
+    /// compositor does not know.
     pub fn focus_holder(&mut self, compositor: &mut Compositor, holder: WindowId) -> bool {
         if !compositor.raise(holder) {
             return false;
@@ -1758,7 +1771,8 @@ impl DesktopShell {
     }
 
     /// Route one seat event into `chain`, which holds the seat, at the pointer
-    /// the shell tracks. A close queues its answer on the chain.
+    /// the shell tracks. A close queues its answer on the chain, and a
+    /// clipboard chord reaches an open quick-entry field through `clipboard`.
     ///
     /// Motion alone still reaches the shell, so the tracked pointer and the
     /// cursor stay in step; its outcome is dropped, and nothing else the chain
@@ -1768,17 +1782,20 @@ impl DesktopShell {
         compositor: &mut Compositor,
         chain: &mut MenuChain,
         event: &InputEvent,
+        clipboard: &mut dyn TextClipboard,
         now_ns: u64,
     ) {
         if matches!(event, InputEvent::PointerMoved { .. }) {
             let _ = self.apply(*event, compositor, now_ns);
         }
-        let _ = chain.handle(
-            event,
-            self.router.pointer(),
-            &chain_geometry(&self.session, compositor),
-            now_ns,
-        );
+        let geom = chain_geometry(&self.session, compositor);
+        if let InputEvent::KeyPressed { key, modifiers } = event {
+            let chord = ClipboardChord::of(*key, *modifiers);
+            if chord.is_some_and(|chord| chain.entry_chord(chord, clipboard, &geom).is_some()) {
+                return;
+            }
+        }
+        let _ = chain.handle(event, self.router.pointer(), &geom, now_ns);
     }
 
     /// Let `chain` settle a crossing whose deadline has passed, answering
@@ -2426,16 +2443,85 @@ impl DesktopShell {
         }
     }
 
-    /// Put `label` on the taskbar clock and re-present the bar.
+    /// The icon bar clock.
+    #[must_use]
+    pub const fn clock(&self) -> &SessionClock {
+        &self.clock
+    }
+
+    /// The zone store the clock resolves against.
+    #[must_use]
+    pub fn zones(&self) -> Option<&'static ZoneInfo<'static>> {
+        self.zones.map(|held| held.info)
+    }
+
+    /// Hold `zones`: the store the next [`adopt_civil`](Self::adopt_civil)
+    /// resolves the clock against, and the descriptor Settings is delegated
+    /// it from.
+    pub fn set_zones(&mut self, zones: Option<HeldZones>) {
+        self.zones = zones;
+    }
+
+    /// The descriptor the zone store is delegated from, for `caller`, the
+    /// application the kernel attests is asking.
     ///
-    /// The embedder owns the wall clock — the bar carries no time ABI of its
-    /// own — so it spells the reading and hands over the text. A machine whose
-    /// wall time has never been set is spelled as the bar's own placeholder
-    /// rather than a fabricated reading, so the clock stays visible and
-    /// pressable.
-    pub fn set_clock_label(&mut self, compositor: &mut Compositor, label: &str) {
-        self.session.taskbar_mut().clock_mut().set_label(label);
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for any caller but the desktop's own
+    /// Settings application, which lists the store's regions and places;
+    /// [`Errno::NotFound`] when the session holds no store.
+    pub fn zone_store_descriptor(&self, caller: Option<&AppIdentity>) -> Result<u32, Errno> {
+        if !self.settings_only(caller, "zone-store") {
+            return Err(Errno::PermissionDenied);
+        }
+        self.zones.map(|held| held.fd).ok_or(Errno::NotFound)
+    }
+
+    /// Read the clock in the zone and region `settings` name, keeping the
+    /// bar's room for its widest lines. The clock is due at once, so the
+    /// change shows on the next wake.
+    pub fn adopt_civil(&mut self, settings: &DesktopSettings) -> CivilAdoption {
+        let (civil, (zone, region)) = tairix_wallpaper::civil_clock(self.zones(), settings);
+        self.clock.set_civil(civil);
+        let widest = self.clock.widest();
+        let reshaped = self.session.taskbar().clock().widest() != widest.as_slice();
+        if reshaped {
+            self.session.taskbar_mut().clock_mut().set_widest(widest);
+        }
+        CivilAdoption {
+            zone,
+            region,
+            reshaped,
+        }
+    }
+
+    /// Adopt the wall clock's `reading` as of `now_ns`, or note there was
+    /// none, presenting the bar where its lines changed; answers whether it
+    /// presented.
+    ///
+    /// The embedder reads the wall clock — the bar and the shell hold no time
+    /// source — and hands the reading over.
+    pub fn tell_time(
+        &mut self,
+        compositor: &mut Compositor,
+        reading: Option<WallClockReading>,
+        now_ns: u64,
+    ) -> bool {
+        let Some(reading) = reading else {
+            self.clock.missed(now_ns);
+            return false;
+        };
+        if !self.clock.adopt(reading, now_ns) {
+            return false;
+        }
+        let lines = self.clock.lines().clone();
+        let heading = String::from(self.clock.heading());
+        self.session
+            .taskbar_mut()
+            .clock_mut()
+            .set_reading(lines, heading);
         self.present(compositor);
+        true
     }
 
     /// Attest to the taskbar whether this session can step aside for another

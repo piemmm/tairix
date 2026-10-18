@@ -18,6 +18,8 @@ use tairix_abi::driver::audio::StreamDirection;
 use tairix_appconf::MAX_VALUE_LEN;
 use tairix_audio::stream::DeviceControl;
 
+use crate::settings::put_optional;
+
 /// The most endpoint levels remembered: as many as one settings value can
 /// spell at their longest. The least recently changed goes first.
 pub const REMEMBERED_LEVELS: usize =
@@ -143,13 +145,13 @@ impl SoundControls {
     /// Adopt the preferred sink `value` spells, answering whether it was one.
     #[must_use]
     pub fn set_output(&mut self, value: &str) -> bool {
-        adopt_place(&mut self.output, value)
+        put_optional(&mut self.output, value, parse_place)
     }
 
     /// Adopt the preferred source `value` spells.
     #[must_use]
     pub fn set_input(&mut self, value: &str) -> bool {
-        adopt_place(&mut self.input, value)
+        put_optional(&mut self.input, value, parse_place)
     }
 
     /// The levels as their one settings value: `<location>:<level>` pairs,
@@ -236,19 +238,8 @@ fn render_place(place: Option<AudioLocation>) -> String {
     text
 }
 
-/// Adopt a preference's value: empty for none, else one location.
-fn adopt_place(preference: &mut Option<AudioLocation>, value: &str) -> bool {
-    if value.is_empty() {
-        *preference = None;
-        return true;
-    }
-    match AudioLocation::parse(value) {
-        Ok(place) => {
-            *preference = Some(place);
-            true
-        }
-        Err(_) => false,
-    }
+fn parse_place(value: &str) -> Option<AudioLocation> {
+    AudioLocation::parse(value).ok()
 }
 
 #[cfg(test)]

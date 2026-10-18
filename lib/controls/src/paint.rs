@@ -86,20 +86,46 @@ pub(crate) fn role_font(theme: &Theme, scale: Scale, role: TextRole) -> BitmapFo
     BitmapFont::for_role(theme.fonts(), role, scale)
 }
 
-/// The height a plate carrying one line of `role` text needs: the theme's
+/// The height a row carrying one line of `role` text needs: the theme's
 /// standard control height, but never shorter than the line itself.
 ///
 /// The standard height alone is a floor, not a fit. A theme authors its type
 /// ladder freely up to `Fonts::MAX_BASE_SIZE_PX`, well past the standard
-/// control height, and a plate pinned to that height would cut the text it
+/// control height, and a row pinned to that height would cut the text it
 /// exists to show. The shipped themes sit below the floor, so this changes
 /// nothing for them and keeps a larger-typography theme legible.
 #[must_use]
+pub(crate) fn text_row_height(theme: &Theme, scale: Scale, role: TextRole) -> u32 {
+    line_row_height(theme, scale, role_font(theme, scale, role))
+}
+
+/// The height a framed plate carrying one line of `role` text needs: a row's
+/// height ([`text_row_height`]), and never less than the line seated inside
+/// the plate's rim, gap and focus ring ([`plate_frame_inset`]). The shipped
+/// themes seat it within the row at normal contrast; a heavier contrast
+/// doubles all three, and its plates grow to keep the line clear of them.
+#[must_use]
 pub(crate) fn text_plate_height(theme: &Theme, scale: Scale, role: TextRole) -> u32 {
+    let font = role_font(theme, scale, role);
+    let framed = font
+        .glyph_height()
+        .saturating_add(plate_frame_inset(theme, scale).saturating_mul(2));
+    line_row_height(theme, scale, font).max(framed)
+}
+
+fn line_row_height(theme: &Theme, scale: Scale, font: BitmapFont) -> u32 {
     scale
         .scale_length(theme.metrics().control_height)
-        .max(role_font(theme, scale, role).line_height())
+        .max(font.line_height())
         .max(1)
+}
+
+/// How far inside a plate's edge its content begins: the rim, the gap and the
+/// focus ring [`paint_flush_plate`] draws there, reserved whether or not the
+/// ring is lit so nothing moves when focus does.
+#[must_use]
+pub(crate) fn plate_frame_inset(theme: &Theme, scale: Scale) -> u32 {
+    plate_border(theme, scale).saturating_mul(3)
 }
 
 /// The theme's signal colour for a resource `kind` — the Pressure Rail hue
@@ -575,8 +601,16 @@ pub(crate) enum TextAlign {
 /// For text its owner never changes in place: a builder that changes it
 /// forgets what was remembered. It compares equal to any other, because
 /// nothing drawn reads it.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Measured<K: Copy + Eq>(Cell<Option<(K, u32)>>);
+
+// Written out because the derive would demand a default key, which an
+// empty memory never holds.
+impl<K: Copy + Eq> Default for Measured<K> {
+    fn default() -> Self {
+        Self(Cell::new(None))
+    }
+}
 
 impl<K: Copy + Eq> Measured<K> {
     /// The measurement remembered for `key`, or `measure`'s answer, remembered.
@@ -775,10 +809,48 @@ pub(crate) fn icon_slot_side(font: BitmapFont, content_height: u32) -> u32 {
     font.glyph_height().min(content_height)
 }
 
-/// The `saturation` at which [`paint_icon_slot`] draws artwork exactly as its
-/// owner cached it — the identity value of
-/// [`Pixel::desaturate`](tairix_raster::Pixel::desaturate).
-pub const FULL_COLOUR: u8 = 255;
+/// How [`paint_icon_slot`] tones artwork on its way into its slot. A glyph
+/// takes its tint from the control's state instead, so it is never toned.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ArtworkTone {
+    /// How much of its colour the artwork keeps, as
+    /// [`Pixel::desaturate`](tairix_raster::Pixel::desaturate) reads it.
+    pub saturation: u8,
+    /// How much of the artwork lands, as
+    /// [`Surface::blit_faded`](tairix_raster::Surface::blit_faded) reads it.
+    pub strength: u8,
+}
+
+impl ArtworkTone {
+    /// The artwork exactly as its owner cached it.
+    pub const FULL: Self = Self {
+        saturation: u8::MAX,
+        strength: u8::MAX,
+    };
+
+    /// The artwork keeping `saturation` of its colour, at full strength.
+    #[must_use]
+    pub const fn desaturated(saturation: u8) -> Self {
+        Self {
+            saturation,
+            strength: u8::MAX,
+        }
+    }
+
+    /// The artwork of a control that cannot act, on `ground` in `palette`:
+    /// grey, and faded as far toward the ground as its muted label is.
+    #[must_use]
+    pub fn disabled(palette: &Palette, ground: Color) -> Self {
+        let ground = ground.luma();
+        let reach = |ink: Rgba| u32::from(Color::from(ink).luma().abs_diff(ground));
+        let full = reach(palette.on_surface).max(1);
+        let muted = reach(palette.on_surface_muted).min(full);
+        Self {
+            saturation: 0,
+            strength: u8::try_from(muted * u32::from(u8::MAX) / full).unwrap_or(u8::MAX),
+        }
+    }
+}
 
 /// Paint a content icon into the `(x, y, side)` square `slot` from the
 /// `picture` its owner resolved: ready-coloured artwork (shipped, or a settings
@@ -805,19 +877,19 @@ pub const FULL_COLOUR: u8 = 255;
 /// picture the cache would have retained, so a cached icon and an uncached one
 /// are the same pixels.
 ///
-/// `saturation` reduces the *artwork's* colour on its way in
-/// ([`Pixel::desaturate`](tairix_raster::Pixel::desaturate): [`FULL_COLOUR`]
-/// draws it as cached, `0` draws it grey), which is how a control states that
-/// what the artwork identifies is not the thing in hand — an unfocused
-/// window's title bar. It does not touch a glyph: that takes `tint` from the
-/// control's own state and has no application colour in it to reduce.
+/// `tone` reduces the *artwork's* colour and strength on its way in
+/// ([`ArtworkTone::FULL`] draws it as cached), which is how a control states
+/// that what the artwork identifies is not the thing in hand — an unfocused
+/// window's title bar — or that the control cannot act. It does not touch a
+/// glyph: that takes `tint` from the control's own state and has no
+/// application colour in it to reduce.
 pub fn paint_icon_slot(
     surface: &mut Surface,
     slot: (u32, u32, u32),
     kind: IconKind,
     tint: Color,
     picture: Option<IconPicture<'_>>,
-    saturation: u8,
+    tone: ArtworkTone,
 ) {
     let mut draw = |picture: IconPicture<'_>| {
         let art = picture.surface();
@@ -825,7 +897,7 @@ pub fn paint_icon_slot(
         if picture.is_mask() {
             surface.blit_tinted(ax, ay, art, tint);
         } else {
-            surface.blit_desaturated(ax, ay, art, saturation);
+            surface.blit_desaturated(ax, ay, art, tone.saturation, tone.strength);
         }
     };
     match picture {
@@ -1003,7 +1075,7 @@ pub(crate) fn key_activation(state: ControlState, key: Key) -> bool {
 /// relying on hue.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BeadShape {
-    /// A completion check mark.
+    /// A completion bead, drawn as a filled disc.
     Check,
     /// A recovery diamond.
     Diamond,
@@ -1783,10 +1855,13 @@ pub(crate) enum ChevronDir {
 /// glance, while the region holds one.
 ///
 /// The triangle is fitted to whole pixels: its base lies on a pixel edge and
-/// its sides run at 45 degrees from an apex at a pixel's centre, so each row
-/// is whole pixels across with only a sliver of coverage at its ends. A mark
-/// whose geometry fell between pixels came out a grey smudge with no
-/// direction left to read. It is filled in place, confined to `rect`.
+/// its sides run at 45 degrees from an apex at a pixel's centre — or, in a box
+/// an even number of pixels across, from a one-pixel flat apex — so each row
+/// is whole pixels across with only a sliver of coverage at its ends and the
+/// mark centres exactly across its axis. Along its axis it is centred by its
+/// weight rather than its bounding box. A mark whose geometry fell between
+/// pixels came out a grey smudge with no direction left to read. It is filled
+/// in place, confined to `rect`.
 pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, color: Color) {
     let Some((x, y, w, h)) = surface_rect(rect) else {
         return;
@@ -1798,34 +1873,55 @@ pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, 
     if half == 0 {
         return;
     }
-    let (span, depth) = (half * 2 + 1, half + 1);
-    let (mark_w, mark_h) = match dir {
-        ChevronDir::Up | ChevronDir::Down => (span, depth),
-        ChevronDir::Left | ChevronDir::Right => (depth, span),
+    let vertical = matches!(dir, ChevronDir::Up | ChevronDir::Down);
+    let across = if vertical { w } else { h };
+    // An even box takes a one-pixel flat apex, so its rows are even and the
+    // mark centres exactly rather than half a pixel off.
+    let flat = u32::from(across % 2 == 0);
+    let (span, depth) = (half * 2 + 1 + flat, half + 1);
+    // Pulled a sixth of its depth toward its apex: a triangle's weight sits
+    // that far from its bounding box's centre, toward its base.
+    let toward_apex = (depth + 3) / 6;
+    let (mark_w, mark_h) = if vertical {
+        (span, depth)
+    } else {
+        (depth, span)
     };
+    let centred = |origin: u32, extent: u32, mark: u32| origin + (extent - mark) / 2;
+    let (mut left, mut top) = (centred(x, w, mark_w), centred(y, h, mark_h));
+    match dir {
+        ChevronDir::Up => top = top.saturating_sub(toward_apex).max(y),
+        ChevronDir::Down => top = (top + toward_apex).min(y + h - mark_h),
+        ChevronDir::Left => left = left.saturating_sub(toward_apex).max(x),
+        ChevronDir::Right => left = (left + toward_apex).min(x + w - mark_w),
+    }
     let at = |v: u32| to_i32(v).saturating_mul(SUBPIXEL);
-    let (left, top) = (at(x + (w - mark_w) / 2), at(y + (h - mark_h) / 2));
     let mid = SUBPIXEL / 2;
-    let (span, depth, half) = (at(span), at(depth), at(half));
-    let points: [(i32, i32); 3] = match dir {
+    let (left, top) = (at(left), at(top));
+    let (span, depth, half, flat) = (at(span), at(depth), at(half), at(flat));
+    let points: [(i32, i32); 4] = match dir {
         ChevronDir::Up => [
             (left + half + mid, top),
+            (left + half + flat + mid, top),
             (left + span + mid, top + depth),
             (left - mid, top + depth),
         ],
         ChevronDir::Down => [
             (left - mid, top),
             (left + span + mid, top),
+            (left + half + flat + mid, top + depth),
             (left + half + mid, top + depth),
         ],
         ChevronDir::Left => [
             (left, top + half + mid),
             (left + depth, top - mid),
             (left + depth, top + span + mid),
+            (left, top + half + flat + mid),
         ],
         ChevronDir::Right => [
             (left, top - mid),
             (left + depth, top + half + mid),
+            (left + depth, top + half + flat + mid),
             (left, top + span + mid),
         ],
     };
@@ -1837,6 +1933,38 @@ pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, 
 /// The half-base, in whole pixels past the apex column, below which a chevron
 /// stops reading as an arrow: a seven-pixel base four rows deep.
 const MIN_CHEVRON_HALF: u32 = 3;
+
+/// Draw a tick, the mark of a setting a row turns on, centred in the `(x, y,
+/// side)` square `slot`.
+///
+/// Fitted to whole pixels as [`paint_chevron`] is: two arms at 45 degrees, the
+/// long one twice the short, each a whole number of pixels deep down its
+/// column and ending square on a pixel column, so a small tick reads as a mark
+/// rather than a smudge.
+pub(crate) fn paint_tick(surface: &mut Surface, (x, y, side): (u32, u32, u32), color: Color) {
+    let short = (side + 2) / 5;
+    let long = short * 2;
+    let deep = ((side + 3) / 6).max(2);
+    let (width, height) = (short + long, long + deep);
+    if short == 0 || width > side || height > side {
+        return;
+    }
+    let left = x + (side - width) / 2;
+    let top = y + (side - height) / 2;
+    let knee = left + short;
+    let at = |v: u32| to_i32(v).saturating_mul(SUBPIXEL);
+    let points = [
+        (at(left), at(top + long - short)),
+        (at(knee), at(top + long)),
+        (at(knee + long), at(top)),
+        (at(knee + long), at(top + deep)),
+        (at(knee), at(top + long + deep)),
+        (at(left), at(top + long + deep - short)),
+    ];
+    surface.with_clip(x, y, side, side, |clipped| {
+        clipped.fill_polygon_subpixel(&points, color);
+    });
+}
 
 /// Outline `rect` in the accent when `state` marks the control a drop target:
 /// where a carried drag would land, over whatever else the control wears.

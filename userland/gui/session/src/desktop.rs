@@ -60,7 +60,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::render::{entry_body, Tiles};
+use tairix_browse::render::{entry_parts, Tiles};
 use tairix_browse::{
     applications_for, entry_icon, merge_changes, resolve_occupancy, sort_entries, AppAssociation,
     DirectorySource, Entry, EntryChange, EntryKind, GridFlow, GridView, LinkTarget, Listing,
@@ -310,6 +310,9 @@ pub struct PinboardChange {
     /// The notification policy changed: what is already showing must be
     /// held to the new one.
     pub notifications: bool,
+    /// The region or the zone changed: the clocks must be read in the new
+    /// ones.
+    pub clock: bool,
 }
 
 /// One icon the column shows, as the paint and the artwork landing see it.
@@ -531,6 +534,8 @@ impl<S: DirectorySource> Desktop<S> {
             },
             appearance,
             notifications: settings.notifications != self.settings.notifications,
+            clock: settings.region != self.settings.region
+                || settings.time_zone != self.settings.time_zone,
         };
         self.settings = settings;
         if resorted {
@@ -947,13 +952,13 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// The icon whose tile's body — its picture and name, not the ground
-    /// around them — covers screen position `at`, through the shared grid
+    /// The icon whose tile's picture or name — not the ground around and
+    /// between them — covers screen position `at`, through the shared grid
     /// hit-test.
     fn icon_at(&self, layout: &GridView, at: Point, scale: Scale, theme: &Theme) -> Option<usize> {
         let index = layout.index_at(DESKTOP_SCROLL, at)?;
         let cell = shown_whole(layout, index)?;
-        entry_body(Tiles::Large, self.entries.get(index)?, cell, scale, theme)?
+        entry_parts(Tiles::Large, self.entries.get(index)?, cell, scale, theme)?
             .contains(at)
             .then_some(index)
     }

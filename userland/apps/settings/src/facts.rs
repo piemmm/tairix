@@ -24,10 +24,13 @@ use tairix_abi::sysinfo::{CpuInfoRecord, SystemIdentity, Uptime};
 use tairix_abi::time::{WallClockReading, WallTimeState};
 use tairix_controls::{stack, FieldControl, FieldGroup, FieldLayout, FieldRow};
 use tairix_geometry::{Rect, Scale};
-use tairix_procinfo::format_uptime;
+use tairix_procinfo::{format_uptime, processor_summary, UNMEASURED};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
+use tairix_tz::{CivilClock, ZoneInfo};
 use tairix_util::size::{format_binary, SIZE_TEXT_MAX};
+
+use crate::civil;
 
 /// The label of every About reading, in the order the pane lists them.
 pub(crate) const ABOUT_FACTS: &[&str] = &[
@@ -41,10 +44,7 @@ pub(crate) const ABOUT_FACTS: &[&str] = &[
 ];
 
 /// The label of every Date & Time reading.
-pub(crate) const CLOCK_FACTS: &[&str] = &["Clock", "Set from"];
-
-/// What a reading states when the caller could not take it.
-const UNMEASURED: &str = "not measured";
+pub(crate) const CLOCK_FACTS: &[&str] = &["Clock", "Time zone", "Set from"];
 
 /// What the identity states where the installer has not minted one.
 const UNPROVISIONED: &str = "not set";
@@ -91,9 +91,14 @@ impl Facts {
         Self::of("THIS MACHINE", about_rows(facts))
     }
 
-    /// The Date & Time column for `facts`.
-    pub(crate) fn clock(facts: &MachineFacts) -> Self {
-        Self::of("THE CLOCK", clock_rows(facts))
+    /// The Date & Time column for `facts`, read in `clock`'s zone and region
+    /// from the store `zones`.
+    pub(crate) fn clock(
+        facts: &MachineFacts,
+        clock: &CivilClock<'_>,
+        zones: Option<&'static ZoneInfo<'static>>,
+    ) -> Self {
+        Self::of("THE CLOCK", clock_rows(facts, clock, zones))
     }
 
     /// One captioned plate carrying `rows`.
@@ -197,25 +202,29 @@ fn about_rows(facts: &MachineFacts) -> Vec<FieldRow> {
     ]
 }
 
-/// The Date & Time readings.
-fn clock_rows(facts: &MachineFacts) -> Vec<FieldRow> {
+/// The Date & Time readings, in `civil`'s zone and region.
+fn clock_rows(
+    facts: &MachineFacts,
+    civil: &CivilClock<'_>,
+    zones: Option<&'static ZoneInfo<'static>>,
+) -> Vec<FieldRow> {
     let clock = facts.clock;
+    let set = clock.filter(|clock| clock.state() != WallTimeState::Unset);
     alloc::vec![
         reading(
             CLOCK_FACTS[0],
-            clock.map_or_else(unmeasured, |clock| {
-                if clock.state() == WallTimeState::Unset {
-                    String::from("not set")
-                } else {
-                    // The instant itself, in the one spelling `lib/abi`
-                    // gives it: rendering a civil date needs the zone
-                    // store, which is another pane's subject.
-                    alloc::format!("{} s since the epoch", clock.time().secs())
-                }
-            }),
+            match (clock, set) {
+                (None, _) => unmeasured(),
+                (Some(_), None) => String::from("not set"),
+                (_, Some(set)) => civil::reading(set.time(), civil),
+            },
         ),
         reading(
             CLOCK_FACTS[1],
+            civil::zone_reading(set.map(|set| set.time()), civil, zones),
+        ),
+        reading(
+            CLOCK_FACTS[2],
             clock.map_or_else(unmeasured, |clock| String::from(provenance(clock.state()))),
         ),
     ]
@@ -252,20 +261,11 @@ const fn hex(nibble: u8) -> char {
     }
 }
 
-/// The processor the machine reported, or the unmeasured statement.
-///
-/// The first core's model name: a machine with cores of different classes
-/// still has one processor a reader would name, and the core count beside
-/// it is what says how many there are.
+/// The processor parts the machine reported, each with its core count, or
+/// the unmeasured statement: a machine of two parts names both rather than
+/// whichever core came first.
 fn processor(cpus: &[CpuInfoRecord]) -> String {
-    let Some(first) = cpus.first() else {
-        return unmeasured();
-    };
-    let name = core::str::from_utf8(first.model_bytes()).unwrap_or("");
-    if name.is_empty() {
-        return unmeasured();
-    }
-    name.to_string()
+    processor_summary(cpus).unwrap_or_else(unmeasured)
 }
 
 /// What a reading the caller could not take says.

@@ -17,7 +17,9 @@ use tairix_raster::{Affine, Color, FillRule, Layer, Paint};
 use tairix_svg::geom::{place, LineCap, LineJoin, StrokeStyle, SubPath};
 use tairix_svg::pathdata::{flatten_ellipse_arc, parse_path_data};
 use tairix_svg::stroke::stroke_outline;
+use tairix_util::mathf::round;
 
+use crate::fit::{GridFit, Phase};
 use crate::glyph::IconKind;
 use crate::vector::VectorIcon;
 
@@ -134,6 +136,14 @@ pub(crate) fn glyph(kind: IconKind, color: Color) -> Option<VectorIcon> {
     Some(VectorIcon::new(DESIGN, layers))
 }
 
+/// `kind`'s symbol as a glyph filling a `side`-pixel square in `color`, fitted
+/// to that side's pixel grid, or `None` for a kind drawn with a glyph of its
+/// own.
+pub(crate) fn glyph_at(kind: IconKind, color: Color, side: u32) -> Option<VectorIcon> {
+    let layers = fitted_layers(marks(kind)?, Placement::WHOLE, &Paint::Solid(color), side)?;
+    Some(VectorIcon::new(DESIGN, layers))
+}
+
 /// The flatness, in symbol units, a picture `px_per_unit` pixels to the symbol
 /// unit needs: finer as it is drawn larger, so a small icon costs few vertices
 /// and a large one shows no facets.
@@ -186,6 +196,93 @@ pub(crate) fn layers(
                 rule,
                 place(&subpaths, to_design),
             ))
+        })
+        .collect()
+}
+
+/// How a mark's contours are drawn once fitted.
+enum Drawn {
+    /// Filled under its rule.
+    Fill(FillRule),
+    /// Stroked a whole number of pixels wide.
+    Stroke(StrokeStyle),
+}
+
+impl Drawn {
+    /// Where the edges of contours drawn this way land on the pixel grid.
+    fn phase(&self) -> Phase {
+        match self {
+            Self::Fill(_) => Phase::Boundary,
+            Self::Stroke(style) => Phase::of_stroke(style.width),
+        }
+    }
+}
+
+/// [`layers`] for a picture `side` pixels square, fitted to its pixel grid:
+/// every stroke a whole number of pixels wide, at least one, and every edge of
+/// every mark on the grid, the marks fitted together so each still meets the
+/// next where it did.
+///
+/// `None` for a zero side, or as [`layers`] answers it.
+pub(crate) fn fitted_layers(
+    marks: &[Mark],
+    placement: Placement,
+    paint: &Paint,
+    side: u32,
+) -> Option<Vec<Layer>> {
+    if side == 0 {
+        return None;
+    }
+    let px_per_design = f64::from(side) / f64::from(DESIGN);
+    let px_per_unit = placement.scale * px_per_design;
+    let to_pixels = placement
+        .to_design()
+        .then(Affine::scale(px_per_design, px_per_design));
+    let flatness = flatness_at(px_per_unit);
+    let mut parts = Vec::with_capacity(marks.len());
+    for mark in marks {
+        let (outlines, drawn) = match *mark {
+            Mark::Fill { outlines, rule } => (outlines, Drawn::Fill(rule)),
+            Mark::Stroke {
+                outlines,
+                width,
+                cap,
+                join,
+            } => (
+                outlines,
+                Drawn::Stroke(StrokeStyle {
+                    width: round(width * px_per_unit).max(1.0),
+                    cap,
+                    join,
+                    ..StrokeStyle::default()
+                }),
+            ),
+        };
+        let contours: Vec<SubPath> = flatten(outlines, flatness)?
+            .iter()
+            .map(|contour| contour.mapped(to_pixels))
+            .collect();
+        parts.push((contours, drawn));
+    }
+    let fit = GridFit::new(
+        side,
+        parts
+            .iter()
+            .map(|(contours, drawn)| (contours.as_slice(), drawn.phase())),
+    );
+    let to_design = Affine::scale(1.0 / px_per_design, 1.0 / px_per_design);
+    parts
+        .into_iter()
+        .map(|(mut contours, drawn)| {
+            fit.apply(&mut contours);
+            let (area, rule) = match drawn {
+                Drawn::Fill(rule) => (contours, rule),
+                Drawn::Stroke(style) => (
+                    stroke_outline(&contours, &style, FLATNESS_PX, MAX_MARK_POINTS).ok()?,
+                    FillRule::NonZero,
+                ),
+            };
+            Some(Layer::filled(paint.clone(), rule, place(&area, to_design)))
         })
         .collect()
 }

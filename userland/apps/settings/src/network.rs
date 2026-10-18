@@ -26,7 +26,7 @@ use tairix_controls::{
     ComboBox, ControlState, FieldControl, FieldGroup, FieldRow, TextField, ValidationState,
 };
 use tairix_netconfig::{valid_iface_name, IfaceKey, Ipv4Method, Ipv6Method, NetworkConfig};
-use tairix_procinfo::render_server;
+use tairix_procinfo::{render_server, UNMEASURED};
 use tairix_util::conf::ValueShape;
 
 /// What the Ethernet pane contributes to the search index.
@@ -56,9 +56,6 @@ const ADDRESSING_CAPTION: &str = "CONFIGURED ADDRESSING";
 /// nothing, which is worth saying plainly rather than showing an empty
 /// plate.
 const NO_SERVERS: &str = "none — this machine resolves no names";
-
-/// What a reading states when the caller could not take it.
-const UNMEASURED: &str = "not measured";
 
 /// What the networking panes state before anyone has asked.
 const NOT_ASKED: &str =

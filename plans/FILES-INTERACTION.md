@@ -43,7 +43,7 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI17 | Clicking the name of the one selected item renames it in place once the click can no longer be a double-click | done |
 | FI18 | A folder's icon fans out the files inside it: photos as their own pictures, other files as their kind, repeated as the folder holds them | done |
 | FI19 | The marquee keeps up: input drained before a paint, each damaged rectangle painted alone, and a window present carrying a rectangle list | done |
-| FI20 | A tile's body is its picture and its name: the press target and the plate hug it, and the cell around it is ground a band starts on | done |
+| FI20 | A tile is its picture and its name: the press target is either part, the selection plate stands behind the name while the picture is tinted, and the cell around and between them is ground a band starts on | done |
 | FI21 | Select All (`Ctrl+A`) and Clear Selection (`Ctrl+Shift+A`) in the window's menu | done |
 | FI22 | A thumbnail is framed by a one-pixel line around the picture's own bounds | done |
 | FI23 | Every icon a tile draws casts a small soft shadow, cast once per picture and retained | done |
@@ -450,10 +450,18 @@ stripped. What lost the extension was the cut: one line, elided at its end.
 - A due rename is checked on every turn of the loop, the turn that serves a
   running copy or delete included, and its opening repaints the entry and its
   field, not the window.
-- Every way a rename opens — `F2`, the menu, New ▸, a click — selects the name's
-  **stem**, everything before its extension (`rename_selection`), so typing
-  replaces the name and keeps the extension. A name with no extension and a
-  folder are selected whole; a bundle selects its stem and keeps `.app`.
+- Every way a rename opens — `F2`, the menu's in-place editor or its
+  quick-entry field, New ▸, a click — selects the name's **stem**, everything
+  before its extension (`rename_selection`), so typing replaces the name and
+  keeps the extension. A name with no extension and a folder are selected
+  whole; a bundle selects its stem and keeps `.app`.
+- The editor **replaces** the name: the tile draws its picture and no name
+  while the field is open (`IconTile::with_name_withheld`, through
+  `ManagerChrome::renaming`), and the field is one line, its own height,
+  centred on the name's first line, as wide as the name's band in the icon
+  views and the name cell in the list. It may stand a pixel or two past a
+  short list row and is cut only by the view, never by the cell. Closing it
+  repaints the tile, so the name returns whole.
 - While the field is open a press inside it reaches the field (caret, drag
   selection). A press outside it commits: a name refused before any syscall
   keeps the field open with its reason and the press is spent; an unchanged
@@ -540,22 +548,27 @@ merged into the box spanning it.
 
 ## FI20 — ground between tiles
 
-- A tile's **body** is its picture and its name's drawn lines, each widened by a
-  half inset (`TileLayout::body_rect`): the press target, the hover and
-  selection plate, the drop-target outline, and what a marquee has to touch.
-  The rest of the cell is ground, so a press there clears the selection and
-  starts a band exactly as between cells, and a name drawn on one line leaves
-  the second line's space as ground too.
-- A hit-test stays arithmetic to the cell and then tests that one entry's body.
-  A band selects an entry whose body it touches: a cell whose picture it touches
-  is certain, a cell it misses entirely is not, and only the cells along its
-  edges are tested by body, so a sweep still visits only the entries entering
-  or leaving it.
-- Bodies never meet: the cell keeps an inset either side of the widest body,
-  and the grid keeps its gap between cells, so two half insets and a gap of
-  ground lie between tiles side by side, and at least a half inset and a gap
-  between rows, however the window is sized.
-- The desktop's icon field takes the same body.
+- A tile is **two parts**, its picture and its name's drawn lines, each widened
+  by a half inset (`TileLayout::parts`): the press target, a marquee's touch and
+  the drop target are either part, never the box around both. The rest of the
+  cell — beside a narrow picture above a wide name, beside a short name, a
+  name's unused second line — is ground, so a press there clears the selection
+  and starts a band exactly as between cells.
+- The selection marks the **name**: the hover wash, the press recess, the
+  selection plate, the focus ring and the drop-target outline stand behind the
+  name's lines, and a selected (or drop-target) tile's picture is washed with
+  the theme's `selection_tint`, as the RISC OS Filer lights a selected icon.
+- A hit-test stays arithmetic to the cell and then tests that one entry's two
+  parts. A band selects an entry it touches: a cell whose picture it touches is
+  certain, a cell it misses entirely is not, and only the cells along its edges
+  are tested part by part, so a sweep still visits only the entries entering or
+  leaving it.
+- Tiles never meet: the cell keeps an inset either side of the widest part, and
+  the grid keeps its gap between cells, so two half insets and a gap of ground
+  lie between tiles side by side, and at least a half inset and a gap between
+  rows, however the window is sized.
+- The desktop's icon field and the greeter's account chooser take the same
+  parts.
 
 ## FI21 — Select All and Clear Selection
 
@@ -703,7 +716,7 @@ shows, the cells laid in rows across the window and wrapping down
 face's average character and as tall as a list row (`render::small_metrics`),
 so the arrangement is a function of the theme and scale alone. It is the tile
 grid with a second arrangement (`TileLayout::beside`): the same cell maths,
-hit-test, marquee, rename field and drop targets, the body being the picture
+hit-test, marquee, rename field and drop targets, the parts being the picture
 and the name's drawn run.
 
 ## FI29 — List

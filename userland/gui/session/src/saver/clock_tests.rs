@@ -35,7 +35,13 @@ fn face_showing(
         motion,
         ..Accessibility::default()
     });
-    ClockFace::new(&identity, &theme, (Scale::ONE, SCREEN), (wall, 0), options)
+    ClockFace::new(
+        &identity,
+        &theme,
+        (Scale::ONE, SCREEN),
+        (wall, tairix_tz::CivilClock::UTC, 0),
+        options,
+    )
 }
 
 /// A face that tells neither the date nor who is signed in shows the time

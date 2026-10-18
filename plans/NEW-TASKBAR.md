@@ -235,13 +235,18 @@ wallpaper gap  ┌────────────────────�
   panel 1). A secondary press on the clock opens the clock's own menu (T17);
   a primary press on it is claimed and inert, as on a status signal other
   than the volume signal, which opens its panel.
-- **Clock:** the time is set in the body face (`TextRole::Body`), a step above
-  a caption, because it is read at a glance from across the bar, and it
-  follows the user's chosen text size like every role. On a horizontal bar its
-  region is at least `clock_extent` and grows to the widest `HH:mm` reading at
-  that size, so no minute is drawn cut short; a label that a region cannot
-  hold whole — a side bar's, at a large size — is not drawn at all, because a
-  time cut short reads as another time.
+- **Clock:** two lines the session writes in the user's zone and region
+  (`plans/TIMEZONES.md`): the time, in the body face (`TextRole::Body`), a step
+  above a caption, because it is read at a glance from across the bar, and the
+  date in the caption face, beneath the time where the bar is deep enough for
+  both and beside it where it is not — `14:05` over `18/10/2026` for the
+  shipped region. Both follow the user's chosen text size. The region keeps
+  room for the widest each line can be in the region's conventions, so the
+  clock holds still as the minutes and days turn: on a horizontal bar at least
+  `clock_extent`, on a vertical one at least as tall as both lines. A line the
+  region cannot hold whole — a side bar's date, or its time at a large size —
+  is not drawn at all, because a time or date cut short reads as another; the
+  time comes first, and the date is drawn only with it.
 - **Account capsule:** always the trailing-most element, reserved, immovable;
   no application or tray icon may occupy or displace its slot. It is the
   Switchboard tray — its badges, seam, rail, readout, and gestures are the
@@ -1433,8 +1438,8 @@ no authority: each row reports a typed outcome and the session resolves it.
 
 | Row | Resolved by | Backing |
 |---|---|---|
-| About This System | session → Switchboard `Resources` | the Resources section, whose `Machine` rail group carries identity, uptime, seats and the session's authority |
-| System Monitor | session → Switchboard `Tasks` | the T11 open panel |
+| About This System | session → its one About window (`Alerts::about`) | `SYSTEM_IDENTITY`, `CPU_INFO` and `MEMORY_TOTAL`, read once before the serve loop |
+| System Monitor | session → Switchboard `Resources` | the Resources section, whose `Machine` rail group carries identity, uptime, seats and the session's authority |
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |
 | Settings… | session → launch `os.tairix.settings` | the settings bundle (`plans/NEW-DESKTOP-SETTINGS.md`) |
@@ -1826,18 +1831,19 @@ it or the reverse):
 
 | Row | Resolved by | Backing |
 |---|---|---|
-| the reading the bar is drawing | nothing — a statement | the bar's own clock label |
+| the reading the bar is drawing | nothing — a statement | the heading the session wrote with the bar's lines |
 | Set Date & Time… | session → `ElevateRequest::Launch` | the per-console elevation broker, then `datetime.app` under `CAP_TIME_SET` |
 
 **Design decisions**
 
-- **The heading states the bar's own label, never a second reading.** The
-  session owns the wall clock and hands the bar the spelled text; the menu
-  repeats that string. A menu that re-derived the time could disagree with
-  the bar beside it. An unset clock — nothing has established a wall time this
-  boot, so the bar draws the `clock::UNSET_LABEL` placeholder rather than
-  vanishing — has its heading say *Time not set*, never a repeat of the
-  dashes and never a fabricated `00:00`.
+- **The heading states the bar's own reading, never a second one.** The
+  session owns the wall clock and hands the bar the lines and the heading it
+  wrote with them — the date, the time and the zone's abbreviation,
+  `18/10/2026 14:05 BST`; the menu states that string. A menu that re-derived
+  the time could disagree with the bar beside it. An unset clock — nothing has
+  established a wall time this boot, so the bar draws the `clock::UNSET_LABEL`
+  placeholder and no date rather than vanishing — has its heading say *Time
+  not set*, never a repeat of the dashes and never a fabricated `00:00`.
 - **One console attestation serves two rows.** Whether the *Lock Screen* row
   (T13) can act and whether the set-time row can act are the **same** fact —
   does this session's console have a re-authentication broker — so the

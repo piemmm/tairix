@@ -119,6 +119,7 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::damage;
+    use tairix_desktop_session::about::SystemFacts;
     use tairix_desktop_session::alert::{alert_title, Speaker};
     use tairix_desktop_session::effects::{
         load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk,
@@ -159,24 +160,25 @@ mod program {
         PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Requester,
         ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaverIdentity, SaverSetup,
         ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
-        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
-        ShellWindowHost, SizedRecord, SlotAnswer, SoundCall, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd, TrialOutcome, UnlockAsk,
-        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH,
-        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE,
-        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,
-        LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED,
-        LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN,
-        LIBRARY_SHOWN_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS,
-        PICKER_SHOWN, PICKER_SHOWN_MESSAGE, SETTINGS_LABEL, SWITCHBOARD_CALL_REFUSED,
-        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE,
-        TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE,
-        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
+        SeatRouter, SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
+        SizedRecord, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, Trial, TrialEnd, TrialOutcome, UnlockAsk, WallpaperDesk, WallpaperJob,
+        WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
+        APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
+        CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
+        MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
+        SETTINGS_LABEL, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
+        TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE,
+        WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
+        WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{
-        preview_source, resolution_ask, ScreensaverPreview, ScreensaverServe,
+        preview_source, resolution_ask, CivilAdoption, HeldZones, ScreensaverPreview,
+        ScreensaverServe,
     };
     use tairix_display::{
         DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay, RtShmMapper, SwitchedOff,
@@ -206,6 +208,7 @@ mod program {
         MenuRequest, MenuSubject, SoundAction, TaskId, TaskbarConfig, TaskbarResponse,
     };
     use tairix_theme::Accessibility;
+    use tairix_tz::{Decided, ZoneInfo};
     use tairix_wallpaper::{
         merge_applied, CpuUse, DesktopSettings, RaytraceOptions, Resolution, ScreensaverKind,
         MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
@@ -928,6 +931,7 @@ mod program {
             ground: ground.flatten(),
             catalog,
             wall,
+            civil: shell.clock().civil(),
             identity,
             theme: shell.session().active_theme(),
             options: &asked.options,
@@ -1004,7 +1008,6 @@ mod program {
         fade: &mut ScreenFade,
         (lock, elevate): (&mut ScreenLock, &mut ElevatePrompt),
         saver: &mut Screensaver,
-        clock: &mut SessionClock,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
         (compositor, pacer): (&mut Compositor, &FramePacer),
@@ -1025,7 +1028,7 @@ mod program {
             &mut || tairix_rt::wall_time().ok(),
             &mut tairix_rt::clock_get,
         );
-        tick_clock(clock, shell, compositor, now_ns);
+        tick_clock(shell, compositor, now_ns);
         // A backdrop dissolving into another is a repaint of the desktop
         // layer rather than a compositor state change, so each frame of it is
         // the layer drawn again. Only a frame that changed the ground costs
@@ -1039,42 +1042,72 @@ mod program {
         }
     }
 
-    /// Read the wall clock when the label it produced has gone stale, and put
-    /// the new one on the bar.
+    /// Read the wall clock once the lines it last produced have gone stale,
+    /// putting new ones on the bar; answers whether the bar was presented.
     ///
-    /// This runs on every frame, but the clock owns the cadence: it is read
-    /// only once the minute its label was right for has turned, which is the
-    /// same deadline the park is shortened to. An idle desktop therefore
-    /// reads it once a minute however often something else wakes the loop —
-    /// and something else does, roughly every couple of seconds, so reading
-    /// unconditionally here would put a syscall on a path that had nothing to
-    /// ask about.
-    ///
-    /// The cost is that a wall clock *stepped* while the desktop is up (an
-    /// NTP correction) reaches the bar at the next minute rather than the
-    /// next wake. There is no step notification to subscribe to — `wall_time`
-    /// is a plain read — and the bar shows whole minutes, so waiting for the
-    /// boundary it already wakes on beats polling for a correction that
-    /// almost never comes.
-    ///
-    /// A refused read (a machine with no wall clock wired at all) leaves the
-    /// bar exactly as it was rather than blanking it — the label already
-    /// shown is the last thing that was true — and asks again a minute later.
-    fn tick_clock(
-        clock: &mut SessionClock,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        now_ns: u64,
-    ) {
-        if !clock.is_due(now_ns) {
-            return;
-        }
-        let Ok(reading) = tairix_rt::wall_time() else {
-            clock.missed(now_ns);
-            return;
+    /// Run every frame, but the clock owns the cadence: it is due at the next
+    /// local minute, the deadline the park is shortened to, so an idle desktop
+    /// reads it once a minute however often it wakes. A wall clock stepped
+    /// meanwhile reaches the bar at that minute, there being no notice of a
+    /// step to wait on. A refused read leaves the bar as it was and asks again
+    /// a minute later.
+    fn tick_clock(shell: &mut DesktopShell, compositor: &mut Compositor, now_ns: u64) -> bool {
+        shell.clock().is_due(now_ns)
+            && shell.tell_time(compositor, tairix_rt::wall_time().ok(), now_ns)
+    }
+
+    /// The planted zone store and the descriptor it was read through, or
+    /// `None` — stated once — where it cannot be had and the clock reads UTC.
+    fn load_zones() -> Option<HeldZones> {
+        let file = match tairix_rt::File::open(
+            tairix_tz::STORE_PATH.as_bytes(),
+            tairix_abi::fs::OpenFlags::READ,
+        ) {
+            Ok(file) => file,
+            Err(raw) => {
+                let error = tairix_tz::LoadError::Unreadable(Errno::from_syscall(raw));
+                app::report(APP_NAME, format_args!("{error}; the clock reads UTC"));
+                return None;
+            }
         };
-        if clock.adopt(reading, now_ns) {
-            shell.set_clock_label(compositor, clock.label());
+        match tairix_tz::load(&file) {
+            Ok(info) => {
+                let fd = file.fd();
+                // Kept open for the life of the session, as the store itself
+                // is: Settings is delegated the store through it.
+                core::mem::forget(file);
+                Some(HeldZones { info, fd })
+            }
+            Err(error) => {
+                app::report(APP_NAME, format_args!("{error}; the clock reads UTC"));
+                None
+            }
+        }
+    }
+
+    /// State a choice of `settings` the zone store does not hold, which the
+    /// clock passed over for the store's default.
+    ///
+    /// Said at bring-up alone: an apply that changes either choice to one the
+    /// store lacks is refused, so no other adoption can bring one.
+    fn report_passed_over(adopted: CivilAdoption, settings: &DesktopSettings) {
+        if let (Decided::StoreDefault, Some(name)) = (adopted.zone, settings.time_zone.as_ref()) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the zone {} is not in the zone store; the clock reads its default",
+                    name.as_str()
+                ),
+            );
+        }
+        if let (Decided::StoreDefault, Some(code)) = (adopted.region, settings.region.as_ref()) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the region {} is not in the zone store; the clock is written as its default's",
+                    code.as_str()
+                ),
+            );
         }
     }
 
@@ -2337,8 +2370,8 @@ mod program {
         // The machine's memory bounds what one client may map here, what a
         // ray-traced scene may hold, and how much stacked frosted glass is
         // retained.
-        let memory_total =
-            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+        let memory_read = tairix_procinfo::memory_total_bytes(&IpcTransport).ok();
+        let memory_total = memory_read.unwrap_or(0);
         let memory_bytes = usize::try_from(memory_total).unwrap_or(usize::MAX);
         let chrome = chrome_cache(
             SEAT_PRIMARY,
@@ -2369,7 +2402,8 @@ mod program {
                 "compositor rejected the queried mode",
             );
         };
-        let online = online_cpus();
+        let cpus = tairix_procinfo::cpu_info(&IpcTransport).ok();
+        let online = online_cpus(cpus.as_deref());
         compositor.set_job_runner(composite_pool(online));
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(
@@ -2677,7 +2711,9 @@ mod program {
         // *before* the first listing, so the very first frame already has
         // the user's own sort order and icon arrangement rather than
         // re-sorting a frame later.
+        shell.set_zones(load_zones());
         let mut pinboard = load_pinboard(&mut desktop, &mut shell, &mut compositor, sandbox);
+        report_passed_over(shell.adopt_civil(desktop.settings()), desktop.settings());
         // The resolution the user chose is drawn from the first frame, where
         // this output offers it; nothing is on the screen yet to re-lay.
         let output = (mode.width_px, mode.height_px);
@@ -3175,11 +3211,6 @@ mod program {
         let mut idle = IdleClock::new(tairix_rt::clock_get());
         let mut idle_policy = IdlePolicy::default();
         let mut saver = Screensaver::new();
-        // The taskbar clock. It is read here so the bar carries the time from
-        // the first frame rather than blank until the minute turns, and its
-        // tick is folded into the park below — one wake a minute, the fewest a
-        // minute-granular clock can be right with.
-        let mut clock = SessionClock::new();
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
@@ -3192,16 +3223,28 @@ mod program {
         // The bar's trailing capsule wears this account's identity disc, the
         // same mark the login screen drew for it.
         shell.set_account(&mut compositor, shown_name);
-        // Who and where the clock screensaver names, read here because it
-        // cannot be read on the loop: the machine's name is a service call.
+        // What the machine is, read here because it cannot be read on the
+        // loop: the clock screensaver names the machine, and *About This
+        // System* states its version.
+        let machine = tairix_procinfo::system_identity(&IpcTransport).ok();
         let saver_identity = SaverIdentity {
             user: alloc::string::String::from(account),
-            host: tairix_procinfo::hostname(&IpcTransport).unwrap_or_else(|_| {
-                io::write_stderr_line(
-                    "desktop: the machine's name could not be read; the clock screensaver names only the account",
-                );
-                alloc::string::String::new()
-            }),
+            host: machine.as_ref().map_or_else(
+                || {
+                    io::write_stderr_line(
+                        "desktop: the machine's name could not be read; the clock screensaver names only the account",
+                    );
+                    alloc::string::String::new()
+                },
+                |machine| tairix_procinfo::field_lossy(machine.hostname_bytes()),
+            ),
+        };
+        let system = SystemFacts {
+            version: machine
+                .as_ref()
+                .map(tairix_abi::sysinfo::SystemIdentity::version),
+            processor: cpus.as_deref().and_then(tairix_procinfo::processor_summary),
+            memory_bytes: memory_read,
         };
         // A display with no power control of its own is said so once a
         // session, not at every idle, and one that will not light again once
@@ -3226,12 +3269,7 @@ mod program {
         shell.set_switch_user_available(&mut compositor, switch.is_available());
         // The clock's first reading, so the bar carries the time from the
         // frame the user first sees rather than from the next minute.
-        tick_clock(
-            &mut clock,
-            &mut shell,
-            &mut compositor,
-            tairix_rt::clock_get(),
-        );
+        tick_clock(&mut shell, &mut compositor, tairix_rt::clock_get());
 
         let mut token = 0u64;
         // Held for the life of the loop rather than taken per request: it is
@@ -3482,7 +3520,7 @@ mod program {
                 step = shell.pointer_aids_park_deadline_ns(now_ns, step);
                 step = fade.park_deadline_ns(now_ns, step);
                 step = park_within(step, compositor.next_elevation_frame_in(now_ns));
-                step = clock.park_deadline_ns(now_ns, step);
+                step = shell.clock().park_deadline_ns(now_ns, step);
                 step = lock.park_deadline_ns(now_ns, step);
                 step = elevate.park_deadline_ns(now_ns, step);
                 step = saver.park_deadline_ns(now_ns, step);
@@ -3602,7 +3640,6 @@ mod program {
                     &mut fade,
                     (&mut lock, &mut elevate),
                     &mut saver,
-                    &mut clock,
                     &mut shell,
                     &desktop,
                     (&mut compositor, &pacer),
@@ -3925,7 +3962,7 @@ mod program {
                     // arriving before the last one has landed does not undo it.
                     let attested = attest_pinboard(
                         self_origin.uid(),
-                        &publisher.base(desktop.settings()),
+                        (&publisher.base(desktop.settings()), shell.zones()),
                         ticket,
                         &request[..len],
                     );
@@ -4535,6 +4572,7 @@ mod program {
                         compositor: &mut compositor,
                         menu: &mut menu,
                         lock: &mut lock,
+                        clipboard: &mut clipboard,
                     },
                     &mut pointer,
                     &mut keyboard,
@@ -4586,6 +4624,7 @@ mod program {
                     compositor: &mut compositor,
                     menu: &mut menu,
                     lock: &mut lock,
+                    clipboard: &mut clipboard,
                 };
                 // The lock's surface only hides the session; this drain is
                 // what keeps the seat's input from reaching it. An answer
@@ -4616,6 +4655,7 @@ mod program {
                         compositor: &mut compositor,
                         menu: &mut menu,
                         lock: &mut lock,
+                        clipboard: &mut clipboard,
                     },
                     &mut pointer,
                     &mut keyboard,
@@ -4649,6 +4689,7 @@ mod program {
                         set,
                         sound: &mut sound,
                         sound_worker: &sound_worker,
+                        system: &system,
                     },
                     tairix_rt::clock_get(),
                 );
@@ -4813,7 +4854,6 @@ mod program {
                 &mut fade,
                 (&mut lock, &mut elevate),
                 &mut saver,
-                &mut clock,
                 &mut shell,
                 &desktop,
                 (&mut compositor, &pacer),
@@ -6643,16 +6683,15 @@ mod program {
         }
     }
 
-    /// How many CPUs are online, or one when the question cannot be asked.
+    /// How many CPUs `cpus` reports online, or one when the question could
+    /// not be asked.
     ///
     /// *Discovered* through the System Information API — the only interface
     /// live machine facts come from — never a constant, so the same binary uses
     /// a four-core Pi's cores and a server's without a rebuild. Asked once, at
     /// bring-up, for everything the session spreads across the machine.
-    fn online_cpus() -> usize {
-        tairix_procinfo::cpu_info(&IpcTransport)
-            .map_or(1, |cpus| cpus.len())
-            .max(1)
+    fn online_cpus(cpus: Option<&[tairix_abi::sysinfo::CpuInfoRecord]>) -> usize {
+        cpus.map_or(1, <[_]>::len).max(1)
     }
 
     /// The pool each composite's per-pixel work is spread across: one
@@ -7003,6 +7042,7 @@ mod program {
         set: u64,
         sound: &'a mut SoundSession,
         sound_worker: &'a SoundWorker,
+        system: &'a SystemFacts,
     }
 
     impl<S: DirectorySource, F: FnMut() -> S> SeatRouter for SessionRoute<'_, S, F> {
@@ -7091,6 +7131,7 @@ mod program {
                 self.switchboard_pid,
                 self.pending_open,
                 self.programs,
+                self.system,
             );
             reconcile_focus(
                 self.focused,
@@ -7769,12 +7810,12 @@ mod program {
     /// — each stated on `stderr` in the session's own wording.
     fn attest_pinboard(
         session_uid: u32,
-        in_effect: &DesktopSettings,
+        held: (&DesktopSettings, Option<&ZoneInfo<'_>>),
         ticket: u64,
         request: &[u8],
     ) -> Result<PinboardCall, Errno> {
         let origin = tairix_rt::peer_origin(PINBOARD_ENDPOINT, ticket)?;
-        serve_pinboard(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
+        serve_pinboard(&LOG_SINK, (session_uid, origin.uid()), held, request).map_err(|refusal| {
             let msg = refusal.reason();
             app::report(APP_NAME, format_args!("{msg}"));
             refusal.errno()
@@ -8002,6 +8043,7 @@ mod program {
         switchboard: &mut Option<u64>,
         pending_open: &mut Option<CommandSection>,
         programs: &mut Programs,
+        system: &SystemFacts,
     ) -> Routed {
         use tairix_desktop_session::ShellOutcome;
         match outcome {
@@ -8808,6 +8850,14 @@ mod program {
                 if !confirm.ask(action, tairix_rt::clock_get(), shell, compositor) {
                     io::write_stderr_line(
                         "desktop: could not ask for confirmation; nothing was done",
+                    );
+                }
+            }
+            ShellOutcome::Taskbar(TaskbarResponse::AboutSystem) => {
+                if !windows.alerts.about(system, shell, compositor) {
+                    app::report(
+                        APP_NAME,
+                        format_args!("no window to state what the system is in"),
                     );
                 }
             }
@@ -10103,6 +10153,12 @@ mod program {
         adopt_appearance(change.appearance, &wanted, shell, compositor);
         if change.notifications {
             shell.withdraw_unadmitted(compositor, &wanted.notifications);
+        }
+        if change.clock {
+            let reshaped = shell.adopt_civil(&wanted).reshaped;
+            if !tick_clock(shell, compositor, now_ns) && reshaped {
+                shell.present(compositor);
+            }
         }
         change.layer || papered
     }

@@ -18,6 +18,11 @@ workspace = true
 # channel, so the value this document stores and the byte on that wire are
 # one definition.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The shapes of a region code and a zone name (`is_region_code`,
+# `is_zone_name`), so a value this document accepts is one the zone store's
+# reader could look up, and the one resolution of the clock these settings
+# ask for.
+tairix-tz = { path = "../tz", version = "=0.0.0" }
 # Integer screen geometry (`Rect`), so the wallpaper placement geometry and
 # the compositor agree on one rectangle type rather than a second one, and
 # `Scale` — the one validator of a UI scale, so a percentage this document
@@ -61,3 +66,5 @@ tairix-appconf = { path = "../appconf", version = "=0.0.0" }
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
 # loop. Test scaffolding only; never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The fixture zone store the clock resolution is tested against.
+tairix-tz = { path = "../tz", version = "=0.0.0", features = ["test-support"] }

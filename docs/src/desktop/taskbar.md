@@ -89,14 +89,21 @@ From the leading end to the trailing end:
   `NOTIFICATIONS_MAX` in all and `SOURCE_NOTIFICATIONS_MAX` from one source,
   a raise past either refused — and the session holds them to the user's
   notification policy ([session](session.md#the-notification-intake)).
-- **Clock** — immediately before the account capsule. Its display text is
-  held by a `Clock` model whose label the caller sets (formatting a `Time64`
-  value into a string is an upstream concern, `AGENTS.md` §21); the bar stores
-  only the text to draw. The label is set in the body face, a step above a
-  caption, and follows the chosen text size. On a horizontal bar the region is
-  at least `clock_extent` and grows to the widest `HH:mm` reading at that size
-  (`clock_room`); a label a region cannot hold whole is not drawn, because a
-  time cut short reads as another time.
+- **Clock** — immediately before the account capsule. A `Clock` model holds
+  two lines the caller has already written, the time and the date
+  (`ClockLines`), and the heading its menu states; reading an instant in a
+  zone and a region's conventions is the session's (`lib/tz`'s `CivilClock`),
+  so the bar carries no time ABI. The time is set in the body face and the
+  date in the caption face, following the chosen text size. Where the region
+  is deep enough for both the date stands beneath the time, else beside it
+  (`ClockFaces::stacks`, the one rule the room and the drawing share). The
+  region keeps room for the widest each line can be in its conventions —
+  samples the caller states with `Clock::set_widest`, measured with every digit
+  as wide as the widest — so the clock holds still as minutes and days turn: on
+  a horizontal bar at least `clock_extent` and as wide as the lines need, on a
+  vertical one at least as tall as both lines. A line the region cannot hold
+  whole is not drawn, because a time or date cut short reads as another; the
+  time comes first, and the date is drawn only with it.
 - **Account capsule** — anchored to the very trailing end, immovable
   (`plans/NEW-TASKBAR.md` T9). The `SwitchboardTray` model derives the shared
   `tairix-controls` `TraySignal` capsule from the Switchboard service's
@@ -443,7 +450,7 @@ colour role from the `Palette`. Its last argument is the caller's
 
 On top of those plates, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
-Hebrew family): the clock label, centred in the clock region, is the only text
+Hebrew family): the clock's lines, centred in the clock region, are the only text
 on the bar — an application slot draws its icon alone, so nothing can spill into
 a neighbouring slot. Glyphs are composited through `tairix-raster`'s one
 premultiplied-alpha `over` path — no blitter or colour
@@ -1087,8 +1094,8 @@ two can never disagree (`AGENTS.md` §2.2):
 
 | Row | What the session does |
 |---|---|
-| About This System | opens the Switchboard's overview |
-| System Monitor | opens the Switchboard's task list |
+| About This System | opens the About window: the system's version, processors and memory |
+| System Monitor | opens the Switchboard's resource panes |
 | Task Shell | launches the terminal bundle |
 | Settings… | opens the Settings component |
 | Lock Screen | secures the screen behind this user's password |
@@ -1133,11 +1140,12 @@ both the rendered menu and the row → command mapping are derived:
 | the reading the bar is drawing | a statement, not a command: it cannot be chosen |
 | Set Date & Time… | asks the session for an account that may set the clock |
 
-The heading repeats the label the bar is *already* drawing rather than
-re-deriving a time of its own, so the menu and the bar beside it can never
-disagree. When no wall-clock time has been established this boot the bar draws
-`clock::UNSET_LABEL` (`--:--`) — the clock's menu is where a time is set, so
-it must stay visible and keep its width — and the heading
+The heading is the one the caller wrote with the lines the bar is *already*
+drawing — the date, the time and the zone's abbreviation, `18/10/2026 14:05
+BST` — rather than a time of the bar's own, so the menu and the bar beside it
+can never disagree. When no wall-clock time has been established this boot the
+bar draws `clock::UNSET_LABEL` (`--:--`) and no date — the clock's menu is where
+a time is set, so it must stay visible and keep its width — and the heading
 states *Time not set* rather than repeating dashes or a fabricated `00:00`.
 
 Setting a clock needs `CAP_TIME_SET`, which the bar does not hold and a

@@ -1,0 +1,42 @@
+[package]
+name = "tairix-tz"
+description = "TAIRiX civil time: the compiled zone store's wire layout and its total, allocation-free reader, the one zone-rule arithmetic the compiler shares, local time in both directions, the regions' numeric date and time formats, and the resolution of which zone and region a reader is in (plans/TIMEZONES.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The store writer, for the compiler that writes the store. Off for every
+# reader, so none links the allocation the writer needs.
+write = []
+# The loader of the planted store, for a program on TAIRiX.
+rt = ["dep:tairix-rt"]
+# A small store of real zones and regions for other crates' tests.
+test-support = ["write"]
+
+[dependencies]
+# `Time64`, `CivilTime` and the one civil-calendar arithmetic
+# (`days_from_civil`, `weekday_from_days`), which this crate applies an offset
+# to rather than re-deriving.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The store's integrity checksum.
+tairix-crc32c = { path = "../crc32c", version = "=0.0.0" }
+# What may not stand in a name a person reads (`utf8::is_hidden`): a region
+# or place that could hide or reorder its text is refused with the store.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# For the `rt` loader only: the bounded whole-file read under the caller's
+# own identity.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[dev-dependencies]
+# The writer, for the fuzz harness to build the stores it damages, and the
+# test kit's seal it reseals them with.
+tairix-tz = { path = ".", features = ["test-support"] }
+# The fuzz harness's per-run seed and budget.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

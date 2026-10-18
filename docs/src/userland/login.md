@@ -146,6 +146,7 @@ request.
 | --- | --- | --- |
 | `Accounts { offset }` | the login screen | one `AccountPage`: a shown name (`UserRecord::shown_name` — the human-readable one, else the login name), a login name, and a live-session flag per account, plus the whole list's `total` |
 | `Authenticate { username, password }` | the login screen | a verdict. It starts nothing |
+| `ZoneStore` | the login screen | a zone-store reply: the handle of a read-only delegation of `/System/Zoneinfo/zones.tzx` minted to the caller, or none |
 | `Background` | the presenting desktop session | a verdict: the session is now recorded as background |
 
 The list is **paged** because a machine may have more accounts than one
@@ -162,6 +163,14 @@ flag per record rather than two answers that could disagree.
 authority acts on its own loop, so a compromised login screen can never
 choose which program runs as the authenticated user.
 
+`ZoneStore` exists because the login screen holds no `CAP_FS_ACCESS` yet
+tells the time in the machine's zone. The authority opens the store, mints the
+caller a read-only delegation and closes its descriptor at once; it never reads
+the store, so no store parser joins the process that adjudicates passwords.
+Refused and absent are the same answer: none, which the screen reads as UTC;
+a store that could not be delegated is recorded with its error
+(`ZONE_STORE_WITHHELD`).
+
 ### The gate
 
 Every request is checked against the caller's **kernel-attested** identity
@@ -173,8 +182,8 @@ failing closed:
    is which *shape* of refusal an unauthorised caller gets back.
 2. **Placement** — the attested console must be login's own, exactly as for
    the elevation broker.
-3. **Identity** — `Accounts` and `Authenticate` require the attested uid to
-   be the `greeter` service account. `Background` requires the attested uid
+3. **Identity** — `Accounts`, `Authenticate` and `ZoneStore` require the
+   attested uid to be the `greeter` service account. `Background` requires the attested uid
    to own the entry the session table records as the foreground one: the
    greeter holds no session and is refused it, a background session cannot
    use it to take the screen back, and nothing else can take the screen
@@ -614,6 +623,10 @@ because external audit-log consumers key off them.
 | 10026 | `LAUNCH_ENDED_ABNORMALLY` | Warn | a program started for a `Launch` request exited non-zero; a reserved load-failure status is named in words, any other code stated as the number |
 | 10027 | `CAPTURE_GRANTED`       | Info  | a `Capture` request re-authenticated and its run's output was relayed; the record states how many bytes, never what they were |
 | 10028 | `CAPTURE_REFUSED`       | Warn  | a `Capture` request was refused (cause audited, never disclosed) |
+| 10029 | `ROUND_CHOSEN`          | Info  | a round chose its login: graphical, or text and why a graphical one was not offered |
+| 10030 | `TEXT_ROUND_SUPERSEDED` | Info  | an untouched text prompt gave way to the graphical login that became available |
+| 10031 | `TEXT_ROUND_UNWATCHED`  | Warn  | the text prompt could not watch for a graphical login; only the next round offers one |
+| 10032 | `ZONE_STORE_WITHHELD`   | Warn  | the login screen asked for the zone store and none was delegated; the record names the error |
 
 A refusal record names the account offered and the attested uid, never the
 offered secret, and never *which* credential fault it was: refusals stay

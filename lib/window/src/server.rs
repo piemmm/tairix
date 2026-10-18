@@ -975,6 +975,24 @@ pub trait WindowHost {
         let _ = (caller, document);
         Err(Errno::NotSupported)
     }
+
+    /// A read-only delegation of the shipped civil-time store to the process
+    /// `to`, at the request of `caller`, the application the kernel attests
+    /// is asking: the `fd_grant` handle minted to `to`.
+    ///
+    /// The host decides who may ask; the default refuses, because a host that
+    /// holds no store has none to hand on.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a caller the host does not answer,
+    /// [`Errno::NotFound`] when it holds no store, the kernel's refusal of
+    /// the delegation, and [`Errno::NotSupported`] from a host with no store
+    /// to hand on.
+    fn zone_store(&mut self, to: ProcId, caller: Option<&AppIdentity>) -> Result<u64, Errno> {
+        let _ = (to, caller);
+        Err(Errno::NotSupported)
+    }
 }
 
 /// What a `RenderPreview` names: the picture and the size it is rendered at,
@@ -1629,6 +1647,12 @@ impl<M: ShmMapper> WindowServer<M> {
                 });
                 return status(reply, shown);
             }
+            WindowRequest::TakeZoneStore => {
+                let granted = identity
+                    .caller_app(ticket)
+                    .and_then(|app| host.zone_store(caller, app.as_ref()));
+                return minted_id_reply(reply, granted);
+            }
             _ => {}
         }
         self.dispatch(host, sink, caller, &decoded, reply)
@@ -1976,10 +2000,11 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::OpenLayer { .. } => {
                 create_reply(reply, Err(Errno::NotSupported), self.server)
             }
-            // Likewise a menu open, which mints an open id.
-            WindowRequest::OpenMenu { .. } | WindowRequest::OpenAlert { .. } => {
-                minted_id_reply(reply, Err(Errno::NotSupported))
-            }
+            // Likewise a menu open, which mints an open id, and the zone store,
+            // which `serve` decides before dispatch is reached.
+            WindowRequest::OpenMenu { .. }
+            | WindowRequest::OpenAlert { .. }
+            | WindowRequest::TakeZoneStore => minted_id_reply(reply, Err(Errno::NotSupported)),
             // ...and a target pull, which answers with its own frame.
             WindowRequest::TakeOpenTarget => open_target_reply(reply, Err(Errno::NotSupported)),
             // ...and a catalog page, likewise.
@@ -3828,9 +3853,9 @@ fn refused(
         | WindowRequest::CreateTool { .. }
         | WindowRequest::CreateDialog { .. }
         | WindowRequest::OpenLayer { .. } => create_reply(reply, Err(err), server),
-        WindowRequest::OpenMenu { .. } | WindowRequest::OpenAlert { .. } => {
-            minted_id_reply(reply, Err(err))
-        }
+        WindowRequest::OpenMenu { .. }
+        | WindowRequest::OpenAlert { .. }
+        | WindowRequest::TakeZoneStore => minted_id_reply(reply, Err(err)),
         _ => status(reply, Err(err)),
     }
 }

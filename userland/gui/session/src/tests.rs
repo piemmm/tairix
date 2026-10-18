@@ -7841,6 +7841,110 @@ fn a_lock_is_asked_for_by_settings_alone_and_only_where_it_can_open() {
     assert!(!shell.take_lock_request(), "one request, one lock");
 }
 
+/// The fixture zone store, held as if read through descriptor 9.
+fn held_zones() -> crate::HeldZones {
+    let bytes: &'static [u8] =
+        alloc::boxed::Box::leak(tairix_tz::testkit::store().into_boxed_slice());
+    let info = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        tairix_tz::ZoneInfo::parse(bytes).expect("the fixture parses"),
+    ));
+    crate::HeldZones { info, fd: 9 }
+}
+
+/// A region's conventions hand the bar the widest lines they write, so its
+/// clock keeps room for them; conventions writing the same lines reshape
+/// nothing.
+#[test]
+fn adopting_a_region_hands_the_bar_its_widest_lines() {
+    let (mut shell, _comp) = headless_desktop();
+    shell.set_zones(Some(held_zones()));
+    let widest = |shell: &DesktopShell| shell.session().taskbar().clock().widest().to_vec();
+    let mut settings = DesktopSettings::default();
+    let adopted = shell.adopt_civil(&settings);
+    assert_eq!(
+        (adopted.zone, adopted.region, adopted.reshaped),
+        (
+            tairix_tz::Decided::StoreDefault,
+            tairix_tz::Decided::StoreDefault,
+            true
+        )
+    );
+    assert_eq!(widest(&shell)[1].time, "22:58");
+    assert_eq!(widest(&shell)[1].date, "28/12/2088");
+    assert!(!shell.adopt_civil(&settings).reshaped, "the same choice");
+    settings.region = tairix_wallpaper::RegionCode::new("IE");
+    assert!(!shell.adopt_civil(&settings).reshaped, "the same patterns");
+    settings.region = tairix_wallpaper::RegionCode::new("US");
+    assert!(shell.adopt_civil(&settings).reshaped);
+    assert_eq!(widest(&shell)[1].time, "10:58 PM");
+    assert_eq!(widest(&shell)[1].date, "12/28/2088");
+}
+
+/// A new region is read at once rather than at the next minute, and the bar
+/// is presented once for it.
+#[test]
+fn a_civil_change_is_told_at_once_and_presented_once() {
+    let (mut shell, mut comp) = headless_desktop();
+    shell.set_zones(Some(held_zones()));
+    let mut settings = DesktopSettings::default();
+    let _ = shell.adopt_civil(&settings);
+    // 2026-10-18 13:05 UTC.
+    let reading = tairix_abi::time::WallClockReading::new(
+        tairix_abi::time::Time64::from_secs(1_792_328_700),
+        tairix_abi::time::WallTimeState::Trusted,
+    );
+    let lines = |shell: &DesktopShell| shell.session().taskbar().clock().lines().clone();
+    assert!(shell.tell_time(&mut comp, Some(reading), 0));
+    assert_eq!(
+        (lines(&shell).time, lines(&shell).date),
+        (String::from("14:05"), String::from("18/10/2026"))
+    );
+    assert!(
+        !shell.tell_time(&mut comp, Some(reading), 1),
+        "nothing moved"
+    );
+
+    settings.region = tairix_wallpaper::RegionCode::new("US");
+    let _ = shell.adopt_civil(&settings);
+    assert!(shell.clock().is_due(2), "due at once");
+    let before = shell.settle_work();
+    assert!(shell.tell_time(&mut comp, Some(reading), 2));
+    assert_eq!(
+        (lines(&shell).time, lines(&shell).date),
+        (String::from("2:05 PM"), String::from("10/18/2026"))
+    );
+    assert_eq!(work_since(&shell, before).0, 1, "one present");
+}
+
+/// Only the desktop's own Settings application is delegated the zone store,
+/// and only where the session holds one.
+#[test]
+fn the_zone_store_is_delegated_to_settings_alone() {
+    let (mut shell, _comp) = headless_desktop();
+    let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+    let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
+    let settings = tairix_abi::AppIdentity::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher)
+        .expect("identity");
+    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    shell.set_own_app(Some(own));
+
+    assert_eq!(
+        shell.zone_store_descriptor(Some(&settings)),
+        Err(Errno::NotFound),
+        "no store held"
+    );
+    shell.set_zones(Some(held_zones()));
+    assert_eq!(shell.zone_store_descriptor(Some(&settings)), Ok(9));
+    assert_eq!(
+        shell.zone_store_descriptor(Some(&files)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        shell.zone_store_descriptor(None),
+        Err(Errno::PermissionDenied)
+    );
+}
+
 /// Counts the refusals of Settings-only requests it is handed.
 struct RefusalCount(core::sync::atomic::AtomicUsize);
 
@@ -7887,7 +7991,11 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
         shell.request_screensaver_preview(Some(&files), document, (&desktop, true)),
         Err(Errno::PermissionDenied)
     );
-    assert_eq!(refused(), 3);
+    assert_eq!(
+        shell.zone_store_descriptor(Some(&files)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(refused(), 4);
 }
 
 /// Only the desktop's own Settings application may preview a screensaver,
@@ -9243,6 +9351,7 @@ fn monitoring(comp: &mut Compositor) -> Screensaver {
             ground: None,
             catalog: &[],
             wall: None,
+            civil: tairix_tz::CivilClock::UTC,
             identity: &identity,
             theme: &theme,
             options: &options,
@@ -11061,6 +11170,7 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
             ground: None,
             catalog: &[],
             wall: None,
+            civil: tairix_tz::CivilClock::UTC,
             identity: &identity,
             theme: &theme,
             options: &options,
@@ -13675,7 +13785,7 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
 
 /// The model of a chain whose one row is chooseable *and* carries a
 /// quick-entry field, as the file manager's Rename row is.
-fn renaming_menu() -> ChainModel {
+pub(crate) fn renaming_menu() -> ChainModel {
     let mut wire = AppMenu::titled(AppMenuLabel::new("Files").expect("a valid title"));
     wire.push(AppMenuRow::Item(
         AppMenuItem::new(
@@ -13683,10 +13793,14 @@ fn renaming_menu() -> ChainModel {
             AppMenuLabel::new("Rename").expect("a valid label"),
             AppMenuSymbol::Open,
         )
-        .with_entry(AppMenuEntry {
-            id: AppMenuItemId::new(90).expect("a valid id"),
-            initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
-        }),
+        .with_entry(
+            AppMenuEntry::new(
+                AppMenuItemId::new(90).expect("a valid id"),
+                AppMenuEntryText::new("report.txt").expect("a valid name"),
+            )
+            .with_selection(0..6)
+            .expect("the stem lies on the name's boundaries"),
+        ),
     ))
     .expect("the rename row fits");
     wire.push(AppMenuRow::Item(AppMenuItem::new(
@@ -13748,7 +13862,8 @@ fn a_quick_entry_field_opens_on_arrival_owns_the_keyboard_and_answers_its_text()
         "and beside its parent plate, not over it"
     );
 
-    // Keys reach the field: a letter is text, not a traversal.
+    // Keys reach the field: a letter is text, not a traversal, and it
+    // replaces the stem the field opened with selected.
     assert_eq!(
         chain.handle(&key_press(Key::Char('2')), Point::ORIGIN, &geom, 0),
         ChainAction::Redraw
@@ -13768,11 +13883,107 @@ fn a_quick_entry_field_opens_on_arrival_owns_the_keyboard_and_answers_its_text()
     match &answers[0].1 {
         ChainOutcome::Entered(id, text) => {
             assert_eq!(id.get(), 90, "the field's own id, never the row's");
-            assert_eq!(text, "report.txt2", "the text as the user left it");
+            assert_eq!(text, "2.txt", "the text as the user left it");
         }
         other => panic!("a commit answers Entered, not {other:?}"),
     }
     assert!(chain.surfaces().is_empty(), "and the chain is gone");
+}
+
+/// The field hears the modifiers the seat reported with each key, so Shift
+/// extends a selection there as it does in any field.
+#[test]
+fn a_quick_entry_field_extends_a_selection_with_shift() {
+    let (shell, comp) = headless_desktop();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut chain = chain_with_entry_open(&geom);
+    let shifted = |key| InputEvent::KeyPressed {
+        key,
+        modifiers: tairix_wm::Modifiers {
+            shift: true,
+            ..tairix_wm::Modifiers::default()
+        },
+    };
+    let mut press = |event: InputEvent| chain.handle(&event, Point::ORIGIN, &geom, 0);
+    press(key_press(Key::Named(NamedKey::End)));
+    for _ in 0..3 {
+        press(shifted(Key::Named(NamedKey::Left)));
+    }
+    press(key_press(Key::Char('m')));
+    press(key_press(Key::Char('d')));
+    assert_eq!(
+        press(key_press(Key::Named(NamedKey::Enter))),
+        ChainAction::Closed
+    );
+    match &chain.take_answers()[..] {
+        [(_, ChainOutcome::Entered(_, text))] => {
+            assert_eq!(
+                text, "report.md",
+                "Shift+Left selected the ending it replaced"
+            );
+        }
+        other => panic!("one commit answers, not {other:?}"),
+    }
+}
+
+/// Cut, copy and paste reach the open field through the desktop clipboard,
+/// and a cut whose copy is refused keeps the text it would have taken.
+#[test]
+fn a_quick_entry_field_cuts_copies_and_pastes_through_the_clipboard() {
+    use crate::clipboard::{NoClipboard, SessionClipboard, TextClipboard};
+    use tairix_controls::ClipboardChord;
+
+    let (shell, comp) = headless_desktop();
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let mut chain = chain_with_entry_open(&geom);
+    assert_eq!(
+        chain.entry_chord(ClipboardChord::Cut, &mut NoClipboard, &geom),
+        Some(ChainAction::Consumed),
+        "a cut the clipboard refused takes nothing out"
+    );
+    let mut clipboard = SessionClipboard::new(());
+    assert_eq!(
+        chain.entry_chord(ClipboardChord::Copy, &mut clipboard, &geom),
+        Some(ChainAction::Consumed)
+    );
+    assert_eq!(clipboard.text(), Some("report"), "the selected stem");
+    assert_eq!(
+        chain.entry_chord(ClipboardChord::Cut, &mut clipboard, &geom),
+        Some(ChainAction::Redraw)
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            chain.entry_chord(ClipboardChord::Paste, &mut clipboard, &geom),
+            Some(ChainAction::Redraw)
+        );
+    }
+    chain.handle(
+        &key_press(Key::Named(NamedKey::Enter)),
+        Point::ORIGIN,
+        &geom,
+        0,
+    );
+    match &chain.take_answers()[..] {
+        [(_, ChainOutcome::Entered(_, text))] => assert_eq!(text, "reportreport.txt"),
+        other => panic!("one commit answers, not {other:?}"),
+    }
+    assert_eq!(
+        chain.entry_chord(ClipboardChord::Paste, &mut clipboard, &geom),
+        None,
+        "with no field open the chord is the chain's to route"
+    );
 }
 
 /// Escape closes the field before it dismisses the chain, so repeated Escape

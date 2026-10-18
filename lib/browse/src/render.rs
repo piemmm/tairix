@@ -41,11 +41,11 @@ use tairix_controls::state::{
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    fill_area, ground_fill, paint_icon_slot, stack, withheld, CellAlign, Chart, Checkbox,
-    ChromeLayer, CompositionBar, CompositionRing, CompositionSegment, Fact, FactList, FieldAction,
-    FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet, HeaderColumn,
-    IconButton, IconTile, ListRow, Panel, PressureKind, ScrollBar, SortOrder, Tab, TableCell,
-    TableHeader, TableRow, Tabs, TileLayout, Toolbar, FULL_COLOUR, FULL_PERMILLE,
+    fill_area, ground_fill, paint_icon_slot, stack, withheld, ArtworkTone, CellAlign, Chart,
+    Checkbox, ChromeLayer, CompositionBar, CompositionRing, CompositionSegment, Fact, FactList,
+    FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
+    HeaderColumn, IconButton, IconTile, ListRow, Panel, PressureKind, ScrollBar, SortOrder, Tab,
+    TableCell, TableHeader, TableRow, Tabs, TileLayout, TileParts, Toolbar, FULL_PERMILLE,
 };
 use tairix_font::{BitmapFont, Cut, ELLIPSIS};
 use tairix_geometry::{to_i32, GridFill, Point, Rect, Region, Scale};
@@ -321,7 +321,7 @@ pub fn render_into<S: DirectorySource>(
                 theme,
                 (browser, tiles),
                 content,
-                chrome.toolbar,
+                chrome,
                 artwork,
             ),
         }
@@ -403,6 +403,10 @@ pub struct ManagerChrome<'a> {
     pub sidebar: Option<&'a Places>,
     /// Whether the command toolbar strip is drawn across the top.
     pub toolbar: ToolbarBand,
+    /// The entry an in-place rename editor stands over, whose tile draws its
+    /// picture and no name, so nothing of the old name shows around the
+    /// editor.
+    pub renaming: Option<usize>,
 }
 
 impl ManagerChrome<'_> {
@@ -417,6 +421,7 @@ impl ManagerChrome<'_> {
             tool_model: ManagerToolModel::none(),
             sidebar: None,
             toolbar: ToolbarBand::Shown,
+            renaming: None,
         }
     }
 }
@@ -826,10 +831,10 @@ fn draw_grid<S: DirectorySource>(
     theme: &Theme,
     (browser, tiles): (&Browser<S>, Tiles),
     content: Rect,
-    toolbar: ToolbarBand,
+    chrome: &ManagerChrome<'_>,
     artwork: &mut dyn IconArtwork,
 ) {
-    let view = grid_view(browser, tiles, scale, theme, content, toolbar);
+    let view = grid_view(browser, tiles, scale, theme, content, chrome.toolbar);
     let offset = browser.scroll_offset();
     let parent = browser.components();
     let entries = browser.entries();
@@ -854,7 +859,10 @@ fn draw_grid<S: DirectorySource>(
             if browser.drop_mark() == Some(index) {
                 state.pointer = PointerState::DragTarget;
             }
-            let tile = tiles.tile(entry, state, kind);
+            let mut tile = tiles.tile(entry, state, kind);
+            if chrome.renaming == Some(index) {
+                tile = tile.with_name_withheld();
+            }
             let side = tiles.layout().icon_side(bounds, scale, theme);
             let art = match tiles {
                 Tiles::Large => artwork.shadowed(request, side, shadow),
@@ -1724,7 +1732,7 @@ pub fn entry_index_at<S: DirectorySource>(
 }
 
 /// The entry whose drawn item covers window `point`: a list's row, or a grid
-/// tile's body.
+/// tile's picture or name.
 fn entry_at<S: DirectorySource>(
     browser: &Browser<S>,
     view: &ViewLayout,
@@ -1739,13 +1747,13 @@ fn entry_at<S: DirectorySource>(
     };
     let at = view.view(offset).to_content(point)?;
     let entry = browser.entries().get(index)?;
-    entry_body(tiles, entry, grid.cell_rect(index)?, scale, theme)?
+    entry_parts(tiles, entry, grid.cell_rect(index)?, scale, theme)?
         .contains(at)
         .then_some(index)
 }
 
-/// The part of every `tiles` tile's body it holds whatever its name — its
-/// picture with the body's margin — relative to the tile's own top-left.
+/// The part every `tiles` tile holds whatever its name — its picture with its
+/// margin — relative to the tile's own top-left.
 #[must_use]
 pub(crate) fn tile_core(tiles: Tiles, scale: Scale, theme: &Theme) -> Rect {
     let metrics = tiles.metrics(scale, theme);
@@ -1756,20 +1764,20 @@ pub(crate) fn tile_core(tiles: Tiles, scale: Scale, theme: &Theme) -> Rect {
         .unwrap_or(Rect::EMPTY)
 }
 
-/// Where the `tiles` tile for `entry`, laid out in `cell`, truly lies: its
-/// picture and its name's drawn lines ([`TileLayout::body_rect`]). The rest of
-/// the cell is ground.
+/// What the `tiles` tile for `entry`, laid out in `cell`, is made of: its
+/// picture and its name's drawn lines ([`TileLayout::parts`]). The rest of the
+/// cell is ground.
 #[must_use]
-pub fn entry_body(
+pub fn entry_parts(
     tiles: Tiles,
     entry: &Entry,
     cell: Rect,
     scale: Scale,
     theme: &Theme,
-) -> Option<Rect> {
+) -> Option<TileParts> {
     tiles
         .layout()
-        .body_rect(cell, scale, theme, entry.name(), name_cut(entry.name()))
+        .parts(cell, scale, theme, entry.name(), name_cut(entry.name()))
 }
 
 /// The folder a drop at window-local `point` lands in, and the listed folder
@@ -1831,8 +1839,8 @@ pub fn entry_rect<S: DirectorySource>(
 }
 
 /// The window-local pixel rectangle of entry `index` a press lands on, as far
-/// as it shows: a list's row, or a grid tile's body. `None` when that is
-/// scrolled out of view.
+/// as it shows: a list's row, or a grid tile's picture (its name where it has
+/// no picture). `None` when that is scrolled out of view.
 ///
 /// What a pointer aimed at the entry from outside — a scripted gesture — must
 /// aim inside, where [`entry_rect`] is what the entry repaints.
@@ -1852,14 +1860,16 @@ pub fn entry_target<S: DirectorySource>(
         return Some(shown);
     };
     let scrolled = view.view(offset);
-    let body = entry_body(
+    let parts = entry_parts(
         tiles,
         browser.entries().get(index)?,
         grid.cell_rect(index)?,
         scale,
         theme,
     )?;
-    let target = scrolled.to_window(body)?.intersection(&shown);
+    let target = scrolled
+        .to_window(parts.picture.or(parts.name)?)?
+        .intersection(&shown);
     (!target.is_empty()).then_some(target)
 }
 
@@ -1890,16 +1900,15 @@ pub fn selection_name_rect<S: DirectorySource>(
     )
 }
 
-/// The window-local pixel rectangle of entry `index`'s **name** that shows, or
-/// `None` when it is scrolled out of view (or the view seats no name there).
+/// The window-local pixel rectangle the rename editor for entry `index` is
+/// drawn in, as far as it shows, or `None` when it is scrolled out of view (or
+/// the view seats no name there).
 ///
 /// Read from the drawn controls themselves — the list row's own name-cell text
 /// span, the grid tile's own label band — so an overlay cannot land where the
-/// name is not. The band is grown to a field's own height where it is shorter
-/// (a tile's label band is one line of glyphs, and a field wants its plate)
-/// and clamped back into the item's rectangle, so the editor never spills onto
-/// a neighbour. An item the viewport's edge cuts answers the part of its name
-/// that shows.
+/// name is not: one field line, the name's width and the field's own height,
+/// centred on the name's first line. It may stand a little past a short cell,
+/// as the field it is drawn for does, and is cut only by the viewport.
 #[must_use]
 pub fn entry_name_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1995,12 +2004,23 @@ fn name_field<S: DirectorySource>(
 ) -> Option<(Rect, ScrollView)> {
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let item = view.layout_rect(index)?;
-    let name = match Tiles::of(browser.view_mode()) {
-        None => list_name_rect(browser, browser.entries().get(index)?, item, scale, theme)?,
-        Some(tiles) => tiles.layout().label_rect(item, scale, theme)?,
+    let (name, line) = match Tiles::of(browser.view_mode()) {
+        None => {
+            let cell = list_name_rect(browser, browser.entries().get(index)?, item, scale, theme)?;
+            (cell, cell.height)
+        }
+        Some(tiles) => {
+            let layout = tiles.layout();
+            let band = layout.label_rect(item, scale, theme)?;
+            let lines = u32::try_from(layout.label_lines(item, scale, theme))
+                .ok()
+                .filter(|&lines| lines > 0)?;
+            (band, band.height / lines)
+        }
     };
-    let height = name.height.max(TextField::height(scale, theme));
-    let field = Rect::new(name.left(), name.top(), name.width, height).intersection(&item);
+    let height = TextField::height(scale, theme);
+    let top = i64::from(name.top()) + (i64::from(line) - i64::from(height)) / 2;
+    let field = Rect::new(name.left(), i32::try_from(top).ok()?, name.width, height);
     (!field.is_empty()).then(|| (field, view.view(browser.scroll_offset())))
 }
 
@@ -2347,7 +2367,7 @@ fn draw_identity(
         identity.art.icon_kind(),
         palette.on_surface.into(),
         picture,
-        FULL_COLOUR,
+        ArtworkTone::FULL,
     );
 
     let title = BitmapFont::for_role(theme.fonts(), TextRole::ItemTitle, scale);

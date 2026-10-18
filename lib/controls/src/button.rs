@@ -21,8 +21,8 @@ use tairix_theme::{TextRole, Theme};
 use crate::paint::{
     key_activation, paint_bead, paint_chevron, paint_icon_slot, paint_plate, paint_run,
     plate_border, pointer_activation, resolve_bead, resolve_frame, resolve_rail, role_font,
-    run_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir,
-    PlateStyle, FULL_COLOUR,
+    run_width, surface_rect, text_plate_height, to_i32, withheld, ArtworkTone, BeadShape,
+    ChevronDir, PlateStyle,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
@@ -706,14 +706,16 @@ impl IconButton {
             if side > 0 {
                 let ix = x + (w.saturating_sub(side)) / 2;
                 let iy = y + (h.saturating_sub(side)) / 2;
-                paint_icon_slot(
-                    surface,
-                    (ix, iy, side),
-                    self.icon,
-                    res.label,
-                    artwork,
-                    FULL_COLOUR,
-                );
+                let tone = if self.state.disposition() == ControlDisposition::DisabledByState {
+                    let palette = theme.palette();
+                    let ground = res
+                        .face
+                        .map_or_else(|| Color::from(palette.surface), |(plate, _)| plate);
+                    ArtworkTone::disabled(palette, ground)
+                } else {
+                    ArtworkTone::FULL
+                };
+                paint_icon_slot(surface, (ix, iy, side), self.icon, res.label, artwork, tone);
             }
         }
     }

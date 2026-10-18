@@ -994,8 +994,9 @@ to be free under a Size title), its filesystem and its health in the words its
 Info window uses. In the **large icons** display each entry is a shared
 `lib/controls` `IconTile` — its file-type icon over that same label, with no plate of its own, so a folder reads as a field
 of icons rather than a grid of boxes and only a hovered, selected, or focused
-entry paints anything behind its icon — wrapped into as many columns as fit the
-width. A tile's name is whole, over two lines when it needs them, and a name
+entry paints anything, behind its name, a selected entry's icon washed with the
+selection tint — wrapped into as many columns as fit the width. A press lands on
+an entry's icon or its name, never the ground between them. A tile's name is whole, over two lines when it needs them, and a name
 too long for those is cut in its middle (`render::name_cut`) so its extension
 always shows; every picture casts a small soft shadow, and a thumbnail is
 outlined one pixel around its own bounds. **Small icons** sets a row-sized
@@ -1079,7 +1080,9 @@ moves the listing through that bar a fixed distance a detent, carrying what is
 short of a pixel to the next turn and reporting the bar and the items it slid; a
 selection-moving key reveals the selection the least it can
 (`reveal_selection`) — the browser owns the one `ScrollColumn` both consume. The in-place rename editor is drawn at the name's
-laid-out place (`draw_rename_field`), so it scrolls with its item.
+laid-out place (`draw_rename_field`), so it scrolls with its item: one field
+line centred on the name's first line, with the tile drawing no name of its own
+while the field is open, so nothing of the old name shows around the editor.
 `render::visible_range` is the one definition of which entry indices are on
 screen, dispatching on the view mode over the same geometry both painters use,
 so the folder-occupancy probe the app resolves before a frame asks about

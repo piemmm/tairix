@@ -1,5 +1,5 @@
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
-use tairix_controls::Button;
+use tairix_controls::{Button, Keystroke};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::{Theme, ThemeRegistry};
@@ -71,7 +71,11 @@ impl Bar {
     fn key_with(&mut self, key: Key, modifiers: Modifiers) -> BarOutcome {
         let theme = self.registry.active();
         self.controls.on_key(
-            (key, modifiers),
+            Keystroke {
+                key,
+                modifiers,
+                at_ns: 0,
+            },
             &self.placement,
             &mut self.options,
             (Scale::ONE, theme),

@@ -1,0 +1,263 @@
+# Each ISO 3166-1 region's English name, numeric date and time of day.
+#
+# Derived from Unicode CLDR 44, as ICU 74.2 ships it: for each code in tzdb
+# 2026e's iso3166.tab, the region's likely locale (CLDR's likely subtags of
+# und-<code>), that locale's best patterns for the skeletons yMd and jm in the
+# Gregorian calendar with Latin digits, and the region's English display name.
+# A pattern keeps its numeric fields and the ASCII punctuation and spaces
+# between them: bidirectional marks are removed, and quoted text, letters and
+# every literal after them are dropped.
+#
+# CLDR data is licensed under the Unicode License V3, in LICENSE beside this
+# file.
+#
+# code	name	date	time
+AD	Andorra	d/M/y	H:mm
+AE	United Arab Emirates	d/M/y	h:mm a
+AF	Afghanistan	M/d/y	HH:mm
+AG	Antigua & Barbuda	dd/MM/y	h:mm a
+AI	Anguilla	dd/MM/y	HH:mm
+AL	Albania	d.M.y	h:mm a
+AM	Armenia	dd.MM.y	H:mm
+AO	Angola	dd/MM/y	HH:mm
+AQ	Antarctica	M/d/y	HH:mm
+AR	Argentina	d/M/y	h:mm a
+AS	American Samoa	dd/MM/y	h:mm a
+AT	Austria	d.M.y	HH:mm
+AU	Australia	dd/MM/y	h:mm a
+AW	Aruba	d-M-y	HH:mm
+AX	Åland Islands	y-MM-dd	HH:mm
+AZ	Azerbaijan	dd.MM.y	HH:mm
+BA	Bosnia & Herzegovina	d.M.y.	HH:mm
+BB	Barbados	dd/MM/y	h:mm a
+BD	Bangladesh	d/M/y	h:mm a
+BE	Belgium	d/M/y	HH:mm
+BF	Burkina Faso	dd/MM/y	HH:mm
+BG	Bulgaria	d.MM.y	HH:mm
+BH	Bahrain	d/M/y	h:mm a
+BI	Burundi	d/M/y	HH:mm
+BJ	Benin	dd/MM/y	HH:mm
+BL	St. Barthélemy	dd/MM/y	HH:mm
+BM	Bermuda	dd/MM/y	h:mm a
+BN	Brunei	d/M/y	h:mm a
+BO	Bolivia	d/M/y	h:mm a
+BQ	Caribbean Netherlands	dd/MM/y	HH:mm
+BR	Brazil	dd/MM/y	HH:mm
+BS	Bahamas	dd/MM/y	h:mm a
+BT	Bhutan	y-M-d	h:mm a
+BV	Bouvet Island	M/d/y	HH:mm
+BW	Botswana	dd/MM/y	HH:mm
+BY	Belarus	d.M.y	HH:mm
+BZ	Belize	dd/MM/y	HH:mm
+CA	Canada	y-MM-dd	h:mm a
+CC	Cocos (Keeling) Islands	y-MM-dd	HH:mm
+CD	Congo - Kinshasa	d/M/y	HH:mm
+CF	Central African Republic	dd/MM/y	HH:mm
+CG	Congo - Brazzaville	dd/MM/y	HH:mm
+CH	Switzerland	d.M.y	HH:mm
+CI	Côte d’Ivoire	dd/MM/y	HH:mm
+CK	Cook Islands	dd/MM/y	HH:mm
+CL	Chile	dd-MM-y	h:mm a
+CM	Cameroon	dd/MM/y	HH:mm
+CN	China	y/M/d	HH:mm
+CO	Colombia	d/M/y	h:mm a
+CR	Costa Rica	d/M/y	h:mm a
+CU	Cuba	d/M/y	h:mm a
+CV	Cape Verde	dd/MM/y	HH:mm
+CW	Curaçao	dd/MM/y	HH:mm
+CX	Christmas Island	dd/MM/y	HH:mm
+CY	Cyprus	d/M/y	h:mm a
+CZ	Czechia	d. M. y	H:mm
+DE	Germany	d.M.y	HH:mm
+DJ	Djibouti	dd/MM/y	h:mm a
+DK	Denmark	d.M.y	HH.mm
+DM	Dominica	dd/MM/y	h:mm a
+DO	Dominican Republic	d/M/y	h:mm a
+DZ	Algeria	d/M/y	h:mm a
+EC	Ecuador	d/M/y	h:mm a
+EE	Estonia	d.M.y	HH:mm
+EG	Egypt	d/M/y	h:mm a
+EH	Western Sahara	d/M/y	h:mm a
+ER	Eritrea	d/M/y	h:mm a
+ES	Spain	d/M/y	H:mm
+ET	Ethiopia	d/M/y	h:mm a
+FI	Finland	d.M.y	H.mm
+FJ	Fiji	dd/MM/y	h:mm a
+FK	Falkland Islands	dd/MM/y	HH:mm
+FM	Micronesia	dd/MM/y	h:mm a
+FO	Faroe Islands	dd.MM.y	HH:mm
+FR	France	dd/MM/y	HH:mm
+GA	Gabon	dd/MM/y	HH:mm
+GB	United Kingdom	dd/MM/y	HH:mm
+GD	Grenada	dd/MM/y	h:mm a
+GE	Georgia	d.M.y	HH:mm
+GF	French Guiana	dd/MM/y	HH:mm
+GG	Guernsey	dd/MM/y	HH:mm
+GH	Ghana	y/M/d	h:mm a
+GI	Gibraltar	dd/MM/y	HH:mm
+GL	Greenland	y-MM-dd	HH:mm
+GM	Gambia	dd/MM/y	h:mm a
+GN	Guinea	dd/MM/y	HH:mm
+GP	Guadeloupe	dd/MM/y	HH:mm
+GQ	Equatorial Guinea	d/M/y	H:mm
+GR	Greece	d/M/y	h:mm a
+GS	South Georgia & South Sandwich Islands	M/d/y	HH:mm
+GT	Guatemala	d/M/y	h:mm a
+GU	Guam	M/d/y	h:mm a
+GW	Guinea-Bissau	dd/MM/y	HH:mm
+GY	Guyana	dd/MM/y	h:mm a
+HK	Hong Kong SAR China	d/M/y	ah:mm
+HM	Heard & McDonald Islands	M/d/y	HH:mm
+HN	Honduras	d/M/y	h:mm a
+HR	Croatia	dd. MM. y.	HH:mm
+HT	Haiti	dd/MM/y	HH:mm
+HU	Hungary	y. MM. dd.	H:mm
+ID	Indonesia	d/M/y	HH.mm
+IE	Ireland	d/M/y	HH:mm
+IL	Israel	d.M.y	H:mm
+IM	Isle of Man	dd/MM/y	HH:mm
+IN	India	d/M/y	h:mm a
+IO	British Indian Ocean Territory	dd/MM/y	HH:mm
+IQ	Iraq	d/M/y	h:mm a
+IR	Iran	y/M/d	H:mm
+IS	Iceland	d.M.y	HH:mm
+IT	Italy	dd/MM/y	HH:mm
+JE	Jersey	dd/MM/y	HH:mm
+JM	Jamaica	dd/MM/y	h:mm a
+JO	Jordan	d/M/y	h:mm a
+JP	Japan	y/M/d	H:mm
+KE	Kenya	d/M/y	HH:mm
+KG	Kyrgyzstan	y-dd-MM	HH:mm
+KH	Cambodia	d/M/y	h:mm a
+KI	Kiribati	dd/MM/y	h:mm a
+KM	Comoros	d/M/y	HH:mm
+KN	St. Kitts & Nevis	dd/MM/y	h:mm a
+KP	North Korea	y. M. d.	a h:mm
+KR	South Korea	y. M. d.	a h:mm
+KW	Kuwait	d/M/y	h:mm a
+KY	Cayman Islands	dd/MM/y	h:mm a
+KZ	Kazakhstan	dd.MM.y	HH:mm
+LA	Laos	d/M/y	HH:mm
+LB	Lebanon	d/M/y	h:mm a
+LC	St. Lucia	dd/MM/y	h:mm a
+LI	Liechtenstein	d.M.y	HH:mm
+LK	Sri Lanka	y-M-d	HH.mm
+LR	Liberia	dd/MM/y	h:mm a
+LS	Lesotho	dd/MM/y	h:mm a
+LT	Lithuania	y-MM-dd	HH:mm
+LU	Luxembourg	dd/MM/y	HH:mm
+LV	Latvia	d.MM.y.	HH:mm
+LY	Libya	d/M/y	h:mm a
+MA	Morocco	d/M/y	HH:mm
+MC	Monaco	dd/MM/y	HH:mm
+MD	Moldova	dd.MM.y	HH:mm
+ME	Montenegro	d. M. y.	HH:mm
+MF	St. Martin	dd/MM/y	HH:mm
+MG	Madagascar	y-MM-dd	HH:mm
+MH	Marshall Islands	M/d/y	h:mm a
+MK	North Macedonia	d.M.y	HH:mm
+ML	Mali	d/M/y	HH:mm
+MM	Myanmar (Burma)	d/M/y	HH:mm
+MN	Mongolia	y.MM.dd	HH:mm
+MO	Macao SAR China	d/M/y	ah:mm
+MP	Northern Mariana Islands	M/d/y	h:mm a
+MQ	Martinique	dd/MM/y	HH:mm
+MR	Mauritania	d/M/y	h:mm a
+MS	Montserrat	dd/MM/y	HH:mm
+MT	Malta	M/d/y	HH:mm
+MU	Mauritius	y-MM-dd	HH:mm
+MV	Maldives	dd/MM/y	HH:mm
+MW	Malawi	dd/MM/y	h:mm a
+MX	Mexico	d/M/y	h:mm a
+MY	Malaysia	d/M/y	h:mm a
+MZ	Mozambique	dd/MM/y	HH:mm
+NA	Namibia	y-MM-dd	h:mm a
+NC	New Caledonia	dd/MM/y	HH:mm
+NE	Niger	y-MM-dd	HH:mm
+NF	Norfolk Island	dd/MM/y	HH:mm
+NG	Nigeria	dd/MM/y	HH:mm
+NI	Nicaragua	d/M/y	h:mm a
+NL	Netherlands	d-M-y	HH:mm
+NO	Norway	d.M.y	HH:mm
+NP	Nepal	y-MM-dd	HH:mm
+NR	Nauru	dd/MM/y	HH:mm
+NU	Niue	dd/MM/y	HH:mm
+NZ	New Zealand	d/MM/y	h:mm a
+OM	Oman	d/M/y	h:mm a
+PA	Panama	MM/dd/y	h:mm a
+PE	Peru	d/M/y	h:mm a
+PF	French Polynesia	dd/MM/y	HH:mm
+PG	Papua New Guinea	dd/MM/y	h:mm a
+PH	Philippines	M/d/y	h:mm a
+PK	Pakistan	d/M/y	h:mm a
+PL	Poland	d.MM.y	HH:mm
+PM	St. Pierre & Miquelon	dd/MM/y	HH:mm
+PN	Pitcairn Islands	dd/MM/y	HH:mm
+PR	Puerto Rico	MM/dd/y	h:mm a
+PS	Palestinian Territories	d/M/y	h:mm a
+PT	Portugal	dd/MM/y	HH:mm
+PW	Palau	dd/MM/y	h:mm a
+PY	Paraguay	dd/MM/y	h:mm a
+QA	Qatar	d/M/y	h:mm a
+RE	Réunion	dd/MM/y	HH:mm
+RO	Romania	dd.MM.y	HH:mm
+RS	Serbia	d. M. y.	HH:mm
+RU	Russia	dd.MM.y	HH:mm
+RW	Rwanda	y-MM-dd	HH:mm
+SA	Saudi Arabia	d/M/y	h:mm a
+SB	Solomon Islands	dd/MM/y	h:mm a
+SC	Seychelles	dd/MM/y	HH:mm
+SD	Sudan	d/M/y	h:mm a
+SE	Sweden	y-MM-dd	HH:mm
+SG	Singapore	dd/MM/y	h:mm a
+SH	St. Helena	dd/MM/y	HH:mm
+SI	Slovenia	d. M. y	HH:mm
+SJ	Svalbard & Jan Mayen	d.M.y	HH:mm
+SK	Slovakia	d. M. y	H:mm
+SL	Sierra Leone	dd/MM/y	h:mm a
+SM	San Marino	dd/MM/y	HH:mm
+SN	Senegal	dd/MM/y	HH:mm
+SO	Somalia	M/d/y	h:mm a
+SR	Suriname	d-M-y	HH:mm
+SS	South Sudan	d/M/y	h:mm a
+ST	São Tomé & Príncipe	dd/MM/y	HH:mm
+SV	El Salvador	d/M/y	h:mm a
+SX	Sint Maarten	dd/MM/y	HH:mm
+SY	Syria	d/M/y	h:mm a
+SZ	Eswatini	dd/MM/y	h:mm a
+TC	Turks & Caicos Islands	dd/MM/y	h:mm a
+TD	Chad	dd/MM/y	h:mm a
+TF	French Southern Territories	dd/MM/y	HH:mm
+TG	Togo	dd/MM/y	HH:mm
+TH	Thailand	d/M/y	HH:mm
+TJ	Tajikistan	d/M/y	HH:mm
+TK	Tokelau	dd/MM/y	HH:mm
+TL	Timor-Leste	dd/MM/y	HH:mm
+TM	Turkmenistan	dd.MM.y	HH:mm
+TN	Tunisia	d/M/y	h:mm a
+TO	Tonga	d/M/y	h:mm a
+TR	Türkiye	dd.MM.y	HH:mm
+TT	Trinidad & Tobago	dd/MM/y	h:mm a
+TV	Tuvalu	dd/MM/y	HH:mm
+TW	Taiwan	y/M/d	ah:mm
+TZ	Tanzania	d/M/y	HH:mm
+UA	Ukraine	dd.MM.y	HH:mm
+UG	Uganda	d/M/y	HH:mm
+UM	U.S. Outlying Islands	M/d/y	h:mm a
+US	United States	M/d/y	h:mm a
+UY	Uruguay	d/M/y	h:mm a
+UZ	Uzbekistan	dd/MM/y	HH:mm
+VA	Vatican City	dd/MM/y	HH:mm
+VC	St. Vincent & Grenadines	dd/MM/y	h:mm a
+VE	Venezuela	d/M/y	h:mm a
+VG	British Virgin Islands	dd/MM/y	h:mm a
+VI	U.S. Virgin Islands	M/d/y	h:mm a
+VN	Vietnam	d/M/y	H:mm
+VU	Vanuatu	dd/MM/y	h:mm a
+WF	Wallis & Futuna	dd/MM/y	HH:mm
+WS	Samoa	dd/MM/y	h:mm a
+YE	Yemen	d/M/y	h:mm a
+YT	Mayotte	dd/MM/y	HH:mm
+ZA	South Africa	y/MM/dd	HH:mm
+ZM	Zambia	d/M/y	h:mm a
+ZW	Zimbabwe	y-MM-dd	HH:mm

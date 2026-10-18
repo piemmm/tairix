@@ -182,7 +182,7 @@ pub use execute::{
     paste_strategy, CopyAction, CopyChunk, CopyCursor, CopyError, CopyKind, CopyWalk,
     CopyWalkError, PasteStrategy, VolumeId, COPY_CHUNK_LEN, MAX_COPY_DEPTH,
 };
-pub use format::{format_date, format_datetime, format_minute, format_size};
+pub use format::{format_datetime, format_minute, format_size};
 pub use layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
 pub use marquee::Marquee;
 pub use media::{

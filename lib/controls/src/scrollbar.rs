@@ -27,8 +27,8 @@ use tairix_theme::{edge_weight, Theme};
 
 use crate::damage;
 use crate::paint::{
-    authority_rgba, draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32,
-    withheld, ChevronDir, ChromeLayer,
+    authority_rgba, draw_outline, ground_fill, heavy_contrast, paint_chevron, plate_border,
+    surface_rect, to_i32, withheld, ChevronDir, ChromeLayer,
 };
 use crate::scroll::{
     wheel_steps, HoldRepeat, ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit,
@@ -685,16 +685,17 @@ impl ScrollBar {
 
     /// Paint the bar into `surface` at `bounds` for the active theme.
     ///
-    /// The Scroll Channel is recessed into the surface, and the two end
-    /// buttons and the thumb are raised in it alike: each end button a plate
-    /// carrying its chevron across the whole button, the thumb a rounded bar.
-    /// An end button whose step would move nothing — the content already at
-    /// that end — draws no plate and a dimmed chevron, so it reads as having
-    /// nothing that way. The hovered button's chevron and the awake thumb
-    /// brighten, a held button's plate lights, and a focused bar draws a
+    /// The Scroll Channel is recessed into the surface, edged along both long
+    /// sides in the theme's frame colour, and the two end buttons and the
+    /// thumb are raised in it alike: each end button a plate carrying its
+    /// chevron across the whole button, the thumb a rounded bar. An end button
+    /// whose step would move nothing — the content already at that end — draws
+    /// no plate and a dimmed chevron, so it reads as having nothing that way.
+    /// A hovered or held end button and an awake thumb take the neutral
+    /// `scroll_thumb_active` grey, never the accent, and a focused bar draws a
     /// reactive outline distinct from a hover. Content changes are never
     /// animated — the thumb follows the offset immediately — so the bar is
-    /// already reduced-motion correct (spec §11.28).
+    /// already reduced-motion correct.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {
             return;
@@ -711,6 +712,19 @@ impl ScrollBar {
         // a frosted popup is not an opaque strip.
         let channel = ground_fill(theme, palette.scroll_track, ChromeLayer::Inlay);
         surface.fill_rect(bx, by, bw, bh, Color::from(channel));
+        let edge = Color::from(palette.frame);
+        match self.orientation {
+            ScrollOrientation::Vertical => {
+                let line = plate_border(theme, scale).min(bw / 2);
+                surface.fill_rect(bx, by, line, bh, edge);
+                surface.fill_rect(bx + bw - line, by, line, bh, edge);
+            }
+            ScrollOrientation::Horizontal => {
+                let line = plate_border(theme, scale).min(bh / 2);
+                surface.fill_rect(bx, by, bw, line, edge);
+                surface.fill_rect(bx, by + bh - line, bw, line, edge);
+            }
+        }
 
         let (dec_dir, inc_dir) = match self.orientation {
             ScrollOrientation::Vertical => (ChevronDir::Up, ChevronDir::Down),
@@ -728,7 +742,7 @@ impl ScrollBar {
         } else if denied {
             Color::from(authority_rgba(palette, self.state.authority))
         } else if draggable && self.is_active() {
-            Color::from(palette.rim_active)
+            Color::from(palette.scroll_thumb_active)
         } else {
             Color::from(palette.scroll_thumb)
         };
@@ -766,7 +780,7 @@ impl ScrollBar {
         };
         let palette = theme.palette();
         let live = self.state.is_actionable() && self.moves(part);
-        let held = live && self.held == Some(part);
+        let awake = live && (self.held == Some(part) || self.hover == part);
         if live {
             let inset = layout.inset();
             let plate = Rect::new(
@@ -775,8 +789,8 @@ impl ScrollBar {
                 rect.width.saturating_sub(inset.saturating_mul(2)),
                 rect.height.saturating_sub(inset.saturating_mul(2)),
             );
-            let face = Color::from(if held {
-                palette.rim_active
+            let face = Color::from(if awake {
+                palette.scroll_thumb_active
             } else {
                 palette.scroll_thumb
             });
@@ -784,12 +798,10 @@ impl ScrollBar {
                 paint_raised(surface, plate, layout.breadth / 4, face, theme);
             }
         }
-        let glyph = if !live {
-            palette.on_surface_muted
-        } else if !held && self.hover == part {
-            palette.rim_active
-        } else {
+        let glyph = if live {
             palette.on_surface
+        } else {
+            palette.on_surface_muted
         };
         paint_chevron(surface, rect, dir, Color::from(glyph));
     }

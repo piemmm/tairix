@@ -237,7 +237,7 @@ impl MenuBuilder {
         ) else {
             return;
         };
-        let item = item.with_entry(AppMenuEntry { id: entry, initial });
+        let item = item.with_entry(AppMenuEntry::new(entry, initial));
         let _ = self.push(&AppMenuRow::Item(item), plate);
     }
 

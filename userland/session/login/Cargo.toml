@@ -60,6 +60,9 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # resolves to rather than spelling a second time. The same engine the
 # `configure` command writes with, so producer and consumer never diverge.
 tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
+# Where the civil-time store is planted: the authority opens it to delegate
+# to the login screen and never reads it, so it links none of the reader.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0" }
 
 # The pure-Rust userland runtime: `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and

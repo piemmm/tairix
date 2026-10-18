@@ -56,6 +56,9 @@ pub const DISPLAY_WAKE_REFUSED: EventId = EventId(19_010);
 /// on the screen's own thread, which pauses for the answer.
 pub const AUTHORITY_ON_LOOP: EventId = EventId(19_011);
 
+/// The zone store could not be read, so the clock reads UTC.
+pub const ZONES_UNAVAILABLE: EventId = EventId(19_012);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +75,7 @@ mod tests {
         DISPLAY_KEPT_BLACK,
         DISPLAY_WAKE_REFUSED,
         AUTHORITY_ON_LOOP,
+        ZONES_UNAVAILABLE,
     ];
 
     #[test]

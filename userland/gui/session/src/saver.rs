@@ -36,6 +36,7 @@ use tairix_abi::DriverError;
 use tairix_display::{DisplaySleep, SwitchedOff};
 use tairix_raytrace::Detail;
 use tairix_theme::Theme;
+use tairix_tz::CivilClock;
 use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions};
 use tairix_window::WallpaperName;
 use tairix_wm::{Color, Compositor, Surface, WindowId};
@@ -72,6 +73,8 @@ pub struct SaverSetup<'a> {
     /// The wall clock as the screensaver starts, which a kind that
     /// [tells the time](tells_time) tells.
     pub wall: Option<WallClockReading>,
+    /// The zone and conventions it is told in: the icon bar clock's.
+    pub civil: CivilClock<'static>,
     /// Who is signed in, and where, as the clock names them.
     pub identity: &'a SaverIdentity,
     /// The look in force: the clock's type, and whether motion is reduced.
@@ -251,7 +254,7 @@ impl Screensaver {
                     setup.identity,
                     setup.theme,
                     (scale, size),
-                    (setup.wall, now_ns),
+                    (setup.wall, setup.civil, now_ns),
                     options.clock,
                 );
                 face.paint(&mut frame);
@@ -260,7 +263,7 @@ impl Screensaver {
             ScreensaverKind::Ribbon => Ribbon::new(
                 setup.theme,
                 (scale, size),
-                (setup.wall, now_ns),
+                (setup.wall, setup.civil, now_ns),
                 (calm, options.ribbon),
             )
             .map_or(Scene::Still, |mut face| {
@@ -294,7 +297,7 @@ impl Screensaver {
                 setup.identity,
                 setup.theme,
                 size,
-                (setup.wall, now_ns),
+                (setup.wall, setup.civil, now_ns),
                 options.system_monitor,
             )
             .map_or(Scene::Still, |board| {

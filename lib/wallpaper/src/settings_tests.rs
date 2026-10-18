@@ -147,6 +147,8 @@ fn every_key_moved() -> DesktopSettings {
         display_off_after: DisplayOffAfter::Minutes(0),
         screensaver_options: retuned_scenes(),
         lock_after: IdleAfter::Minutes(15),
+        region: RegionCode::new("FI"),
+        time_zone: ZoneName::new("Europe/Helsinki"),
         sound,
     }
 }
@@ -205,6 +207,8 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.retro_games.speed = slow\n\
          screensaver.system_monitor.tasks = false\n\
          lock.after_min = 15\n\
+         region = FI\n\
+         time.zone = Europe/Helsinki\n\
          audio.output = 0000000000000051.0\n\
          audio.input = \"\"\n\
          audio.levels = 0000000000000051.0:-6.5dB\n\
@@ -936,7 +940,7 @@ fn a_refused_merge_changes_nothing_at_all() {
 fn the_key_groups_partition_the_registry() {
     // Every key belongs to exactly one group, so a surface that renders
     // its group can never leave a key with no owner or post one twice.
-    let groups: [&[SettingsKey]; 10] = [
+    let groups: [&[SettingsKey]; 11] = [
         &SettingsKey::PINBOARD,
         &SettingsKey::APPEARANCE,
         &SettingsKey::DISPLAY,
@@ -946,6 +950,7 @@ fn the_key_groups_partition_the_registry() {
         &SettingsKey::KEYBOARD,
         &SettingsKey::SCREENSAVER,
         &SettingsKey::LOCK,
+        &SettingsKey::CIVIL,
         &SettingsKey::SOUND,
     ];
     for key in SettingsKey::ALL {

@@ -3,16 +3,22 @@
 //!
 //! `top`, `sysmon`, `sysinfo`, the `info:`/`stats:` resolver and the desktop's
 //! monitor all render the same figures — byte counts, tenths-of-a-percent
-//! shares, uptimes, load averages, ISA feature sets — in the same
-//! GNU-familiar spellings, so the formatting lives here once. Each surface
-//! keeps its own layout; this module owns only the reading → text conversions
-//! they would otherwise copy.
+//! shares, uptimes, load averages, ISA feature sets, processor parts — in the
+//! same GNU-familiar spellings, so the formatting lives here once. Each
+//! surface keeps its own layout; this module owns only the reading → text
+//! conversions they would otherwise copy.
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
-use tairix_abi::sysinfo::LoadAverage;
+use tairix_abi::sysinfo::{CpuInfoRecord, LoadAverage};
+
+/// What a surface states for a reading the System Information API did not
+/// answer, rather than a figure it would have to invent.
+pub const UNMEASURED: &str = "not measured";
 
 /// The lowercase, space-separated ISA-extension flag list of a raw
 /// [`CpuFeatureSet`] bitset, in stable bit order; `(none)` when the set is
@@ -37,6 +43,34 @@ pub fn cpu_feature_flags(bits: u64) -> String {
         out.push_str("(none)");
     }
     out
+}
+
+/// The processor parts `cpus` reports, each with how many cores carry it, in
+/// the order they first appear — `4 × Cortex-A72`, or
+/// `4 × Cortex-A76 · 4 × Cortex-A55` for a machine of two parts, so a
+/// heterogeneous machine names both rather than whichever core came first.
+/// `None` when no core names its part.
+#[must_use]
+pub fn processor_summary(cpus: &[CpuInfoRecord]) -> Option<String> {
+    let mut parts: Vec<(&[u8], u32)> = Vec::new();
+    for model in cpus.iter().map(CpuInfoRecord::model_bytes) {
+        if model.is_empty() {
+            continue;
+        }
+        match parts.iter_mut().find(|(seen, _)| *seen == model) {
+            Some((_, count)) => *count = count.saturating_add(1),
+            None => parts.push((model, 1)),
+        }
+    }
+    let mut summary = String::new();
+    for (model, count) in parts {
+        if !summary.is_empty() {
+            summary.push_str(" \u{b7} ");
+        }
+        // Writing into a `String` never fails.
+        let _ = write!(summary, "{count} \u{d7} {}", String::from_utf8_lossy(model));
+    }
+    (!summary.is_empty()).then_some(summary)
 }
 
 /// Render a tenths-of-a-percent figure as `W.T`, saturating at `999.9` so
@@ -160,10 +194,40 @@ pub fn format_load(fixed: u32) -> String {
 mod tests {
     use super::{
         cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
-        format_uptime, SIZE_WIDTH,
+        format_uptime, processor_summary, SIZE_WIDTH,
     };
     use alloc::vec::Vec;
     use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
+    use tairix_abi::sysinfo::{CpuCoreClass, CpuInfoRecord};
+
+    /// A processor summary names every part present with its core count, in
+    /// the order each first appears, skips cores that name none, and is
+    /// absent where none does.
+    #[test]
+    fn a_processor_summary_names_every_part_with_its_count() {
+        let core = |cpu, model: &[u8]| {
+            CpuInfoRecord::new(cpu, CpuCoreClass::Performance, 0, 0, 0, 0, 0, model)
+                .expect("model fits")
+        };
+        assert_eq!(
+            processor_summary(&[core(0, b"ARM Cortex-A72"), core(1, b"")]).as_deref(),
+            Some("1 \u{d7} ARM Cortex-A72")
+        );
+        let mixed = [
+            core(0, b"Cortex-A76"),
+            core(1, b"Cortex-A55"),
+            core(2, b"Cortex-A76"),
+            core(3, b""),
+            core(4, b"Cortex-A55"),
+            core(5, b"Cortex-A55"),
+        ];
+        assert_eq!(
+            processor_summary(&mixed).as_deref(),
+            Some("2 \u{d7} Cortex-A76 \u{b7} 3 \u{d7} Cortex-A55")
+        );
+        assert_eq!(processor_summary(&[core(0, b"")]), None);
+        assert_eq!(processor_summary(&[]), None);
+    }
 
     #[test]
     fn counts_render_exact_then_compact_units() {

@@ -11,7 +11,7 @@ use tairix_colour::legibility::contrast_hundredths;
 use tairix_colour::Rgba;
 
 use crate::motion::{ease_out, smoothstep, MotionInteraction};
-use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
+use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA, SELECTION_TINT_ALPHA};
 use crate::{
     edge_weight, lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind,
     CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Metrics,
@@ -55,6 +55,8 @@ fn dark_and_light_palettes_differ_on_every_role() {
     assert_ne!(d.danger, l.danger);
     assert_ne!(d.scroll_track, l.scroll_track);
     assert_ne!(d.scroll_thumb, l.scroll_thumb);
+    assert_ne!(d.scroll_thumb_active, l.scroll_thumb_active);
+    assert_ne!(d.selection_tint, l.selection_tint);
     assert_ne!(d.frame, l.frame);
     for role in [
         SignalRole::Cpu,
@@ -801,7 +803,7 @@ fn the_light_window_ground_is_a_neutral_grey_with_a_deeper_title_band() {
 }
 
 /// Every light-theme neutral, so a role retuned with a cast cannot slip in.
-const LIGHT_NEUTRALS: [&str; 12] = [
+const LIGHT_NEUTRALS: [&str; 13] = [
     "desktop",
     "surface",
     "surface_raised",
@@ -814,6 +816,7 @@ const LIGHT_NEUTRALS: [&str; 12] = [
     "border",
     "scroll_track",
     "scroll_thumb",
+    "scroll_thumb_active",
 ];
 
 #[test]
@@ -835,6 +838,7 @@ fn the_light_neutrals_are_neutral_and_descend_in_one_ladder() {
         p.border,
         p.scroll_track,
         p.scroll_thumb,
+        p.scroll_thumb_active,
     ]) {
         assert_eq!(role.r, role.g, "light {name} carries a colour cast");
         assert_eq!(role.g, role.b, "light {name} carries a colour cast");
@@ -847,6 +851,40 @@ fn the_light_neutrals_are_neutral_and_descend_in_one_ladder() {
     assert!(luma(p.surface_raised) > luma(p.surface));
     assert!(luma(p.surface) > luma(p.title_band));
     assert!(luma(p.title_band) > luma(p.desktop));
+}
+
+#[test]
+fn an_active_scrollbar_part_is_a_neutral_step_from_the_thumb_never_the_accent() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert_ne!(p.scroll_thumb_active, p.rim_active, "{}", theme.name());
+        assert_ne!(p.scroll_thumb_active, p.accent, "{}", theme.name());
+        assert!(
+            luma(p.scroll_thumb_active).abs_diff(luma(p.scroll_thumb)) >= 32,
+            "{}: an active part is a clearly defined step from the thumb",
+            theme.name()
+        );
+        assert!(
+            luma(p.scroll_thumb_active).abs_diff(luma(p.scroll_track))
+                > luma(p.scroll_thumb).abs_diff(luma(p.scroll_track)),
+            "{}: and stands further from the channel than the resting thumb",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn a_selected_pictures_tint_is_the_accent_heavier_than_the_fill() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert_eq!(p.selection_tint, p.accent.with_alpha(SELECTION_TINT_ALPHA));
+        assert!(p.selection_tint.a > p.selection_fill.a, "{}", theme.name());
+        assert!(
+            p.selection_tint.a < u8::MAX,
+            "{}: a wash, never a cover",
+            theme.name()
+        );
+    }
 }
 
 #[test]
@@ -1549,6 +1587,7 @@ fn sample_palette() -> Palette {
         accent: Rgba::rgb(80, 140, 255),
         on_accent: Rgba::rgb(0, 0, 0),
         selection_fill: Rgba::new(80, 140, 255, 128),
+        selection_tint: Rgba::new(80, 140, 255, 160),
         border: Rgba::rgb(60, 60, 60),
         surface_hover: Rgba::rgb(30, 30, 30),
         surface_pressed: Rgba::rgb(5, 5, 5),
@@ -1575,6 +1614,7 @@ fn sample_palette() -> Palette {
         net_send: Rgba::rgb(123, 108, 232),
         scroll_track: Rgba::rgb(35, 40, 48),
         scroll_thumb: Rgba::rgb(74, 81, 92),
+        scroll_thumb_active: Rgba::rgb(110, 116, 124),
         frame: Rgba::rgb(60, 60, 60),
         bevel_light: Rgba::new(255, 255, 255, 40),
         bevel_shade: Rgba::new(0, 0, 0, 80),

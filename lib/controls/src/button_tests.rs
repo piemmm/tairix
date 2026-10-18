@@ -601,6 +601,32 @@ fn icon_button_blits_supplied_artwork_and_falls_back_to_the_glyph_without_it() {
     assert!(has_pixel(&glyph, premul(theme.palette().on_accent)));
 }
 
+#[test]
+fn an_icon_button_that_cannot_act_greys_and_fades_its_artwork() {
+    let theme = Theme::dark();
+    let mut button = IconButton::new(IconKind::Library, ControlRole::Neutral);
+    button.set_state(ControlState::disabled());
+    let bounds = Rect::new(0, 0, H, H);
+    let side = button.icon_side(bounds, Scale::ONE, &theme);
+    let mut drawn = Surface::new(H, H).expect("surface");
+    button.render(
+        &mut drawn,
+        bounds,
+        Scale::ONE,
+        &theme,
+        Some(IconPicture::coloured(&artwork(side, ART))),
+    );
+    assert!(
+        !has_pixel(&drawn, ART.premultiply()),
+        "never in full colour"
+    );
+    let middle = drawn.get(H / 2, H / 2).expect("the slot's middle");
+    assert!(
+        middle.r.abs_diff(middle.g) <= 2 && middle.g.abs_diff(middle.b) <= 2,
+        "grey, as its muted glyph would be: {middle:?}"
+    );
+}
+
 // --- SplitButton --------------------------------------------------------
 
 #[test]

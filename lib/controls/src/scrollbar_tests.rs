@@ -676,14 +676,71 @@ fn render_draws_the_channel_and_an_idle_thumb() {
     assert!(has_pixel(&surface, premul(theme.palette().scroll_thumb)));
 }
 
+/// An awake bar's thumb, and an end button hovered or held, take the neutral
+/// active grey: the accent is the selection's, and a bar in use is handled,
+/// not selected.
 #[test]
-fn an_awake_bar_brightens_the_thumb() {
+fn an_awake_bar_takes_the_active_grey_never_the_accent() {
     let theme = theme();
+    let palette = theme.palette();
     let mut bar = vbar();
-    // Hovering the bar makes it awake; the thumb takes the reactive rim.
+    bar.set_model(bar.model().scroll_to(300));
     bar.on_pointer(&moved(2, 200), vbounds(), Scale::ONE, &theme, &mut sink());
     let surface = render(&bar, vbounds(), &theme);
-    assert!(has_pixel(&surface, premul(theme.palette().rim_active)));
+    assert!(has_pixel(&surface, premul(palette.scroll_thumb_active)));
+    assert!(!has_pixel(&surface, premul(palette.rim_active)));
+    assert!(!has_pixel(&surface, premul(palette.accent)));
+
+    let button = bar
+        .part_rect(ScrollPart::Decrement, vbounds(), Scale::ONE, &theme)
+        .expect("a decrement button");
+    let centre = button.center();
+    bar.on_pointer(
+        &moved(centre.x, centre.y),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    let hovered = render(&bar, vbounds(), &theme);
+    let on_button = |surface: &Surface, colour| {
+        (0..button.height)
+            .any(|y| (0..button.width).any(|x| surface.get(x, y) == Some(premul(colour))))
+    };
+    assert!(
+        on_button(&hovered, palette.scroll_thumb_active),
+        "a hovered end button lights grey"
+    );
+    assert!(
+        on_button(&hovered, palette.on_surface),
+        "its chevron stays the plain foreground"
+    );
+    assert!(!has_pixel(&hovered, premul(palette.rim_active)));
+}
+
+/// The channel's long sides carry a one-pixel edge in the frame colour, so the
+/// bar's extent reads against any ground; its ends do not.
+#[test]
+fn the_channel_is_edged_along_both_long_sides() {
+    let theme = theme();
+    let frame = premul(theme.palette().frame);
+    let surface = render(&vbar(), vbounds(), &theme);
+    let (w, h) = (surface.width(), surface.height());
+    for y in 0..h {
+        assert_eq!(surface.get(0, y), Some(frame), "left edge at row {y}");
+        assert_eq!(surface.get(w - 1, y), Some(frame), "right edge at row {y}");
+    }
+    let middle = w / 2;
+    assert_ne!(
+        surface.get(middle, h / 2),
+        Some(frame),
+        "the channel is not filled with it"
+    );
+    assert_ne!(
+        surface.get(1, h / 2),
+        Some(frame),
+        "the edge is one pixel wide"
+    );
 }
 
 #[test]

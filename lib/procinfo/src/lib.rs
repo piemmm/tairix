@@ -165,7 +165,7 @@ pub use cputime::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
 pub use dma::{for_each_dma_group, for_each_dma_node, for_each_dma_unit, DMA_PAGE};
 pub use human::{
     cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
-    format_uptime, SIZE_WIDTH,
+    format_uptime, processor_summary, SIZE_WIDTH, UNMEASURED,
 };
 pub use hwtree::{bus_order, class_label, depth_of, fetch_tree, keep_with_ancestors, HW_TREE_PAGE};
 pub use kstats::{
@@ -201,7 +201,7 @@ pub use resinfo::{
     ResourceResponse, ResponsePayload, Sensitivity, Unit, ValueKind, MAX_INFO_VALUE_LEN,
     MAX_METRIC_NAME_LEN, MAX_QUERY_LEN, RESINFO_VERSION_CURRENT, RESINFO_VERSION_V1,
 };
-pub use resolve::{cpu_info, hostname, resolve, ResolveInfoError, CPU_INFO_PAGE};
+pub use resolve::{cpu_info, hostname, resolve, system_identity, ResolveInfoError, CPU_INFO_PAGE};
 pub use transport::{Output, Transport};
 pub use users::{
     for_each_group, for_each_user, group_names, self_account, user_name, user_names,

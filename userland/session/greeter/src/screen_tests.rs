@@ -161,7 +161,10 @@ fn screen_in(accounts: Vec<AccountTile>, authority: Authority, theme: Theme) -> 
         Scanout::new(mode()).expect("a valid mode"),
         theme,
         Scale::ONE,
-        "TAIRiX 0.0.0 (tairix)".to_string(),
+        (
+            "TAIRiX 0.0.0 (tairix)".to_string(),
+            tairix_tz::CivilClock::UTC,
+        ),
         accounts,
         Inline::new(authority),
     )
@@ -939,9 +942,15 @@ fn an_idle_screen_arms_only_its_sleep_and_a_clocked_one_wakes_at_the_minute() {
     );
     assert_eq!(login.park_timeout(0, None), ENERGY_SAVING_AFTER_NS);
 
-    // Twenty seconds past a minute boundary, so forty seconds to the next.
+    // Twenty seconds past a minute boundary, so forty seconds to the next;
+    // a reading a quarter of a second further on waits that much less, and
+    // one on the boundary a whole minute, never nothing.
     let twenty_past = Time64::from_secs(1_700_000_060);
     assert_eq!(login.park_timeout(0, Some(twenty_past)), 40_000_000_000);
+    let later = Time64::new(1_700_000_060, 250_000_000).expect("a canonical instant");
+    assert_eq!(login.park_timeout(0, Some(later)), 39_750_000_000);
+    let on_the_minute = Time64::from_secs(1_700_000_040);
+    assert_eq!(login.park_timeout(0, Some(on_the_minute)), 60_000_000_000);
 }
 
 #[test]

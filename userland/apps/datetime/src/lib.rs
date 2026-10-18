@@ -394,9 +394,8 @@ impl Editor {
             return Err(Fault::NoSuchDay);
         }
 
-        let days = days_from_civil(year, month, day);
-        let secs = days
-            .checked_mul(SECS_PER_DAY)
+        let secs = days_from_civil(year, month, day)
+            .and_then(|days| days.checked_mul(SECS_PER_DAY))
             .and_then(|d| d.checked_add(i64::from(hour) * SECS_PER_HOUR))
             .and_then(|s| s.checked_add(i64::from(minute) * SECS_PER_MIN))
             .and_then(|s| s.checked_add(i64::from(second)))

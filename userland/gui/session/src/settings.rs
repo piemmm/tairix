@@ -47,9 +47,11 @@ use tairix_abi::Errno;
 use tairix_appconf::Registry;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
 use tairix_geometry::Scale;
+use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_touch::TouchSettings;
+use tairix_tz::ZoneInfo;
 use tairix_wallpaper::{
-    merge_applied, DesktopSettings, DocumentRefusal, PointerSpeed, PrimaryButton,
+    merge_applied, DesktopSettings, DocumentRefusal, PointerSpeed, PrimaryButton, SettingsKey,
 };
 
 use crate::keyboard::KeyRepeat;
@@ -68,6 +70,13 @@ pub struct LoadedPinboard {
     pub warnings: Vec<String>,
 }
 
+/// Event id of a pinboard request the kernel attests as another user's than
+/// the session's.
+pub const PINBOARD_UNATTESTED: EventId = EventId(20_026);
+
+/// The exact message [`PINBOARD_UNATTESTED`] is emitted with.
+pub const PINBOARD_UNATTESTED_MESSAGE: &str = "pinboard request from another user refused";
+
 /// Why a request arriving on the pinboard channel was refused.
 ///
 /// Carries both the wire [`Errno`] the caller receives and the `stderr`
@@ -82,6 +91,9 @@ pub enum PinboardRefusal {
     Malformed(Errno),
     /// The carried document is not a settings document this registry accepts.
     Undecodable(DocumentRefusal),
+    /// The document changes the region or the zone to one the zone store
+    /// does not hold.
+    NotInStore(SettingsKey),
 }
 
 impl PinboardRefusal {
@@ -91,7 +103,7 @@ impl PinboardRefusal {
         match self {
             Self::Unattested => Errno::PermissionDenied,
             Self::Malformed(err) => *err,
-            Self::Undecodable(_) => Errno::OutOfRange,
+            Self::Undecodable(_) | Self::NotInStore(_) => Errno::OutOfRange,
         }
     }
 
@@ -100,10 +112,13 @@ impl PinboardRefusal {
     #[must_use]
     pub fn reason(&self) -> String {
         match self {
-            Self::Unattested => String::from("pinboard request from another user refused"),
+            Self::Unattested => String::from(PINBOARD_UNATTESTED_MESSAGE),
             Self::Malformed(err) => format!("malformed pinboard request refused ({err:?})"),
             Self::Undecodable(refusal) => {
                 format!("pinboard apply carries an unusable settings document: {refusal}")
+            }
+            Self::NotInStore(key) => {
+                format!("pinboard apply sets {key} to one the zone store does not hold")
             }
         }
     }
@@ -221,7 +236,8 @@ pub fn publish_pinboard(
 /// read off the endpoint by the embedder — never anything the caller said
 /// about itself. Only a caller running as this session's own user may
 /// rewrite this session's desktop or its user's sounds: a request from any
-/// other uid is [`PinboardRefusal::Unattested`] and reads nothing. A frame
+/// other uid is [`PinboardRefusal::Unattested`], reads nothing, and is
+/// recorded on `audit` ([`PINBOARD_UNATTESTED`]). A frame
 /// that will not decode, or a document the registry's strict reading refuses,
 /// is likewise a typed refusal.
 ///
@@ -237,23 +253,49 @@ pub fn publish_pinboard(
 /// wallpaper the document names under its own identity, so this channel
 /// grants a caller no reach it did not already have.
 ///
+/// A region or zone the apply *changes* must be one `zones` holds, so a
+/// choice is refused while the person making it is looking at it. One already
+/// in effect is left alone: a stored choice outlives the store that shipped
+/// it, and the clock passes over it to the store's default.
+///
 /// # Errors
 ///
 /// The [`PinboardRefusal`] naming why the request was refused. Nothing is
 /// half-applied: `in_effect` is what the desktop keeps on a refusal.
 pub fn serve_pinboard(
-    session_uid: u32,
-    caller_uid: u32,
-    in_effect: &DesktopSettings,
+    audit: &dyn Sink,
+    (session_uid, caller_uid): (u32, u32),
+    (in_effect, zones): (&DesktopSettings, Option<&ZoneInfo<'_>>),
     request: &[u8],
 ) -> Result<PinboardCall, PinboardRefusal> {
     if caller_uid != session_uid {
+        tairix_log::log(
+            audit,
+            &Event {
+                level: Level::Warn,
+                id: PINBOARD_UNATTESTED,
+                message: PINBOARD_UNATTESTED_MESSAGE,
+                fields: &[
+                    Field {
+                        key: "caller_uid",
+                        value: FieldValue::UnsignedInt(u64::from(caller_uid)),
+                    },
+                    Field {
+                        key: "session_uid",
+                        value: FieldValue::UnsignedInt(u64::from(session_uid)),
+                    },
+                ],
+            },
+        );
         return Err(PinboardRefusal::Unattested);
     }
     let sound = match PinboardRequest::from_bytes(request).map_err(PinboardRefusal::Malformed)? {
         PinboardRequest::Apply { document } => {
             let settings = merge_applied(in_effect, document.as_str())
                 .map_err(PinboardRefusal::Undecodable)?;
+            if let Some(key) = unheld_civil(zones, in_effect, &settings) {
+                return Err(PinboardRefusal::NotInStore(key));
+            }
             return Ok(PinboardCall::Apply(PinboardApplied { settings, document }));
         }
         PinboardRequest::SoundRead => SoundCall::Read,
@@ -263,6 +305,30 @@ pub fn serve_pinboard(
         PinboardRequest::SoundUseTheme { event } => SoundCall::UseTheme(event),
     };
     Ok(PinboardCall::Sound(sound))
+}
+
+/// The civil key `settings` changes from `in_effect` to a value `zones` does
+/// not hold, if any.
+fn unheld_civil(
+    zones: Option<&ZoneInfo<'_>>,
+    in_effect: &DesktopSettings,
+    settings: &DesktopSettings,
+) -> Option<SettingsKey> {
+    let region_held = settings
+        .region
+        .as_ref()
+        .is_none_or(|code| zones.is_some_and(|zones| zones.region(code.as_str()).is_some()));
+    let zone_held = settings
+        .time_zone
+        .as_ref()
+        .is_none_or(|name| zones.is_some_and(|zones| zones.zone(name.as_str()).is_some()));
+    if settings.region != in_effect.region && !region_held {
+        Some(SettingsKey::Region)
+    } else if settings.time_zone != in_effect.time_zone && !zone_held {
+        Some(SettingsKey::TimeZone)
+    } else {
+        None
+    }
 }
 
 /// What an attested pinboard call asks for.
@@ -385,9 +451,11 @@ mod tests {
         WallpaperFit,
     };
 
+    use tairix_log::DiscardSink;
+
     use super::{
         load_pinboard, publish_pinboard, serve_pinboard, AskedSettings, PinboardCall,
-        PinboardRefusal, SoundCall,
+        PinboardRefusal, SoundCall, PINBOARD_UNATTESTED,
     };
 
     /// A change made while an earlier one is still being written is made over
@@ -472,7 +540,7 @@ mod tests {
         in_effect: &DesktopSettings,
         request: &[u8],
     ) -> Result<DesktopSettings, PinboardRefusal> {
-        match serve_pinboard(session, caller, in_effect, request)? {
+        match serve_pinboard(&DiscardSink, (session, caller), (in_effect, None), request)? {
             PinboardCall::Apply(applied) => Ok(applied.settings),
             PinboardCall::Sound(call) => panic!("not an apply: {call:?}"),
         }
@@ -699,6 +767,62 @@ mod tests {
         assert_eq!(merged.density, in_effect.density);
     }
 
+    #[test]
+    fn a_region_or_zone_the_store_does_not_hold_is_refused_where_it_is_set() {
+        let bytes = tairix_tz::testkit::store();
+        let zones = tairix_tz::ZoneInfo::parse(&bytes).expect("the fixture parses");
+        let apply = |text: &str| {
+            frame(&PinboardRequest::Apply {
+                document: PinboardDocument::new(text).expect("a bounded document"),
+            })
+        };
+        let served = |in_effect: &DesktopSettings, text: &str, zones| match serve_pinboard(
+            &DiscardSink,
+            (SESSION_UID, SESSION_UID),
+            (in_effect, zones),
+            &apply(text),
+        ) {
+            Ok(PinboardCall::Apply(applied)) => Ok(applied.settings),
+            Ok(PinboardCall::Sound(call)) => panic!("not an apply: {call:?}"),
+            Err(refusal) => Err(refusal),
+        };
+        let fresh = DesktopSettings::default();
+        let chosen = served(
+            &fresh,
+            "region = US\ntime.zone = America/New_York\n",
+            Some(&zones),
+        )
+        .expect("both are held");
+        assert_eq!(
+            chosen
+                .time_zone
+                .as_ref()
+                .map(tairix_wallpaper::ZoneName::as_str),
+            Some("America/New_York")
+        );
+        assert_eq!(
+            served(&fresh, "time.zone = Mars/Olympus\n", Some(&zones)),
+            Err(PinboardRefusal::NotInStore(SettingsKey::TimeZone))
+        );
+        assert_eq!(
+            served(&fresh, "region = ZZ\n", Some(&zones)),
+            Err(PinboardRefusal::NotInStore(SettingsKey::Region))
+        );
+        assert_eq!(
+            served(&fresh, "region = GB\n", None),
+            Err(PinboardRefusal::NotInStore(SettingsKey::Region)),
+            "with no store, nothing is held"
+        );
+        assert!(
+            served(&fresh, "region = \n", None).is_ok(),
+            "the store's default is always held"
+        );
+        // A stored choice the store has since lost is not the caller's to
+        // answer for: an apply that leaves it alone still lands.
+        let stale = tairix_wallpaper::merge(&fresh, "time.zone = Mars/Olympus\n").expect("a shape");
+        assert!(served(&stale, "sort = size\n", Some(&zones)).is_ok());
+    }
+
     /// What the user set on the sound devices is the session's own reading of
     /// the audio service, never an application's to plant.
     #[test]
@@ -714,6 +838,41 @@ mod tests {
                 tairix_wallpaper::SettingsKey::AudioMuted
             )))
         );
+    }
+
+    /// Counts the unattested requests it is handed.
+    struct Unattested(core::sync::atomic::AtomicUsize);
+
+    impl tairix_log::Sink for Unattested {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
+            if event.id == PINBOARD_UNATTESTED {
+                self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Another user reaching for this session's desktop is a decision the
+    /// audit trail keeps; the session's own requests and their refusals for
+    /// other reasons are not.
+    #[test]
+    fn a_request_from_another_user_is_recorded() {
+        let audit = Unattested(core::sync::atomic::AtomicUsize::new(0));
+        let in_effect = DesktopSettings::default();
+        let served = |caller, request: &[u8]| {
+            serve_pinboard(&audit, (SESSION_UID, caller), (&in_effect, None), request)
+        };
+        let count = || audit.0.load(core::sync::atomic::Ordering::Relaxed);
+        assert!(served(SESSION_UID, &apply_frame(&edited())).is_ok());
+        assert!(matches!(
+            served(SESSION_UID, b"garbage"),
+            Err(PinboardRefusal::Malformed(_))
+        ));
+        assert_eq!(count(), 0);
+        assert_eq!(
+            served(SESSION_UID + 1, &apply_frame(&edited())),
+            Err(PinboardRefusal::Unattested)
+        );
+        assert_eq!(count(), 1);
     }
 
     #[test]
@@ -764,11 +923,21 @@ mod tests {
         ] {
             let frame = frame(&request);
             assert_eq!(
-                serve_pinboard(SESSION_UID, SESSION_UID, &in_effect, &frame),
+                serve_pinboard(
+                    &DiscardSink,
+                    (SESSION_UID, SESSION_UID),
+                    (&in_effect, None),
+                    &frame
+                ),
                 Ok(PinboardCall::Sound(call))
             );
             assert_eq!(
-                serve_pinboard(SESSION_UID, SESSION_UID + 1, &in_effect, &frame),
+                serve_pinboard(
+                    &DiscardSink,
+                    (SESSION_UID, SESSION_UID + 1),
+                    (&in_effect, None),
+                    &frame
+                ),
                 Err(PinboardRefusal::Unattested)
             );
         }

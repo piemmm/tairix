@@ -35,7 +35,7 @@ use crate::menu::BarMenuRow;
 /// session knows how to apply. There is no "other" or free-form command.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SystemAction {
-    /// Show what this machine is, in the Switchboard's overview.
+    /// Show what this system is: its version, processors and memory.
     About,
     /// Show what the machine is doing, in the Switchboard's resource panes.
     SystemMonitor,
@@ -295,17 +295,14 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<BarMenuRow> {
 /// Indexed over [`ROWS`] itself rather than over the rows a menu happened to
 /// offer, so a row `permits` left out cannot shift the meaning of another.
 ///
-/// The two inspection rows reuse the capsule's own Switchboard-opening
-/// response and the launch row reuses the bar's one launch response, so no
-/// command here introduces a second path to a destination the bar already
-/// reaches.
+/// The monitor row reuses the capsule's own Switchboard-opening response and
+/// the launch row reuses the bar's one launch response, so no command here
+/// introduces a second path to a destination the bar already reaches.
 #[must_use]
 pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
     Some(match ROWS.get(index)?.action {
-        // Both rows land on the same section: the wire vocabulary names a
-        // *section*, and what the machine is and what it is doing are two
-        // panes within Resources rather than two sections.
-        SystemAction::About | SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
+        SystemAction::About => TaskbarResponse::AboutSystem,
+        SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Resources,
         },
         // The row is only actionable when this identifier resolved against

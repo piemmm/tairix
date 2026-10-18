@@ -30,9 +30,12 @@ Decision 1 is **settled** — variable-length framing, landed
 as M1a. Decision 2 is **reversed** by the owner and superseded by M6: Open
 With… is a row that *both* concludes the chain and opens a submenu of the
 applications that claim the file. Decision 3 stands, on the one of its two
-reasons that survives M6: a plate does not scroll, and the program-library
-popup is a list as long as what a user has installed. Its other reason — that
-a plate takes no text — is no longer true, and the text below says so.
+reasons that survives M6: a plate is sized to its rows, and the program-library
+popup is a list as long as what a user has installed. A plate the screen cuts
+shows a window of whole rows the keyboard moves (`plans/GUI-CONTROLS-DESIGN.md`
+§11.10), which keeps every row reachable but is no way to browse a library. Its
+other reason — that a plate takes no text — is no longer true, and the text
+below says so.
 
 ### Defects found, to fix in the stage named
 
@@ -116,9 +119,12 @@ A menu is a **chain of session-owned plates**, not a window an app draws.
   title and nothing else — no close, minimize, put-to-back or size-toggle
   control, no resize edge. The band is the plate's drag handle.
 - **A chain** is a root plate and the descendants open beneath it. Each
-  child is placed edge-adjacent to its parent at its parent row's top,
-  flipped to the parent's other side when the screen edge leaves no room,
-  and slid vertically to stay on screen.
+  child is placed edge-adjacent to its parent with its body level with the
+  row that opened it — a submenu's first row beside that row, its band above
+  it — flipped to the parent's other side when the screen edge leaves no
+  room, and slid vertically to stay on screen. The lift is the child's band
+  plus the plate's rim (`body_lead`), one definition beside the row geometry
+  the plate draws.
 - **A child is one of three things**: a **submenu** (more rows, from the same
   model), the **information panel** — the session's own `FactList` of the
   owning bundle's signed manifest — or a **quick-entry field**, the session's
@@ -191,9 +197,8 @@ rules decide when an open child closes:
   the strip under the band lie between rows, never on a different one, so the
   pointer crossing the parent's edge into the child keeps the child open and
   the parent row highlighted (`Menu::hold`).
-- **A crossing aimed at the child waits.** The child's band puts its first
-  row level with the parent's *next* row, so a path aimed at the child's rows
-  crosses that sibling. A motion sample landing on a sibling of the open row is
+- **A crossing aimed at the child waits.** A path aimed at a child row below
+  the first crosses the open row's siblings on the way. A motion sample landing on a sibling of the open row is
   deferred while it lies in the triangle from the apex to the child's near
   edge, or within `AIM_SLACK` of the apex. The apex is where the pointer last
   stood on the open row, or where it was when the child opened — a key that
@@ -237,11 +242,16 @@ and `Enter` **commits**, ending the chain with the field's own id. Its band
 titles it and does not drag it, because a child of a row is placed by the chain
 against that row, exactly as the information panel is.
 
-The declaring row supplies only the id and the initial text; the committed text
-is the desktop's answer, held for the owning window and pulled once
-(`TakeMenuText`) because an event frame is far narrower than a name. The field
-cannot be masked — the model has no way to say so — so a menu row is
-structurally incapable of being a password prompt.
+The declaring row supplies only the id, the initial text and the bytes of it
+the field opens with selected (`AppMenuEntrySelection`, refused off the text's
+character boundaries) — a rename's stem, so typing replaces the name and keeps
+its ending; the committed text is the desktop's answer, held for the owning
+window and pulled once (`TakeMenuText`) because an event frame is far narrower
+than a name. Each key reaches the field with the modifiers the seat reported, so
+Shift extends a selection, and cut, copy and paste go through the desktop's
+clipboard (`MenuChain::entry_chord`), a cut taking nothing out unless the
+clipboard took it. The field cannot be masked — the model has no way to say so
+— so a menu row is structurally incapable of being a password prompt.
 
 **There is deliberately no app-drawn attached window.** M1d landed one — a
 surface the *application* presented, hanging off a menu row, detaching when

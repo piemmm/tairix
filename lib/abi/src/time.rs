@@ -570,32 +570,40 @@ impl Duration64 {
 /// Seconds in one UTC day.
 pub const SECS_PER_DAY: i64 = 86_400;
 
+/// Seconds in one hour.
+pub const SECS_PER_HOUR: i64 = 60 * SECS_PER_MINUTE;
+
+/// Seconds in one minute: there are no leap seconds in the count.
+pub const SECS_PER_MINUTE: i64 = 60;
+
 /// Days from the Unix epoch (1970-01-01) to the given proleptic-Gregorian
-/// civil date. `month` is `1..=12`, `day` is `1..=31`; the caller validates
-/// the ranges. Negative for dates before the epoch.
+/// civil date, or `None` for a year so far from the epoch that the count does
+/// not fit an `i64`. `month` is `1..=12`, `day` is `1..=31`; the caller
+/// validates the ranges. Negative for dates before the epoch.
 ///
-/// Howard Hinnant's `days_from_civil` algorithm, exact for every date in the
-/// `i64` range.
+/// Howard Hinnant's `days_from_civil` algorithm, exact wherever it answers.
 #[must_use]
-pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let m = i64::from(month);
-    let d = i64::from(day);
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
+pub fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    let y = i128::from(year) - i128::from(month <= 2);
+    let (m, d) = (i128::from(month), i128::from(day));
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
     let mp = if m > 2 { m - 3 } else { m + 9 };
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    i64::try_from(era * 146_097 + doe - 719_468).ok()
 }
 
 /// The proleptic-Gregorian civil date `(year, month, day)` for a count of days
 /// from the Unix epoch — the inverse of [`days_from_civil`].
 #[must_use]
 pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
+    // Widened so the shift to the algorithm's epoch, 0000-03-01, cannot
+    // overflow at either end of the range; the era and day it yields fit an
+    // `i64`, so the zero fallbacks are unreachable.
+    let z = i128::from(days) + 719_468;
+    let era = i64::try_from(z.div_euclid(146_097)).unwrap_or(0);
+    let doe = i64::try_from(z.rem_euclid(146_097)).unwrap_or(0);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
@@ -675,8 +683,17 @@ impl CivilTime {
     /// through Euclidean division, so the time-of-day is always in range.
     #[must_use]
     pub fn from_unix_secs(secs: i64) -> Self {
-        let days = secs.div_euclid(SECS_PER_DAY);
-        let tod = secs.rem_euclid(SECS_PER_DAY);
+        Self::at_offset(secs, 0)
+    }
+
+    /// The calendar fields of instant `secs` read `offset` seconds east of
+    /// UTC: a local time. Exact at both ends of the range, where the local
+    /// count itself would leave `i64`.
+    #[must_use]
+    pub fn at_offset(secs: i64, offset: i32) -> Self {
+        let shifted = secs.rem_euclid(SECS_PER_DAY) + i64::from(offset);
+        let days = secs.div_euclid(SECS_PER_DAY) + shifted.div_euclid(SECS_PER_DAY);
+        let tod = shifted.rem_euclid(SECS_PER_DAY);
         let (year, month, day) = civil_from_days(days);
         Self {
             year,
@@ -723,13 +740,11 @@ impl CivilTime {
         if !self.is_valid() {
             return None;
         }
-        let days = days_from_civil(self.year, self.month, self.day);
-        Some(
-            days * SECS_PER_DAY
-                + i64::from(self.hour) * 3_600
-                + i64::from(self.minute) * 60
-                + i64::from(self.second),
-        )
+        let time_of_day =
+            i64::from(self.hour) * 3_600 + i64::from(self.minute) * 60 + i64::from(self.second);
+        let days = days_from_civil(self.year, self.month, self.day)?;
+        // Widened: the last day before the range's start begins outside it.
+        i64::try_from(i128::from(days) * i128::from(SECS_PER_DAY) + i128::from(time_of_day)).ok()
     }
 
     /// The whole-second [`Time64`] instant these fields name, or `None` when
@@ -767,10 +782,13 @@ mod tests {
         assert_eq!(weekday_from_days(-1), 3);
         // 2000-02-29 (a leap day) was a Tuesday, 2038-01-19 a Tuesday, and
         // 2026-09-28 a Monday; 1900-01-01 was a Monday too.
-        assert_eq!(weekday_from_days(days_from_civil(2000, 2, 29)), 2);
-        assert_eq!(weekday_from_days(days_from_civil(2038, 1, 19)), 2);
-        assert_eq!(weekday_from_days(days_from_civil(2026, 9, 28)), 1);
-        assert_eq!(weekday_from_days(days_from_civil(1900, 1, 1)), 1);
+        let weekday = |year, month, day| {
+            weekday_from_days(days_from_civil(year, month, day).expect("a representable date"))
+        };
+        assert_eq!(weekday(2000, 2, 29), 2);
+        assert_eq!(weekday(2038, 1, 19), 2);
+        assert_eq!(weekday(2026, 9, 28), 1);
+        assert_eq!(weekday(1900, 1, 1), 1);
         // A whole week on from any day is the same day, and the next day is
         // the next weekday, wrapping Sunday to Monday.
         for days in [-100_000, -8, -7, -1, 0, 3, 6, 7, 20_000] {
@@ -1270,12 +1288,59 @@ mod tests {
 
     #[test]
     fn epoch_day_anchors_match_the_calendar() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(1969, 12, 31), -1);
-        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
+        assert_eq!(days_from_civil(1969, 12, 31), Some(-1));
+        assert_eq!(days_from_civil(2000, 3, 1), Some(11_017));
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
         assert_eq!(civil_from_days(11_017), (2000, 3, 1));
+    }
+
+    #[test]
+    fn a_local_time_is_exact_past_either_end_of_the_utc_count() {
+        let latest = CivilTime::at_offset(i64::MAX, 14 * 3_600);
+        let utc = CivilTime::from_unix_secs(i64::MAX);
+        assert_eq!((latest.hour + 24 - utc.hour) % 24, 14);
+        assert!((latest.year, latest.month, latest.day) > (utc.year, utc.month, utc.day));
+        let earliest = CivilTime::at_offset(i64::MIN, -12 * 3_600);
+        let utc = CivilTime::from_unix_secs(i64::MIN);
+        assert_eq!((utc.hour + 24 - earliest.hour) % 24, 12);
+        assert!((earliest.year, earliest.month, earliest.day) < (utc.year, utc.month, utc.day));
+        assert_eq!(
+            CivilTime::at_offset(-1, 3_600),
+            CivilTime::from_unix_secs(3_599),
+            "an hour east of a second before the epoch"
+        );
+    }
+
+    #[test]
+    fn the_calendar_holds_at_the_ends_of_the_range_and_refuses_past_them() {
+        // Every day count names a date that names it back, at both ends.
+        for days in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+            let (year, month, day) = civil_from_days(days);
+            assert_eq!(days_from_civil(year, month, day), Some(days), "{days}");
+        }
+        let (year, _, _) = civil_from_days(i64::MAX);
+        assert_eq!(days_from_civil(year + 1, 1, 1), None, "a day past the last");
+        assert_eq!(days_from_civil(i64::MAX, 12, 31), None);
+        assert_eq!(days_from_civil(i64::MIN, 1, 1), None);
+        // The seconds of a civil time fail closed where they leave the range.
+        let last = CivilTime::from_unix_secs(i64::MAX);
+        assert_eq!(last.to_unix_secs(), Some(i64::MAX));
+        assert_eq!(
+            CivilTime::from_unix_secs(i64::MIN).to_unix_secs(),
+            Some(i64::MIN)
+        );
+        let beyond = CivilTime {
+            year: last.year + 1,
+            ..last
+        };
+        assert_eq!(beyond.to_unix_secs(), None);
+        let far = CivilTime {
+            year: i64::MAX,
+            ..last
+        };
+        assert_eq!(far.to_unix_secs(), None);
     }
 
     #[test]

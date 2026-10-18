@@ -48,6 +48,16 @@ pub(crate) fn damage() -> Region {
     tairix_controls::damage::sink()
 }
 
+/// The fixture zone store of real zones and regions, kept for the process
+/// as the delegated one is.
+pub(crate) fn zones() -> &'static tairix_tz::ZoneInfo<'static> {
+    let bytes: &'static [u8] =
+        alloc::boxed::Box::leak(tairix_tz::testkit::store().into_boxed_slice());
+    alloc::boxed::Box::leak(alloc::boxed::Box::new(
+        tairix_tz::ZoneInfo::parse(bytes).expect("the fixture parses"),
+    ))
+}
+
 /// A shell showing `pane`, laid out for [`WIDE`].
 pub(crate) fn showing(pane: &str) -> Shell {
     let mut shell = Shell::new(DesktopSettings::default()).expect("a registry");

@@ -72,7 +72,7 @@ pub fn datetime_to_time64(date: u16, time: u16) -> Result<Time64, MetadataError>
     {
         return Err(MetadataError::NotRepresentable);
     }
-    let days = days_from_civil(year, month, day);
+    let days = days_from_civil(year, month, day).ok_or(MetadataError::NotRepresentable)?;
     let secs = days * SECS_PER_DAY + hour * 3600 + minute * 60 + second;
     Ok(Time64::from_secs(secs))
 }

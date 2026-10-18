@@ -550,6 +550,15 @@ three times its neighbour's width defeats. The column count is a layout input
 to the compile, so a resize recompiles the flow and the scroll range keeps
 describing what is on screen.
 
+**The scheduler is read as rates.** Context switches and involuntary
+preemptions are counters the kernel keeps since boot, and a total says nothing
+about what the scheduler is doing now, so the CPU pane states each as events a
+second — the counters' growth over the sample's own interval, each CPU deltaed
+against its own last reading and summed — and graphs the two as one duplex
+trace beneath the per-core grid, switches above the midline and preemptions
+below. A first sample measures no interval and reads unavailable; without
+`CAP_SYSINFO_KERNEL` both read not permitted and the trace states its absence.
+
 **A resource under pressure wears a banner on its own pane**, above the hero:
 the band, how long it has stood there, and the relief the model recommends. A
 cause and its resource were never two places. The banner is pinned across the

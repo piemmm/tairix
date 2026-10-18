@@ -1,4 +1,4 @@
-//! The `session-v1` broker: the three requests the session authority
+//! The `session-v1` broker: the four requests the session authority
 //! answers on its rendezvous, and the answers it gives.
 //!
 //! The greeter draws and types; the authority verifies and starts. This is
@@ -12,12 +12,13 @@
 //! *kernel-attested* identity, never a claim in the message, and the checks
 //! come in two layers:
 //!
-//! * **Placement**, shared by all three requests: the attested console must
+//! * **Placement**, shared by all four requests: the attested console must
 //!   be the authority's own.
-//! * **Identity**, one rule per request. The two the login screen asks —
-//!   [`SessionRequest::Accounts`] and [`SessionRequest::Authenticate`] —
-//!   require the attested uid to be the `greeter` service account, which
-//!   runs with no authority to read the user database or start a process.
+//! * **Identity**, one rule per request. The three the login screen asks —
+//!   [`SessionRequest::Accounts`], [`SessionRequest::Authenticate`] and
+//!   [`SessionRequest::ZoneStore`] — require the attested uid to be the
+//!   `greeter` service account, which runs with no authority to read the
+//!   user database or start a process.
 //!   [`SessionRequest::Background`] is not the greeter's at all: it is the
 //!   presenting desktop session giving up the screen, so it requires the
 //!   attested uid to own the entry the session table records as the
@@ -37,12 +38,14 @@
 //! choose which program runs as the authenticated user.
 
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 use tairix_abi::session_ipc::{
-    encode_account_page, SessionAccount, SessionRequest, SessionVerdict, SESSION_ACCOUNTS_PER_PAGE,
-    SESSION_DISPLAY_NAME_MAX, SESSION_LOGIN_NAME_MAX,
+    encode_account_page, encode_zone_store_reply, SessionAccount, SessionRequest, SessionVerdict,
+    SESSION_ACCOUNTS_PER_PAGE, SESSION_DISPLAY_NAME_MAX, SESSION_LOGIN_NAME_MAX,
 };
 use tairix_abi::time::Duration64;
+use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_users::{
     AccountState, UserRecord, UsersDb, GREETER_UID, MAX_DISPLAY_NAME_LEN, MAX_USERNAME_LEN,
@@ -159,6 +162,21 @@ impl SessionDirectory for DbAccounts<'_> {
     }
 }
 
+/// How the authority hands the login screen the shipped civil-time store: a
+/// read-only delegation, minted to the caller, of a descriptor it opens.
+///
+/// The authority opens and delegates and never reads the store, so no store
+/// parser joins the process that adjudicates passwords.
+pub trait ZoneStoreGrant {
+    /// A one-shot read-only delegation of the store to the caller.
+    ///
+    /// # Errors
+    ///
+    /// The [`Errno`] opening the store or the kernel's delegation failed
+    /// with.
+    fn grant(&self) -> Result<NonZeroU64, Errno>;
+}
+
 /// What one served `session-v1` request produced.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SessionReply {
@@ -192,16 +210,16 @@ impl SessionReply {
 /// 2. **Placement** — `peer_console` (kernel-attested, never claimed) must
 ///    be `own_console`. This one check guards every request.
 /// 3. **Identity** — then each request's own rule: the greeter's uid for
-///    `Accounts` and `Authenticate`, ownership of the presenting session
-///    for `Background`. An unattested caller arrives as [`None`] and fails
-///    both.
+///    `Accounts`, `Authenticate` and `ZoneStore`, ownership of the
+///    presenting session for `Background`. An unattested caller arrives as
+///    [`None`] and fails both.
 /// 4. **Adjudication** — only then is state touched: the directory read,
-///    the presenting session stepped aside, or the budget and the
-///    authenticator consulted.
+///    the presenting session stepped aside, the budget and the
+///    authenticator consulted, or the zone store delegated.
 ///
 /// A refused or undecodable request is answered in the shape it asked for —
-/// an empty account page, or the one reasonless
-/// [`SessionVerdict::Refused`] — so a malformed frame reaches a client as
+/// an empty account page, the one reasonless [`SessionVerdict::Refused`], or
+/// a zone-store reply carrying none — so a malformed frame reaches a client as
 /// the protocol fault it is rather than as a wrong password, and no reply
 /// tells one refusal from another. An accepted `Background` additionally
 /// reports [`SessionReply::stepped_aside`].
@@ -218,6 +236,7 @@ pub fn handle_session_request(
     own_console: u64,
     directory: &mut dyn SessionDirectory,
     authenticator: &dyn Authenticator,
+    zones: &dyn ZoneStoreGrant,
     budget: &mut AttemptBudget,
     now: Duration64,
     sink: &dyn Sink,
@@ -230,19 +249,21 @@ pub fn handle_session_request(
     if peer_console != own_console {
         audit_request_refused(sink, "another console", peer_uid);
         // Shaped to the request that was sent — an empty page for the list,
-        // one reasonless verdict for the other two — so a stranger cannot
-        // tell a placement refusal from any other.
+        // one reasonless verdict for the verdict requests, a zone-store reply
+        // carrying none — so a stranger cannot tell a placement refusal from
+        // any other.
         return SessionReply::of(match decoded {
             SessionRequest::Accounts { .. } => empty_page(reply),
             SessionRequest::Authenticate { .. } | SessionRequest::Background => {
                 encode_verdict(&refusal(Duration64::ZERO), reply)
             }
+            SessionRequest::ZoneStore => zone_store_reply(None, reply),
         });
     }
     let from_greeter = peer_uid == Some(GREETER_UID.0);
     match decoded {
-        // The login screen's two questions: only the greeter service account
-        // may ask them.
+        // The login screen's three questions: only the greeter service
+        // account may ask them.
         SessionRequest::Accounts { offset } => {
             if !from_greeter {
                 audit_request_refused(sink, "not the greeter", peer_uid);
@@ -265,6 +286,17 @@ pub fn handle_session_request(
                 sink,
                 reply,
             ))
+        }
+        SessionRequest::ZoneStore => {
+            if !from_greeter {
+                audit_request_refused(sink, "not the greeter", peer_uid);
+                return SessionReply::of(zone_store_reply(None, reply));
+            }
+            let handle = zones
+                .grant()
+                .inspect_err(|err| audit_zone_store_withheld(sink, *err))
+                .ok();
+            SessionReply::of(zone_store_reply(handle, reply))
         }
         // The desktop session's own request, and never the greeter's: only
         // the session holding the screen may give it up.
@@ -381,6 +413,10 @@ fn encode_verdict(verdict: &SessionVerdict, reply: &mut [u8]) -> usize {
     verdict.encode(reply).unwrap_or(0)
 }
 
+fn zone_store_reply(handle: Option<NonZeroU64>, reply: &mut [u8]) -> usize {
+    encode_zone_store_reply(handle, reply).unwrap_or(0)
+}
+
 /// The attested uid as an audit field, or `-` when the caller could not be
 /// attested at all.
 fn uid_field(buf: &mut DecBuf, peer_uid: Option<u32>) -> &str {
@@ -419,6 +455,19 @@ fn audit_request_refused(sink: &dyn Sink, cause: &str, peer_uid: Option<u32>) {
                 value: FieldValue::Str(uid_field(&mut uid_buf, peer_uid)),
             },
         ],
+    );
+}
+
+fn audit_zone_store_withheld(sink: &dyn Sink, err: Errno) {
+    emit(
+        sink,
+        Level::Warn,
+        events::ZONE_STORE_WITHHELD,
+        "zone store withheld from the login screen",
+        &[Field {
+            key: "error",
+            value: FieldValue::Error(err),
+        }],
     );
 }
 

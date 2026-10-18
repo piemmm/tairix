@@ -155,6 +155,9 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # the icon arrangement/sort — so the session has one owner of them and the
 # shell reads them from the desktop rather than keeping a second copy.
 tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# The civil clock: the user's zone and region resolved against the planted
+# zone store (`rt` loads it), and the one renderer of a reading.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["rt"] }
 # The network interface-configuration engine names the Settings pane that edits
 # its interfaces, which the bar's network menu hands over; the session reads
 # nothing else of it.
@@ -188,6 +191,9 @@ tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0" }
 # The secret marker's cadence, which the credential prompt's frame schedule is
 # checked against rather than restated.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The zone store's fixture of real zones and regions, which the clock's tests
+# read London and New York from.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["rt", "test-support"] }
 # The controls' shared test fixtures, among them the check that a painted
 # surface keeps inside its own rounded silhouette.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [

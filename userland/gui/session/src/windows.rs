@@ -2389,6 +2389,11 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.shell.request_lock(caller)
     }
 
+    fn zone_store(&mut self, to: ProcId, caller: Option<&AttestedApp>) -> Result<u64, Errno> {
+        let fd = self.shell.zone_store_descriptor(caller)?;
+        self.relay.relay(DocumentAuthority::Held { fd }, false, to)
+    }
+
     fn preview_render_requested(
         &mut self,
         window_id: u64,

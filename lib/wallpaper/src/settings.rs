@@ -67,6 +67,7 @@ use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
 use crate::catalog;
+use crate::civil::{RegionCode, ZoneName};
 use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{
     parse_decimal, parse_millis, render_millis, PointerSpeed, PrimaryButton, RepeatRate,
@@ -570,6 +571,12 @@ pub enum SettingsKey {
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
+    /// `region` — the region whose conventions the desktop's clocks are
+    /// written in, or empty for the zone store's default.
+    Region,
+    /// `time.zone` — the zone the desktop's clocks read, or empty for the
+    /// zone store's default.
+    TimeZone,
     /// `audio.output` — the sink the user prefers as the default.
     AudioOutput,
     /// `audio.input` — the source the user prefers as the default.
@@ -582,7 +589,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 54] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -631,6 +638,8 @@ impl SettingsKey {
         Self::RetroGamesSpeed,
         Self::MonitorTasks,
         Self::LockAfter,
+        Self::Region,
+        Self::TimeZone,
         Self::AudioOutput,
         Self::AudioInput,
         Self::AudioLevels,
@@ -718,6 +727,11 @@ impl SettingsKey {
     /// application's Lock Screen pane edits.
     pub const LOCK: [Self; 1] = [Self::LockAfter];
 
+    /// The keys deciding which region's conventions the desktop's clocks are
+    /// written in and which zone they read: what the Settings application's
+    /// Language & Region pane edits.
+    pub const CIVIL: [Self; 2] = [Self::Region, Self::TimeZone];
+
     /// The keys remembering the user's sound controls. The session alone
     /// writes them, from what the audio service shows its own room, so no
     /// application's document may carry them.
@@ -780,6 +794,8 @@ impl SettingsKey {
             Self::RetroGamesSpeed => "screensaver.retro_games.speed",
             Self::MonitorTasks => "screensaver.system_monitor.tasks",
             Self::LockAfter => "lock.after_min",
+            Self::Region => "region",
+            Self::TimeZone => "time.zone",
             Self::AudioOutput => "audio.output",
             Self::AudioInput => "audio.input",
             Self::AudioLevels => "audio.levels",
@@ -888,6 +904,10 @@ pub struct DesktopSettings {
     pub screensaver_options: ScreensaverOptions,
     /// How long the desktop sits idle before the screen locks.
     pub lock_after: IdleAfter,
+    /// The region the user chose, or `None` for the zone store's default.
+    pub region: Option<RegionCode>,
+    /// The zone the user chose, or `None` for the zone store's default.
+    pub time_zone: Option<ZoneName>,
     /// What the user set on the sound devices.
     pub sound: SoundControls,
 }
@@ -926,6 +946,8 @@ impl Default for DesktopSettings {
             display_off_after: DisplayOffAfter::Minutes(30),
             screensaver_options: ScreensaverOptions::default(),
             lock_after: IdleAfter::Minutes(15),
+            region: None,
+            time_zone: None,
             sound: SoundControls::default(),
         }
     }
@@ -1067,6 +1089,8 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::RetroGamesSpeed => put(&mut saver.retro_games.speed, Pace::from_value(value)),
         SettingsKey::MonitorTasks => put_bool(&mut saver.system_monitor.tasks, value),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
+        SettingsKey::Region => put_optional(&mut settings.region, value, RegionCode::new),
+        SettingsKey::TimeZone => put_optional(&mut settings.time_zone, value, ZoneName::new),
         SettingsKey::AudioOutput => settings.sound.set_output(value),
         SettingsKey::AudioInput => settings.sound.set_input(value),
         SettingsKey::AudioLevels => settings.sound.set_levels(value),
@@ -1085,6 +1109,22 @@ fn parse_speed(value: &str) -> Option<PointerSpeed> {
 /// one.
 fn put_bool(field: &mut bool, value: &str) -> bool {
     put(field, tairix_appconf::as_bool(value).ok())
+}
+
+/// Store the choice `value` names in `field`, an empty value naming none,
+/// answering whether it named one `parse` accepts; `field` is left unchanged
+/// when it did not.
+pub(crate) fn put_optional<T>(
+    field: &mut Option<T>,
+    value: &str,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> bool {
+    if value.is_empty() {
+        *field = None;
+        return true;
+    }
+    let parsed = parse(value).map(Some);
+    put(field, parsed)
 }
 
 /// Store `parsed` in `field`, answering whether there was a value to store;
@@ -1168,6 +1208,14 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
             tairix_appconf::bool_text(saver.system_monitor.tasks).to_string()
         }
         SettingsKey::LockAfter => settings.lock_after.render_value(),
+        SettingsKey::Region => settings
+            .region
+            .as_ref()
+            .map_or_else(String::new, |code| code.as_str().to_string()),
+        SettingsKey::TimeZone => settings
+            .time_zone
+            .as_ref()
+            .map_or_else(String::new, |zone| zone.as_str().to_string()),
         SettingsKey::AudioOutput => settings.sound.render_output(),
         SettingsKey::AudioInput => settings.sound.render_input(),
         SettingsKey::AudioLevels => settings.sound.render_levels(),

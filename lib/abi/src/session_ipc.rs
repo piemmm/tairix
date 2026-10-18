@@ -16,6 +16,9 @@
 //!   back a verdict. It starts nothing: the authority chooses what runs, on
 //!   its own loop, so a compromised greeter cannot pick the program that
 //!   runs as the authenticated user.
+//! * [`SessionRequest::ZoneStore`] takes a read-only delegation of the
+//!   shipped civil-time store, so the screen tells the time in the machine's
+//!   zone while reading no file of its own.
 //! * [`SessionRequest::Background`] is the *desktop session's* one request,
 //!   not the greeter's: "I am giving up the screen, put the login screen
 //!   back up". It is the switch-away half of fast user switching, and the
@@ -47,7 +50,9 @@
 
 use crate::account::MAX_PASSWORD_LEN;
 use crate::bounded_text::BoundedText;
-use crate::le::{put_u16, put_u32, read_u16, read_u32};
+use core::num::NonZeroU64;
+
+use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -108,13 +113,25 @@ pub const SESSION_ACCOUNT_RECORD_LEN: usize =
 pub const SESSION_ACCOUNTS_HEADER_LEN: usize = 16;
 
 /// Largest encoded account page: the header plus a full page of records.
-/// Also the endpoint's maximum reply size, since it is the longer of the
-/// two reply frames.
+/// Also the endpoint's maximum reply size, since it is the longest of the
+/// reply frames.
 pub const SESSION_MAX_REPLY: usize =
     SESSION_ACCOUNTS_HEADER_LEN + SESSION_ACCOUNTS_PER_PAGE * SESSION_ACCOUNT_RECORD_LEN;
 
 /// Exact encoded length of an authentication verdict.
 pub const SESSION_VERDICT_LEN: usize = 8 + Duration64::WIRE_LEN;
+
+/// Magic word identifying a zone-store reply (`"SEZ1"` little-endian).
+pub const SESSION_ZONE_STORE_MAGIC: u32 = u32::from_le_bytes(*b"SEZ1");
+
+/// Exact encoded length of a zone-store reply: the magic, the version, two
+/// reserved bytes, and the delegation's handle.
+pub const SESSION_ZONE_STORE_LEN: usize = 16;
+
+const _: () = assert!(
+    SESSION_VERDICT_LEN <= SESSION_MAX_REPLY && SESSION_ZONE_STORE_LEN <= SESSION_MAX_REPLY,
+    "an account page is the longest reply"
+);
 
 /// Largest encoded request — also the endpoint's maximum request size: the
 /// fixed header, a login name, and a secret, each length-prefixed.
@@ -126,6 +143,8 @@ const OPCODE_ACCOUNTS: u8 = 0;
 const OPCODE_AUTHENTICATE: u8 = 1;
 /// Wire opcode naming a [`SessionRequest::Background`] request.
 const OPCODE_BACKGROUND: u8 = 2;
+/// Wire opcode naming a [`SessionRequest::ZoneStore`] request.
+const OPCODE_ZONE_STORE: u8 = 3;
 
 /// Wire status naming an [`SessionVerdict::Accepted`] verdict.
 const STATUS_ACCEPTED: u8 = 0;
@@ -174,6 +193,12 @@ pub enum SessionRequest<'a> {
     /// mailbox — or [`SessionVerdict::Refused`] if it is not the session
     /// holding the screen.
     Background,
+    /// Take a read-only delegation of the shipped civil-time store.
+    ///
+    /// Asked by the greeter, and answered with a [`decode_zone_store_reply`]
+    /// frame carrying the `fd_grant` handle the authority minted to the
+    /// caller, or none — refused, or no store — indistinguishably.
+    ZoneStore,
 }
 
 impl<'a> SessionRequest<'a> {
@@ -188,7 +213,7 @@ impl<'a> SessionRequest<'a> {
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let body = match *self {
             Self::Accounts { .. } => 4,
-            Self::Background => 0,
+            Self::Background | Self::ZoneStore => 0,
             Self::Authenticate { username, password } => {
                 check_field(username, SESSION_LOGIN_NAME_MAX)?;
                 check_field(password, MAX_PASSWORD_LEN)?;
@@ -213,6 +238,7 @@ impl<'a> SessionRequest<'a> {
                 put_str(out, at, password)?;
             }
             Self::Background => out[6] = OPCODE_BACKGROUND,
+            Self::ZoneStore => out[6] = OPCODE_ZONE_STORE,
         }
         Ok(total)
     }
@@ -247,6 +273,7 @@ impl<'a> SessionRequest<'a> {
                 Self::Authenticate { username, password }
             }
             OPCODE_BACKGROUND => Self::Background,
+            OPCODE_ZONE_STORE => Self::ZoneStore,
             _ => return Err(Errno::OutOfRange),
         };
         if !cur.exhausted() {
@@ -555,6 +582,43 @@ impl SessionVerdict {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Encode a zone-store reply carrying the delegation `handle`, or none, into
+/// `out`, returning [`SESSION_ZONE_STORE_LEN`].
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] when `out` cannot hold the frame.
+pub fn encode_zone_store_reply(handle: Option<NonZeroU64>, out: &mut [u8]) -> Result<usize, Errno> {
+    let frame = out
+        .get_mut(..SESSION_ZONE_STORE_LEN)
+        .ok_or(Errno::BufferTooSmall)?;
+    frame.fill(0);
+    put_u32(frame, 0, SESSION_ZONE_STORE_MAGIC);
+    put_u16(frame, 4, SESSION_VERSION);
+    put_u64(frame, 8, handle.map_or(0, NonZeroU64::get));
+    Ok(SESSION_ZONE_STORE_LEN)
+}
+
+/// Decode a zone-store reply: the delegation's handle, or `None` for none.
+///
+/// # Errors
+///
+/// [`Errno::LengthOutOfRange`] for a wrong length, [`Errno::BadMagic`] for a
+/// wrong magic or a dirty reserved byte, [`Errno::OutOfRange`] for a wrong
+/// version.
+pub fn decode_zone_store_reply(bytes: &[u8]) -> Result<Option<NonZeroU64>, Errno> {
+    if bytes.len() != SESSION_ZONE_STORE_LEN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if read_u32(bytes, 0) != SESSION_ZONE_STORE_MAGIC || bytes[6] != 0 || bytes[7] != 0 {
+        return Err(Errno::BadMagic);
+    }
+    if read_u16(bytes, 4) != SESSION_VERSION {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(NonZeroU64::new(read_u64(bytes, 8)))
 }
 
 // --- The authority -> session wake mailbox ---------------------------------

@@ -50,7 +50,7 @@ under the floor and are unchanged.
 | `metric` | `MetricTile`, `StatusPill`, `CompositionBar`, `CompositionRing` |
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
-| `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A |
+| `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A, of which `ClipboardChord` names cut, copy and paste. A field's text, selection and caret stand inside its rim and focus ring, the selection and caret a line tall |
 | `number` | `NumberField`: an integer between two bounds — or a whole number of hundredths and the like, spelled with a point (`with_decimals`) — live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, settled by a step, Enter or the owner's commit as the focus leaves |
 | `colour_picker` | `ColourPicker`: one colour picked on a square (saturation and value plane and hue strip), a wheel (hue ring round a saturation and value triangle) or sliders (a swept track per channel), an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and number fields for one model's channels and A, its values held as typed, laid beside the view in wide bounds and beneath it in narrow ones |
 | `colour_model` | `PickerView` and `ColourModel` — RGB, HSV, HSL, CMYK, Lab, `LCh` or grey — with each model's channels (`ChannelSpec`) and its conversions to and from a colour, a CIE value past sRGB reported clipped |
@@ -67,7 +67,7 @@ under the floor and are unchanged.
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
 | `decision` | `Dialog`, `Tooltip`, `HelpTip`; a `Dialog` is a form a window draws over itself for an answer typed in it |
-| `alert` | `Alert`: an alert window's content — severity mark, headline, detail, and the bottom row of up to four answers — as wide as its text up to a readable measure and exactly as tall as its content, the whole text scrolling past the screen's share, answering Enter or Space with the focused button and Escape with its cancel |
+| `alert` | `Alert`: an alert window's content — severity mark (or, through `with_picture`, the badge of a statement the desktop makes about itself, its About window), headline, detail, and the bottom row of up to four answers — as wide as its text up to a readable measure and exactly as tall as its content, the whole text scrolling past the screen's share, answering Enter or Space with the focused button and Escape with its cancel |
 
 A continuous control reports where its interaction *settled*, distinctly from
 the values it took along the way: `Slider` answers `SliderAction::SetValue`
@@ -150,6 +150,21 @@ and clamps. `Menu::anchored_rect` is its point case: a zero-extent anchor
 opening trailing with no clearance, which is a context menu at a press point. So
 a root plate, a slot-anchored icon-bar menu and a submenu beside its parent row
 all read one piece of arithmetic rather than each deriving its own.
+
+A `Menu` whose plate is shorter than its rows shows a **window of whole rows**:
+a row outside it has no rectangle, so it is neither drawn nor hit, and the
+keyboard's highlight brings its row into view by the least movement. The plate
+opens with its highlighted row in the middle and holds that window once
+anything moves, so stepping within it never moves the rows; Page Up and Page
+Down move a window less one row, and the wheel scrolls by the nearest whole
+number of rows to the one wheel distance (`WHEEL_STEP`). A slim mark in the
+scrollbar thumb's grey shows where the window stands while rows are hidden.
+`Menu::seek` finds a row by its label: letters within `SEEK_PAUSE_NS` of each
+other extend the prefix, the same letter again steps to the next row it begins,
+and case is ignored. An open `ComboBox` takes typed letters as a seek, so a list
+of hundreds of places is reached by typing a city's first letters, and its
+choice is still Enter's. The plate's preferred width is measured once per face
+and kept, because an open list is placed again on every event.
 
 `ChainModel` is the one *model* a menu is built as: a plate title and a
 parent-indexed list of `ChainRow`s, each carrying the id an outcome names, what
@@ -360,8 +375,11 @@ bar and reports the bar, and a wheel over the bar itself scrolls it. The
 owner reports the content it slid.
 
 A `ScrollBar`'s ends are two raised buttons with grid-fitted chevrons, so an
-arrow is whole pixels at every density, and a press toward an end the content
-already rests at presses nothing. **A held press repeats on the control's own
+arrow is whole pixels at every density and centred exactly in a button of either
+parity, and a press toward an end the content already rests at presses nothing.
+Its channel is edged along both long sides in the theme's `frame` colour, and a
+hovered or held end button and an awake thumb take the neutral
+`scroll_thumb_active` grey, never the accent. **A held press repeats on the control's own
 cadence** (`HoldRepeat`): the first step lands with the press, then one after
 `REPEAT_DELAY_NS` and one every `REPEAT_INTERVAL_NS`, the one cadence every
 press-and-hold stepping control shares. The owner keeps no timer of its own:
@@ -912,13 +930,17 @@ mask to composite tinted. A control given no picture at all (`NoArtwork`: a
 headless build, a test) draws the glyph inline through the same mask-and-tint
 arithmetic, so a cached icon and an uncached one are the same pixels.
 
-The recipe also takes a **saturation** factor, which pulls each artwork pixel
-toward its own luminance as it lands (`Surface::blit_desaturated`, the one
-saturation definition in `lib/raster`). It is how a control states that what its
-artwork identifies is not the thing in hand: a `window::TitleBar` keeps nearly
-all of the colour while its window is active and none of it while it is not, so
-an unfocused window's icon goes grey with its muted title. Every other control
-asks for full colour. The built-in glyph is never touched — it is a theme tint,
+The recipe also takes an **`ArtworkTone`**: a saturation that pulls each
+artwork pixel toward its own luminance, and a strength that fades it, both
+applied as it lands (`Surface::blit_desaturated`, the one saturation definition
+in `lib/raster`). It is how a control states that what its artwork identifies is
+not the thing in hand: a `window::TitleBar` keeps nearly all of the colour while
+its window is active and none of it while it is not, so an unfocused window's
+icon goes grey with its muted title. A menu row or an icon button that cannot
+act draws its artwork `ArtworkTone::disabled`: grey, and faded toward its
+ground as far as the theme's muted label is from it, so a picture never reads
+as something to choose on a row that cannot be chosen. Every other control
+asks for `ArtworkTone::FULL`. The built-in glyph is never touched — it is a theme tint,
 with no application colour in it to reduce — and because the reduction happens
 on the way in, an owner still caches one full-colour copy per (asset, pixel
 side) rather than one per state.
@@ -945,13 +967,18 @@ outline (`paint_drop_target`), the one drop look a table row wears too. Nothing 
 escapes its bounds, so a view may lay tiles edge to edge — and bound the whole
 grid's paint to the area it owns — without a tile bleeding onto its neighbour.
 
-State paints over the tile's **body**, not its bounds: `TileLayout::body_rect`
-is its picture and its name's drawn lines, each with half an inset of margin,
-and the rest of the bounds is ground. The body is also what a press must land
-on and what a marquee must touch, so a short name leaves the space beside it
-free to start a band, and `core_rect` — the picture with its margin — is the
-part every tile's body holds whatever it is named. `name_target` is the part a
-press on the name lands on: the lines with their margin, below the picture's.
+A tile is **two parts**, not its bounds: `TileLayout::parts` answers its picture
+and its name's drawn lines, each with half an inset of margin, and the rest of
+the bounds is ground. Either part is what a press must land on and what a
+marquee must touch, never the box around both, so the ground beside a narrow
+picture above a wide name, or beside a short name, is free to start a band.
+`core_rect` — the picture with its margin — is the part every tile holds
+whatever it is named, and `name_target` is the part a press on the name lands
+on: the lines with their margin, below the picture's. State paints behind the
+**name** (behind the picture of a tile drawing no name), and a selected or
+drop-target tile's picture is washed with the palette's `selection_tint`
+through its own coverage. A tile built `with_name_withheld` draws its picture
+and no name, for an owner laying an editor where the name is.
 
 A tile built `with_picture_shadow` makes its picture cast the theme's small soft
 shadow (`IconTile::shadow_cast`: `icon_shadow_reach` in `drop_shadow`), a mask

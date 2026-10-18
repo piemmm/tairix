@@ -25,7 +25,7 @@ use tairix_controls::{
     ActivityState, DuplexRates, PressureState, RateTrace, RecoveryState, MAX_CHART_SAMPLES,
 };
 use tairix_procinfo::display::{format_bytes, format_duration, format_rate, percent};
-use tairix_procinfo::rate::rate_per_sec;
+use tairix_procinfo::rate::{per_sec, rate_per_sec};
 use tairix_theme::SignalRole;
 
 use crate::derive::{memory_pressured, Hysteresis};
@@ -119,6 +119,105 @@ impl Series {
 pub(crate) fn process_count(sample: &Sample) -> Option<u16> {
     (!sample.degradations.contains(&DegradedField::ProcessList))
         .then(|| u16::try_from(sample.processes.len()).unwrap_or(u16::MAX))
+}
+
+/// The least full scale the scheduler's trace is drawn against, in events a
+/// second: an idle machine's few hundred dispatches then sit low in the box
+/// rather than filling it as if the scheduler were busy.
+pub const SCHEDULER_TRACE_FLOOR: u64 = 1024;
+
+/// One CPU's two cumulative scheduler counters as of a sample.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct CpuCounters {
+    cpu: u32,
+    switches: u64,
+    preemptions: u64,
+}
+
+/// The scheduler's rates: tasks dispatched and timer preemptions a second,
+/// summed over the CPUs both ends of the interval name, and their history.
+///
+/// Each CPU's counters delta against its own last reading, keyed by its index,
+/// so a CPU coming or going between samples skews nothing; one that went
+/// backwards contributes nought rather than cancelling another's progress.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SchedulerMeters {
+    /// Every CPU's counters as of the last sample that carried them, ordered
+    /// by CPU index. Rewritten in place, so a sample allocates nothing once
+    /// the machine's CPU count has been seen.
+    earlier: Vec<CpuCounters>,
+    switches: Option<u64>,
+    preemptions: Option<u64>,
+    rates: DuplexRates,
+}
+
+impl SchedulerMeters {
+    /// Nothing measured yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            earlier: Vec::new(),
+            switches: None,
+            preemptions: None,
+            rates: DuplexRates::new(),
+        }
+    }
+
+    /// Fold `sample`'s per-CPU counters in.
+    ///
+    /// A sample carrying none breaks the series, so the next to carry them is
+    /// a first sample again and yields no rate rather than one deltaed across
+    /// the gap.
+    pub fn record(&mut self, sample: &Sample) {
+        let Some(loads) = sample.cpu_load.as_deref() else {
+            self.earlier.clear();
+            self.switches = None;
+            self.preemptions = None;
+            return;
+        };
+        let (mut switched, mut preempted, mut paired) = (0_u64, 0_u64, false);
+        for load in loads {
+            if let Ok(at) = self.earlier.binary_search_by_key(&load.cpu, |cpu| cpu.cpu) {
+                let before = self.earlier[at];
+                switched = switched.saturating_add(load.switches.saturating_sub(before.switches));
+                preempted =
+                    preempted.saturating_add(load.preemptions.saturating_sub(before.preemptions));
+                paired = true;
+            }
+        }
+        let rate = |delta| paired.then(|| per_sec(delta, sample.elapsed_ns)).flatten();
+        self.switches = rate(switched);
+        self.preemptions = rate(preempted);
+        self.rates.record(self.switches.zip(self.preemptions));
+        self.earlier.clear();
+        self.earlier.extend(loads.iter().map(|load| CpuCounters {
+            cpu: load.cpu,
+            switches: load.switches,
+            preemptions: load.preemptions,
+        }));
+        self.earlier.sort_unstable_by_key(|cpu| cpu.cpu);
+    }
+
+    /// The last interval's dispatches a second, or `None` before two samples
+    /// have measured one.
+    #[must_use]
+    pub const fn switches_per_sec(&self) -> Option<u64> {
+        self.switches
+    }
+
+    /// The last interval's timer preemptions a second, likewise.
+    #[must_use]
+    pub const fn preemptions_per_sec(&self) -> Option<u64> {
+        self.preemptions
+    }
+
+    /// Both rates' history, dispatches the primary direction, drawn against
+    /// the least power of two seating the window's peak and
+    /// [`SCHEDULER_TRACE_FLOOR`].
+    #[must_use]
+    pub fn trace(&self) -> RateTrace {
+        self.rates.trace_floored(SCHEDULER_TRACE_FLOOR)
+    }
 }
 
 /// The rolling instrument state the panel's resource rows need that no single
@@ -1050,6 +1149,8 @@ pub struct RollingMeters {
     /// The per-core and per-device readings the Resources rail and its panes
     /// trace, keyed on each subject's own identity.
     pub devices: DeviceMeters,
+    /// The scheduler's dispatch and preemption rates and their history.
+    pub scheduler: SchedulerMeters,
 }
 
 impl RollingMeters {
@@ -1062,6 +1163,7 @@ impl RollingMeters {
             faults: FaultClock::new(),
             pressure: PressureClock::new(),
             devices: DeviceMeters::new(),
+            scheduler: SchedulerMeters::new(),
         }
     }
 
@@ -1080,6 +1182,7 @@ impl RollingMeters {
         self.system.record(sample, hysteresis);
         self.tasks.record(sample);
         self.devices.record_cores(sample);
+        self.scheduler.record(sample);
         self.faults.record(sample, &session.seat);
         let now = sample.uptime.map(|uptime| uptime.since_boot);
         self.pressure.record(

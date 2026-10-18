@@ -1290,11 +1290,19 @@ fn rebuilding_a_report_never_advances_a_trace() {
         cpu_busy_permille: Some(180),
         net_facts: Some(alloc::vec![iface("eth0")]),
         gpu_stats: Some(alloc::vec![graphics_device()]),
+        cpu_load: Some(alloc::vec![load(0, 1_000, 10)]),
         elapsed_ns: Some(1_000_000_000),
         ..permitted()
     };
-    // One sample, then a handful of rebuilds as reports would drive.
+    // Two samples, so the scheduler's trace holds a point, then a handful of
+    // rebuilds as reports would drive.
     meters.record(&sample, Hysteresis::new(), &SessionReport::HEALTHY);
+    let later = Sample {
+        cpu_load: Some(alloc::vec![load(0, 3_000, 30)]),
+        ..sample.clone()
+    };
+    meters.record(&later, Hysteresis::new(), &SessionReport::HEALTHY);
+    let sample = later;
     let after_fold = (
         device(
             &build_resource_report(
@@ -1310,6 +1318,12 @@ fn rebuilding_a_report_never_advances_a_trace() {
         .clone(),
         meters.system.cpu_history().len(),
         meters.system.memory_history().len(),
+        meters.scheduler.trace(),
+    );
+    assert_eq!(
+        after_fold.3.primary.len(),
+        1,
+        "the fixture graphs the scheduler"
     );
     for _ in 0..5 {
         let report = build_resource_report(
@@ -1324,6 +1338,7 @@ fn rebuilding_a_report_never_advances_a_trace() {
                 device(&report, DeviceId::Graphics).trend.clone(),
                 meters.system.cpu_history().len(),
                 meters.system.memory_history().len(),
+                meters.scheduler.trace(),
             ),
             after_fold,
             "a rebuild advanced a trace"
@@ -1886,4 +1901,117 @@ fn the_audio_pane_states_its_devices_and_streams() {
     let shown = format!("{:?}", audio.blocks);
     assert!(shown.contains("the sound devices"), "{shown}");
     assert!(shown.contains("the sound streams"), "{shown}");
+}
+
+/// A CPU's scheduler counters as a sample carries them.
+fn load(cpu: u32, switches: u64, preemptions: u64) -> tairix_abi::sysinfo::CpuLoadRecord {
+    tairix_abi::sysinfo::CpuLoadRecord {
+        cpu,
+        switches,
+        preemptions,
+        ..tairix_abi::sysinfo::CpuLoadRecord::default()
+    }
+}
+
+/// A sample one second after the last carrying `loads`.
+fn loads_sample(loads: Vec<tairix_abi::sysinfo::CpuLoadRecord>) -> Sample {
+    Sample {
+        cpu_load: Some(loads),
+        elapsed_ns: Some(1_000_000_000),
+        ..permitted()
+    }
+}
+
+/// The scheduler's figures are rates — the counters' growth over the
+/// sample's own interval, summed over the CPUs — never totals since boot,
+/// and the pane graphs them as one duplex trace.
+#[test]
+fn context_switches_and_preemptions_are_rates_graphed_in_the_cpu_pane() {
+    let mut meters = RollingMeters::new();
+    let first = folded_report(
+        &loads_sample(alloc::vec![load(0, 10_000, 400), load(1, 20_000, 600)]),
+        &mut meters,
+        &SessionReport::HEALTHY,
+    );
+    let cpu = device(&first, DeviceId::Cpu);
+    assert_eq!(
+        fact(cpu, "Context switches"),
+        &Reading::Absent(Unmeasured::Unavailable),
+        "one sample measures no interval"
+    );
+    let second = folded_report(
+        &loads_sample(alloc::vec![load(0, 10_900, 430), load(1, 21_500, 650)]),
+        &mut meters,
+        &SessionReport::HEALTHY,
+    );
+    let cpu = device(&second, DeviceId::Cpu);
+    assert_eq!(fact(cpu, "Context switches"), &Reading::measured("2400 /s"));
+    assert_eq!(
+        fact(cpu, "Involuntary preemptions"),
+        &Reading::measured("80 /s")
+    );
+    let trend = cpu
+        .blocks
+        .iter()
+        .find_map(|block| match &block.body {
+            BlockBody::Trend { trace, .. } => Some(trace),
+            _ => None,
+        })
+        .expect("the pane graphs the scheduler's rates");
+    assert_eq!(
+        series_lengths(trend),
+        (1, Some(1)),
+        "one interval, one point each"
+    );
+    assert_eq!(
+        series_roles(trend),
+        (Some(SignalRole::Cpu), Some(SignalRole::Workload))
+    );
+}
+
+/// Each CPU deltas against its own last reading: one that left or joined
+/// between samples contributes nothing, and one whose counter went backwards
+/// contributes nought rather than cancelling another's progress.
+#[test]
+fn scheduler_rates_follow_each_cpu_by_its_index() {
+    let mut meters = RollingMeters::new();
+    for loads in [
+        alloc::vec![load(0, 1_000, 100), load(1, 5_000, 500)],
+        alloc::vec![load(1, 5_300, 520), load(2, 9_999, 999), load(0, 900, 150)],
+    ] {
+        meters.record(
+            &loads_sample(loads),
+            Hysteresis::new(),
+            &SessionReport::HEALTHY,
+        );
+    }
+    assert_eq!(meters.scheduler.switches_per_sec(), Some(300));
+    assert_eq!(meters.scheduler.preemptions_per_sec(), Some(70));
+
+    // A sample without the counters breaks the series: the next one to carry
+    // them is a first sample again.
+    meters.record(&permitted(), Hysteresis::new(), &SessionReport::HEALTHY);
+    assert_eq!(meters.scheduler.switches_per_sec(), None);
+    meters.record(
+        &loads_sample(alloc::vec![load(0, 2_000, 200)]),
+        Hysteresis::new(),
+        &SessionReport::HEALTHY,
+    );
+    assert_eq!(meters.scheduler.switches_per_sec(), None);
+}
+
+/// Without the scheduler's scope the rates wear the refusal and the trend
+/// states its absence, never a nought.
+#[test]
+fn unpermitted_scheduler_rates_are_stated_rather_than_zeroed() {
+    let report = report_of(&Sample::default());
+    let cpu = device(&report, DeviceId::Cpu);
+    assert_eq!(
+        fact(cpu, "Context switches"),
+        &Reading::Absent(Unmeasured::NotPermitted)
+    );
+    assert!(cpu.blocks.iter().any(|block| matches!(
+        &block.body,
+        BlockBody::Absence(statement) if statement.contains("scheduler")
+    )));
 }

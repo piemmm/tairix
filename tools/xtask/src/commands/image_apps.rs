@@ -94,6 +94,39 @@ pub struct AppStoreFile {
     pub bytes: Vec<u8>,
 }
 
+impl AppStoreFile {
+    /// The file at the absolute `/System` path `path`, holding `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// A string naming `path` when it is not on the read-only `/System`
+    /// volume: outside `/System`, under a subtree the writable root volume
+    /// mounts over it at runtime, or spelled with an empty, `.` or `..`
+    /// component.
+    fn at(path: &str, bytes: Vec<u8>) -> Result<Self, String> {
+        let not_on_volume = || format!("image: {path} is not on the /System volume");
+        let within = path.strip_prefix("/System/").ok_or_else(not_on_volume)?;
+        let components: Vec<&str> = within.split('/').collect();
+        let shadowed = components
+            .first()
+            .is_some_and(|top| tairix_mkimage::rootfs::SYSTEM_MOUNT_EXCEPTIONS.contains(top));
+        if shadowed
+            || components
+                .iter()
+                .any(|part| matches!(*part, "" | "." | ".."))
+        {
+            return Err(not_on_volume());
+        }
+        Ok(Self {
+            components: components
+                .into_iter()
+                .map(|part| part.as_bytes().to_vec())
+                .collect(),
+            bytes,
+        })
+    }
+}
+
 /// Build every discovered application bundle for `arch`'s image: walk
 /// the userland crate roots for `AppInfo.toml` manifest sources, compile
 /// each crate's `Run` binary for that target, and compose its signed
@@ -170,6 +203,7 @@ pub fn app_store_files(
             // The `/System/Fonts` family store the `fontd` service discovers
             // ships on every image alongside the bundles.
             files.extend(system_font_files(ctx)?);
+            files.push(zone_store_file()?);
             Ok(files)
         })
         .as_ref()
@@ -221,16 +255,25 @@ fn discovery_grant_store(bundles: &[BuiltAppBundle]) -> Result<AppStoreFile, Str
             );
         }
     }
-    let path = DISCOVERY_POLICY_PATH
-        .strip_prefix("/System/")
-        .ok_or("image: the grant store is not on the /System volume")?;
-    Ok(AppStoreFile {
-        components: path
-            .split('/')
-            .map(|part| part.as_bytes().to_vec())
-            .collect(),
-        bytes: text.into_bytes(),
-    })
+    AppStoreFile::at(DISCOVERY_POLICY_PATH, text.into_bytes())
+}
+
+/// The civil-time zone store every clock reads (`plans/TIMEZONES.md`),
+/// compiled from the vendored IANA and CLDR sources for this image.
+///
+/// # Errors
+///
+/// A string naming why the store would not compile; the image is not built
+/// rather than shipped reading every clock in UTC.
+fn zone_store_file() -> Result<AppStoreFile, String> {
+    // Every image of a run plants the same bytes, so they are compiled once.
+    static STORE: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+    let bytes = STORE
+        .get_or_init(|| {
+            tairix_tzcompile::compile().map_err(|error| format!("image: the zone store: {error}"))
+        })
+        .clone()?;
+    AppStoreFile::at(tairix_tz::STORE_PATH, bytes)
 }
 
 /// The `/System/Fonts` store the image plants: every family directory under
@@ -587,16 +630,9 @@ pub fn audio_store_files(
 
 /// The shared signal, as the FLAC file the `play` vertical is run on.
 fn signal_file() -> Result<AppStoreFile, String> {
-    let path = tairix_test_audio_wire::SIGNAL_FILE;
-    let within = path
-        .strip_prefix("/System/")
-        .ok_or_else(|| format!("image: the signal file {path} is not on /System"))?;
     let bytes = tairix_test_audio_wire::signal_flac()
         .map_err(|err| format!("image: the signal file could not be encoded: {err:?}"))?;
-    Ok(AppStoreFile {
-        components: within.split('/').map(|c| c.as_bytes().to_vec()).collect(),
-        bytes,
-    })
+    AppStoreFile::at(tairix_test_audio_wire::SIGNAL_FILE, bytes)
 }
 
 /// A planted `/System/Settings/` configuration file, addressed by the ABI's
@@ -1245,7 +1281,7 @@ fn verify_vector_master(
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_icon_master, verify_library_icon};
+    use super::{verify_icon_master, verify_library_icon, zone_store_file, AppStoreFile};
     use tairix_sandbox::imagerender::{MAX_DESTINATION_HEIGHT, MAX_DESTINATION_WIDTH};
     use tairix_svg::font::NoFonts;
 
@@ -1289,6 +1325,37 @@ mod tests {
             .collect();
         let picture = tairix_image::Picture::rgba(width, height, rgba).expect("a picture");
         tairix_image::encode_png(&picture).expect("it encodes")
+    }
+
+    #[test]
+    fn every_image_plants_a_zone_store_its_reader_accepts_where_it_reads_it() {
+        let planted = zone_store_file().expect("the store compiles");
+        assert_eq!(
+            planted.components,
+            [b"Zoneinfo".to_vec(), b"zones.tzx".to_vec()]
+        );
+        let info = tairix_tz::ZoneInfo::parse(&planted.bytes).expect("the reader accepts it");
+        assert_eq!(info.default_zone().name(), "Europe/London");
+    }
+
+    #[test]
+    fn a_planted_file_must_be_on_the_system_volume() {
+        let planted = AppStoreFile::at("/System/Zoneinfo/x", vec![1]).expect("on the volume");
+        assert_eq!(planted.components, [b"Zoneinfo".to_vec(), b"x".to_vec()]);
+        // The signed policies live on the read-only volume beside the keys.
+        assert!(AppStoreFile::at("/System/Security/Policy/x", Vec::new()).is_ok());
+        for path in [
+            "/Users/x",
+            "System/x",
+            "/System/Logs/x",
+            "/System/Settings/x",
+            "/System/",
+            "/System//x",
+            "/System/a/./x",
+            "/System/a/../Logs/x",
+        ] {
+            assert!(AppStoreFile::at(path, Vec::new()).is_err(), "{path}");
+        }
     }
 
     /// A bundle that declares no library icon has nothing to verify.

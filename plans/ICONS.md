@@ -377,17 +377,20 @@ waits on the same witness, so the runner's unverified-dump hold puts the
 baseline on disk before any click can change the screen it read
 (`plans/OPEN-DEFECTS.md` D138).
 
-## 10. I9 — one surface still rasterises its glyphs per frame
+## 10. I9 — two surfaces still rasterise their glyphs per frame
 
 The glyph tier is cached and the draw path blits, but a control only benefits
-where its owner holds a cache to resolve through. One surface holds none, so
-its `paint_icon_slot` calls still take the inline path and re-resolve coverage
-every frame:
+where its owner holds a cache to resolve through. Two surfaces hold none, so
+their glyphs are still resolved on every paint:
 
 - **The widgets gallery** (`userland/apps/widgets`) is a demo of the control
   family; it draws each control once per frame with `NoArtwork` deliberately,
   and is not a surface a user scrolls. It needs a cache only if the gallery is
   ever meant to demonstrate the cached path.
+- **The music player** (`userland/apps/music`) paints its transport buttons
+  with no picture, and its volume and empty-cover glyphs through `glyph_mask`,
+  on every paint. It needs an `ArtworkCache` held by its window, as the
+  Switchboard holds one, threaded to `paint_transport` and `paint_art`.
 
 The Switchboard now holds one (`userland/gui/switchboard/src/run.rs`), built
 through the shared `artwork_cache` constructor with its own label, the primary
@@ -557,7 +560,15 @@ badge kind of its own too, never its category's borrowed.
   to it.
 - **The symbol is also the glyph.** `glyph_mask` of a category or pane — what
   a button or menu row draws in its own colour — is the symbol alone, never a
-  tinted plate. A category never draws the tray reading it stands beside
+  tinted plate.
+- **A glyph is fitted to the pixel grid of its side; a badge is not.**
+  `glyph_mask` strokes a symbol a whole number of pixels wide and moves every
+  axis-aligned edge and contour extreme of a symbol or a polygon glyph onto its
+  grid, the points between following by interpolation (`fit::GridFit`), so a
+  menu row's glyph is as crisp as its label. A symmetric glyph stays symmetric,
+  half a pixel aside where a one-pixel middle stroke meets an even side. A
+  badge keeps its exact-side unfitted symbol, since only that keeps it
+  centred on its plate at every side. A category never draws the tray reading it stands beside
   (`Network`, `Volume`, `Bell`) or the single thing it gathers (`User`,
   `Disk`), and the About pane's `i` in a ring is its own kind rather than the
   viewer's `Info` command.

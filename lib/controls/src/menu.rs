@@ -8,7 +8,9 @@
 //! trailing shortcut, and submenu marker. The [`Menu`] owns keyboard
 //! navigation (Up/Down move the current row, Enter/Space activate it, Escape
 //! dismisses), pointer hover/click, and emits a typed [`MenuAction`]; it
-//! performs no privileged work — the owner enforces authority. Every colour,
+//! performs no privileged work — the owner enforces authority. A plate too
+//! short for every row shows a window of whole rows that follows the
+//! highlight, scrolls under the wheel, and marks where it stands. Every colour,
 //! metric, radius, and *face* resolves from the active [`Theme`]
 //! and [`Scale`]; nothing here restates a recipe the shared `crate::paint`
 //! core already owns.
@@ -23,6 +25,7 @@ use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuIconView, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView,
@@ -40,10 +43,11 @@ use crate::about::AboutSheet;
 use crate::damage;
 use crate::paint::{
     ground_fill, inset, paint_bead, paint_chevron, paint_icon_slot, paint_run, paint_surface_plate,
-    plate_border, plate_corner, resolve_bead, role_font, run_width, surface_rect,
-    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, PlateInterior,
-    FULL_COLOUR,
+    paint_tick, plate_border, plate_corner, resolve_bead, role_font, run_width, surface_rect,
+    text_row_height, to_i32, withheld, ArtworkTone, ChevronDir, ChromeLayer, Measured,
+    PlateInterior,
 };
+use crate::scroll::{wheel_steps, ScrollGeometry, ScrollRange, WHEEL_STEP};
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
 
 /// The outcome of feeding input to a [`Menu`].
@@ -151,7 +155,8 @@ impl PlatePlacement {
 /// when that would leave `viewport` (and the opposite side would not), and is
 /// finally slid along the cross axis and clamped inside `viewport` by the
 /// shared [`Rect::clamped_onto`]. Its near edge on the cross axis aligns with
-/// the anchor's, so a submenu hangs at its parent row's top.
+/// the anchor's; a chain lifts a child's anchor by the child's band so the
+/// child's first row, not its band, lies beside its parent row.
 ///
 /// When neither side has room the roomier one wins, so an oversized plate is
 /// placed beside its anchor rather than over it. A degenerate (zero-sized)
@@ -484,10 +489,15 @@ impl MenuItem {
         }
     }
 
-    /// Paint the row's picture into `slot`: its artwork as it is, else its
+    /// Paint the row's picture into `slot`: its artwork in `tone`, else its
     /// glyph in `ink` — the retained mask, or one rasterised here for an owner
     /// that resolved none. Answers whether there was a picture to paint.
-    fn paint_picture(&self, surface: &mut Surface, slot: (u32, u32, u32), ink: Color) -> bool {
+    fn paint_picture(
+        &self,
+        surface: &mut Surface,
+        slot: (u32, u32, u32),
+        (ink, tone): (Color, ArtworkTone),
+    ) -> bool {
         let (x, y, side) = slot;
         if let Some(art) = self.artwork.as_ref() {
             paint_icon_slot(
@@ -496,7 +506,7 @@ impl MenuItem {
                 IconKind::AppBundle,
                 ink,
                 Some(IconPicture::coloured(art)),
-                FULL_COLOUR,
+                tone,
             );
             return true;
         }
@@ -646,13 +656,21 @@ impl MenuItem {
             let iy = y + (h.saturating_sub(icon_slot)) / 2;
             let mark_ink = Color::from(label_color);
             let glyph_ink = Color::from(self.glyph_color(palette, current, label_color));
+            // A row that cannot act mutes its artwork as it mutes its label: a
+            // full-colour picture would still read as something to choose.
+            let tone = if disposition == ControlDisposition::DisabledByState {
+                ArtworkTone::disabled(palette, Color::from(palette.surface_raised))
+            } else {
+                ArtworkTone::FULL
+            };
+            let picture = (glyph_ink, tone);
             if leading.gutter {
                 paint_menu_mark(surface, (cursor, iy, icon_slot), self.mark, mark_ink);
                 let at = cursor
                     .saturating_add(icon_slot)
                     .saturating_add(Leading::gap(pad));
-                self.paint_picture(surface, (at, iy, icon_slot), glyph_ink);
-            } else if !self.paint_picture(surface, (cursor, iy, icon_slot), glyph_ink) {
+                self.paint_picture(surface, (at, iy, icon_slot), picture);
+            } else if !self.paint_picture(surface, (cursor, iy, icon_slot), picture) {
                 paint_menu_mark(surface, (cursor, iy, icon_slot), self.mark, mark_ink);
             }
         }
@@ -791,20 +809,28 @@ struct RowBand {
 /// A pinned command plate carrying a column of [`MenuItem`] rows (spec §11.10).
 ///
 /// The menu owns highlight state and input: Up/Down move the current row
-/// (wrapping), Home/End jump to the ends, Enter/Space activate the current row
-/// (opening a submenu parent), and Escape dismisses. Pointer hover highlights
-/// the row under the pointer, unless the owner holds the highlight on a row
-/// ([`hold`](Self::hold)), and a primary click activates it. Every activation is a typed
-/// [`MenuAction`] the owner dispatches; the menu enforces no authority. A
-/// non-actionable row (disabled, denied, pending, failed-closed) can be
-/// highlighted — so its Authority Mark is legible and the seat can explain it
-/// on dwell — but never activates (fail closed).
+/// (wrapping), Home/End jump to the ends, Page Up/Page Down move a window's
+/// worth, Enter/Space activate the current row (opening a submenu parent), and
+/// Escape dismisses. Pointer hover highlights the row under the pointer, unless
+/// the owner holds the highlight on a row ([`hold`](Self::hold)), and a primary
+/// click activates it. Every activation is a typed [`MenuAction`] the owner
+/// dispatches; the menu enforces no authority. A non-actionable row (disabled,
+/// denied, pending, failed-closed) can be highlighted — so its Authority Mark
+/// is legible and the seat can explain it on dwell — but never activates (fail
+/// closed).
+///
+/// A plate too short for every row shows a window of whole rows: a row
+/// outside it has no rectangle, so it is neither drawn nor hit, and the
+/// keyboard's highlight brings its row into the window. The wheel scrolls the
+/// window, typing seeks a row by its label ([`seek`](Self::seek)), and a slim
+/// mark along the trailing edge shows where the window stands.
 ///
 /// Equal menus draw the same pixels, so a host may use `==` as its repaint
-/// gate: the rows, the highlighted row, and whether that highlight came from
-/// the keyboard all compare. The pointer coordinate, the pressed-row latch and
-/// the held row do not — no render path reads any of them, and the *visible*
-/// consequence of each is the highlight the same event sets.
+/// gate: the rows, the highlighted row, whether that highlight came from the
+/// keyboard, and the window's first row all compare. The pointer coordinate,
+/// the pressed-row latch, the held row, the wheel's carry and the typed prefix
+/// do not — no render path reads any of them, and the *visible* consequence of
+/// each is the highlight or window the same event sets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Menu {
     items: Vec<MenuItem>,
@@ -821,6 +847,32 @@ pub struct Menu {
     /// pointer is over: the row whose child is open, while the pointer
     /// travels to that child.
     held: RenderInvariant<Option<usize>>,
+    /// The first row a plate too short for every row shows, or `None` to open
+    /// with the highlighted row in the middle of the window.
+    first: Option<usize>,
+    /// The part of a wheel turn short of a whole row, carried to the next.
+    wheel_carry: RenderInvariant<i64>,
+    /// What the keyboard has typed to seek a row by.
+    seek: RenderInvariant<Seek>,
+    /// The preferred width, remembered with the face, rim, inset and icon
+    /// side it was measured at: a long list's owner asks on every event while
+    /// it is open, and measuring is a pass over every label.
+    width: Measured<(BitmapFont, u32, u32, u32)>,
+}
+
+/// How long after one key the next still extends the label prefix being
+/// sought, in nanoseconds; a slower key starts a new one.
+pub const SEEK_PAUSE_NS: u64 = 1_000_000_000;
+
+/// The most characters a sought prefix holds: a bound on typed input, past
+/// any label a reader would type out.
+const SEEK_MAX_CHARS: usize = 32;
+
+/// The label prefix the keyboard is seeking, and when its last key came.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Seek {
+    typed: String,
+    last_ns: Option<u64>,
 }
 
 impl Menu {
@@ -834,6 +886,10 @@ impl Menu {
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
             held: RenderInvariant::new(None),
+            first: None,
+            wheel_carry: RenderInvariant::new(0),
+            seek: RenderInvariant::new(Seek::default()),
+            width: Measured::default(),
         }
     }
 
@@ -855,6 +911,7 @@ impl Menu {
 
     /// Mutable access to the menu's rows (e.g. to update a row's state).
     pub fn items_mut(&mut self) -> &mut [MenuItem] {
+        self.width = Measured::default();
         &mut self.items
     }
 
@@ -900,10 +957,13 @@ impl Menu {
     /// [`set_current`](Self::set_current) is the interactive move and reports the
     /// two rows the highlight moves between. A rebuild has no layout to resolve a
     /// row against and nothing to report against either, so it says so here
-    /// rather than passing a scale and theme it does not have.
+    /// rather than passing a scale and theme it does not have. A plate too
+    /// short for every row opens with the adopted row in the middle of it.
     pub fn adopt_current(&mut self, index: Option<usize>) {
         self.current = self.on_menu(index);
         self.keyboard_focus = self.current.is_some();
+        self.first = None;
+        *self.seek = Seek::default();
     }
 
     /// Keep the pointer's highlight on `row` whatever row the pointer is over,
@@ -949,9 +1009,10 @@ impl Menu {
         index.filter(|&i| i < self.items.len())
     }
 
-    /// The scaled height of one menu row.
+    /// The scaled height of one menu row: a row, not a framed plate, so a
+    /// heavier contrast's thicker rim and ring take nothing from it.
     fn row_height(scale: Scale, theme: &Theme) -> u32 {
-        text_plate_height(theme, scale, TextRole::Body)
+        text_row_height(theme, scale, TextRole::Body)
     }
 
     /// The side, in physical pixels, an owner must rasterise a row's artwork
@@ -1045,6 +1106,208 @@ impl Menu {
             .map_or(0, |band| band.top.saturating_add(band.height))
     }
 
+    /// The rows a rows area `room` tall shows, laid out from its top: the one
+    /// definition painting, hit-testing and the highlight read, so a row
+    /// nothing draws can never be hit or highlighted unseen.
+    ///
+    /// The divider above the first row shown is not drawn: at the rim it
+    /// would read as a second rim, as it would above the menu's first row.
+    fn window(&self, room: u32, scale: Scale, theme: &Theme) -> impl Iterator<Item = RowBand> + '_ {
+        let first = self.first_shown(room, scale, theme);
+        let base = self
+            .layout(scale, theme)
+            .nth(first)
+            .map_or(0, |band| band.top);
+        self.layout(scale, theme)
+            .skip(first)
+            .map(move |band| RowBand {
+                divider: if band.index == first { 0 } else { band.divider },
+                top: band.top.saturating_sub(base),
+                ..band
+            })
+            .take_while(move |band| band.top.saturating_add(band.height) <= room)
+    }
+
+    /// The first row a rows area `room` tall shows: the first of all while
+    /// every row fits, else the window's own first row kept in range, else
+    /// the highlighted row's neighbourhood with it in the middle.
+    fn first_shown(&self, room: u32, scale: Scale, theme: &Theme) -> usize {
+        let last = self.last_first(room, scale, theme);
+        match (self.first, self.current) {
+            (Some(first), _) => first.min(last),
+            (None, Some(current)) => {
+                let Some(row) = self.layout(scale, theme).nth(current) else {
+                    return 0;
+                };
+                let middle = row.top.saturating_add(row.height / 2);
+                let from = middle.saturating_sub(room / 2);
+                self.first_from(from, scale, theme).min(last)
+            }
+            (None, None) => 0,
+        }
+    }
+
+    /// The last row a window may start at: the first from which every row to
+    /// the end fits in `room`.
+    fn last_first(&self, room: u32, scale: Scale, theme: &Theme) -> usize {
+        let end = self.content_height(scale, theme);
+        self.layout(scale, theme)
+            .find(|band| end.saturating_sub(band.top) <= room)
+            .map_or(self.items.len().saturating_sub(1), |band| band.index)
+    }
+
+    /// The first row whose top is at or below `top`, in the unscrolled layout.
+    fn first_from(&self, top: u32, scale: Scale, theme: &Theme) -> usize {
+        self.layout(scale, theme)
+            .find(|band| band.top >= top)
+            .map_or(self.items.len().saturating_sub(1), |band| band.index)
+    }
+
+    /// Bring row `index` into the window of the plate at `bounds` by the least
+    /// movement, answering whether the window moved.
+    fn reveal(&mut self, index: usize, bounds: Rect, scale: Scale, theme: &Theme) -> bool {
+        let Some((_, _, _, room)) = Self::inner(bounds, scale, theme) else {
+            return false;
+        };
+        let start = self.first_shown(room, scale, theme);
+        let (Some(row), Some(base)) = (
+            self.layout(scale, theme).nth(index),
+            self.layout(scale, theme).nth(start),
+        ) else {
+            return false;
+        };
+        let bottom = row.top.saturating_add(row.height);
+        if index >= start && bottom.saturating_sub(base.top) <= room {
+            return false;
+        }
+        // A row taller than the plate is shown from its own top, cut.
+        let first = if index < start {
+            index
+        } else {
+            self.first_from(bottom.saturating_sub(room), scale, theme)
+                .min(index)
+        };
+        self.first = Some(first);
+        first != start
+    }
+
+    /// The rows area of the plate at `bounds`: what every row the window
+    /// shows lies inside, and what moves when the window does.
+    fn rows_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Rect {
+        Self::inner(bounds, scale, theme).map_or(Rect::EMPTY, |(x, y, w, h)| {
+            Rect::new(to_i32(x), to_i32(y), w, h)
+        })
+    }
+
+    /// How far Page Up and Page Down move the highlight: a window's worth less
+    /// one, so the row it left stays in view, and never less than a row.
+    fn page(&self, bounds: Rect, scale: Scale, theme: &Theme) -> usize {
+        let room = Self::inner(bounds, scale, theme).map_or(0, |(_, _, _, h)| h);
+        self.window(room, scale, theme)
+            .count()
+            .saturating_sub(1)
+            .max(1)
+    }
+
+    /// Scroll the window by `units` of wheel turn while the pointer is over
+    /// the plate at `bounds`, re-deriving the hover from the rows that now lie
+    /// under it.
+    ///
+    /// A detent moves the one distance every view moves by ([`WHEEL_STEP`]),
+    /// in the nearest whole number of rows and never less than one.
+    fn wheel(
+        &mut self,
+        units: i32,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let Some((_, _, _, room)) = Self::inner(bounds, scale, theme) else {
+            return;
+        };
+        if !bounds.contains(*self.pointer) || self.content_height(scale, theme) <= room {
+            return;
+        }
+        let row = Self::row_height(scale, theme).max(1);
+        let step = scale.scale_length(WHEEL_STEP);
+        let per_detent = u64::from(step.saturating_add(row / 2) / row).max(1);
+        let rows = wheel_steps(units, per_detent, &mut self.wheel_carry);
+        let start = self.first_shown(room, scale, theme);
+        let last = self.last_first(room, scale, theme);
+        let moved = i64::try_from(start)
+            .unwrap_or(i64::MAX)
+            .saturating_add(rows);
+        let first = usize::try_from(moved.max(0))
+            .unwrap_or(usize::MAX)
+            .min(last);
+        if first == start {
+            return;
+        }
+        self.first = Some(first);
+        damage.add(Self::rows_rect(bounds, scale, theme));
+        let over = self.row_at(bounds, scale, theme, *self.pointer);
+        self.hover(over, bounds, scale, theme, damage);
+    }
+
+    /// Seek the row whose label begins with what has been typed, `typed`
+    /// arriving at monotonic `at_ns`, and highlight it from the keyboard;
+    /// answers whether a row was found.
+    ///
+    /// A key within [`SEEK_PAUSE_NS`] of the last extends the prefix, so
+    /// `l`, `o`, `n` finds *London*; a slower one starts afresh. The same
+    /// letter typed again steps to the next row it begins, as a lone letter
+    /// does from the highlighted row. Letters compare without case.
+    pub fn seek(
+        &mut self,
+        typed: char,
+        at_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        if self.items.is_empty() || typed.is_control() {
+            return false;
+        }
+        let fresh = self
+            .seek
+            .last_ns
+            .is_none_or(|last| at_ns.saturating_sub(last) > SEEK_PAUSE_NS);
+        if fresh {
+            self.seek.typed.clear();
+        }
+        self.seek.last_ns = Some(at_ns);
+        if self.seek.typed.chars().count() < SEEK_MAX_CHARS {
+            self.seek.typed.push(typed);
+        }
+        let repeated = self.seek.typed.chars().all(|ch| ch == typed);
+        let count = self.items.len();
+        let mut lone = [0u8; 4];
+        // A lone or repeated letter steps on from the highlighted row; a
+        // longer prefix may still be the highlighted row's own.
+        let (from, prefix) = if repeated {
+            (
+                self.current.map_or(0, |i| i + 1),
+                &*typed.encode_utf8(&mut lone),
+            )
+        } else {
+            (self.current.unwrap_or(0), self.seek.typed.as_str())
+        };
+        let found = (0..count)
+            .map(|offset| (from + offset) % count)
+            .find(|&index| {
+                self.items
+                    .get(index)
+                    .is_some_and(|item| starts_with_folded(&item.label, prefix))
+            });
+        let Some(index) = found else {
+            return false;
+        };
+        self.highlight(Some(index), true, bounds, scale, theme, damage);
+        true
+    }
+
     /// The menu's preferred height for the active theme (plate rims plus every
     /// row and every group divider), so the owner can size the popup surface
     /// exactly.
@@ -1062,7 +1325,16 @@ impl Menu {
         let font = role_font(theme, scale, TextRole::Body);
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let leading = Leading::of(&self.items).width(Self::icon_side(scale, theme), pad);
+        let side = Self::icon_side(scale, theme);
+        self.width.get_or((font, border, pad, side), || {
+            self.measure_width(font, border, pad, side)
+        })
+    }
+
+    /// The widest row's width in `font`, between rims `border` thick, with
+    /// `pad` around each part and icons `side` square.
+    fn measure_width(&self, font: BitmapFont, border: u32, pad: u32, side: u32) -> u32 {
+        let leading = Leading::of(&self.items).width(side, pad);
         let mut widest = 0;
         for item in &self.items {
             let label_w = font.text_width(&item.label);
@@ -1132,13 +1404,14 @@ impl Menu {
             return None;
         }
         let rel = u32::try_from(py - to_i32(iy)).ok()?;
-        self.layout(scale, theme)
+        self.window(ih, scale, theme)
             .find(|band| rel >= band.top && rel < band.top.saturating_add(band.height))
             .map(|band| band.index)
     }
 
     /// The surface rectangle row `index` occupies for the given bounds, or
-    /// `None` when the index is out of range or the plate has no room for rows.
+    /// `None` when the index is out of range or outside the rows the plate
+    /// shows.
     ///
     /// The forward mirror of [`row_at`](Self::row_at) over the same inner
     /// geometry, so a caller that must aim *at* a row — a test harness clicking
@@ -1153,8 +1426,10 @@ impl Menu {
         scale: Scale,
         theme: &Theme,
     ) -> Option<Rect> {
-        let (ix, iy, iw, _ih) = Self::inner(bounds, scale, theme)?;
-        let band = self.layout(scale, theme).nth(index)?;
+        let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
+        let band = self
+            .window(ih, scale, theme)
+            .find(|band| band.index == index)?;
         Some(Rect::new(
             to_i32(ix),
             to_i32(iy).saturating_add(to_i32(band.top)),
@@ -1248,11 +1523,8 @@ impl Menu {
         let gap = Self::divider_gap(scale, theme);
         let inset_x = Self::divider_inset(scale, theme).min(iw / 2);
         let leading = Leading::of(&self.items);
-        for band in self.layout(scale, theme) {
+        for band in self.window(ih, scale, theme) {
             let row_top = iy.saturating_add(band.top);
-            if row_top.saturating_add(band.height) > iy + ih {
-                break;
-            }
             if band.divider > 0 {
                 surface.fill_rect(
                     ix.saturating_add(inset_x),
@@ -1281,6 +1553,45 @@ impl Menu {
                 font,
             );
         }
+        self.paint_position(surface, (ix, iy, iw, ih), scale, theme);
+    }
+
+    /// Mark where the window stands along the trailing edge of the rows area
+    /// `(ix, iy, iw, ih)`, when it shows fewer rows than the menu has.
+    ///
+    /// Only a mark: the rows beneath it stay where the pointer finds them.
+    fn paint_position(
+        &self,
+        surface: &mut Surface,
+        (ix, iy, iw, ih): (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let first = self.first_shown(ih, scale, theme);
+        let shown = self.window(ih, scale, theme).count();
+        if shown >= self.items.len() {
+            return;
+        }
+        let range = ScrollRange::new(
+            u64::try_from(self.items.len()).unwrap_or(u64::MAX),
+            u64::try_from(shown).unwrap_or(0),
+            u64::try_from(first).unwrap_or(0),
+        );
+        let min_thumb = scale.scale_length(theme.metrics().min_thumb_length).max(1);
+        let thumb = ScrollGeometry::new(range, ih, min_thumb).thumb();
+        let breadth = scale.scale_length(POSITION_BREADTH).max(2);
+        let gap = scale.scale_length(POSITION_GAP).max(1);
+        let x = ix
+            .saturating_add(iw)
+            .saturating_sub(breadth.saturating_add(gap));
+        surface.fill_round_rect(
+            x,
+            iy.saturating_add(thumb.start),
+            breadth,
+            thumb.length,
+            breadth / 2,
+            Color::from(theme.palette().scroll_thumb),
+        );
     }
 
     /// The typed action for activating the current row, if it is actionable;
@@ -1302,6 +1613,11 @@ impl Menu {
     /// Move the highlight to `next`, `keyboard` when the keyboard put it there,
     /// reporting the row it left, the row it arrives on, and — when only the
     /// ring changed — that one row.
+    ///
+    /// A row outside the window is brought into it first, which moves every
+    /// row shown, so the whole rows area is reported then. The window a plate
+    /// opened with is held from the first move on, so moving the highlight
+    /// within it never moves the rows.
     fn highlight(
         &mut self,
         next: Option<usize>,
@@ -1311,6 +1627,18 @@ impl Menu {
         theme: &Theme,
         damage: &mut Region,
     ) {
+        if self.first.is_none() {
+            let room = Self::inner(bounds, scale, theme).map_or(0, |(_, _, _, h)| h);
+            self.first = Some(self.first_shown(room, scale, theme));
+        }
+        if let Some(index) = next {
+            if self.reveal(index, bounds, scale, theme) {
+                damage.add(Self::rows_rect(bounds, scale, theme));
+                self.current = next;
+                self.keyboard_focus = keyboard;
+                return;
+            }
+        }
         if damage::move_mark(
             self.current,
             next,
@@ -1371,13 +1699,18 @@ impl Menu {
                     _ => None,
                 }
             }
+            InputEvent::PointerScrolled { dy, .. } => {
+                self.wheel(*dy, bounds, scale, theme, damage);
+                None
+            }
             _ => None,
         }
     }
 
     /// Feed a key event: Up/Down move the current row (wrapping), Home/End jump
-    /// to the ends, Enter/Space activate the current row, Right walks into its
-    /// child, and Escape dismisses.
+    /// to the ends, Page Up/Page Down move a window's worth, Enter/Space
+    /// activate the current row, Right walks into its child, and Escape
+    /// dismisses.
     ///
     /// A moved highlight reports the two rows it moved between; the keys that
     /// only activate or dismiss report nothing, because the menu itself draws
@@ -1422,6 +1755,18 @@ impl Menu {
                 self.highlight(Some(last), true, bounds, scale, theme, damage);
                 None
             }
+            Key::Named(NamedKey::PageDown) => {
+                let page = self.page(bounds, scale, theme);
+                let next = self.current.map_or(0, |i| i.saturating_add(page).min(last));
+                self.highlight(Some(next), true, bounds, scale, theme, damage);
+                None
+            }
+            Key::Named(NamedKey::PageUp) => {
+                let page = self.page(bounds, scale, theme);
+                let next = self.current.map_or(0, |i| i.saturating_sub(page));
+                self.highlight(Some(next), true, bounds, scale, theme, damage);
+                None
+            }
             Key::Named(NamedKey::Right) => {
                 let i = self.current?;
                 self.items
@@ -1436,6 +1781,21 @@ impl Menu {
     }
 }
 
+/// The logical breadth of the mark showing where a scrolled window stands.
+const POSITION_BREADTH: u32 = 4;
+
+/// The logical gap between that mark and the plate's trailing rim.
+const POSITION_GAP: u32 = 2;
+
+/// Whether `label` begins with `prefix`, letters compared without case.
+fn starts_with_folded(label: &str, prefix: &str) -> bool {
+    let mut label = label.chars().flat_map(char::to_lowercase);
+    prefix
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|ch| label.next() == Some(ch))
+}
+
 /// Paint `mark` into the `side`-pixel column at `(x, y)` in `color`.
 ///
 /// A tick reuses the shared Signal Bead check shape and a bullet the shared
@@ -1445,7 +1805,7 @@ fn paint_menu_mark(surface: &mut Surface, slot: (u32, u32, u32), mark: MenuMark,
     let (x, y, side) = slot;
     match mark {
         MenuMark::None => {}
-        MenuMark::Check => paint_bead(surface, x, y, side, color, BeadShape::Check),
+        MenuMark::Check => paint_tick(surface, (x, y, side), color),
         MenuMark::Radio => {
             // A bullet reads at about half the column, centred, so it is a
             // mark rather than a filled cell.
@@ -1483,14 +1843,22 @@ pub enum ChainChild {
     /// from the bundle's signed manifest before the chain opened, so an
     /// application cannot state an identity that is not its own.
     Info(Box<AboutSheet>),
-    /// The desktop's own one-line text field, pre-filled with this text and
-    /// answering the carried id when it is committed.
+    /// The desktop's own one-line text field, pre-filled with `initial`,
+    /// opening with `selected` of it selected, and answering `id` when it is
+    /// committed.
     ///
     /// A *presentation* child like the information panel — the desktop draws
     /// it and owns the keyboard while it is up — that additionally has an
     /// answer of its own, which is why it carries an id the row's own does
     /// not shadow.
-    Entry(AppMenuItemId, String),
+    Entry {
+        /// The id a commit answers with.
+        id: AppMenuItemId,
+        /// What the field starts out holding.
+        initial: String,
+        /// The bytes of `initial` the field opens with selected.
+        selected: Range<usize>,
+    },
 }
 
 /// One row of the model a menu chain renders.
@@ -1565,7 +1933,8 @@ impl ChainRow {
     }
 
     /// A chooseable row whose child is the desktop's own text field,
-    /// pre-filled with `initial` and answering `entry` when committed.
+    /// pre-filled with `initial`, opening with `selected` of it selected, and
+    /// answering `entry` when committed.
     ///
     /// Both answers are live: choosing the row answers `id`, committing its
     /// field answers `entry`. The two ids are distinct by the model's own
@@ -1573,14 +1942,18 @@ impl ChainRow {
     #[must_use]
     pub fn entry(
         (id, entry): (AppMenuItemId, AppMenuItemId),
-        initial: impl Into<String>,
+        (initial, selected): (impl Into<String>, Range<usize>),
         symbol: AppMenuSymbol,
         item: MenuItem,
     ) -> Self {
         Self {
             parent: None,
             id: Some(id),
-            child: ChainChild::Entry(entry, initial.into()),
+            child: ChainChild::Entry {
+                id: entry,
+                initial: initial.into(),
+                selected,
+            },
             icon: None,
             tip: None,
             item: item.with_submenu(true).with_icon(menu_symbol_icon(symbol)),
@@ -1847,9 +2220,12 @@ fn wire_row(
             // A declared field *is* the row's child, and the model forbids a
             // row holding both, so the two cases cannot overlap.
             let mut row = match item.entry {
-                Some(entry) => {
-                    ChainRow::entry((item.id, entry.id), entry.initial, item.symbol, built)
-                }
+                Some(entry) => ChainRow::entry(
+                    (item.id, entry.id),
+                    (entry.initial, entry.selected.range()),
+                    item.symbol,
+                    built,
+                ),
                 None if opens_children => {
                     ChainRow::item(item.id, item.symbol, built).opening_a_plate()
                 }

@@ -653,20 +653,21 @@ fn item_id(index: usize) -> Result<AppMenuItemId, Errno> {
     AppMenuItemId::for_index(index).ok_or(Errno::OutOfRange)
 }
 
-/// What the context menu offers beyond its commands: the selection's current
-/// name, the applications that can open it, and the documents New ▸ can make.
+/// What the context menu offers beyond its commands: the chosen entry, the
+/// applications that can open it, and the documents New ▸ can make.
 ///
-/// All three are things the *caller* already holds — the browser's selected
-/// name, and a bundle scan it keeps warm on a worker — so building the menu
+/// All three are things the *caller* already holds — the browser's chosen
+/// entry, and a bundle scan it keeps warm on a worker — so building the menu
 /// reads no file and a right-click waits on nothing. Any may be empty: the
 /// selection's row then says only what is selected, the Rename row opens only
 /// the in-place editor, the "Open With…" row carries no chevron and opens the
 /// chooser, and New ▸ offers only Folder.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextQuick<'a> {
-    /// The selected entry's current name, which the selection's row names and
-    /// the Rename row's field starts out holding.
-    pub name: &'a str,
+    /// The one chosen entry, whose name the selection's row names and the
+    /// Rename row's field starts out holding, with its
+    /// [`rename_selection`](crate::rename_selection) selected.
+    pub chosen: Option<&'a Entry>,
     /// The applications that can open the selection, highest-ranked first
     /// ([`quick_applications`](crate::open_with::quick_applications)); a plate
     /// offers at most [`OPEN_WITH_QUICK_MAX`].
@@ -720,6 +721,7 @@ pub fn context_menu(
     quick: ContextQuick<'_>,
 ) -> Result<AppMenu, Errno> {
     let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
+    let name = quick.chosen.map_or("", Entry::name);
     let display_row = push_submenu(
         &mut menu,
         AppMenuLabel::new(DISPLAY_LABEL)?,
@@ -730,7 +732,7 @@ pub fn context_menu(
     let selected = model.selected > 0;
     let selection_row = push_submenu(
         &mut menu,
-        selection_label(model.chosen, quick.name)?,
+        selection_label(model.chosen, name)?,
         selection_symbol(model.chosen),
         if selected { "" } else { REASON_NO_SELECTION },
     )?;
@@ -758,7 +760,7 @@ pub fn context_menu(
         let enabled = reason.is_empty();
         push_on(
             &mut menu,
-            &AppMenuRow::Item(command_item(index, command, reason, quick.name)?),
+            &AppMenuRow::Item(command_item(index, command, reason, quick.chosen)?),
             plate,
         )?;
         if command == ContextCommand::OpenWith && enabled && !quick.candidates.is_empty() {
@@ -775,7 +777,8 @@ pub fn context_menu(
 
 /// The row for `command`, numbered by its `index` in [`CONTEXT_COMMANDS`]:
 /// disabled with `reason` when there is one, and — for an actionable Rename —
-/// carrying a quick-entry field holding `name` when the field can hold it.
+/// carrying a quick-entry field holding `chosen`'s name, its stem selected,
+/// when the field can hold it.
 ///
 /// # Errors
 ///
@@ -784,7 +787,7 @@ fn command_item(
     index: usize,
     command: ContextCommand,
     reason: &str,
-    name: &str,
+    chosen: Option<&Entry>,
 ) -> Result<AppMenuItem, Errno> {
     let mut item = AppMenuItem::new(
         item_id(index)?,
@@ -799,13 +802,17 @@ fn command_item(
         return Ok(item.disabled().with_reason(AppMenuReason::new(reason)?));
     }
     if command == ContextCommand::Rename {
-        if let Ok(initial) = AppMenuEntryText::new(name) {
-            if !initial.is_empty() {
-                item = item.with_entry(AppMenuEntry {
-                    id: item_id(RENAME_COMMIT)?,
-                    initial,
-                });
-            }
+        let field = chosen.and_then(|entry| {
+            AppMenuEntryText::new(entry.name())
+                .ok()
+                .filter(|initial| !initial.is_empty())
+                .map(|initial| (entry, initial))
+        });
+        if let Some((entry, initial)) = field {
+            item = item.with_entry(
+                AppMenuEntry::new(item_id(RENAME_COMMIT)?, initial)
+                    .with_selection(crate::rename_selection(entry))?,
+            );
         }
     }
     Ok(item)

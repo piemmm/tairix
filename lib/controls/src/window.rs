@@ -38,7 +38,8 @@ use crate::damage;
 use crate::paint::{
     authority_rgba, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
     paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
-    resolve_tinted_frame, role_font, surface_rect, to_i32, withheld, PlateBleed, PlateStyle,
+    resolve_tinted_frame, role_font, surface_rect, to_i32, withheld, ArtworkTone, PlateBleed,
+    PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
@@ -1490,7 +1491,7 @@ impl TitleBar {
                     kind,
                     text_color,
                     artwork,
-                    saturation,
+                    ArtworkTone::desaturated(saturation),
                 );
             }
         }

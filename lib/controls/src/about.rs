@@ -154,7 +154,7 @@ impl AboutSheet {
             self.icon,
             Color::from(palette.on_surface),
             picture,
-            crate::FULL_COLOUR,
+            crate::ArtworkTone::FULL,
         );
         let text_w = Self::text_width(w, scale, theme);
         Self::name_block(text_w, scale, theme).paint(surface, &self.name, at(layout.name));

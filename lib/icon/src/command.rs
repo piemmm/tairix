@@ -238,6 +238,10 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Comment => SLASHES,
         IconKind::Overwrite => BLOCK_CARET,
         IconKind::Search => MAGNIFIER,
+        IconKind::ToolZoom => MAGNIFIER_ON_POINT,
+        IconKind::ZoomIn => ZOOM_IN,
+        IconKind::ZoomOut => ZOOM_OUT,
+        IconKind::ZoomFit => CORNER_BRACKETS,
         IconKind::Replace => REPLACE,
         IconKind::FindNext => FIND_NEXT,
         IconKind::FindPrevious => FIND_PREVIOUS,
@@ -273,6 +277,9 @@ pub(crate) const fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Home => HOUSE,
         IconKind::MoveUp => ARROW_UP,
         IconKind::MoveDown => ARROW_DOWN,
+        IconKind::NavBack => CHEVRON_LEFT,
+        IconKind::NavForward => CHEVRON_RIGHT,
+        IconKind::NavUp => CHEVRON_UP,
         IconKind::Layers => LAYERS,
         IconKind::LayerNew => LAYER_NEW,
         IconKind::LayerAbove => LAYER_ABOVE,
@@ -580,10 +587,31 @@ const BLOCK_CARET: &[Mark] = &[
 ];
 
 /// A magnifier.
-const MAGNIFIER: &[Mark] = &[line(&[
-    circle(10.5, 10.5, 6.5),
-    Outline::Path("M15.3 15.3L20.5 20.5"),
+const MAGNIFIER: &[Mark] = &[line(&[LENS, HANDLE])];
+
+/// The lens every magnifier draws.
+const LENS: Outline = circle(10.5, 10.5, 6.5);
+
+/// The handle every magnifier draws.
+const HANDLE: Outline = Outline::Path("M15.3 15.3L20.5 20.5");
+
+/// A magnifier centred on a point.
+const MAGNIFIER_ON_POINT: &[Mark] = &[line(&[LENS, HANDLE]), fill(&[circle(10.5, 10.5, 1.8)])];
+
+/// A magnifier bearing a plus.
+const ZOOM_IN: &[Mark] = &[line(&[
+    LENS,
+    HANDLE,
+    Outline::Path("M7.5 10.5H13.5M10.5 7.5V13.5"),
 ])];
+
+/// A magnifier bearing a minus.
+const ZOOM_OUT: &[Mark] = &[line(&[LENS, HANDLE, Outline::Path("M7.5 10.5H13.5")])];
+
+/// Four corner brackets.
+const CORNER_BRACKETS: &[Mark] = &[line(&[Outline::Path(
+    "M3 8V3H8M16 3H21V8M21 16V21H16M8 21H3V16",
+)])];
 
 /// One box turning into another along an arrow.
 const REPLACE: &[Mark] = &[line(&[
@@ -845,6 +873,16 @@ const ARROW_DOWN: &[Mark] = &[line(&[
     Outline::Path("M12 4V20"),
     Outline::Path("M6 14L12 20L18 14"),
 ])];
+
+/// A chevron pointing left. A step between places is a chevron, where a move
+/// that carries something is an arrow.
+const CHEVRON_LEFT: &[Mark] = &[line(&[Outline::Path("M15 5L8 12L15 19")])];
+
+/// A chevron pointing right.
+const CHEVRON_RIGHT: &[Mark] = &[line(&[Outline::Path("M9 5L16 12L9 19")])];
+
+/// A chevron pointing up.
+const CHEVRON_UP: &[Mark] = &[line(&[Outline::Path("M5 15.5L12 8.5L19 15.5")])];
 
 /// A sheet seen edge on, the shape the layer pictures stack.
 const SHEET_ON_EDGE: Outline = Outline::Path("M12 3L21 7.5L12 12L3 7.5Z");

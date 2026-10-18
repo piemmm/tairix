@@ -217,6 +217,10 @@ pub enum TaskbarResponse {
     /// The system menu's *Settings…* row was chosen. The embedder opens the
     /// Settings component; the bar changes nothing itself.
     OpenSettings,
+    /// The system menu's *About This System* row was chosen. The embedder
+    /// states what the system is — its version, processors and memory — in a
+    /// window of its own; the bar reads nothing itself.
+    AboutSystem,
 
     /// A gesture on the Switchboard capsule (or the readout's "Open
     /// Switchboard" safe action) asked to open the Switchboard window at a

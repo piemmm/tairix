@@ -5565,6 +5565,7 @@ mod program {
             tool_model: manager_tool_model(browser),
             sidebar: rail,
             toolbar,
+            renaming: rename.and(browser.chosen_index()),
         };
         let band = match overlays.sweep.as_ref() {
             Some(Sweep::Live(band)) => {
@@ -7967,7 +7968,7 @@ mod program {
             model,
             MANAGER_MENU_TITLE,
             ContextQuick {
-                name: browser.chosen_entry().map_or("", Entry::name),
+                chosen: browser.chosen_entry(),
                 candidates: &quick,
                 documents: &documents,
             },
@@ -9880,8 +9881,9 @@ mod program {
         )
     }
 
-    /// Report where the rename editor is drawn into `damage`, answering
-    /// whether any of it shows.
+    /// Report where the rename editor is drawn into `damage`, and the tile it
+    /// stands over — whose name is withheld while it is open and drawn again
+    /// once it closes — answering whether any of it shows.
     fn report_editor<S: DirectorySource>(
         browser: &Browser<S>,
         frame: Frame<'_>,
@@ -9891,6 +9893,19 @@ mod program {
             return false;
         };
         damage.add(rect);
+        let tile = browser.chosen_index().and_then(|index| {
+            tairix_browse::render::entry_rect(
+                browser,
+                frame.scale,
+                frame.theme,
+                frame.viewport,
+                frame.toolbar,
+                index,
+            )
+        });
+        if let Some(tile) = tile {
+            damage.add(tile);
+        }
         true
     }
 

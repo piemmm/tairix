@@ -1541,6 +1541,7 @@ dependencies = [
  "tairix-taskbar",
  "tairix-theme",
  "tairix-touch",
+ "tairix-tz",
  "tairix-util",
  "tairix-vt",
  "tairix-wallpaper",
@@ -2601,6 +2602,7 @@ dependencies = [
  "tairix-rt",
  "tairix-theme",
  "tairix-touch",
+ "tairix-tz",
  "tairix-users",
  "tairix-util",
  "tairix-window",
@@ -3265,6 +3267,7 @@ dependencies = [
  "tairix-soundtheme",
  "tairix-sysconfig",
  "tairix-termcap",
+ "tairix-tz",
  "tairix-users",
  "tairix-util",
  "tairix-vt",
@@ -4003,6 +4006,7 @@ dependencies = [
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
+ "tairix-fsmeta",
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
@@ -4014,6 +4018,7 @@ dependencies = [
  "tairix-soundtheme",
  "tairix-sysconfig",
  "tairix-theme",
+ "tairix-tz",
  "tairix-useradmin",
  "tairix-users",
  "tairix-util",
@@ -7957,6 +7962,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-tz"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-crc32c",
+ "tairix-fuzzseed",
+ "tairix-rt",
+ "tairix-tz",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-tzcompile"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-crypto",
+ "tairix-tz",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-unlink"
 version = "0.0.0"
 dependencies = [
@@ -8160,6 +8187,7 @@ dependencies = [
  "tairix-path",
  "tairix-rt",
  "tairix-theme",
+ "tairix-tz",
 ]
 
 [[package]]
@@ -8490,6 +8518,8 @@ dependencies = [
  "tairix-test-tcpserve",
  "tairix-test-wintersun-client-qemu-aarch64",
  "tairix-theme",
+ "tairix-tz",
+ "tairix-tzcompile",
  "tairix-users",
  "tairix-util",
  "tairix-vcmailbox",

@@ -327,6 +327,7 @@ impl Theme {
                 accent,
                 on_accent: ON_ACCENT,
                 selection_fill: accent.with_alpha(SELECTION_ALPHA),
+                selection_tint: accent.with_alpha(SELECTION_TINT_ALPHA),
                 border: Rgba::rgb(0x1c, 0x23, 0x27),
                 surface_hover: Rgba::rgb(0x28, 0x31, 0x37),
                 surface_pressed: Rgba::rgb(0x0b, 0x0f, 0x11),
@@ -353,6 +354,7 @@ impl Theme {
                 net_send: Rgba::rgb(0x7b, 0x6c, 0xe8),
                 scroll_track: Rgba::rgb(0x13, 0x1a, 0x1d),
                 scroll_thumb: Rgba::rgb(0x2f, 0x3a, 0x3f),
+                scroll_thumb_active: Rgba::rgb(0x5a, 0x66, 0x6c),
                 frame: Rgba::rgb(0x4b, 0x52, 0x57),
                 bevel_light: Rgba::new(0xff, 0xff, 0xff, 0x40),
                 bevel_shade: Rgba::new(0x00, 0x00, 0x00, 0x78),
@@ -409,6 +411,7 @@ impl Theme {
                 accent,
                 on_accent: ON_ACCENT,
                 selection_fill: accent.with_alpha(SELECTION_ALPHA),
+                selection_tint: accent.with_alpha(SELECTION_TINT_ALPHA),
                 border: Rgba::rgb(0xad, 0xad, 0xad),
                 surface_hover: Rgba::rgb(0xcc, 0xcc, 0xcc),
                 surface_pressed: Rgba::rgb(0xb3, 0xb3, 0xb3),
@@ -435,6 +438,7 @@ impl Theme {
                 net_send: Rgba::rgb(0x55, 0x46, 0xc4),
                 scroll_track: Rgba::rgb(0xcf, 0xcf, 0xcf),
                 scroll_thumb: Rgba::rgb(0x9e, 0x9e, 0x9e),
+                scroll_thumb_active: Rgba::rgb(0x74, 0x74, 0x74),
                 frame: Rgba::rgb(0x91, 0x91, 0x91),
                 bevel_light: Rgba::new(0xff, 0xff, 0xff, 0x8c),
                 bevel_shade: Rgba::new(0x00, 0x00, 0x00, 0x50),
@@ -475,6 +479,11 @@ const ON_ACCENT: Rgba = Rgba::rgb(0xff, 0xf5, 0xee);
 /// than to cover. Each theme still authors its own fill colour and may tune
 /// this.
 pub(crate) const SELECTION_ALPHA: u8 = 77;
+
+/// The opacity both built-in themes wash a selected item's picture with:
+/// about nine twentieths, enough to read as lit over the picture's own colour
+/// where the lighter fill beside it only tints a plate.
+pub(crate) const SELECTION_TINT_ALPHA: u8 = 115;
 
 /// The opacity both built-in themes give their window-command highlights:
 /// half.

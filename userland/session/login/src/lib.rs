@@ -103,7 +103,9 @@ pub mod table;
 pub mod view;
 
 pub use auth::{DenyAll, UsersAuthenticator};
-pub use broker::{handle_session_request, DbAccounts, SessionDirectory, SessionReply};
+pub use broker::{
+    handle_session_request, DbAccounts, SessionDirectory, SessionReply, ZoneStoreGrant,
+};
 pub use budget::AttemptBudget;
 pub use elevate::{
     audit_launch_ended_abnormally, drain_bounded, handle_elevate_request, Captured, ElevateLauncher,

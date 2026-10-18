@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use tairix_abi::rlimit::{LimitKind, RLIMIT_INFINITY};
 use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    SYSTEM_NAME,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 use tairix_controls::RateTrace;
@@ -191,7 +192,7 @@ fn machine_facts(sample: &Sample) -> Vec<SystemFact> {
         SystemFact::new(
             "OS version",
             reading(sample, DegradedField::Identity, identity, |id| {
-                format!("TAIRiX {}", id.version())
+                format!("{SYSTEM_NAME} {}", id.version())
             }),
         ),
         SystemFact::new(

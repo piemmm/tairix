@@ -175,9 +175,12 @@ Four panes, two kinds.
   reading per figure, each from its own ungated query, so one refusal costs
   one row and every reading that did not arrive says so. About states the
   machine's name and id, the OS version, uptime, processors and memory; Date
-  & Time states the wall clock and the source it was set from, and its band
-  starts `datetime.app` as an authenticated account, leaving it running — the
-  clock is that application's to set.
+  & Time states the wall clock — the day written out and the time as the
+  user's region writes it — the zone it is read in (its place, abbreviation
+  and offset from UTC) and the source it was set from, and its band starts
+  `datetime.app` as an authenticated account, leaving it running — the clock
+  is that application's to set. The zone is read from the store the session
+  delegates (below); with none the clock reads UTC.
 - **Login & startup** (whether the machine starts at a text login or a
   graphical one) and **Caching** (how much memory each cache class may keep,
   under one master switch) are **staged** over the machine's `system.conf`,
@@ -576,9 +579,9 @@ run, so re-reading would cost a second password for an answer already known,
 and the reader is left in place for the next change. The public directories
 are free, so they are read again at once.
 
-## Notifications, Mouse, Trackpad, Keyboard, Lock Screen and Screensaver
+## Notifications, Mouse, Trackpad, Keyboard, Lock Screen, Screensaver and Language & Region
 
-Six more panes over the desktop's own document, each **immediate** and each
+Seven more panes over the desktop's own document, each **immediate** and each
 posting only its own keys, so no pane can reimpose a value another pane set.
 
 - **Notifications** is a desktop-wide switch (`notify.enabled`) and one row
@@ -645,6 +648,19 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   lock any program could raise would keep the user out of their own desktop.
   It states that unlocking always asks for this account's password; that is not
   a setting. A refused request is stated on the row that asked.
+- **Language & Region** sets the region whose conventions every date and time
+  on the desktop is written in (`region`) and the zone its clocks read
+  (`time.zone`), each *Default* — this system's own, United Kingdom and
+  London as shipped — until chosen. The choices are the zone store's, which
+  Settings may not open: the session mints it a read-only delegation of the
+  store it holds (`TakeZoneStore`, answered for this application alone), read
+  once and kept. The Region row lists every region by name and says how the one
+  it holds writes a date and a time (*31/12/2026 and 23:30*); the Time zone row
+  lists every place as *City, Region*, ordered by city. Both lists run to
+  hundreds, so an open list scrolls a window of whole rows and seeks a choice as
+  its first letters are typed. A held value the store does not carry is offered
+  as itself, and choosing it changes nothing; the session refuses an apply
+  that changes either key to one the store lacks.
 
 The document spells every span a person edits in whole units — milliseconds
 for the pointer and keyboard, minutes for the idle waits — and every in-memory
@@ -791,13 +807,14 @@ the staged source of truth; the shape of it is:
   The walk is an IPC round trip, so it runs on a worker and the pane draws
   what has arrived rather than waiting;
 - **user-scope panes** (Appearance, Wallpaper, Displays, Lock Screen,
-  Screensaver, Notifications, Keyboard, Mouse, Trackpad, Accessibility) post a
+  Screensaver, Notifications, Keyboard, Mouse, Trackpad, Accessibility,
+  Language & Region) post a
   document to the desktop session, which validates it, applies it and persists
   it to its own published app-data scope; the desktop adopts a change only
   after the write succeeded, so memory and disk cannot diverge. A resolution is
   persisted only once its trial is kept;
-- **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS,
-  Language & Region) ask the console's elevation broker to re-authenticate an
+- **machine-scope panes** (Login & startup, Caching, TCP/IP, Ethernet, DNS)
+  ask the console's elevation broker to re-authenticate an
   account that may, and run the same `configure` program the command line
   uses, so the CLI and the GUI are literally the same writer. They are
   **staged**: a choice edits a working copy, the pane's action band says how

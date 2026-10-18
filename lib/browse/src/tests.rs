@@ -641,6 +641,7 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
                 tool_model: ManagerToolModel::new(true),
                 sidebar,
                 toolbar: BAND,
+                renaming: None,
             },
             &mut NoArtwork,
         )
@@ -837,6 +838,7 @@ fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
                 tool_model: ManagerToolModel::new(true),
                 sidebar,
                 toolbar: BAND,
+                renaming: None,
             },
             &mut NoArtwork,
         )
@@ -920,6 +922,7 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
                 tool_model: ManagerToolModel::new(true),
                 sidebar: Some(&places),
                 toolbar: BAND,
+                renaming: None,
             },
             &mut NoArtwork,
         );
@@ -952,6 +955,7 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
         tool_model: crate::ManagerToolModel::none(),
         sidebar: Some(&places),
         toolbar: BAND,
+        renaming: None,
     };
     let unselected = paint(
         &browser,
@@ -3060,6 +3064,7 @@ fn a_part_inside_the_listing_draws_none_of_the_chrome() {
         tool_model: ManagerToolModel::new(true),
         sidebar: Some(&places),
         toolbar: BAND,
+        renaming: None,
     };
     let colour = Color::rgb(255, 0, 255);
     let mut whole = RecordingArtwork::new(24, colour);
@@ -3818,6 +3823,7 @@ mod rename_model {
     use super::BAND;
 
     use tairix_abi::Errno;
+    use tairix_controls::TextField;
     use tairix_geometry::{Rect, Scale};
     use tairix_theme::Theme;
 
@@ -4016,13 +4022,15 @@ mod rename_model {
         );
     }
 
-    /// The in-place rename field goes over the item's **name**, in both views
+    /// The in-place rename field goes over the item's **name**, in every view
     /// — not over the whole row (icon, name, size and date) or the whole tile
-    /// (picture above the label).
+    /// (picture above the label) — as one field line, its own height, centred
+    /// on the name's first line.
     ///
     /// Regression: the editor was drawn at the item rectangle, so in the list
     /// view it covered the icon and both trailing columns and in the icon view
-    /// it covered the picture.
+    /// it covered the picture; and then two name lines tall, so the field's
+    /// one-line plate left the name's second line showing beneath it.
     #[test]
     fn the_rename_field_sits_over_the_name_in_both_views() {
         use crate::layout::ViewMode;
@@ -4032,21 +4040,31 @@ mod rename_model {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(1).expect("select the second entry");
 
-        for view in [ViewMode::List, ViewMode::LargeIcons] {
+        for view in [ViewMode::List, ViewMode::LargeIcons, ViewMode::SmallIcons] {
             browser.set_view_mode(view);
             let item = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
                 .expect("the selected item is drawn");
             let name =
                 crate::render::selection_name_rect(&browser, Scale::ONE, &theme, viewport, BAND)
                     .expect("and so is its name");
-            assert!(!name.is_empty(), "{view:?}: the field has somewhere to go");
+            let pressed =
+                crate::render::entry_name_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+                    .expect("the name's own lines");
             assert_eq!(
-                name.intersection(&item),
-                name,
-                "{view:?}: the field stays inside the item it is renaming"
+                name.height,
+                TextField::height(Scale::ONE, &theme),
+                "{view:?}: one field line"
             );
             assert!(
-                name.width < item.width || name.height < item.height,
+                name.left() >= item.left() && name.right() <= item.right(),
+                "{view:?}: the field stays within the item's columns: {name:?} of {item:?}"
+            );
+            assert!(
+                name.top() <= pressed.top() && name.bottom() >= pressed.top(),
+                "{view:?}: the field stands on the name's first line: {name:?} over {pressed:?}"
+            );
+            assert!(
+                name.width < item.width,
                 "{view:?}: the name is a part of the item, not the whole of it: \
                  {name:?} of {item:?}"
             );
@@ -4090,6 +4108,57 @@ mod rename_model {
         );
     }
 
+    /// While an entry is renamed in place its tile draws no name, so nothing
+    /// of the old name shows around or under the editor laid over it.
+    #[test]
+    fn a_tile_being_renamed_draws_no_name_under_its_editor() {
+        use crate::layout::ViewMode;
+        use crate::render::entry_name_target;
+
+        let theme = Theme::dark();
+        let viewport = Rect::new(0, 0, 400, 300);
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.set_view_mode(ViewMode::LargeIcons);
+        browser.select(1).expect("select the second entry");
+        let drawn = |renaming| {
+            super::paint(
+                &browser,
+                Scale::ONE,
+                &theme,
+                viewport,
+                &crate::ManagerChrome {
+                    tools: &[],
+                    tool_model: crate::ManagerToolModel::none(),
+                    sidebar: None,
+                    toolbar: BAND,
+                    renaming,
+                },
+                &mut super::NoArtwork,
+            )
+        };
+        let name = entry_name_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+            .expect("the name's lines");
+        let at = |v: i32| u32::try_from(v).expect("on the surface");
+        let distinct = |surface: &tairix_raster::Surface| {
+            let mut seen = alloc::vec::Vec::new();
+            for y in at(name.top())..at(name.bottom()) {
+                for x in at(name.left())..at(name.right()) {
+                    let pixel = surface.get(x, y).expect("on the surface");
+                    if !seen.contains(&pixel) {
+                        seen.push(pixel);
+                    }
+                }
+            }
+            seen.len()
+        };
+        assert!(distinct(&drawn(None)) > 1, "a named tile draws its name");
+        assert_eq!(
+            distinct(&drawn(Some(1))),
+            1,
+            "a renamed tile leaves its name's place bare for the editor"
+        );
+    }
+
     /// A press on an entry's name lands on its drawn text, in both views: the
     /// list row's name cell rather than its icon or trailing columns, and the
     /// tile's lines below its picture, each inside what a press on the entry
@@ -4103,20 +4172,19 @@ mod rename_model {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         for view in [ViewMode::List, ViewMode::LargeIcons] {
             browser.set_view_mode(view);
-            let target =
-                crate::render::entry_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
-                    .expect("the entry is pressable");
+            let item = crate::render::entry_rect(&browser, Scale::ONE, &theme, viewport, BAND, 1)
+                .expect("the entry is drawn");
             let name =
                 crate::render::entry_name_target(&browser, Scale::ONE, &theme, viewport, BAND, 1)
                     .expect("and so is its name");
             assert_eq!(
-                name.intersection(&target),
+                name.intersection(&item),
                 name,
-                "{view:?}: {name:?} of {target:?}"
+                "{view:?}: {name:?} of {item:?}"
             );
             assert!(
-                name.width < target.width || name.height < target.height,
-                "{view:?}: the name is part of the entry: {name:?} of {target:?}"
+                name.width < item.width || name.height < item.height,
+                "{view:?}: the name is part of the entry: {name:?} of {item:?}"
             );
             let centre = tairix_geometry::Point::new(
                 name.left() + i32::try_from(name.width / 2).expect("small"),
@@ -6663,11 +6731,12 @@ fn the_selection_row_names_the_one_item_it_acts_on() {
     use tairix_font::ELLIPSIS;
 
     let selection_row = |browser: &Browser<_>, name: &str| {
+        let chosen = Entry::file(name);
         let menu = context_menu(
             ContextMenuModel::for_browser(browser, false),
             "Files",
             ContextQuick {
-                name,
+                chosen: Some(&chosen),
                 ..ContextQuick::default()
             },
         )
@@ -6747,7 +6816,7 @@ fn a_name_the_rename_field_cannot_hold_still_opens_the_menu() {
         ContextMenuModel::for_browser(&browser, false),
         "Files",
         ContextQuick {
-            name: "bell\u{7}.txt",
+            chosen: Some(&Entry::file("bell\u{7}.txt")),
             ..ContextQuick::default()
         },
     )
@@ -6763,6 +6832,42 @@ fn a_name_the_rename_field_cannot_hold_still_opens_the_menu() {
         .expect("the Rename row");
     assert!(rename.enabled);
     assert!(rename.entry.is_none(), "no field it could not hold");
+}
+
+/// The Rename row's field opens with what every other way into a rename
+/// selects: a file's stem, keeping its ending, and a folder's whole name.
+#[test]
+fn the_rename_rows_field_opens_with_the_names_stem_selected() {
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, ContextQuick};
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    for (chosen, selected) in [
+        (Entry::file("notes.txt"), 0..5),
+        (Entry::directory("Docs.d"), 0..6),
+    ] {
+        let menu = context_menu(
+            ContextMenuModel::for_browser(&browser, false),
+            "Files",
+            ContextQuick {
+                chosen: Some(&chosen),
+                ..ContextQuick::default()
+            },
+        )
+        .expect("the rows fit the bounds");
+        let field = menu
+            .rows()
+            .find_map(|(row, _)| match row {
+                AppMenuRowView::Item(item) if item.label == ContextCommand::Rename.label() => {
+                    item.entry
+                }
+                _ => None,
+            })
+            .expect("the Rename row carries a field");
+        assert_eq!(field.initial, chosen.name());
+        assert_eq!(field.selected.range(), selected, "{:?}", chosen.name());
+    }
 }
 
 /// Display ▸ offers every view, the one the window shows marked as the
@@ -6869,7 +6974,7 @@ fn more_candidates_than_a_plate_offers_never_reach_the_new_rows_ids() {
         ContextMenuModel::for_browser(&browser, false),
         "Files",
         ContextQuick {
-            name: "notes.txt",
+            chosen: Some(&Entry::file("notes.txt")),
             candidates: &candidates,
             documents: &[],
         },
@@ -6900,8 +7005,9 @@ fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     let model = ContextMenuModel::for_browser(&browser, true);
+    let notes = Entry::file("notes.txt");
     let quick = ContextQuick {
-        name: "notes.txt",
+        chosen: Some(&notes),
         ..ContextQuick::default()
     };
     let menu = context_menu(model, "Files", quick).expect("the fixed rows fit the bounds");
@@ -6993,7 +7099,7 @@ fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
         model,
         "Files",
         ContextQuick {
-            name: "Docs",
+            chosen: Some(&Entry::directory("Docs")),
             ..ContextQuick::default()
         },
     )
@@ -7665,8 +7771,9 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     let model = ContextMenuModel::for_browser(&browser, true);
+    let notes = Entry::file("notes.txt");
     let quick = ContextQuick {
-        name: "notes.txt",
+        chosen: Some(&notes),
         candidates: &candidates,
         documents: &[],
     };

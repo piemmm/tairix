@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
+use tairix_controls::TileParts;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
 
@@ -15,7 +16,7 @@ use crate::browser::Browser;
 use crate::chrome::ToolbarBand;
 use crate::entry::Entry;
 use crate::layout::ViewMode;
-use crate::render::{entry_body, entry_rect, listing_area, Tiles};
+use crate::render::{entry_parts, entry_rect, listing_area, Tiles};
 use crate::source::{DirectorySource, Listing};
 
 /// A root holding `0` files and nothing else.
@@ -63,23 +64,39 @@ fn rect_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> Rect {
     .expect("the entry shows")
 }
 
-/// Where the tile at `index` truly lies in the window: its body.
-fn body_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> Rect {
+/// Where the tile at `index` lies in the window, part by part.
+fn parts_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> TileParts {
     let cell = rect_of(browser, frame, index);
-    let body = entry_body(
+    let parts = entry_parts(
         Tiles::Large,
         &browser.entries()[index],
         Rect::new(0, 0, cell.width, cell.height),
         frame.scale,
         frame.theme,
     )
-    .expect("a body");
-    Rect::new(
-        cell.left() + body.left(),
-        cell.top() + body.top(),
-        body.width,
-        body.height,
-    )
+    .expect("the tile draws");
+    let shift = |part: Rect| {
+        Rect::new(
+            cell.left() + part.left(),
+            cell.top() + part.top(),
+            part.width,
+            part.height,
+        )
+    };
+    TileParts {
+        picture: parts.picture.map(shift),
+        name: parts.name.map(shift),
+    }
+}
+
+/// Where the picture of the tile at `index` lies in the window.
+fn picture_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> Rect {
+    parts_of(browser, frame, index).picture.expect("a picture")
+}
+
+/// Where the name of the tile at `index` lies in the window.
+fn name_of(browser: &Browser<Flat>, frame: Frame<'_>, index: usize) -> Rect {
+    parts_of(browser, frame, index).name.expect("a name")
 }
 
 fn selected(browser: &Browser<Flat>) -> Vec<usize> {
@@ -150,20 +167,20 @@ fn a_band_in_a_grid_takes_the_block_of_tiles_it_crosses_and_no_gap() {
     let theme = Theme::dark();
     let frame = frame(&theme);
     let mut browser = browser(40, ViewMode::LargeIcons);
-    let a = body_of(&browser, frame, 0);
-    let b = body_of(&browser, frame, 1);
+    let a = picture_of(&browser, frame, 0);
+    let b = picture_of(&browser, frame, 1);
     let first_line = rect_of(&browser, frame, 0).top();
     let per_line = (0..40)
         .position(|index| rect_of(&browser, frame, index).top() != first_line)
         .expect("the grid wraps");
 
     // From inside tile 1 to inside the tile below tile 2.
-    let below = body_of(&browser, frame, per_line + 2);
+    let below = picture_of(&browser, frame, per_line + 2);
     let mut marquee = begin(&browser, frame, inside(b, 3, 3)).expect("in the item area");
     sweep(&mut browser, frame, &mut marquee, inside(below, 3, 3));
     assert_eq!(selected(&browser), [1, 2, per_line + 1, per_line + 2]);
 
-    // A band wholly within the ground between two tiles' bodies touches
+    // A band wholly within the ground between two tiles' pictures touches
     // neither, though it lies inside their cells, until it reaches the second.
     let gap = (a.right(), b.left());
     assert!(gap.0 < gap.1, "the tiles stand apart");
@@ -173,7 +190,7 @@ fn a_band_in_a_grid_takes_the_block_of_tiles_it_crosses_and_no_gap() {
         &mut browser,
         frame,
         &mut marquee,
-        Point::new(gap.1 - 1, a.bottom() - 2),
+        Point::new(gap.1 - 1, a.center().y),
     );
     assert!(selected(&browser).is_empty());
     sweep(
@@ -185,16 +202,16 @@ fn a_band_in_a_grid_takes_the_block_of_tiles_it_crosses_and_no_gap() {
     assert_eq!(selected(&browser), [1]);
 }
 
-/// A band selects a tile whose body it touches anywhere, its name included,
-/// not only where it crosses the picture — and none whose cell it touches
-/// only on the ground.
+/// A band selects a tile it touches anywhere, its name included, not only
+/// where it crosses the picture — and none whose cell it touches only on the
+/// ground.
 #[test]
 fn a_band_touching_only_a_tiles_name_selects_it() {
     let theme = Theme::dark();
     let frame = frame(&theme);
     let mut browser = browser(40, ViewMode::LargeIcons);
     let cell = rect_of(&browser, frame, 0);
-    let body = body_of(&browser, frame, 0);
+    let body = name_of(&browser, frame, 0);
     let core = crate::render::tile_core(Tiles::Large, frame.scale, frame.theme);
     let name_row = cell.top() + core.bottom() + 4;
     assert!(
@@ -229,7 +246,7 @@ fn a_band_lays_out_an_edge_tiles_name_once_while_it_stays_on_the_edge() {
     let frame = frame(&theme);
     let mut browser = browser(40, ViewMode::LargeIcons);
     let cell = rect_of(&browser, frame, 0);
-    let body = body_of(&browser, frame, 0);
+    let body = name_of(&browser, frame, 0);
     let core = crate::render::tile_core(Tiles::Large, frame.scale, frame.theme);
     let name_row = cell.top() + core.bottom() + 4;
     let mut marquee =
@@ -251,7 +268,7 @@ fn a_band_lays_out_an_edge_tiles_name_once_while_it_stays_on_the_edge() {
         );
     }
     assert_eq!(marquee.laid_out, first, "no sample laid a name out again");
-    marquee.bodies.iter_mut().for_each(|found| found.name ^= 1);
+    marquee.edges.iter_mut().for_each(|found| found.name ^= 1);
     sweep(
         &mut browser,
         frame,

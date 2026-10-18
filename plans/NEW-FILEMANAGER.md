@@ -701,8 +701,8 @@ signatures are unchanged, so both get the new look for free.
   than a re-derived anchor. Both `render` (paint) and `entry_index_at`
   (hit-test) consume it, so they can never disagree (§2.2).
 - **Column formatting** (`lib/browse::format`): `format_size` (binary units)
-  and `format_date` (`Time64` → ISO `YYYY-MM-DD`, blank at the epoch so a
-  stampless file is never given a fabricated date, §21) — the file-listing
+  and `format_minute` (`Time64` → ISO `YYYY-MM-DD HH:MM`, blank at the epoch so
+  a stampless file is never given a fabricated date, §21) — the file-listing
   convention shared by both views, deliberately distinct from the `top`/
   `sysinfo` figure spellings in `lib/procinfo` (a browser engine does not
   depend on the System Information client crate).

@@ -33,7 +33,7 @@ fn face_on(
     Ribbon::new(
         &theme(motion),
         (Scale::ONE, screen),
-        (wall, 0),
+        (wall, tairix_tz::CivilClock::UTC, 0),
         (calm, options),
     )
     .expect("the heap gives a ribbon")

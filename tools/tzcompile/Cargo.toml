@@ -1,0 +1,32 @@
+[package]
+name = "tairix-tzcompile"
+description = "Host-only compiler of the civil-time zone store: IANA tzdb's Rule/Zone/Link source resolved with zic's semantics, the zone table's places and the CLDR-derived regions' conventions, written through the one store writer (plans/TIMEZONES.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The store's one writer and reader, and the zone-rule arithmetic (`rule`) the
+# compiler resolves every rule with, so the two cannot disagree about when a
+# rule fires.
+tairix-tz = { path = "../../lib/tz", version = "=0.0.0", features = ["write"] }
+# The SHA-256 every vendored source is pinned by.
+tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
+# Hex for the pins.
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+# `Time64`, to read the compiled store as its consumers do, and the civil
+# calendar the oracle evaluates TZ strings over.
+tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fixture store, to build a store whose continuation is broken.
+tairix-tz = { path = "../../lib/tz", version = "=0.0.0", features = ["write", "test-support"] }

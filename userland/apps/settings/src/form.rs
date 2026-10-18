@@ -65,6 +65,7 @@ use tairix_wallpaper::{
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
+use crate::civil::{self, CivilChoices};
 use crate::effects::{self, EffectsAsk, EffectsReading, EffectsRow};
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
@@ -153,6 +154,9 @@ pub struct Offered<'a> {
     /// The output the desktop is drawn on, once the desktop has said: the
     /// resolutions on offer are the ones it can show.
     pub output: Option<(u32, u32)>,
+    /// The delegated zone store's regions and places, which the Language &
+    /// Region rows offer.
+    pub(crate) civil: Option<&'a CivilChoices>,
 }
 
 /// What the Text rows offer beyond the document: the families the font store
@@ -231,6 +235,10 @@ pub enum Setting {
     DisplayOff,
     /// How long the desktop sits idle before the screen locks.
     LockAfter,
+    /// The region whose conventions dates and times are written in.
+    Region,
+    /// The zone the desktop's clocks read.
+    TimeZone,
 }
 
 impl Setting {
@@ -269,6 +277,8 @@ impl Setting {
             Self::Saver(option) => option.key(),
             Self::DisplayOff => SettingsKey::DisplayOffAfter,
             Self::LockAfter => SettingsKey::LockAfter,
+            Self::Region => SettingsKey::Region,
+            Self::TimeZone => SettingsKey::TimeZone,
         }
     }
 
@@ -307,6 +317,8 @@ impl Setting {
             Self::Saver(option) => option.label(),
             Self::DisplayOff => "Turn display off",
             Self::LockAfter => "Lock after",
+            Self::Region => "Region",
+            Self::TimeZone => "Time zone",
         }
     }
 
@@ -405,6 +417,10 @@ impl Setting {
             Self::LockAfter => {
                 "How long the desktop sits without a key press or a movement of the mouse before \
                  the screen locks."
+            }
+            Self::Region => "How the desktop writes dates and times.",
+            Self::TimeZone => {
+                "Where the desktop's clocks read the time. Type a city to find it in the list."
             }
         }
     }
@@ -513,6 +529,8 @@ impl Setting {
                 settings.lock_after,
                 idle_label,
             )),
+            Self::Region => list(civil::region_choices(settings, offered.civil)),
+            Self::TimeZone => list(civil::zone_choices(settings, offered.civil)),
         }
     }
 
@@ -529,33 +547,27 @@ impl Setting {
             Self::Density => set(&Density::ALL, index, &mut settings.density),
             Self::Motion => set(&Motion::ALL, index, &mut settings.motion),
             Self::Scale => set(&scale_ladder(settings.scale), index, &mut settings.scale),
-            Self::Font => match family_ladder(settings.text_family, offered.text).get(index) {
-                Some((_, family)) => {
-                    settings.text_family = *family;
-                    true
-                }
-                None => false,
-            },
-            Self::TextSize => match size_ladder(settings.text_size, offered.text).get(index) {
-                Some((_, size)) => {
-                    settings.text_size = *size;
-                    true
-                }
-                None => false,
-            },
+            Self::Font => take(
+                family_ladder(settings.text_family, offered.text),
+                index,
+                &mut settings.text_family,
+            ),
+            Self::TextSize => take(
+                size_ladder(settings.text_size, offered.text),
+                index,
+                &mut settings.text_size,
+            ),
             Self::Resolution => set(
                 &resolution_ladder(settings.resolution, offered.output),
                 index,
                 &mut settings.resolution,
             ),
             Self::Fit => set(&WallpaperFit::ALL, index, &mut settings.fit),
-            Self::Backdrop => match backdrop_ladder(settings.backdrop).get(index) {
-                Some((_, backdrop)) => {
-                    settings.backdrop = *backdrop;
-                    true
-                }
-                None => false,
-            },
+            Self::Backdrop => take(
+                backdrop_ladder(settings.backdrop),
+                index,
+                &mut settings.backdrop,
+            ),
             Self::Icons => set(&IconFlow::ALL, index, &mut settings.icons),
             Self::Sort => set(&IconSort::ALL, index, &mut settings.sort),
             Self::CursorSet => set(
@@ -621,10 +633,15 @@ impl Setting {
                 index,
                 &mut settings.lock_after,
             ),
+            Self::Region => civil::choose_region(index, settings, offered.civil),
+            Self::TimeZone => civil::choose_zone(index, settings, offered.civil),
         }
     }
 
     /// The row this setting draws, showing what the desktop currently holds.
+    ///
+    /// The region's row also shows how the region it holds writes a date and
+    /// a time.
     fn row(self, settings: &DesktopSettings, offered: Offered<'_>) -> FieldRow {
         let control = match self.offer(settings, offered) {
             Offer::List(choices, current) => {
@@ -638,7 +655,18 @@ impl Setting {
                 FieldControl::Slider(slider)
             }
         };
-        FieldRow::new(self.label(), control).with_description(self.description())
+        FieldRow::new(self.label(), control)
+            .with_description(self.described(settings, offered.civil))
+    }
+
+    /// The sentence beneath the row's label for `settings`: the region's row
+    /// also says how the region it holds writes a date and a time.
+    fn described(self, settings: &DesktopSettings, civil: Option<&CivilChoices>) -> String {
+        if self != Self::Region {
+            return String::from(self.description());
+        }
+        let (clock, _) = tairix_wallpaper::civil_clock(civil.map(|civil| civil.zones), settings);
+        alloc::format!("{} {}", self.description(), civil::written_example(&clock))
     }
 }
 
@@ -702,6 +730,18 @@ pub(crate) fn set<T: Copy>(values: &[T], index: usize, field: &mut T) -> bool {
     match values.get(index) {
         Some(value) => {
             *field = *value;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Set `field` to the value of the labelled choice `ladder[index]`,
+/// answering whether the index named one.
+fn take<T>(ladder: Vec<(String, T)>, index: usize, field: &mut T) -> bool {
+    match ladder.into_iter().nth(index) {
+        Some((_, value)) => {
+            *field = value;
             true
         }
         None => false,
@@ -1279,6 +1319,7 @@ impl Declared {
                     catalog: documents.catalog,
                     text: documents.text,
                     output: documents.output,
+                    civil: documents.civil,
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
@@ -1525,6 +1566,20 @@ const LOCK_GROUPS: [GroupSpec; 1] = [GroupSpec {
     ),
 }];
 
+/// The Language & Region pane's one group.
+const LANGUAGE_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "REGION AND TIME ZONE",
+    settings: &[
+        Declared::Desktop(Setting::Region),
+        Declared::Desktop(Setting::TimeZone),
+    ],
+    pictures: None,
+    footnote: Some(
+        "Every clock and date on this desktop follows these. Default follows this system: the \
+         login screen tells the time by it.",
+    ),
+}];
+
 /// The Wallpaper pane's groups: how the picture is placed and how the icons
 /// standing on it are arranged, then the picture itself.
 const WALLPAPER_GROUPS: [GroupSpec; 2] = [
@@ -1611,6 +1666,8 @@ pub enum Composition {
     Screensaver,
     /// The Lock Screen pane.
     LockScreen,
+    /// The Language & Region pane.
+    Language,
     /// The Sound pane: one plate per sink and source, and what is recording,
     /// discovered from the audio service.
     Sound,
@@ -1637,6 +1694,7 @@ impl Composition {
             Self::Keyboard => &KEYBOARD_GROUPS,
             Self::Screensaver => &SCREENSAVER_GROUPS,
             Self::LockScreen => &LOCK_GROUPS,
+            Self::Language => &LANGUAGE_GROUPS,
             Self::Ethernet | Self::Dns | Self::Users | Self::Sound | Self::SoundEffects => &[],
         }
     }
@@ -1655,6 +1713,7 @@ impl Composition {
             | Self::Keyboard
             | Self::Screensaver
             | Self::LockScreen
+            | Self::Language
             | Self::Sound
             | Self::SoundEffects => Posture::Immediate,
             // Writing either of the machine's stores is a re-authenticated
@@ -1691,6 +1750,7 @@ impl Composition {
                 | Self::Keyboard
                 | Self::Screensaver
                 | Self::LockScreen
+                | Self::Language
         )
     }
 
@@ -1754,6 +1814,7 @@ impl Composition {
             Self::Keyboard => &SettingsKey::KEYBOARD,
             Self::Screensaver => &SettingsKey::SCREENSAVER,
             Self::LockScreen => &SettingsKey::LOCK,
+            Self::Language => &SettingsKey::CIVIL,
             Self::LoginStartup
             | Self::Caching
             | Self::TcpIp
@@ -2006,6 +2067,9 @@ pub(crate) struct Documents<'a> {
     pub(crate) text: Option<&'a TextChoices>,
     /// The output the desktop is drawn on, once the desktop has said.
     pub(crate) output: Option<(u32, u32)>,
+    /// The delegated zone store's regions and places, once it has arrived;
+    /// kept for the life of the process.
+    pub(crate) civil: Option<&'static CivilChoices>,
     /// The machine's boot-time configuration, or `None` while it has not
     /// been read.
     pub(crate) config: Option<&'a SystemConfig>,
@@ -2192,6 +2256,8 @@ pub struct Form {
     text: Option<TextChoices>,
     /// The output the desktop is drawn on, kept for the same reason.
     output: Option<(u32, u32)>,
+    /// The delegated zone store's choices, kept for the same reason.
+    civil: Option<&'static CivilChoices>,
     /// What renders each picture the choosers show, and which the desktop
     /// would not.
     pictures: Pictures,
@@ -2243,6 +2309,7 @@ impl Form {
             catalog: documents.catalog.to_vec(),
             text: documents.text.cloned(),
             output: documents.output,
+            civil: documents.civil,
             pictures: Pictures::default(),
             notify_sources: documents.notify_sources.map(<[_]>::to_vec),
             sources_full: documents.sources_full,
@@ -2707,6 +2774,7 @@ impl Form {
             catalog: &self.catalog,
             text: self.text.as_ref(),
             output: self.output,
+            civil: self.civil,
             config: self.config.as_ref(),
             addressing: &self.addressing,
             staged: &self.staged,
@@ -3168,11 +3236,20 @@ impl Form {
             owners,
             sound,
             effects,
+            settings,
+            civil,
             ..
         } = self;
         let mut moved = Vec::new();
         for (at, (group, rows)) in groups.iter_mut().zip(owners.iter()).enumerate() {
             for (index, (held, owner)) in group.rows_mut().iter_mut().zip(rows).enumerate() {
+                if changed == Owner::Desktop(Setting::Region) && *owner == changed {
+                    let described = Setting::Region.described(settings, *civil);
+                    if held.set_description(Some(described)) {
+                        moved.push((at, index));
+                    }
+                    continue;
+                }
                 let built = match (changed, *owner) {
                     (Owner::Sound(changed), Owner::Sound(row)) if sound::touches(changed, row) => {
                         sound.as_ref().and_then(|reading| sound::row(row, reading))
@@ -3314,6 +3391,7 @@ impl Form {
                     catalog: &self.catalog,
                     text: self.text.as_ref(),
                     output: self.output,
+                    civil: self.civil,
                 };
                 let offered_before = setting.offer(&self.settings, offered).len();
                 if !setting.adopt(index, &mut self.settings, offered) {
@@ -3327,9 +3405,15 @@ impl Form {
                     catalog: &self.catalog,
                     text: self.text.as_ref(),
                     output: self.output,
+                    civil: self.civil,
                 };
                 if setting.offer(&self.settings, offered).len() != offered_before {
                     self.rebuild();
+                }
+                // The region's row states how the region it holds writes a
+                // date, which a new region changes.
+                if setting == Setting::Region {
+                    self.restating = Some(owner);
                 }
                 if setting == Setting::Backdrop {
                     self.retiled = self.pictures.restate_swatch(

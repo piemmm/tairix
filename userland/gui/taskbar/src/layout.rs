@@ -114,24 +114,24 @@ impl BarLayout {
     /// Regions are then laid out inside the bar's rim, one [`plate_border`]
     /// in on every side, so nothing the bar seats can paint over the edge the
     /// renderer draws. [`bar`](Self::bar) keeps the whole rectangle.
+    ///
+    /// `clock_room` answers how much room along the bar the clock needs, for
+    /// the bar's orientation and the depth of its interior; the clock is
+    /// never given less than its configured extent.
     #[must_use]
     pub fn compute(
         config: &TaskbarConfig,
         theme: &Theme,
         scale: Scale,
-        clock_room: u32,
+        clock_room: impl FnOnce(Orientation, u32) -> u32,
         (app_count, icon_count): (usize, usize),
     ) -> Self {
         let mut scaled = config.scaled(scale);
-        if scaled.edge.orientation() == Orientation::Horizontal {
-            scaled.clock_extent = scaled.clock_extent.max(clock_room);
-        }
-        let config = &scaled;
         let metrics = theme.metrics();
-        let orientation = config.edge.orientation();
+        let orientation = scaled.edge.orientation();
         let (main_screen, cross_screen) = match orientation {
-            Orientation::Horizontal => (config.screen_width, config.screen_height),
-            Orientation::Vertical => (config.screen_height, config.screen_width),
+            Orientation::Horizontal => (scaled.screen_width, scaled.screen_height),
+            Orientation::Vertical => (scaled.screen_height, scaled.screen_width),
         };
         // The gap the bar floats in, spent once: at both ends of the main
         // axis and against the cross edge the bar faces. A screen too small
@@ -142,7 +142,7 @@ impl BarLayout {
             .min(main_screen.saturating_sub(1) / 2)
             .min(cross_screen / 2);
         let main_total = main_screen.saturating_sub(margin.saturating_mul(2));
-        let thickness = config.thickness.min(cross_screen.saturating_sub(margin));
+        let thickness = scaled.thickness.min(cross_screen.saturating_sub(margin));
         // The bar's own rim, spent once: it belongs to the bar rather than to
         // what stands on it, so every region is laid out inside it and a
         // hovered slot cannot wash over the surface's edge. A bar too thin to
@@ -150,6 +150,13 @@ impl BarLayout {
         let border = plate_border(theme, scale)
             .min(main_total.saturating_sub(1) / 2)
             .min(thickness.saturating_sub(1) / 2);
+        // How much room the clock takes along the bar turns on how deep the
+        // bar is across it: its two lines stack only where both fit.
+        let cross_interior = thickness.saturating_sub(border.saturating_mul(2));
+        scaled.clock_extent = scaled
+            .clock_extent
+            .max(clock_room(orientation, cross_interior));
+        let config = &scaled;
         let cross_origin = if config.edge.at_trailing_cross_edge() {
             to_i32(
                 cross_screen

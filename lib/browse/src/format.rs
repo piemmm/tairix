@@ -57,20 +57,6 @@ fn unstamped(stamp: Time64) -> bool {
         && stamp.subsec_nanos() == Time64::UNIX_EPOCH.subsec_nanos()
 }
 
-/// Render an entry's modification instant as an ISO calendar date
-/// (`YYYY-MM-DD`), or the empty string when the instant is the epoch.
-///
-/// Dates before 1970 and far after 2038 render correctly: the civil date is
-/// [`CivilTime`]'s, over the signed 64-bit seconds.
-#[must_use]
-pub fn format_date(modified: Time64) -> String {
-    if unstamped(modified) {
-        return String::new();
-    }
-    let civil = CivilTime::from_time64(modified);
-    format!("{:04}-{:02}-{:02}", civil.year, civil.month, civil.day)
-}
-
 /// Render an instant as an ISO date and the time of day to the minute
 /// (`YYYY-MM-DD HH:MM`), the spelling a listing's modified column shows, or the
 /// empty string when the instant is the epoch.
@@ -101,7 +87,7 @@ pub fn format_datetime(stamp: Time64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_date, format_datetime, format_minute, format_size};
+    use super::{format_datetime, format_minute, format_size};
     use tairix_abi::time::Time64;
 
     #[test]
@@ -126,26 +112,6 @@ mod tests {
     fn huge_sizes_stay_in_pib_without_overflow() {
         // Beyond a pebibyte the value stays in PiB rather than wrapping.
         assert_eq!(format_size(u64::MAX), "16383.9 PiB");
-    }
-
-    #[test]
-    fn the_epoch_renders_blank_never_a_fabricated_date() {
-        assert_eq!(format_date(Time64::UNIX_EPOCH), "");
-    }
-
-    #[test]
-    fn dates_render_iso_after_and_before_the_epoch() {
-        // 2021-01-01T00:00:00Z.
-        assert_eq!(format_date(Time64::from_secs(1_609_459_200)), "2021-01-01");
-        // A stamp late in a day still resolves to that civil day.
-        assert_eq!(
-            format_date(Time64::from_secs(1_609_459_200 + 86_399)),
-            "2021-01-01"
-        );
-        // One second before the epoch is the last day of 1969.
-        assert_eq!(format_date(Time64::from_secs(-1)), "1969-12-31");
-        // Far after 2038 (the 32-bit boundary) still renders.
-        assert_eq!(format_date(Time64::from_secs(4_102_444_800)), "2100-01-01");
     }
 
     #[test]

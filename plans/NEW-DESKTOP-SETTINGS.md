@@ -411,7 +411,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | General → About | `SYSTEM_IDENTITY`, `UPTIME`, `CPU_INFO`, `MEMORY_TOTAL` | — (read-only) | reading renders unmeasured |
 | General → Login & startup | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
 | General → Caching | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
-| General → Date & Time | `WallClockReading` | elevated `datetime.app` (launched) | refusal stated, clock untouched |
+| General → Date & Time | `WallClockReading`, read in the user's zone and region from the delegated zone store | elevated `datetime.app` (launched) | refusal stated, clock untouched; no store reads UTC |
 | Appearance | the session's published settings document; the font store's families (`FontRequest::Families`) | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Theme | — | — (no theme model, §3) | pane states absence |
@@ -433,7 +433,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Touchscreen | — | — | pane states absence (§3) |
 | Printers & Scanners | — | — | pane states absence (§3) |
 | Accessibility | the session's published settings document (contrast, density, motion, scale, the pointer's set, size and aids) | session apply (merged) | apply refused, stated on `stderr`, row reverts |
-| Language & Region | the bundle `Help/` locale set, `lib/sysconfig` | elevated `configure`; zones → `plans/TIMEZONES.md` | Authority Mark |
+| Language & Region | the session's published settings document (`region`, `time.zone`); the regions and places from the zone store, read through the read-only delegation the session mints Settings alone (`TakeZoneStore`) | session apply, which refuses a region or zone the store does not hold | apply refused, stated; with no store delegated the rows offer the default and the held value alone |
 | Sharing | — | — | pane states absence (§3) |
 | Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` roster + own record; other accounts' fields, lock state and grants only after admin authentication (DS9) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
 | Storage | ungated `MOUNT_LIST` alone — its `VolumeStats` and its availability overlay; `VOLUME_IO_HEALTH` needs `CAP_SYSINFO_KERNEL` and stays the Switchboard's | — (read-only; mounting is the file manager's) | reading renders unmeasured |
@@ -464,7 +464,7 @@ would change nothing.
 | Power → sleep, battery, thermal | no power-supply, battery, or sensor interface, and no driver to serve one | `plans/DEVICES.md` sensor work + an ACPI/PSCI sleep path |
 | Keyboard → layout, modifier remap | exactly one hard-coded US ANSI table (`lib/hid::console`) | a layout registry (`lib/keymap` grows the data; the seat selects) |
 | Keyboard → shortcuts | no shortcut registry anywhere; each surface owns its own keys | a desktop-wide binding registry |
-| Language & Region → time zone | no zone data, no local rendering | `plans/TIMEZONES.md` |
+| Language & Region → language | the help ships in several locales, but nothing names the language a user reads in or chooses which a surface draws | a language setting and the locale walk that honours it (`plans/APPS.md` §2.1) |
 | General → Software Update | no updater, no package store | out of scope for this plan |
 | Accessibility → screen reader, zoom, sticky keys | no assistive-technology surface | out of scope for this plan |
 
@@ -1054,7 +1054,24 @@ would have had. The master switch's ceiling is shown as the ceiling it is: a
 per-class row keeps its own value, because that is what the store says, and
 states that caching is off for the machine so it cannot be read as running.
 Date & Time launches `datetime.app` through the broker's existing `Launch`,
-started and left running.
+started and left running. Its clock reading is the day written out and the time
+in the user's region, and its zone row names the place, its abbreviation and
+its offset from UTC; both are read through the zone store the session delegates
+(below), and read UTC where none was.
+
+**Language & Region** is a user-scope form over the session's `region` and
+`time.zone` keys. Settings may open no file, so the zone store reaches it as a
+read-only delegation: `WindowRequest::TakeZoneStore`, answered to Settings
+alone, mints it the descriptor the session opened at bring-up, and Settings
+reads and keeps the store for its life. The Region row offers *Default* (the
+store's own region, by name) and then every region by name, its description
+showing how the region it holds writes a date and a time at an instant that
+shows both field order and clock style; the Time zone row offers *Default* and
+then every place as *City, Region*, ordered by city. Both lists are long, so the
+choice list scrolls a window of whole rows and seeks a choice by typed prefix
+(`plans/GUI-CONTROLS-DESIGN.md` §11.10). A held value the store lacks is offered
+under its own spelling, so opening the pane never changes it; the session
+refuses an apply that names one.
 
 **The credential question is shared.** The desktop has one credential
 surface, `lib/controls::CredentialSheet`: the session's prompt window and this

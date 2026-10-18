@@ -58,6 +58,7 @@ extern crate alloc;
 
 pub mod apply;
 pub mod catalog;
+pub mod civil;
 pub mod fit;
 pub mod idle;
 pub mod input;
@@ -77,6 +78,7 @@ pub use catalog::{
     DEFAULT_WALLPAPER, DEFAULT_WALLPAPER_CATEGORY, MAX_WALLPAPER_BYTES,
     MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
+pub use civil::{civil_clock, RegionCode, ZoneName};
 pub use fit::{decode_request, nominal_source_size, place, Placement};
 pub use idle::{DisplayOffAfter, IdleAfter, IdleWait, MAX_WAIT_MINUTES};
 pub use input::{

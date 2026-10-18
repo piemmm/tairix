@@ -175,6 +175,7 @@
 
 extern crate alloc;
 
+pub mod about;
 pub mod aids;
 pub mod alert;
 pub mod apps;
@@ -250,7 +251,7 @@ pub use apps::{
 };
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
-pub use clock::{spell as spell_clock, SessionClock};
+pub use clock::{CivilAdoption, HeldZones, SessionClock};
 pub use config::{
     DATETIME_LABEL, FILES_LABEL, SETTINGS_LABEL, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
@@ -311,7 +312,8 @@ pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
     load_pinboard, publish_pinboard, serve_pinboard, AskedSettings, InputPolicy, LoadedPinboard,
-    PinboardApplied, PinboardCall, PinboardRefusal, SoundCall,
+    PinboardApplied, PinboardCall, PinboardRefusal, SoundCall, PINBOARD_UNATTESTED,
+    PINBOARD_UNATTESTED_MESSAGE,
 };
 pub use shell::{
     DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, DESKTOP_RESTYLED,

@@ -60,16 +60,23 @@ pub const SYSTEM_SUBDIRS: [&str; 16] = [
     "Components",
 ];
 
+/// The writable exceptions the root volume mounts over the read-only
+/// `/System` at runtime: a file the read-only volume holds beneath one is
+/// never seen.
+pub const SYSTEM_MOUNT_EXCEPTIONS: [&str; 2] = ["Logs", "Settings"];
+
 /// The writable-state `/System` subtree the **root** volume ships
-/// (`build_root_partition`). These are the only `/System` paths that resolve
-/// to the writable root volume at runtime: `Logs` and `Settings` are the
-/// writable exceptions mounted over the read-only `/System`, and `Security`
-/// holds the user/group databases (read by the boot-time `/System/Security`
-/// reader off this volume, which an installation may encrypt — they are never
-/// placed on the read-only `ARXFSSystem` volume). The immutable
-/// subdirectories in [`SYSTEM_SUBDIRS`] are deliberately absent here; they
-/// live only on `ARXFSSystem`.
-pub const WRITABLE_SYSTEM_SUBDIRS: [&str; 3] = ["Logs", "Settings", "Security"];
+/// (`build_root_partition`): the [`SYSTEM_MOUNT_EXCEPTIONS`], and `Security`,
+/// which holds the user/group databases (read by the boot-time
+/// `/System/Security` reader off this volume, which an installation may
+/// encrypt — they are never placed on the read-only `ARXFSSystem` volume). The
+/// immutable subdirectories in [`SYSTEM_SUBDIRS`] are deliberately absent
+/// here; they live only on `ARXFSSystem`.
+pub const WRITABLE_SYSTEM_SUBDIRS: [&str; 3] = [
+    SYSTEM_MOUNT_EXCEPTIONS[0],
+    SYSTEM_MOUNT_EXCEPTIONS[1],
+    "Security",
+];
 
 /// Number of inodes the root volume is formatted with: ample for the
 /// skeleton plus the installer's first-boot output, while trivial against

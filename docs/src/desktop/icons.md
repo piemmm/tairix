@@ -54,7 +54,8 @@ file-manager kinds
 something, and an open one — the `FolderBack`/`FolderFront` halves a folder's
 picture of what it holds is composed between, `File`, `AppBundle`, the type
 badges `Text`/`Image`/`Archive`/`Executable`/`Audio`/`Video`, the toolbar's
-`NavBack`/`NavForward`/`NavUp`/
+`NavBack`/`NavForward`/`NavUp` — chevrons, since a step between places is
+drawn as a chevron where a move that carries something is an arrow —
 `Refresh`/`ViewToggle`/`Sort`/`NewFolder`, and `Trash`/`EmptyTrash`), the
 taskbar's `Library` (the program-library launcher's three-by-three tile
 grid, `plans/NEW-TASKBAR.md` T4) and `User` (a head-and-shoulders bust, the
@@ -141,7 +142,10 @@ its mirror grey. The symbols are authored as SVG path data on a 24-unit grid
 and built through `lib/svg`'s one flattener and stroker, so a symbol and a
 decoded SVG asset are the same drawing to the rasteriser. The symbol is also
 the kind's tintable glyph: `glyph_mask(kind, side)` — what a button or a
-menu row draws in its own colour — is the symbol alone, never a tinted plate.
+menu row draws in its own colour — is the symbol alone, never a tinted plate,
+fitted to the pixel grid of its side ([lib/icon](../lib/icon.md)). The badge
+itself is not fitted: a symmetric symbol's middle stroke could be made crisp at
+half the sides only by drawing it half a pixel off its plate's centre.
 
 The badge is retained by `ArtworkCache` exactly as a glyph mask is, once per
 `(kind, side)`, and handed out as ready-coloured `IconPicture::Artwork`.

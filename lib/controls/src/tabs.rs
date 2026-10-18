@@ -56,8 +56,8 @@ use crate::disclosure::{tree_step, TreeKey, TreeRow, TreeStep};
 use crate::paint::{
     draw_outline, ground_fill, icon_slot_side, line_budget, paint_bead, paint_chevron,
     paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width, seam_thickness,
-    seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir,
-    ChromeLayer, TextBlock, FULL_COLOUR,
+    seam_width, surface_rect, text_plate_height, to_i32, withheld, ArtworkTone, BeadShape,
+    ChevronDir, ChromeLayer, TextBlock,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -1418,7 +1418,7 @@ impl Tabs {
             kind,
             tint,
             picture,
-            FULL_COLOUR,
+            ArtworkTone::FULL,
         );
         line.lead = line.lead.saturating_add(side.saturating_add(gap));
         line.avail = remaining;

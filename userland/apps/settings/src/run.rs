@@ -58,7 +58,7 @@ mod program {
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
+    use tairix_abi::sysinfo::{SysinfoQueryId, Uptime};
     use tairix_abi::window_ipc::{DialogModality, PreviewOutcome, PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId};
     use tairix_abi::{NoticeTopic, WaitSetOp, WaitSourceKind};
@@ -85,6 +85,7 @@ mod program {
     use tairix_settings::{EffectsAsk, EffectsAsks, EffectsReading, EffectsTrip};
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
+    use tairix_tz::ZoneInfo;
     use tairix_users::{Salt, SALT_LEN};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
@@ -545,8 +546,7 @@ mod program {
     /// on its own so one refusal costs one reading rather than all of them.
     fn machine_facts() -> MachineFacts {
         MachineFacts {
-            identity: read_scalar(SysinfoQueryId::SYSTEM_IDENTITY)
-                .and_then(|reply| SystemIdentity::from_bytes(&reply).ok()),
+            identity: tairix_procinfo::system_identity(&IpcTransport).ok(),
             uptime: read_scalar(SysinfoQueryId::UPTIME)
                 .and_then(|reply| Uptime::from_bytes(&reply).ok()),
             cpus: tairix_procinfo::cpu_info(&IpcTransport).unwrap_or_default(),
@@ -1081,6 +1081,49 @@ mod program {
             .filter_map(|name| core::str::from_utf8(name).ok())
             .filter_map(CursorSetId::new)
             .collect()
+    }
+
+    /// The desktop's zone store, read through the read-only delegation the
+    /// session mints this application, or `None` — stated — where it cannot
+    /// be had: the Language & Region rows then offer the default alone, and
+    /// the clock reads UTC.
+    fn fetch_zones(
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+    ) -> Option<&'static ZoneInfo<'static>> {
+        let unavailable = |why: &dyn core::fmt::Display| {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the desktop's zone store could not be read ({why}); dates and times \
+                              read UTC"
+                ),
+            );
+        };
+        let handle = match client.zone_store() {
+            Ok(handle) => handle,
+            Err(err) => {
+                unavailable(&err);
+                return None;
+            }
+        };
+        let Some(session) = client.session() else {
+            unavailable(&Errno::NotFound);
+            return None;
+        };
+        let file = match tairix_rt::File::from_delegation_by(handle, session) {
+            Ok(file) => file,
+            Err(raw) => {
+                unavailable(&Errno::from_syscall(raw));
+                return None;
+            }
+        };
+        match tairix_tz::load(&file) {
+            Ok(zones) => Some(zones),
+            Err(err) => {
+                unavailable(&err);
+                None
+            }
+        }
     }
 
     /// The client half of the panes' pictures: the renders outstanding and
@@ -2566,6 +2609,8 @@ mod program {
         shell.adopt_catalog(fetch_catalog(surface.window.client()));
         // And the pointer rows their choice space, for the same reason.
         shell.adopt_cursor_sets(fetch_cursor_sets(surface.window.client()));
+        // And the zone store, which the session holds open for exactly this.
+        shell.adopt_zones(fetch_zones(surface.window.client()));
         // The resolutions on offer are what the output can show.
         shell.adopt_output(output_of(desktop));
         // The font store is read once per boot, so its families are too.

@@ -35,9 +35,9 @@ use tairix_vt::secret::{SecretIndicator, SecretInput};
 
 use crate::damage;
 use crate::paint::{
-    ground_fill, line_budget, paint_bead, paint_plate, paint_run, plate_border, resolve_bead,
-    resolve_frame, role_font, run_width, surface_rect, text_plate_height, to_i32, withheld,
-    ChromeLayer, PlateStyle, TextBlock,
+    ground_fill, line_budget, paint_bead, paint_plate, paint_run, plate_border, plate_frame_inset,
+    resolve_bead, resolve_frame, role_font, run_width, surface_rect, text_plate_height, to_i32,
+    withheld, ChromeLayer, PlateStyle, TextBlock,
 };
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use crate::scrollbar::{ScrollAction, ScrollBar};
@@ -502,6 +502,11 @@ struct FieldGeom {
     text_x0: u32,
     /// The clipped text region width in pixels.
     avail_w: u32,
+    /// The surface-y the text region begins at, inside the rim, gap and ring.
+    text_top: u32,
+    /// The text region's height: nothing the field draws for its text, its
+    /// selection or its caret reaches the frame around it.
+    text_height: u32,
     /// The message-row rectangle below the field, if there is room for one.
     message: Option<(u32, u32, u32, u32)>,
 }
@@ -524,11 +529,13 @@ fn field_geom(
     let pad = scale.scale_length(metrics.control_inset);
     let edge = border.saturating_add(pad);
 
-    let control_h = scale.scale_length(metrics.control_height).max(1);
-    let row_h = if control_h < h { control_h } else { h };
+    let row_h = TextField::height(scale, theme).min(h);
+    let frame = plate_frame_inset(theme, scale).min(row_h / 2);
 
     let text_x0 = x + edge.saturating_add(leading).min(w);
     let avail_w = w.saturating_sub(edge.saturating_mul(2).saturating_add(leading));
+    let text_top = y + frame;
+    let text_height = row_h.saturating_sub(frame.saturating_mul(2));
 
     let message = {
         let below = h.saturating_sub(row_h);
@@ -546,8 +553,18 @@ fn field_geom(
         row: (x, y, w, row_h),
         text_x0,
         avail_w,
+        text_top,
+        text_height,
         message,
     })
+}
+
+/// Where a field's line of text sits in a text region `height` tall, as
+/// `(top, height)`: the glyph box, centred, never taller than the region. The
+/// text, its selection and its caret all stand in this one band.
+fn line_band(font: BitmapFont, height: u32) -> (u32, u32) {
+    let glyph = font.glyph_height();
+    (height.saturating_sub(glyph) / 2, glyph.min(height))
 }
 
 /// The horizontal text scroll (pixels hidden at the left) that keeps the caret
@@ -749,16 +766,16 @@ impl FieldCore {
         (font, label): (BitmapFont, Color),
         shown: Shown<'_>,
     ) {
-        let (_, y, _, row_h) = geom.row;
-        let avail_w = geom.avail_w;
-        if avail_w == 0 || row_h == 0 {
+        let (avail_w, text_height) = (geom.avail_w, geom.text_height);
+        if avail_w == 0 || text_height == 0 {
             return;
         }
-        let Some(mut layer) = Surface::new(avail_w, row_h) else {
+        let Some(mut layer) = Surface::new(avail_w, text_height) else {
             return;
         };
         let palette = theme.palette();
-        let baseline = font.centred_top(0, row_h);
+        let band = line_band(font, text_height);
+        let baseline = to_i32(band.0);
         let caret = match shown {
             Shown::Marker(Some(marker)) => {
                 let run = font.elide_to_width(marker, avail_w);
@@ -766,7 +783,7 @@ impl FieldCore {
                 Some(to_i32(run_width(font, run)))
             }
             Shown::Buffer if !self.editor.text.is_empty() => {
-                self.paint_buffer(&mut layer, (font, label), baseline, palette)
+                self.paint_buffer(&mut layer, (font, label), band, palette)
             }
             Shown::Buffer | Shown::Marker(None) => {
                 if let Some(placeholder) = &self.placeholder {
@@ -788,14 +805,14 @@ impl FieldCore {
             let cx = cx.clamp(0, to_i32(avail_w.saturating_sub(caret_w)));
             layer.fill_rect(
                 u32::try_from(cx).unwrap_or(0),
-                0,
+                band.0,
                 caret_w,
-                row_h,
+                band.1,
                 Color::from(palette.on_surface),
             );
         }
 
-        surface.blit(to_i32(geom.text_x0), to_i32(y), &layer);
+        surface.blit(to_i32(geom.text_x0), to_i32(geom.text_top), &layer);
     }
 
     /// Paint the non-empty buffer scrolled to keep the caret in view, with its
@@ -805,11 +822,12 @@ impl FieldCore {
         &self,
         layer: &mut Surface,
         (font, label): (BitmapFont, Color),
-        baseline: i32,
+        (band_top, band_h): (u32, u32),
         palette: &Palette,
     ) -> Option<i32> {
         let text = self.editor.text.as_str();
-        let (avail_w, row_h) = (layer.width(), layer.height());
+        let avail_w = layer.width();
+        let baseline = to_i32(band_top);
         let scroll = text_scroll(font, text, self.editor.caret, avail_w);
         let base_x = -to_i32(scroll);
         let Some((a, b)) = self.editor.selection() else {
@@ -824,9 +842,9 @@ impl FieldCore {
         if sel_w > 0 {
             layer.fill_rect(
                 u32::try_from(clamped_a).unwrap_or(0),
-                0,
+                band_top,
                 sel_w,
-                row_h,
+                band_h,
                 Color::from(palette.accent),
             );
         }
@@ -1330,6 +1348,35 @@ pub fn owner_chord(key: Key, modifiers: Modifiers) -> bool {
     let select_all =
         modifiers.ctrl && !modifiers.alt && !modifiers.meta && matches!(key, Key::Char('a' | 'A'));
     chord && !select_all
+}
+
+/// A clipboard chord a field leaves to its owner ([`owner_chord`]), because
+/// only the owner holds a clipboard.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClipboardChord {
+    /// Ctrl+X: the selection to the clipboard, then out of the field.
+    Cut,
+    /// Ctrl+C: the selection to the clipboard.
+    Copy,
+    /// Ctrl+V: the clipboard's text over the selection.
+    Paste,
+}
+
+impl ClipboardChord {
+    /// The clipboard chord `key` with `modifiers` is, if it is one: X, C or V
+    /// with Ctrl and no other modifier but Shift.
+    #[must_use]
+    pub fn of(key: Key, modifiers: Modifiers) -> Option<Self> {
+        if !modifiers.ctrl || modifiers.alt || modifiers.meta {
+            return None;
+        }
+        match key {
+            Key::Char('x' | 'X') => Some(Self::Cut),
+            Key::Char('c' | 'C') => Some(Self::Copy),
+            Key::Char('v' | 'V') => Some(Self::Paste),
+            _ => None,
+        }
+    }
 }
 
 /// One key press as a control that times its own feedback takes it: the key,

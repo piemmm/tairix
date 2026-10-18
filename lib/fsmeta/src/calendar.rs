@@ -80,14 +80,6 @@ pub fn iso_minute(civil: &CivilTime) -> String {
     out
 }
 
-/// Render `civil`'s time of day as a 24-hour clock shows it: `HH:MM`.
-#[must_use]
-pub fn hour_minute(civil: &CivilTime) -> String {
-    let mut out = String::new();
-    push_hour_minute(&mut out, civil);
-    out
-}
-
 fn push_hour_minute(out: &mut String, civil: &CivilTime) {
     // Writing into a `String` never fails.
     let _ = write!(out, "{:02}:{:02}", civil.hour, civil.minute);
@@ -115,9 +107,10 @@ pub fn full_date(civil: &CivilTime) -> String {
 /// `weekdays` and the month from `months`.
 fn spelled_date(civil: &CivilTime, weekdays: &[&'static str], months: &[&'static str]) -> String {
     let real = (1..=days_in_month(civil.year, civil.month)).contains(&civil.day);
-    let weekday = real
-        .then(|| weekday_from_days(days_from_civil(civil.year, civil.month, civil.day)))
-        .map_or("", |weekday| ordinal_name(weekdays, weekday));
+    let days = real
+        .then(|| days_from_civil(civil.year, civil.month, civil.day))
+        .flatten();
+    let weekday = days.map_or("", |days| ordinal_name(weekdays, weekday_from_days(days)));
     let mut out = String::new();
     // Writing into a `String` never fails; the `Result` is discarded
     // deliberately rather than unwrapped.
@@ -134,7 +127,7 @@ fn spelled_date(civil: &CivilTime, weekdays: &[&'static str], months: &[&'static
 
 #[cfg(test)]
 mod tests {
-    use super::{full_date, hour_minute, iso_minute, long_date, month_abbreviation};
+    use super::{full_date, iso_minute, long_date, month_abbreviation};
     use tairix_abi::time::CivilTime;
 
     #[test]
@@ -200,7 +193,7 @@ mod tests {
     #[test]
     fn the_time_of_day_is_two_padded_fields() {
         let civil = CivilTime::from_unix_secs(1_709_214_367);
-        assert_eq!(hour_minute(&civil), "13:46");
+        assert_eq!(iso_minute(&civil), "2024-02-29 13:46");
         let early = CivilTime {
             year: 2026,
             month: 9,
@@ -209,8 +202,11 @@ mod tests {
             minute: 5,
             second: 59,
         };
-        assert_eq!(hour_minute(&early), "04:05");
-        assert_eq!(hour_minute(&CivilTime::from_unix_secs(-60)), "23:59");
+        assert_eq!(iso_minute(&early), "2026-09-30 04:05");
+        assert_eq!(
+            iso_minute(&CivilTime::from_unix_secs(-60)),
+            "1969-12-31 23:59"
+        );
     }
 
     /// Neither a month nor a weekday is named for a date the calendar lacks.

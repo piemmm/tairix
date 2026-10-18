@@ -3,8 +3,8 @@
 //!
 //! The band's anchor is held in layout coordinates, so scrolling while it is
 //! held grows it; its head is the pointer, in window coordinates, clamped to
-//! the item area. It selects an entry whose body it touches — a grid tile's
-//! picture and name, not the ground around them. Which tiles it surely touches
+//! the item area. It selects an entry it touches — a grid tile's picture or
+//! name, not the ground around and between them. Which tiles it surely touches
 //! is arithmetic over the view's lines and slots, only the tiles along its
 //! edges are tested one by one, each laid out once while it stays on an edge,
 //! and a sweep changes only the entries entering or leaving the band, so a band
@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 use tairix_controls::scroll::{ScrollOrientation, ScrollView};
-use tairix_controls::{blend_area, fill_area};
+use tairix_controls::{blend_area, fill_area, TileParts};
 
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_hash::FastHash;
@@ -21,7 +21,7 @@ use tairix_theme::Theme;
 
 use crate::browser::Browser;
 use crate::layout::BandMarks;
-use crate::render::{entry_body, tile_core, view_layout_for, Frame, Tiles};
+use crate::render::{entry_parts, tile_core, view_layout_for, Frame, Tiles};
 use crate::select::Selection;
 use crate::source::DirectorySource;
 
@@ -42,23 +42,23 @@ pub struct Marquee {
     touched: BandMarks,
     /// What a sweep builds the next marks in, so a step allocates nothing.
     next: BandMarks,
-    /// The bodies of the entries along the band's last edges, by index, so a
+    /// The parts of the entries along the band's last edges, by index, so a
     /// pointer sample lays out only the names it has not laid out already.
-    bodies: Vec<Edge>,
-    /// What a sweep collects the next edges' bodies in.
-    next_bodies: Vec<Edge>,
+    edges: Vec<Edge>,
+    /// What a sweep collects the next edges' parts in.
+    next_edges: Vec<Edge>,
     #[cfg(test)]
     laid_out: usize,
 }
 
 /// One edge entry as a sweep found it: the cell it lay in, a digest of its
-/// name, and the body they gave.
+/// name, and the parts they gave.
 #[derive(Clone, Copy, Debug)]
 struct Edge {
     index: usize,
     cell: Rect,
     name: u64,
-    body: Option<Rect>,
+    parts: Option<TileParts>,
 }
 
 impl Marquee {
@@ -84,8 +84,8 @@ pub fn begin<S: DirectorySource>(
         base: browser.selection().clone(),
         touched: BandMarks::default(),
         next: BandMarks::default(),
-        bodies: Vec::new(),
-        next_bodies: Vec::new(),
+        edges: Vec::new(),
+        next_edges: Vec::new(),
         #[cfg(test)]
         laid_out: 0,
     })
@@ -119,39 +119,44 @@ pub fn sweep<S: DirectorySource>(
     let entries = browser.entries();
     let Marquee {
         next,
-        bodies,
-        next_bodies,
+        edges,
+        next_edges,
         ..
     } = marquee;
-    next_bodies.clear();
+    next_edges.clear();
     next.rebuild(core, &cells, |index| {
         let (Some(cell), Some(entry)) = (layout.layout_rect(index), entries.get(index)) else {
             return false;
         };
         let name = FastHash::hash_bytes(0, entry.name().as_bytes());
-        let body = match bodies.binary_search_by_key(&index, |found| found.index) {
-            Ok(at) if bodies[at].cell == cell && bodies[at].name == name => bodies[at].body,
+        let parts = match edges.binary_search_by_key(&index, |found| found.index) {
+            Ok(at) if edges[at].cell == cell && edges[at].name == name => edges[at].parts,
             _ => {
                 #[cfg(test)]
                 {
                     marquee.laid_out += 1;
                 }
-                // A list row is all body, so a list's rows are never edges.
-                tiles.map_or(Some(cell), |tiles| {
-                    entry_body(tiles, entry, cell, frame.scale, frame.theme)
-                })
+                // A list row is one part, the whole row, so a list's rows are
+                // never edges.
+                tiles.map_or(
+                    Some(TileParts {
+                        picture: Some(cell),
+                        name: None,
+                    }),
+                    |tiles| entry_parts(tiles, entry, cell, frame.scale, frame.theme),
+                )
             }
         };
-        next_bodies.push(Edge {
+        next_edges.push(Edge {
             index,
             cell,
             name,
-            body,
+            parts,
         });
-        body.is_some_and(|body| !body.intersection(&band).is_empty())
+        parts.is_some_and(|parts| parts.meets(&band))
     });
-    next_bodies.sort_unstable_by_key(|found| found.index);
-    core::mem::swap(bodies, next_bodies);
+    next_edges.sort_unstable_by_key(|found| found.index);
+    core::mem::swap(edges, next_edges);
     let changed = browser.move_band(&marquee.base, &marquee.touched, &marquee.next);
     core::mem::swap(&mut marquee.touched, &mut marquee.next);
     changed

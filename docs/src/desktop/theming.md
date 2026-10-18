@@ -23,7 +23,8 @@ bundles, under a stable `ThemeId`:
   opacities: the surface/foreground base
   (`desktop`, `surface`, `surface_raised`, `document`, `title_band`,
   `on_surface`, `on_surface_muted`,
-  `accent`, `on_accent`, `selection_fill`, `border`), the Reactive Alloy
+  `accent`, `on_accent`, `selection_fill`, `selection_tint`, `border`), the
+  Reactive Alloy
   control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
   signal roles the boards' legend fixes (the `*_pressure` set,
@@ -31,7 +32,8 @@ bundles, under a stable `ThemeId`:
   `workload`, and the four transfer directions `disk_read`, `disk_write`,
   `net_receive`, `net_send`), the
   scroll and window-frame roles
-  (`scroll_track`, `scroll_thumb`, `frame`), the light the desktop is lit by
+  (`scroll_track`, `scroll_thumb`, `scroll_thumb_active`, `frame`), the light
+  the desktop is lit by
   (`bevel_light`, `bevel_shade`, `drop_shadow`), the window-command highlight
   roles (`window_close`, `window_minimize`, `window_maximize`,
   `window_put_to_back`), and `title_hue_alpha`. The
@@ -91,9 +93,11 @@ bundles, under a stable `ThemeId`:
     heavier than the rest of a floating plate. The tests hold it a stated
     distance from both the plate and the hover wash, in the appearance's own
     direction, and hold body text legible on it.
-  - `selection_fill` is the plate a selected item is filled with — an icon tile
-    in the file manager's grid, on the desktop's icon field, or on the login
-    chooser. It is each theme's own `accent` at three tenths opacity (alpha
+  - `selection_fill` is the plate a selected item's name is filled with — an
+    icon tile in the file manager's grid, on the desktop's icon field, or on
+    the login chooser — and `selection_tint`, the same accent at alpha `115`,
+    is what the item's picture is washed with through its own coverage, heavier
+    because it marks a picture rather than tinting a plate. It is each theme's own `accent` at three tenths opacity (alpha
     `77`): `#d1550f4d` on dark, `#c8500c4d` on light. It is this light because
     it is not doing the work alone — the backdrop beneath a selected item is
     frosted by `selection_backdrop_blur` first, and that separation is what

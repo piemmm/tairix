@@ -5,6 +5,7 @@
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
+use tairix_controls::Alert;
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, WindowId};
 
 use crate::alert::{alert_title, AlertWindow, Speaker};
@@ -60,8 +61,15 @@ impl ChoicePrompt {
         compositor: &mut Compositor,
     ) -> Option<Self> {
         let title = alert_title(spec.severity(), Speaker::Desktop);
-        AlertWindow::open(spec, &title, owner, (0, true, false), shell, compositor)
-            .map(|window| Self { window })
+        AlertWindow::open(
+            Alert::from_spec(spec),
+            &title,
+            owner,
+            (0, true, false),
+            shell,
+            compositor,
+        )
+        .map(|window| Self { window })
     }
 
     /// Start the arm delay from `now_ns`, the moment the prompt is first on

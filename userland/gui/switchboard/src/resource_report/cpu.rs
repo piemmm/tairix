@@ -12,6 +12,8 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::{CpuCoreClass, CpuInfoRecord, CpuLoadRecord, LoadAverage};
 use tairix_controls::PressureKind;
 use tairix_procinfo::display::{percent, whole_percent};
+use tairix_procinfo::human::format_count;
+use tairix_theme::SignalRole;
 
 use super::{consumers, reading as reading_of};
 use crate::model::{OwnerBundles, RollingMeters};
@@ -91,8 +93,8 @@ fn context(sample: &Sample) -> Vec<String> {
     lines
 }
 
-/// The per-core grid, the processor's own facts, and the tasks costing it
-/// most.
+/// The per-core grid, the scheduler's rates, the processor's own facts, and
+/// the tasks costing it most.
 fn blocks(sample: &Sample, meters: &RollingMeters, bundles: &OwnerBundles) -> Vec<PaneBlock> {
     let cores = core_cells(sample, meters);
     let heading = match core_count(sample) {
@@ -111,7 +113,11 @@ fn blocks(sample: &Sample, meters: &RollingMeters, bundles: &OwnerBundles) -> Ve
                 BlockBody::Cores(cores)
             },
         ),
-        PaneBlock::half("PROCESSOR", BlockBody::Facts(processor_facts(sample))),
+        PaneBlock::full("SCHEDULER — PER SECOND", scheduler_body(sample, meters)),
+        PaneBlock::half(
+            "PROCESSOR",
+            BlockBody::Facts(processor_facts(sample, meters)),
+        ),
         PaneBlock::half(
             "TOP CONSUMERS — CPU",
             BlockBody::Consumers(consumers::by_cpu(sample, bundles)),
@@ -173,33 +179,54 @@ fn core_cells(sample: &Sample, meters: &RollingMeters) -> Vec<CoreCell> {
         .collect()
 }
 
+/// The scheduler's two rates as one duplex trace — dispatches above the
+/// midline, timer preemptions below — or the statement of why there is none.
+fn scheduler_body(sample: &Sample, meters: &RollingMeters) -> BlockBody {
+    let trace = meters.scheduler.trace();
+    if trace.primary.is_empty() {
+        return BlockBody::Absence(crate::view::reading::absence_statement(
+            "the scheduler's rates",
+            Unmeasured::from_absence(sample.absence(DegradedField::CpuLoad)),
+        ));
+    }
+    BlockBody::Trend {
+        trace: Trace::Duplex {
+            inbound: SignalRole::Cpu,
+            outbound: SignalRole::Workload,
+            into: trace.primary,
+            out: trace.opposing,
+        },
+        caption: format!(
+            "context switches above, preemptions below · {} /s full scale",
+            format_count(trace.full_scale)
+        ),
+    }
+}
+
+/// A scheduler rate as a reading: events a second, or why it is unmeasured.
+fn rate_reading(sample: &Sample, rate: Option<u64>) -> Reading {
+    reading_of(sample, DegradedField::CpuLoad, rate, |rate| {
+        format!("{} /s", format_count(rate))
+    })
+}
+
 /// The processor's own facts: what it is, how it is arranged, and what the
 /// scheduler is doing on it.
-fn processor_facts(sample: &Sample) -> Vec<ReadingFact> {
+fn processor_facts(sample: &Sample, meters: &RollingMeters) -> Vec<ReadingFact> {
     let mut facts = alloc::vec![
         ReadingFact::new("Model", model_reading(sample)),
         ReadingFact::new("Topology", topology_reading(sample)),
         ReadingFact::new("Live frequency", peak_clock(sample)),
+        ReadingFact::new(
+            "Context switches",
+            rate_reading(sample, meters.scheduler.switches_per_sec()),
+        ),
+        ReadingFact::new(
+            "Involuntary preemptions",
+            rate_reading(sample, meters.scheduler.preemptions_per_sec()),
+        ),
     ];
     let load = sample.cpu_load.as_ref();
-    facts.push(ReadingFact::new(
-        "Context switches",
-        reading_of(
-            sample,
-            DegradedField::CpuLoad,
-            load.map(|loads| loads.iter().map(|entry| entry.switches).sum::<u64>()),
-            |total| format!("{total} since boot"),
-        ),
-    ));
-    facts.push(ReadingFact::new(
-        "Involuntary preemptions",
-        reading_of(
-            sample,
-            DegradedField::CpuLoad,
-            load.map(|loads| loads.iter().map(|entry| entry.preemptions).sum::<u64>()),
-            |total| format!("{total} since boot"),
-        ),
-    ));
     facts.push(ReadingFact::new("ISA features", isa_features(sample)));
     facts.push(ReadingFact::new(
         "Run-queue depth",

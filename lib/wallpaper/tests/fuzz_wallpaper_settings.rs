@@ -248,6 +248,17 @@ const KEYS: &[RegistryRow] = &[
         &["never", "1", "15", "1440"],
         &["0", "later"],
     ),
+    ("region", &["", "GB", "US", "ZZ"], &["gb", "GBR", "G1"]),
+    (
+        "time.zone",
+        &[
+            "",
+            "Europe/London",
+            "America/Argentina/Buenos_Aires",
+            "Etc/GMT+5",
+        ],
+        &["Europe//London", "../etc", "Europe/Lon don"],
+    ),
     (
         "audio.output",
         &["\"\"", "0000000000000051.0", "ffffffffffffffff.31"],

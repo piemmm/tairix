@@ -19,6 +19,7 @@ use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::accounts::{AccountFacts, AccountSetting};
+use crate::civil::CivilChoices;
 use crate::effects::EffectsReading;
 use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace, TextChoices};
@@ -44,6 +45,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) text: Option<&'a TextChoices>,
     /// The output the desktop is drawn on, once the desktop has said.
     pub(crate) output: Option<(u32, u32)>,
+    /// The delegated zone store's regions and places, once it has arrived.
+    pub(crate) civil: Option<&'static CivilChoices>,
     /// The mounted volumes the mount-table walk answered with.
     pub(crate) volumes: &'a [VolumeReading],
     /// The machine's boot-time configuration, or `None` while the read has
@@ -84,6 +87,7 @@ impl<'a> Answered<'a> {
             catalog: self.catalog,
             text: self.text,
             output: self.output,
+            civil: self.civil,
             config: self.config,
             addressing: &self.network.addressing,
             staged: self.staged,
@@ -126,7 +130,11 @@ impl Body {
             }
             Some(PaneContent::Volumes) => Self::Volumes(Readings::new(answered.volumes)),
             Some(PaneContent::About) => Self::Facts(Facts::about(answered.machine)),
-            Some(PaneContent::Clock) => Self::Facts(Facts::clock(answered.machine)),
+            Some(PaneContent::Clock) => {
+                let zones = answered.civil.map(|civil| civil.zones);
+                let (clock, _) = tairix_wallpaper::civil_clock(zones, answered.settings);
+                Self::Facts(Facts::clock(answered.machine, &clock, zones))
+            }
         }
     }
 

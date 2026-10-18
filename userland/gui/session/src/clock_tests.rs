@@ -1,14 +1,20 @@
-//! Host tests for the taskbar clock's reading, spelling, and tick.
-//!
-//! All of it is a pure function of a wall-clock reading and a monotonic
-//! instant, so none of it needs a kernel: what an unset clock draws, how a
-//! reading is spelled, when the label next goes stale, and that an idle
-//! desktop arms no deadline it does not owe.
+//! Host tests for the icon bar clock's reading, spelling and tick: what an
+//! unset clock shows, how a reading is written in a zone and a region's
+//! conventions, when the lines next go stale, and that an idle desktop arms
+//! no deadline it does not owe.
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec;
 
 use tairix_abi::time::{Time64, WallClockReading, WallTimeState};
+use tairix_taskbar::clock::ClockLines;
+use tairix_tz::{CivilClock, Decided, ZoneInfo};
+use tairix_wallpaper::{DesktopSettings, RegionCode, ZoneName};
 
-use super::{spell, SessionClock, UNSET_LABEL};
+use super::{SessionClock, UNSET_LABEL};
 use tairix_abi::WAITSET_TIMEOUT_NONE;
+use tairix_wallpaper::civil_clock;
 
 /// Nanoseconds in one second, for readable deadlines.
 const SEC: u64 = 1_000_000_000;
@@ -26,7 +32,7 @@ fn at(secs: i64, nanos: u32) -> WallClockReading {
 /// folded into would be nothing, and the loop would spin on it.
 #[test]
 fn a_failed_read_waits_a_minute_rather_than_spinning() {
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     assert!(clock.adopt(at(1_709_214_367, 0), 0));
     let stale = 53 * SEC;
     assert!(clock.is_due(stale));
@@ -40,34 +46,146 @@ fn a_failed_read_waits_a_minute_rather_than_spinning() {
     assert!(clock.is_due(stale + 60 * SEC));
 }
 
+/// What a UTC clock spells `reading` as: the time, the date, the heading.
+fn spelled(reading: WallClockReading) -> (String, String, String) {
+    let mut clock = SessionClock::new(CivilClock::UTC);
+    clock.adopt(reading, 0);
+    (
+        clock.lines().time.clone(),
+        clock.lines().date.clone(),
+        String::from(clock.heading()),
+    )
+}
+
 #[test]
-fn a_reading_spells_the_hour_and_minute_zero_padded() {
-    // 2024-02-29 13:46:07 UTC — the shared civil breakdown, spelled to the
-    // minute the bar shows.
-    assert_eq!(spell(at(1_709_214_367, 0)), "13:46");
+fn a_reading_with_no_zone_spells_utc_the_iso_way() {
+    // 2024-02-29 13:46:07 UTC, spelled to the minute the bar shows.
+    let at_leap = spelled(at(1_709_214_367, 0));
+    assert_eq!(
+        (at_leap.0.as_str(), at_leap.1.as_str(), at_leap.2.as_str()),
+        ("13:46", "2024-02-29", "2024-02-29 13:46 UTC")
+    );
     // Midnight pads both fields rather than collapsing to "0:0".
-    assert_eq!(spell(at(0, 0)), "00:00");
-    // The last minute of the day.
-    assert_eq!(spell(at(86_399, 0)), "23:59");
-    // Before the epoch counts backwards correctly rather than wrapping: one
-    // second before is 23:59 of the previous day.
-    assert_eq!(spell(at(-1, 0)), "23:59");
+    assert_eq!(spelled(at(0, 0)).0, "00:00");
+    assert_eq!(spelled(at(86_399, 0)).0, "23:59");
+    // One second before the epoch is 23:59 of the day before.
+    let before = spelled(at(-1, 0));
+    assert_eq!(
+        (before.0.as_str(), before.1.as_str()),
+        ("23:59", "1969-12-31")
+    );
+}
+
+/// The fixture store of real zones and regions, kept for the test.
+fn zones() -> &'static ZoneInfo<'static> {
+    let bytes: &'static [u8] = Box::leak(tairix_tz::testkit::store().into_boxed_slice());
+    Box::leak(Box::new(
+        ZoneInfo::parse(bytes).expect("the fixture parses"),
+    ))
+}
+
+fn settings(zone: Option<&str>, region: Option<&str>) -> DesktopSettings {
+    DesktopSettings {
+        time_zone: zone.and_then(ZoneName::new),
+        region: region.and_then(RegionCode::new),
+        ..DesktopSettings::default()
+    }
+}
+
+#[test]
+fn a_reading_is_written_in_the_users_zone_and_region() {
+    // 2026-10-18 13:05 UTC.
+    let instant = at(1_792_328_700, 0);
+    let (london, decided) = civil_clock(Some(zones()), &settings(None, None));
+    assert_eq!(decided, (Decided::StoreDefault, Decided::StoreDefault));
+    let mut clock = SessionClock::new(london);
+    clock.adopt(instant, 0);
+    assert_eq!(
+        (
+            clock.lines().time.as_str(),
+            clock.lines().date.as_str(),
+            clock.heading()
+        ),
+        ("14:05", "18/10/2026", "18/10/2026 14:05 BST"),
+        "British summer time, the British way"
+    );
+    let (new_york, decided) = civil_clock(
+        Some(zones()),
+        &settings(Some("America/New_York"), Some("US")),
+    );
+    assert_eq!(decided, (Decided::Preference(0), Decided::Preference(0)));
+    let mut clock = SessionClock::new(new_york);
+    clock.adopt(instant, 0);
+    assert_eq!(
+        (
+            clock.lines().time.as_str(),
+            clock.lines().date.as_str(),
+            clock.heading()
+        ),
+        ("9:05 AM", "10/18/2026", "10/18/2026 9:05 AM EDT")
+    );
+}
+
+#[test]
+fn the_next_tick_is_the_local_clocks_minute() {
+    // Local mean time in 1800 is 75 seconds behind UT: 00:00:30 UT is 23:59:15
+    // on the clock, 45 seconds short of its minute.
+    let (london, _) = civil_clock(Some(zones()), &settings(None, None));
+    let mut clock = SessionClock::new(london);
+    clock.adopt(at(-5_364_662_370, 0), 0);
+    assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 45 * SEC);
+}
+
+#[test]
+fn a_change_of_zone_is_due_at_once() {
+    let mut clock = SessionClock::new(CivilClock::UTC);
+    clock.adopt(at(1_709_214_367, 0), 0);
+    assert!(!clock.is_due(SEC));
+    let (london, _) = civil_clock(Some(zones()), &settings(None, None));
+    clock.set_civil(london);
+    assert!(clock.is_due(SEC), "not left until the minute turns");
+    assert_eq!(clock.park_deadline_ns(SEC, WAITSET_TIMEOUT_NONE), 0);
+}
+
+#[test]
+fn the_widest_lines_hold_every_field_at_its_most_digits_either_side_of_noon() {
+    let utc = SessionClock::new(CivilClock::UTC);
+    let lines = |time: &str, date: &str| ClockLines {
+        time: String::from(time),
+        date: String::from(date),
+    };
+    assert_eq!(
+        utc.widest(),
+        vec![lines("10:58", "2088-12-28"), lines("22:58", "2088-12-28")]
+    );
+    let (us, _) = civil_clock(
+        Some(zones()),
+        &settings(Some("America/New_York"), Some("US")),
+    );
+    assert_eq!(
+        SessionClock::new(us).widest(),
+        vec![
+            lines("10:58 AM", "12/28/2088"),
+            lines("10:58 PM", "12/28/2088")
+        ]
+    );
 }
 
 #[test]
 fn an_unset_clock_shows_a_placeholder_rather_than_a_fabricated_time() {
     let unset = WallClockReading::new(Time64::UNIX_EPOCH, WallTimeState::Unset);
+    let shown = spelled(unset);
     assert_eq!(
-        spell(unset),
-        UNSET_LABEL,
+        (shown.0.as_str(), shown.1.as_str(), shown.2.as_str()),
+        (UNSET_LABEL, "", UNSET_LABEL),
         "00:00 would be a time nobody set"
     );
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     assert!(
         clock.adopt(unset, 0),
         "the placeholder owes the bar a repaint, or the clock is never drawn"
     );
-    assert_eq!(clock.label(), UNSET_LABEL);
+    assert_eq!(clock.lines().time, UNSET_LABEL);
     assert!(
         !clock.adopt(unset, SEC),
         "still unset a second later is the same label"
@@ -76,23 +194,23 @@ fn an_unset_clock_shows_a_placeholder_rather_than_a_fabricated_time() {
     // but a real time — so it draws.
     let seeded = WallClockReading::new(Time64::from_secs(1_709_214_367), WallTimeState::Firmware);
     assert!(clock.adopt(seeded, 0));
-    assert_eq!(clock.label(), "13:46");
+    assert_eq!(clock.lines().time, "13:46");
 }
 
 #[test]
 fn adopting_reports_only_a_label_that_actually_moved() {
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     assert!(clock.adopt(at(1_709_214_367, 0), 0), "the first reading");
     // Another second in the same minute is the same label: no repaint.
     assert!(!clock.adopt(at(1_709_214_368, 0), SEC));
     // The next minute is a new label.
     assert!(clock.adopt(at(1_709_214_420, 0), 53 * SEC));
-    assert_eq!(clock.label(), "13:47");
+    assert_eq!(clock.lines().time, "13:47");
 }
 
 #[test]
 fn the_tick_is_armed_at_the_next_minute_boundary_and_never_at_zero() {
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     // 7 seconds into the minute: 53 to go.
     clock.adopt(at(1_709_214_367, 0), 0);
     assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 53 * SEC);
@@ -109,11 +227,30 @@ fn the_tick_is_armed_at_the_next_minute_boundary_and_never_at_zero() {
     assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 60 * SEC);
 }
 
+/// The tick is the zone's own: local mean time turns its minutes on its own
+/// seconds, and only the end of the range, which has no later minute, waits a
+/// whole one rather than arming a deadline of now.
+#[test]
+fn the_tick_follows_the_zones_own_minute() {
+    let info = zones();
+    let mut london = SessionClock::new(CivilClock::new(
+        info.default_zone(),
+        info.default_region().as_ref(),
+    ));
+    // 00:00:30 UT on 1 January 1800 reads 23:59:15 local mean time.
+    let mean = tairix_tz::testkit::utc(1800, 1, 1, 0, 0) + 30;
+    london.adopt(at(mean, 0), 0);
+    assert_eq!(london.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 45 * SEC);
+    let mut clock = SessionClock::new(CivilClock::UTC);
+    clock.adopt(at(i64::MAX, 5), 0);
+    assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 60 * SEC);
+}
+
 #[test]
 fn a_clock_that_has_read_nothing_arms_no_deadline() {
     // An idle desktop must not wake a core for a clock that has never been
     // read: the park is left exactly as it was.
-    let clock = SessionClock::new();
+    let clock = SessionClock::new(CivilClock::UTC);
     assert_eq!(
         clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
         WAITSET_TIMEOUT_NONE
@@ -123,7 +260,7 @@ fn a_clock_that_has_read_nothing_arms_no_deadline() {
 
 #[test]
 fn a_stale_label_shortens_the_park_to_nothing_because_the_tick_is_owed() {
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     clock.adopt(at(1_709_214_367, 0), 0);
     // The deadline has passed while the loop was busy elsewhere: the tick is
     // still owed, so the next park does not wait for it a second time.
@@ -135,7 +272,7 @@ fn a_stale_label_shortens_the_park_to_nothing_because_the_tick_is_owed() {
 fn the_clock_never_lengthens_a_park_another_surface_already_shortened() {
     // The fold only ever tightens: an animation due sooner keeps its own
     // deadline, exactly as `park_within` promises.
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     clock.adopt(at(1_709_214_367, 0), 0);
     assert_eq!(clock.park_deadline_ns(0, SEC / 2), SEC / 2);
 }
@@ -144,8 +281,8 @@ fn the_clock_never_lengthens_a_park_another_surface_already_shortened() {
 fn a_clock_that_has_read_nothing_is_due() {
     // The first reading is owed unconditionally: there is no label yet, and
     // no deadline that could say when one falls due.
-    assert!(SessionClock::new().is_due(0));
-    assert!(SessionClock::new().is_due(u64::MAX));
+    assert!(SessionClock::new(CivilClock::UTC).is_due(0));
+    assert!(SessionClock::new(CivilClock::UTC).is_due(u64::MAX));
 }
 
 /// The gate the run loop reads the wall clock behind, pinned against the
@@ -158,7 +295,7 @@ fn a_clock_that_has_read_nothing_is_due() {
 /// one it *was* shortened for is owed a reading.
 #[test]
 fn the_read_is_due_exactly_when_the_park_it_armed_has_elapsed() {
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     // 53 seconds short of the next minute boundary.
     clock.adopt(at(1_709_214_367, 0), 0);
 
@@ -181,7 +318,7 @@ fn the_read_is_due_exactly_when_the_park_it_armed_has_elapsed() {
 
 #[test]
 fn adopting_a_reading_clears_the_debt_until_the_next_minute() {
-    let mut clock = SessionClock::new();
+    let mut clock = SessionClock::new(CivilClock::UTC);
     clock.adopt(at(1_709_214_367, 0), 0);
     assert!(clock.is_due(53 * SEC));
     // The tick is paid at the boundary, which arms the following whole minute.

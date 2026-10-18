@@ -2,13 +2,16 @@
 //! and a fail-closed refusal for every malformation the login screen or a
 //! hostile caller could put on the wire.
 
+use core::num::NonZeroU64;
+
 use super::{
-    decode_account_page, encode_account_page, session_wake_endpoint, AccountPage, SessionAccount,
-    SessionRequest, SessionVerdict, SessionWake, SESSION_ACCOUNTS_HEADER_LEN,
-    SESSION_ACCOUNTS_MAGIC, SESSION_ACCOUNTS_PER_PAGE, SESSION_ACCOUNT_RECORD_LEN,
-    SESSION_DISPLAY_NAME_MAX, SESSION_ENDPOINT, SESSION_LOGIN_NAME_MAX, SESSION_MAX_REPLY,
-    SESSION_MAX_REQUEST, SESSION_REQUEST_MAGIC, SESSION_VERDICT_LEN, SESSION_VERDICT_MAGIC,
-    SESSION_VERSION, SESSION_WAKE_LEN,
+    decode_account_page, decode_zone_store_reply, encode_account_page, encode_zone_store_reply,
+    session_wake_endpoint, AccountPage, SessionAccount, SessionRequest, SessionVerdict,
+    SessionWake, SESSION_ACCOUNTS_HEADER_LEN, SESSION_ACCOUNTS_MAGIC, SESSION_ACCOUNTS_PER_PAGE,
+    SESSION_ACCOUNT_RECORD_LEN, SESSION_DISPLAY_NAME_MAX, SESSION_ENDPOINT, SESSION_LOGIN_NAME_MAX,
+    SESSION_MAX_REPLY, SESSION_MAX_REQUEST, SESSION_REQUEST_MAGIC, SESSION_VERDICT_LEN,
+    SESSION_VERDICT_MAGIC, SESSION_VERSION, SESSION_WAKE_LEN, SESSION_ZONE_STORE_LEN,
+    SESSION_ZONE_STORE_MAGIC,
 };
 use crate::account::MAX_PASSWORD_LEN;
 use crate::ipc::{is_reserved_endpoint, is_seat_scoped_endpoint};
@@ -72,6 +75,75 @@ fn a_background_request_round_trips_and_carries_no_body() {
     assert_eq!(
         SessionRequest::decode(&buf[..=len]),
         Err(Errno::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn a_zone_store_request_round_trips_and_carries_no_body() {
+    let mut buf = [0u8; SESSION_MAX_REQUEST];
+    let len = SessionRequest::ZoneStore.encode(&mut buf).expect("encodes");
+    assert_eq!(len, 8);
+    assert_eq!(
+        SessionRequest::decode(&buf[..len]),
+        Ok(SessionRequest::ZoneStore)
+    );
+    assert_eq!(
+        SessionRequest::decode(&buf[..=len]),
+        Err(Errno::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn a_zone_store_reply_round_trips_a_handle_and_none() {
+    let mut buf = [0u8; SESSION_ZONE_STORE_LEN];
+    for handle in [NonZeroU64::new(1), NonZeroU64::new(u64::MAX), None] {
+        let len = encode_zone_store_reply(handle, &mut buf).expect("encodes");
+        assert_eq!(len, SESSION_ZONE_STORE_LEN);
+        assert_eq!(decode_zone_store_reply(&buf), Ok(handle));
+    }
+}
+
+#[test]
+fn a_zone_store_reply_fails_closed_on_every_malformation() {
+    let mut buf = [0u8; SESSION_ZONE_STORE_LEN + 1];
+    encode_zone_store_reply(NonZeroU64::new(7), &mut buf).expect("encodes");
+    let frame = buf;
+    assert_eq!(
+        decode_zone_store_reply(&frame[..SESSION_ZONE_STORE_LEN - 1]),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        decode_zone_store_reply(&frame),
+        Err(Errno::LengthOutOfRange)
+    );
+    let mut bad = frame;
+    bad[0..4].copy_from_slice(&SESSION_VERDICT_MAGIC.to_le_bytes());
+    assert_eq!(
+        decode_zone_store_reply(&bad[..SESSION_ZONE_STORE_LEN]),
+        Err(Errno::BadMagic)
+    );
+    for reserved in [6, 7] {
+        let mut dirty = frame;
+        dirty[reserved] = 1;
+        assert_eq!(
+            decode_zone_store_reply(&dirty[..SESSION_ZONE_STORE_LEN]),
+            Err(Errno::BadMagic)
+        );
+    }
+    let mut version = frame;
+    version[4..6].copy_from_slice(&(SESSION_VERSION + 1).to_le_bytes());
+    assert_eq!(
+        decode_zone_store_reply(&version[..SESSION_ZONE_STORE_LEN]),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]),
+        SESSION_ZONE_STORE_MAGIC
+    );
+    let mut short = [0u8; SESSION_ZONE_STORE_LEN - 1];
+    assert_eq!(
+        encode_zone_store_reply(None, &mut short),
+        Err(Errno::BufferTooSmall)
     );
 }
 

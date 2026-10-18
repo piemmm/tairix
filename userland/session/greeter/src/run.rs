@@ -74,10 +74,12 @@ mod program {
         ACCOUNTS_UNAVAILABLE, AUTHORITY_ON_LOOP, AUTHORITY_UNREACHABLE, DISPLAY_ASLEEP,
         DISPLAY_KEPT_BLACK, DISPLAY_WAKE_REFUSED, POINTER_UNAVAILABLE, RIBBON_UNAVAILABLE,
         SCREEN_READY, SCREEN_READY_MESSAGE, SCREEN_UNAVAILABLE, VERDICT_RECEIVED,
+        ZONES_UNAVAILABLE,
     };
     use tairix_greeter_service::frame::{Present, Scanout};
     use tairix_greeter_service::screen::LoginScreen;
     use tairix_greeter_service::verify::{exchange, Check, Checked};
+    use tairix_greeter_service::zones::zone_store_grant;
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::shm::SharedRegion;
@@ -85,6 +87,7 @@ mod program {
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::LogSink;
     use tairix_theme::{Appearance, ThemeRegistry};
+    use tairix_tz::{CivilClock, ZoneInfo};
     use tairix_window::app;
 
     /// Frames in the presented ring: one being scanned out, one being written.
@@ -203,6 +206,37 @@ mod program {
             .ok()
             .and_then(|payload| SystemIdentity::from_bytes(&payload).ok());
         identity_line(reported.as_ref())
+    }
+
+    /// The clock the screen tells the time in: the zone store's own zone and
+    /// region, since no one has signed in to choose another; UTC, recorded,
+    /// where no store can be had.
+    fn civil() -> CivilClock<'static> {
+        match zones() {
+            Ok(zones) => CivilClock::new(zones.default_zone(), zones.default_region().as_ref()),
+            Err(reason) => {
+                record(
+                    ZONES_UNAVAILABLE,
+                    Level::Info,
+                    &alloc::format!("greeter: {reason}; the clock reads UTC"),
+                );
+                CivilClock::UTC
+            }
+        }
+    }
+
+    /// The zone store, read through the delegation the session authority
+    /// mints this process, or why it could not be had.
+    fn zones() -> Result<&'static ZoneInfo<'static>, String> {
+        let handle = zone_store_grant(&mut RtSessionTransport)
+            .map_err(|refusal| String::from(refusal.reason()))?;
+        let file = tairix_rt::File::from_delegation(handle.get()).map_err(|raw| {
+            alloc::format!(
+                "the zone store delegation could not be taken ({})",
+                Errno::from_syscall(raw)
+            )
+        })?;
+        tairix_tz::load(&file).map_err(|error| alloc::format!("{error}"))
     }
 
     /// The wall clock, or `None` when no trusted time has been set.
@@ -556,7 +590,7 @@ mod program {
             scanout,
             themes.active().clone(),
             Scale::ONE,
-            identity(),
+            (identity(), civil()),
             tiles(),
             ToWorker(Arc::clone(&worker)),
         );

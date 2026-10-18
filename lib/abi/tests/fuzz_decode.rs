@@ -78,8 +78,9 @@ use tairix_abi::service_control::{
     REQUEST_LEN as SERVICE_CONTROL_REQUEST_LEN,
 };
 use tairix_abi::session_ipc::{
-    decode_account_page, encode_account_page, SessionRequest, SessionVerdict, SESSION_MAX_REPLY,
-    SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
+    decode_account_page, decode_zone_store_reply, encode_account_page, encode_zone_store_reply,
+    SessionRequest, SessionVerdict, SESSION_MAX_REPLY, SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
+    SESSION_ZONE_STORE_LEN,
 };
 use tairix_abi::sound_cue::{
     decode_cue_reply, encode_cue_reply, names_policy, Answer, CueOutcome, CueRequest, Silence,
@@ -191,6 +192,12 @@ fn exercise_session_ipc(bytes: &[u8]) {
         let redecoded = SessionVerdict::decode(&buf[..len])
             .expect("round-trip of an accepted verdict must succeed");
         assert_eq!(verdict, redecoded);
+    }
+    if let Ok(handle) = decode_zone_store_reply(bytes) {
+        let mut buf = [0u8; SESSION_ZONE_STORE_LEN];
+        let len = encode_zone_store_reply(handle, &mut buf)
+            .expect("round-trip encode of an accepted zone-store reply must succeed");
+        assert_eq!(&buf[..len], bytes, "a zone-store reply has one encoding");
     }
 }
 
@@ -1947,6 +1954,35 @@ fn structured_elevate_replies_with_corrupted_fields_never_panic() {
     }
 }
 
+/// Every `session-v1` frame without a variable body, seeded and bit-flipped:
+/// a random input almost never carries one's magic, so the seeds are what
+/// reach the decoders' field checks.
+#[test]
+fn structured_session_frames_with_corrupted_fields_never_panic() {
+    let mut frames = std::vec::Vec::new();
+    for request in [
+        SessionRequest::Accounts { offset: 3 },
+        SessionRequest::Background,
+        SessionRequest::ZoneStore,
+    ] {
+        let mut buf = [0u8; SESSION_MAX_REQUEST];
+        let len = request.encode(&mut buf).expect("encodes");
+        frames.push(buf[..len].to_vec());
+    }
+    let mut reply = [0u8; SESSION_ZONE_STORE_LEN];
+    encode_zone_store_reply(core::num::NonZeroU64::new(9), &mut reply).expect("encodes");
+    frames.push(reply.to_vec());
+    for mut frame in frames {
+        for byte in 0..frame.len() {
+            for bit in 0..8u32 {
+                frame[byte] ^= 1 << bit;
+                exercise(&frame);
+                frame[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
 /// Every window-channel operation, seeded and bit-flipped at its own frame
 /// length as well as one byte either side of it.
 ///
@@ -2123,6 +2159,7 @@ fn window_request_desktop_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::QueryCursorSets,
         WindowRequest::QueryNotifySources,
         WindowRequest::LockScreen,
+        WindowRequest::TakeZoneStore,
         WindowRequest::RenderPreview {
             window_id: 3,
             shm_handle: 11,
@@ -2274,6 +2311,27 @@ fn fuzz_endings() -> SaveEndings {
     endings
 }
 
+/// A row that both acts and opens a desktop-drawn field opening with its stem
+/// selected, so a flip lands on the entry id, on the field's own text length
+/// and on its selection.
+fn rename_row() -> AppMenuRow {
+    AppMenuRow::Item(
+        AppMenuItem::new(
+            AppMenuItemId::new(4).expect("a valid id"),
+            AppMenuLabel::new("Rename").expect("a valid label"),
+            AppMenuSymbol::Rename,
+        )
+        .with_entry(
+            AppMenuEntry::new(
+                AppMenuItemId::new(90).expect("a valid id"),
+                AppMenuEntryText::new("report.txt").expect("a valid name"),
+            )
+            .with_selection(0..6)
+            .expect("the stem lies on the name's boundaries"),
+        ),
+    )
+}
+
 /// The rich menu both structured menu seeds carry, appended to `menu`: every
 /// row kind, a chain nested two deep, and every marking a row states.
 ///
@@ -2336,20 +2394,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         .with_role(AppMenuRole::Destructive),
     ))
     .expect("room for Quit");
-    // A row that both acts and opens a desktop-drawn field, so a flip lands
-    // on the entry id and on the field's own text length.
-    menu.push(AppMenuRow::Item(
-        AppMenuItem::new(
-            AppMenuItemId::new(4).expect("a valid id"),
-            AppMenuLabel::new("Rename").expect("a valid label"),
-            AppMenuSymbol::Rename,
-        )
-        .with_entry(AppMenuEntry {
-            id: AppMenuItemId::new(90).expect("a valid id"),
-            initial: AppMenuEntryText::new("report.txt").expect("a valid name"),
-        }),
-    ))
-    .expect("room for the rename row");
+    menu.push(rename_row()).expect("room for the rename row");
     // A chooseable row that is *also* a plate's parent, with a child naming
     // the bundle its icon comes from: the two shapes a submenu-as-relationship
     // introduces.

@@ -859,6 +859,14 @@ Text fields use a quiet Alloy Plate with a clear focus ring.
 - Search fields may show active query state through a small leading seam.
 - Denied or read-only fields must be visually distinct from disabled fields.
 - Cursor, selection, and text rendering are theme-driven and DPI-scaled.
+- The text, the selection and the caret stand inside the plate's frame — its
+  rim, the gap and the focus ring, reserved whether or not the ring is lit —
+  never on it. The selection and the caret are the line's height, centred on
+  it, and a framed plate is tall enough to seat its line inside the frame at
+  every contrast (`text_plate_height`); a heavier contrast thickens the frame
+  and its plates grow rather than the text meeting the rim.
+- Cut, copy and paste are the owner's: the field leaves those chords to it
+  (`owner_chord`, `ClipboardChord`), because only an owner holds a clipboard.
 
 The family's credential member is the masked entry `SecretField`; a search
 field has no masked mode, because a query is not a credential.
@@ -914,6 +922,22 @@ Menus are pinned command plates. They are not floating ornament.
   icon in the danger hue.
 - Disabled items show the reason when focused or inspected.
 - Nested menus open from the row edge with a short anchor trace.
+- **A plate shorter than its rows shows a window of whole rows.** A row
+  outside the window has no rectangle, so it is neither painted nor hit, and
+  a highlight can never sit on a row nothing drew. The keyboard's highlight
+  brings its row into the window by the least movement; Page Up and Page Down
+  move a window's worth less one row. A plate opens with its highlighted row
+  in the middle and holds that window from the first move on, so moving the
+  highlight within it never moves the rows. The wheel scrolls the window by
+  the nearest whole number of rows to the one wheel distance, and the hover
+  follows the rows that now lie under the pointer. A slim mark in the
+  scrollbar's thumb grey runs along the trailing edge while rows are hidden,
+  showing where the window stands; it is a mark, not a control.
+- **Typing seeks a row by its label.** A letter within a second of the last
+  extends the prefix sought, a slower one starts afresh, and the same letter
+  again steps to the next row it begins; letters compare without case. A
+  combo box's open list takes typed letters as a seek and never as a choice
+  (`ComboBox::on_key` takes the stamped `Keystroke` for it).
 
 ### 11.11 Toolbar and Toolstrip
 
@@ -1361,7 +1385,12 @@ rows carry icons the marks take a gutter of their own before the icon column,
 so a marked row still shows what it does; on a plate with none the mark takes
 the one leading column. Either way the columns are the plate's, so a marked
 row's label lines up with an unmarked one's. Both are shapes rather than
-colours, so the state is legible without colour vision.
+colours, so the state is legible without colour vision. The tick is fitted to
+whole pixels as the chevron is: two arms at 45 degrees, the long twice the
+short, each a whole number of pixels deep and ending square on a pixel column.
+A row that cannot act mutes its artwork as it mutes its label, grey and faded
+toward the plate as far as the muted label is (`ArtworkTone::disabled`); its
+glyph already takes the muted ink.
 
 ### 11.27 TraySignal
 
@@ -1400,8 +1429,9 @@ ScrollBar
 - The thumb length is proportional to `viewport_extent / content_extent`, subject to the theme's minimum thumb length and the space required by end controls.
 - The thumb position maps the clamped `offset` across the draggable track. The same mapping is used in paint, hit testing, keyboard updates, and tests.
 - When the viewport covers the content, the offset is zero and the bar follows the declared layout policy: hidden, or a reserved quiet gutter with a non-draggable thumb. It must not oscillate between policies as content changes by a pixel.
-- Idle: low-contrast thumb and quiet Scroll Channel.
-- Hover, keyboard focus, wheel input, or active scrolling: thumb and relevant end control brighten without changing geometry.
+- Idle: low-contrast thumb and quiet Scroll Channel, its two long sides edged one rim-width in the theme's `frame` colour so the bar's extent reads against any ground.
+- Hover, keyboard focus, wheel input, or active scrolling: thumb and relevant end control step to the neutral `scroll_thumb_active` grey without changing geometry — never the accent, which is the selection's; the focus ring stays the bar's one accent line.
+- The end controls' chevrons are the shared grid-fitted triangle, centred exactly across the bar in a button of either parity and along it by their weight.
 - Thumb drag captures the pointer and preserves the initial pointer-to-thumb anchor so the content does not jump when the drag begins.
 - A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop. The cadence is the control's own: it states when its next step is due and steps when asked at that time, and its owner folds that one deadline into its wait rather than keeping a timer beside the control. A hold steps only while the pointer is on the part it pressed and the step would move something, and a press toward a bound already reached presses nothing.
 - A press the bar holds is the bar's to its end: its owner routes every event to it wherever the pointer has gone, and a release or a cancel ends it even when the bar itself has gone.
@@ -1528,10 +1558,18 @@ of, and it is a collection control alongside ListRow/TableRow (§11.13) and Card
   the desktop wallpaper — so a folder reads as a field of pictures rather than a
   grid of boxes. A tile is not a Card: a card's plate bounds a group it owns,
   while a plate per item would draw a box around every icon.
-- Only *state* paints anything behind the picture:
+- **A tile is two parts**, its picture and its name's drawn lines, each with a
+  half inset of margin (`TileLayout::parts`). The press target, the hover, a
+  marquee's touch and the drop target are either part, never the box around
+  both, so the ground beside a narrow picture above a wide name is the view's.
+- Only *state* paints anything, and the plate it paints stands behind the
+  **name** (the picture of a tile drawing no name):
   - Hover and press take the shared pointer wash (`surface_hover` /
-    `surface_pressed`) as a rounded panel across the whole tile.
-  - **Selection frosts the tile's backdrop and fills the tile with the theme's
+    `surface_pressed`) as a rounded panel behind the name.
+  - **A selected tile's picture is washed with the theme's `selection_tint`**
+    through its own coverage, at the mark's strength, and so is a drop
+    target's, so the item reads as lit where it is drawn.
+  - **Selection frosts the plate's backdrop and fills the plate with the theme's
     `selection_fill`** — its own accent at three tenths opacity, light because
     the frost is what marks the item and the accent only tints it. What is
     blurred is the *backdrop*: the pixels the tile covers — a window's surface,

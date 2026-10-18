@@ -18,10 +18,10 @@ use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_greeter::{Tickets, Verdict};
 use tairix_greeter_service::accounts::{load_accounts, SessionTransport};
-use tairix_greeter_service::{exchange, Answer, Check};
+use tairix_greeter_service::{exchange, zone_store_grant, Answer, Check, ZoneStoreRefusal};
 use tairix_log::{Event, Sink};
 use tairix_login::session::{AuthenticatedUser, Authenticator, Credentials, Gid, Uid};
-use tairix_login::{handle_session_request, AttemptBudget, SessionDirectory};
+use tairix_login::{handle_session_request, AttemptBudget, SessionDirectory, ZoneStoreGrant};
 
 /// The console both sides are on.
 const CONSOLE: u64 = 1;
@@ -32,6 +32,18 @@ const GREETER: u32 = tairix_users::GREETER_UID.0;
 /// The one account the fixture authority knows, and its secret.
 const ACCOUNT: &str = "ann";
 const SECRET: &str = "correct-horse";
+
+/// The handle the fixture authority's zone-store delegation answers with.
+const ZONE_GRANT: u64 = 21;
+
+/// A machine whose store is delegated as [`ZONE_GRANT`].
+struct Delegates;
+
+impl ZoneStoreGrant for Delegates {
+    fn grant(&self) -> Result<core::num::NonZeroU64, tairix_abi::Errno> {
+        core::num::NonZeroU64::new(ZONE_GRANT).ok_or(tairix_abi::Errno::OutOfRange)
+    }
+}
 
 /// Swallows the authority's audit records: this test is about the wire, and
 /// the audit trail has its own tests on the authority's side.
@@ -150,6 +162,7 @@ impl SessionTransport for Authority {
             CONSOLE,
             &mut self.accounts,
             &OneAccount,
+            &Delegates,
             &mut self.budget,
             self.now,
             &Quiet,
@@ -161,6 +174,20 @@ impl SessionTransport for Authority {
         );
         Ok(served.len)
     }
+}
+
+#[test]
+fn the_zone_store_the_authority_delegates_reaches_the_greeter_as_its_handle() {
+    let mut authority = Authority::holding(1);
+    assert_eq!(
+        zone_store_grant(&mut authority).map(core::num::NonZeroU64::get),
+        Ok(ZONE_GRANT)
+    );
+    let mut impostor = Authority::from_an_impostor(1);
+    assert_eq!(
+        zone_store_grant(&mut impostor),
+        Err(ZoneStoreRefusal::Withheld)
+    );
 }
 
 #[test]

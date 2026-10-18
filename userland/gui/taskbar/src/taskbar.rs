@@ -27,7 +27,6 @@ use tairix_controls::{
     plate_content_inset, readout_hover, ControlRole, FactList, IconButton, Measured,
     PlatePlacement, PlateSeating, PointerState, TaskbarItem, TraySignalAction,
 };
-use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconRequest, Landed};
 use tairix_input::InputEvent;
@@ -36,9 +35,9 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::apps::{AppSlot, AppStrip};
-use crate::clock::{clock_room, clock_room_key, Clock};
+use crate::clock::{clock_room, Clock, ClockFaces};
 use crate::clock_menu::ClockPermits;
-use crate::edge::Edge;
+use crate::edge::{Edge, Orientation};
 use crate::input::TaskbarResponse;
 use crate::layout::{local_rect, BarLayout, Hit, NotificationsLayout, ReadoutLayout};
 use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
@@ -167,7 +166,7 @@ pub struct Taskbar {
     network_hover: PointerState,
     /// The clock's room, measured once per face and padding rather than on
     /// every layout a pointer motion asks for.
-    clock_room: Measured<(BitmapFont, u32)>,
+    clock_room: Measured<(ClockFaces, u64, Orientation, u32)>,
     elevation_available: bool,
     switch_user_available: bool,
     /// Whether the session attested the Settings component is installed.
@@ -918,13 +917,18 @@ impl Taskbar {
     /// counts at the desktop `scale` (the compositor's output density).
     #[must_use]
     pub fn layout(&self, scale: Scale) -> BarLayout {
-        let key = clock_room_key(&self.theme, scale);
-        let clock_room = self.clock_room.get_or(key, || clock_room(key));
+        let faces = ClockFaces::of(&self.theme, scale);
+        let (samples, shape) = self.clock.shape();
         BarLayout::compute(
             &self.config,
             &self.theme,
             scale,
-            clock_room,
+            |orientation, cross| {
+                self.clock_room
+                    .get_or((faces, shape, orientation, cross), || {
+                        clock_room(faces, samples, orientation, cross)
+                    })
+            },
             (self.apps.len(), self.notifications.signal_count()),
         )
     }
@@ -1321,7 +1325,7 @@ impl Taskbar {
     /// only where the session attested a broker to authenticate against.
     pub(crate) fn clock_menu(&self, anchor: Rect, scale: Scale) -> MenuRequest {
         let permits = ClockPermits {
-            reading: String::from(self.clock.label()),
+            reading: String::from(self.clock.heading()),
             set_available: self.elevation_available,
         };
         MenuRequest {

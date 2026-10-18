@@ -2936,6 +2936,10 @@ impl core::fmt::Display for OsVersion {
     }
 }
 
+/// The name the operating system a [`SystemIdentity`] describes is stated by,
+/// beside its [`OsVersion`].
+pub const SYSTEM_NAME: &str = "TAIRiX";
+
 /// Maximum bytes of the source identifier carried in a [`MountRecord`].
 ///
 /// The source is the backing volume or device name (e.g. a `/Storage`

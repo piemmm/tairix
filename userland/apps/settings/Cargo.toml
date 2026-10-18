@@ -96,6 +96,13 @@ tairix-useradmin = { path = "../../../lib/useradmin", version = "=0.0.0" }
 # pane states what the store will take before anyone authenticates, and
 # hashes a new password here so no plaintext leaves this process.
 tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
+# The civil-time engine: the regions and places the Language & Region rows
+# offer, and the reading the Date & Time pane states, from the store the
+# session delegates.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0" }
+# The full date a reading is stated in, from the one calendar every surface
+# writes a day out by.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 
 # Everything only the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host the binary is an
@@ -131,6 +138,8 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 # font service over the runtime `ipc_call` transport; the base dependency
 # stays host-neutral so host tests inject the mock transport instead.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# Reads the delegated zone store whole on the real target.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["rt"] }
 
 # The shell's host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).
@@ -140,6 +149,9 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["tes
 # The secret marker's cadence, which the window's marker schedule is checked
 # against rather than restated.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The fixture zone store the Language & Region and Date & Time panes are
+# tested against.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["test-support"] }
 
 [lints]
 workspace = true

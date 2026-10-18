@@ -577,6 +577,12 @@ pub const TARGETS: &[Target] = &[
             "lib/procinfo info:/stats: resolver (untrusted reference bytes + hostile sysinfod replies: never panics, fails closed, envelope invariants hold)",
     },
     Target {
+        package: "tairix-tz",
+        test: "fuzz_zoneinfo",
+        description:
+            "lib/tz zone-store reader (any bytes validated or refused, every query of an accepted store, the local-time round trip)",
+    },
+    Target {
         package: "tairix-devids",
         test: "fuzz_devids",
         description:

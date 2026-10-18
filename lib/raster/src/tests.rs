@@ -880,7 +880,7 @@ fn blit_desaturated_greys_the_source_without_touching_it() {
     let mut dst = Surface::new(2, 2).expect("allocates");
     let mut src = Surface::new(2, 2).expect("allocates");
     src.fill(RED);
-    dst.blit_desaturated(0, 0, &src, 0);
+    dst.blit_desaturated(0, 0, &src, 0, 255);
     assert_eq!(dst.get(0, 0), Some(RED.premultiply().desaturate(0)));
     // The sprite itself is unchanged, so one cached copy serves every state.
     assert_eq!(src.get(0, 0), Some(RED.premultiply()));
@@ -896,7 +896,7 @@ fn a_fully_saturated_blit_is_the_plain_blit() {
     let mut mapped = Surface::new(3, 3).expect("allocates");
     mapped.fill(BLUE);
     plain.blit(0, 0, &src);
-    mapped.blit_desaturated(0, 0, &src, 255);
+    mapped.blit_desaturated(0, 0, &src, 255, 255);
     assert_eq!(plain.pixels(), mapped.pixels());
 }
 
@@ -905,9 +905,34 @@ fn a_desaturated_blit_clips_exactly_as_a_plain_one_does() {
     let mut src = Surface::new(4, 4).expect("allocates");
     src.fill(RED);
     let mut dst = Surface::new(2, 2).expect("allocates");
-    dst.blit_desaturated(-1, -1, &src, 0);
+    dst.blit_desaturated(-1, -1, &src, 0, 255);
     let grey = RED.premultiply().desaturate(0);
     assert!(dst.pixels().iter().all(|p| *p == grey));
+}
+
+#[test]
+fn a_toned_blit_greys_and_fades_as_the_two_alone_do() {
+    // What a disabled control's artwork rests on: grey, and only part of it.
+    let mut src = Surface::new(2, 2).expect("allocates");
+    src.fill(RED);
+    let mut grey = Surface::new(2, 2).expect("allocates");
+    grey.blit_desaturated(0, 0, &src, 0, 255);
+    let mut toned = Surface::new(2, 2).expect("allocates");
+    toned.fill(BLUE);
+    let mut by_hand = Surface::new(2, 2).expect("allocates");
+    by_hand.fill(BLUE);
+    toned.blit_desaturated(0, 0, &src, 0, 96);
+    by_hand.blit_faded(0, 0, &grey, 96);
+    assert_eq!(toned.pixels(), by_hand.pixels());
+    let mut untouched = Surface::new(2, 2).expect("allocates");
+    untouched.fill(BLUE);
+    let before = untouched.pixels().to_vec();
+    untouched.blit_desaturated(0, 0, &src, 0, 0);
+    assert_eq!(
+        untouched.pixels(),
+        before,
+        "nothing at all lands at zero strength"
+    );
 }
 
 #[test]

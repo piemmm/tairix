@@ -31,6 +31,7 @@ use tairix_controls::{
     ComboBox, ControlState, FieldControl, FieldGroup, FieldRow, SecretField, TextField,
     ValidationState,
 };
+use tairix_procinfo::UNMEASURED;
 use tairix_useradmin::listing::{known_capability, Listing};
 use tairix_useradmin::{render_grants, state_word, Account};
 use tairix_users::{
@@ -55,9 +56,6 @@ const GROUPS_CAPTION: &str = "GROUPS";
 
 /// The label every roster row carries before a listing has landed.
 const ACCOUNT_LABEL: &str = "Account";
-
-/// What a reading states when the caller could not take it.
-const UNMEASURED: &str = "not measured";
 
 /// What the own-account plate states for a uid no account database holds.
 ///

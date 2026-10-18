@@ -6,15 +6,13 @@
 //! The text never moves; the ribbon is what changes. Under reduced motion the
 //! ribbon holds still too, and only the minute turning redraws anything.
 
-use alloc::string::String;
-
 use tairix_abi::font_ipc::FontWeight;
-use tairix_abi::time::{CivilTime, Time64, WallClockReading};
+use tairix_abi::time::WallClockReading;
 use tairix_font::BitmapFont;
-use tairix_fsmeta::calendar::long_date;
 use tairix_ribbon::Light;
 use tairix_theme::motion::SceneClock;
 use tairix_theme::{TextRole, Theme};
+use tairix_tz::CivilClock;
 use tairix_wallpaper::RibbonOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
@@ -67,18 +65,18 @@ pub(super) struct Ribbon {
 }
 
 impl Ribbon {
-    /// A face for a `screen` at `scale`, telling `wall` as of `now_ns` with the
-    /// lines `options` ask for, still when `calm`; `None` when the heap will
-    /// not give the ribbon.
+    /// A face for a `screen` at `scale`, telling `wall` in `civil` as of
+    /// `now_ns` with the lines `options` ask for, still when `calm`; `None`
+    /// when the heap will not give the ribbon.
     pub(super) fn new(
         theme: &Theme,
         (scale, screen): (Scale, (u32, u32)),
-        (wall, now_ns): (Option<WallClockReading>, u64),
+        time: (Option<WallClockReading>, CivilClock<'static>, u64),
         (calm, options): (bool, RibbonOptions),
     ) -> Option<Self> {
-        let spelling: DateSpelling = spell_date;
+        let now_ns = time.2;
         let (fonts, baselines) = typeset(theme, scale, screen);
-        let telling = Telling::new(options.date.then_some(spelling), (wall, now_ns));
+        let telling = Telling::new(options.date.then_some(DateSpelling::Long), time);
         let figure = fonts[0].cell_width();
         let (block, at) = compose(&telling, fonts, figure, baselines, screen);
         let light = Light::new(screen, lettered_rect(block.as_ref(), at), 0.0)?;
@@ -269,11 +267,6 @@ fn typeset(
     let baseline = i32::try_from(share(height, TIME_BASELINE)).unwrap_or(0);
     let drop = i32::try_from(share(time.pixel_height(), DATE_DROP)).unwrap_or(0);
     ([time, date], [baseline, baseline.saturating_add(drop)])
-}
-
-/// The date a `time` falls on, spelled out: `Mon 28 Sep 2026`.
-fn spell_date(time: Time64) -> String {
-    long_date(&CivilTime::from_time64(time))
 }
 
 /// The box a line `width` pixels wide and set in `font` occupies, centred

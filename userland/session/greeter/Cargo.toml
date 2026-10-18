@@ -23,6 +23,7 @@ program = [
     "dep:tairix-procinfo",
     "dep:tairix-font",
     "tairix-display/rt",
+    "tairix-tz/rt",
 ]
 
 # The package is both the `tairix-greeter-service` engine library (the
@@ -78,6 +79,9 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The shared spellings of a date and a time of day, so the login screen's
 # clock reads as every other clock on the system does.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# The clock in the zone store's own zone and region: the resolved zone and the
+# one renderer of a reading, and the store's loader for the program.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0" }
 # The volatile erase applied to the request buffer that carried a password.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The ribbon of light behind the column, the clock that paces it, and the sky
@@ -109,6 +113,9 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", optional = true,
 ] }
 
 [dev-dependencies]
+# The zone store's fixture, which the clock's tests read London and New York
+# from.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["test-support"] }
 # The surface's host tests draw text, so they inject the shared solid test
 # transport rather than reaching for a running font service.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [

@@ -193,6 +193,14 @@ pub enum BlockBody {
         /// The buckets the pill resolves from.
         facts: Vec<ReadingFact>,
     },
+    /// A rate's recent history drawn across the block, with the axis row a
+    /// hero's trace carries.
+    Trend {
+        /// The history and how it is tinted.
+        trace: Trace,
+        /// What the trace's extent means.
+        caption: String,
+    },
     /// A statement that something is absent, in words.
     ///
     /// An empty list is *not* such a statement — it reads as "none" — so a
@@ -268,6 +276,8 @@ const HERO_ROWS: u32 = 4;
 /// How many logical rows one per-core cell claims: its name and badge, its
 /// trace, and its busy share beside its clock.
 const CELL_ROWS: u32 = 3;
+/// How many logical rows a trend block's trace claims, its axis row with it.
+const TREND_ROWS: u32 = 4;
 /// Most per-core cells that sit side by side in one grid row, however wide
 /// the pane is: past six the cells are too narrow to read a clock in.
 const CELLS_PER_ROW_MAX: u32 = 6;
@@ -362,6 +372,13 @@ pub(in crate::view) enum ItemBody {
     Pill(StatusPill),
     /// A statement of absence, in words.
     Note(String),
+    /// A trend block's trace and its axis row.
+    Trend {
+        /// The trace.
+        chart: Chart,
+        /// What the trace's extent means.
+        caption: String,
+    },
 }
 
 /// One per-core cell, built.
@@ -534,22 +551,10 @@ fn push_block(
                     push(1, ItemBody::Fact(fact_list(fact)));
                 }
             }
-            BlockBody::Composition(parts) => match composition(kind, parts) {
-                // Shares that do not account for the whole fail construction
-                // rather than drawing a silently short bar, so the block states
-                // the absence instead of under-reporting where the resource went.
-                Some(bar) => push(
-                    1 + u32::try_from(parts.len()).unwrap_or(0),
-                    ItemBody::Composition(bar),
-                ),
-                None => push(
-                    1,
-                    ItemBody::Note(crate::view::reading::absence_statement(
-                        "this composition",
-                        Unmeasured::Unavailable,
-                    )),
-                ),
-            },
+            BlockBody::Composition(parts) => {
+                let (rows, item) = composition_item(kind, parts);
+                push(rows, item);
+            }
             BlockBody::Cores(cells) => {
                 let columns = grid_columns(cells.len(), cells_per_row);
                 for chunk in cells.chunks(usize::try_from(columns).unwrap_or(1)) {
@@ -586,6 +591,10 @@ fn push_block(
                     push(1, ItemBody::Fact(fact_list(fact)));
                 }
             }
+            BlockBody::Trend { trace, caption } => {
+                let (rows, item) = trend_item(trace, caption);
+                push(rows, item);
+            }
             BlockBody::Absence(statement) => push(1, ItemBody::Note(statement.clone())),
         }
     }
@@ -601,6 +610,47 @@ fn push_block(
         slot.rows = row.saturating_sub(start);
     }
     row
+}
+
+/// A composition block's item and the rows it claims.
+///
+/// Shares that do not account for the whole fail construction rather than
+/// drawing a silently short bar, so the block states the absence instead of
+/// under-reporting where the resource went.
+fn composition_item(kind: PressureKind, parts: &[CompositionPart]) -> (u32, ItemBody) {
+    match composition(kind, parts) {
+        Some(bar) => (
+            1 + u32::try_from(parts.len()).unwrap_or(0),
+            ItemBody::Composition(bar),
+        ),
+        None => (
+            1,
+            ItemBody::Note(crate::view::reading::absence_statement(
+                "this composition",
+                Unmeasured::Unavailable,
+            )),
+        ),
+    }
+}
+
+/// A trend block's item and the rows it claims.
+fn trend_item(trace: &Trace, caption: &str) -> (u32, ItemBody) {
+    match trace.chart() {
+        Some(chart) => (
+            TREND_ROWS,
+            ItemBody::Trend {
+                chart,
+                caption: String::from(caption),
+            },
+        ),
+        None => (
+            1,
+            ItemBody::Note(crate::view::reading::absence_statement(
+                "this trace",
+                Unmeasured::Unavailable,
+            )),
+        ),
+    }
 }
 
 /// One labelled reading as the one-fact list that draws it, toned so an
@@ -907,7 +957,37 @@ fn render_item(
                 Color::from(palette.on_surface_muted),
             );
         }
+        ItemBody::Trend { chart, caption } => render_trend(surface, chart, caption, rect, window),
     }
+}
+
+/// Paint a trend block's trace across `rect`, its axis row beneath it.
+fn render_trend(
+    surface: &mut Surface,
+    chart: &Chart,
+    caption: &str,
+    rect: Rect,
+    window: PaneWindow<'_>,
+) {
+    let PaneWindow { scale, theme, .. } = window;
+    let Some(rect) = hero_rect(rect, scale, theme) else {
+        return;
+    };
+    let axis = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
+    let axis_h = axis.line_height().min(rect.height);
+    let plot_h = rect.height.saturating_sub(axis_h);
+    chart.render(
+        surface,
+        Rect::new(rect.left(), rect.top(), rect.width, plot_h),
+        scale,
+        theme,
+    );
+    render_axis(
+        surface,
+        Rect::new(rect.left(), rect.top() + to_i32(plot_h), rect.width, axis_h),
+        caption,
+        (axis, theme),
+    );
 }
 
 /// What a hero draws: its reading tile, its optional trace, the context lines

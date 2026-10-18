@@ -266,6 +266,10 @@ pub fn badge(kind: IconKind, hue: BadgeHue, shape: PlateShape, side: u32) -> Opt
 
 /// `kind`'s symbol in white, placed by `placement`, flattened for a picture
 /// `px_per_unit` pixels to the symbol unit.
+///
+/// Not fitted to the pixel grid as a glyph is: a symmetric symbol's middle
+/// stroke could only be made crisp at half the sides by drawing it half a
+/// pixel off its plate's centre.
 fn ink(kind: IconKind, placement: Placement, px_per_unit: f64) -> Option<VectorIcon> {
     let layers = symbol::layers(
         symbol::marks(kind)?,

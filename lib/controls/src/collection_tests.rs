@@ -1652,11 +1652,12 @@ fn behind_pixels(surface: &Surface) -> usize {
     surface.pixels().iter().filter(|p| **p == want).count()
 }
 
-/// Where [`tile_over_backdrop`]'s tile paints its state: its body.
-fn tile_body(theme: &Theme) -> Rect {
+/// Where [`tile_over_backdrop`]'s tile paints its state: behind its name.
+fn tile_plate(theme: &Theme) -> Rect {
     ONE_LINE
-        .body_rect(TILE, Scale::ONE, theme, "Report.txt", Cut::End)
-        .expect("the tile has a body")
+        .parts(TILE, Scale::ONE, theme, "Report.txt", Cut::End)
+        .and_then(|parts| parts.name)
+        .expect("the tile draws a name")
 }
 
 /// `body`'s left, top, right and bottom as surface pixels, the far two
@@ -1671,21 +1672,27 @@ fn edges(body: Rect) -> (u32, u32, u32, u32) {
     )
 }
 
-/// A tile's body is what it draws — its picture and its name's lines — so a
-/// short name leaves the tile's sides as ground, and a name drawn on one of
-/// two lines leaves the second line's space as ground too.
+/// A tile is what it draws — its picture and its name's lines, each with its
+/// margin — so a short name leaves the tile's sides as ground, a name drawn on
+/// one of two lines leaves the second line's space as ground, and the ground
+/// beside a narrow picture above a wide name takes no press.
 #[test]
-fn a_tiles_body_hugs_its_picture_and_its_drawn_name() {
+fn a_tiles_parts_hug_its_picture_and_its_drawn_name() {
     let theme = Theme::dark();
     let two = TileLayout::new(2);
     let bounds = Rect::new(0, 0, 108, two.height_for(42, Scale::ONE, &theme));
     let core = two
         .core_rect(bounds, Scale::ONE, &theme)
         .expect("a picture");
+    let name_of = |label: &str, cut| {
+        let parts = two
+            .parts(bounds, Scale::ONE, &theme, label, cut)
+            .expect("the tile draws");
+        assert_eq!(parts.picture, Some(core), "the picture is the core");
+        parts.name.expect("a name")
+    };
 
-    let short = two
-        .body_rect(bounds, Scale::ONE, &theme, "a.txt", Cut::End)
-        .expect("a body");
+    let short = name_of("a.txt", Cut::End);
     assert!(short.width < bounds.width, "{short:?} fills the cell");
     assert!(
         short.left() > 0 && short.right() < bounds.right(),
@@ -1693,20 +1700,34 @@ fn a_tiles_body_hugs_its_picture_and_its_drawn_name() {
     );
 
     let long = "A much longer name that fills both lines.txt";
-    let full = two
-        .body_rect(bounds, Scale::ONE, &theme, long, Cut::Middle { keep: 4 })
-        .expect("a body");
+    let full = name_of(long, Cut::Middle { keep: 4 });
     assert!(full.width > short.width && full.height > short.height);
     assert!(full.bottom() <= bounds.bottom());
+    assert_eq!(full.intersection(&bounds), full, "{full:?} leaves the cell");
 
-    for body in [short, full] {
-        assert_eq!(body.intersection(&core), core, "the core lies in {body:?}");
-        assert_eq!(body.intersection(&bounds), body, "{body:?} leaves the cell");
-    }
+    // Beside the narrow picture, level with it, and over the wide name's
+    // column: inside the box around both parts, on neither.
+    assert!(
+        full.left() < core.left(),
+        "the fixture's name outruns the picture"
+    );
+    let ground = Point::new(
+        full.left(),
+        core.top() + i32::try_from(core.height / 2).expect("fits"),
+    );
+    let parts = two
+        .parts(bounds, Scale::ONE, &theme, long, Cut::Middle { keep: 4 })
+        .expect("the tile draws");
+    assert!(core.union(&full).contains(ground));
+    assert!(
+        !parts.contains(ground),
+        "the ground beside the picture is the view's"
+    );
+    assert!(parts.contains(core.center()) && parts.contains(full.center()));
 }
 
-/// A press on a tile's name lands on its drawn lines with the body's margin,
-/// inside the body and below the picture: the strip where the two margins meet
+/// A press on a tile's name lands on its drawn lines with their margin, inside
+/// the name part and below the picture: the strip where the two margins meet
 /// is the picture's. A nameless tile has no name to press.
 #[test]
 fn a_tiles_name_target_is_its_drawn_lines_below_the_picture() {
@@ -1724,8 +1745,9 @@ fn a_tiles_name_target_is_its_drawn_lines_below_the_picture() {
         ),
     ] {
         let body = two
-            .body_rect(bounds, Scale::ONE, &theme, name, cut)
-            .expect("a body");
+            .parts(bounds, Scale::ONE, &theme, name, cut)
+            .and_then(|parts| parts.name)
+            .expect("a name part");
         let target = two
             .name_target(bounds, Scale::ONE, &theme, name, cut)
             .expect("a name");
@@ -1751,12 +1773,107 @@ fn a_tiles_name_target_is_its_drawn_lines_below_the_picture() {
     );
 }
 
+/// A selected tile marks its name and washes its picture with the selection
+/// tint, and leaves the ground beside a narrow picture above a wide name as it
+/// was: the selection is never a box around the whole tile.
+#[test]
+fn a_selected_tile_marks_its_name_and_tints_its_picture() {
+    let theme = Theme::dark();
+    let label = "A much longer name.txt";
+    let bounds = Rect::new(0, 0, 108, ONE_LINE.height_for(42, Scale::ONE, &theme));
+    let render = |state: ControlState| {
+        let mut s = Surface::new(bounds.width, bounds.height).expect("surface");
+        s.fill(BEHIND);
+        IconTile::new(label, IconKind::Text)
+            .with_state(state)
+            .render(&mut s, bounds, Scale::ONE, &theme, None);
+        s
+    };
+    let parts = ONE_LINE
+        .parts(bounds, Scale::ONE, &theme, label, Cut::End)
+        .expect("the tile draws");
+    let (picture, name) = (
+        parts.picture.expect("a picture"),
+        parts.name.expect("a name"),
+    );
+    assert!(
+        name.left() < picture.left(),
+        "the fixture's name outruns its picture"
+    );
+    let resting = render(ControlState::idle());
+    let selected = render(ControlState::idle().with_selection(SelectionState::Selected));
+
+    let at = |v: i32| u32::try_from(v).expect("on the surface");
+    let beside = (at(name.left()), at(picture.center().y));
+    assert_eq!(
+        selected.get(beside.0, beside.1),
+        Some(BEHIND.premultiply()),
+        "the ground beside the picture stays the ground"
+    );
+    let centre = (at(picture.center().x), at(picture.center().y));
+    let (rest, lit) = (
+        resting.get(centre.0, centre.1).expect("on the surface"),
+        selected.get(centre.0, centre.1).expect("on the surface"),
+    );
+    let accent = premul(theme.palette().accent);
+    assert!(
+        distance(lit, accent) < distance(rest, accent),
+        "the selected picture is washed toward the accent: {rest:?} -> {lit:?}"
+    );
+    let plate = (at(name.left()) + 1, at(name.top()) + 1);
+    assert_ne!(
+        selected.get(plate.0, plate.1),
+        Some(BEHIND.premultiply()),
+        "the selection stands behind the name"
+    );
+}
+
+/// A tile whose name is withheld — an editor stands where the name is —
+/// draws its picture and nothing of its name.
+#[test]
+fn a_tile_with_its_name_withheld_draws_no_name() {
+    let theme = Theme::dark();
+    let render = |tile: IconTile| {
+        let mut s = Surface::new(TW, TH).expect("surface");
+        s.fill(BEHIND);
+        tile.render(&mut s, TILE, Scale::ONE, &theme, None);
+        s
+    };
+    let tile = || {
+        IconTile::new("Report.txt", IconKind::Text)
+            .with_state(ControlState::idle().with_selection(SelectionState::Selected))
+    };
+    let band = ONE_LINE
+        .label_rect(TILE, Scale::ONE, &theme)
+        .expect("the tile seats a name");
+    let at = |v: i32| u32::try_from(v).expect("on the surface");
+    let untouched = |s: &Surface| {
+        (at(band.top())..at(band.bottom()))
+            .flat_map(|y| (at(band.left())..at(band.right())).map(move |x| (x, y)))
+            .all(|(x, y)| s.get(x, y) == Some(BEHIND.premultiply()))
+    };
+    assert!(!untouched(&render(tile())), "a named tile draws its name");
+    let withheld = render(tile().with_name_withheld());
+    assert!(untouched(&withheld), "nothing of a withheld name shows");
+    let core = ONE_LINE
+        .core_rect(TILE, Scale::ONE, &theme)
+        .expect("a picture");
+    assert_ne!(
+        withheld.get(at(core.center().x), at(core.center().y)),
+        Some(BEHIND.premultiply()),
+        "the picture still draws"
+    );
+}
+
 /// A nameless tile is its picture and nothing more.
 #[test]
-fn a_nameless_tiles_body_is_its_core() {
+fn a_nameless_tile_is_its_picture() {
     let theme = Theme::dark();
-    let body = ONE_LINE.body_rect(TILE, Scale::ONE, &theme, "", Cut::End);
-    assert_eq!(body, ONE_LINE.core_rect(TILE, Scale::ONE, &theme));
+    let parts = ONE_LINE
+        .parts(TILE, Scale::ONE, &theme, "", Cut::End)
+        .expect("the picture draws");
+    assert_eq!(parts.picture, ONE_LINE.core_rect(TILE, Scale::ONE, &theme));
+    assert_eq!(parts.name, None);
 }
 
 /// The rectangle a tile draws its name in is the band beneath the picture —
@@ -1956,7 +2073,7 @@ fn hover_selection_and_press_paint_distinct_marks() {
     // Each mark covers the tile's body, so none of them is a mere edge mark:
     // only the rounded corners can leave the backdrop untouched there, and the
     // ground around the body is left as it was.
-    let (left, top, right, bottom) = edges(tile_body(&theme));
+    let (left, top, right, bottom) = edges(tile_plate(&theme));
     let behind = BEHIND.premultiply();
     for s in [&hovered, &selected, &pressed] {
         let bare = (top..bottom)
@@ -2027,15 +2144,12 @@ fn fill_at(theme: &Theme, x: u32, y: u32) -> Pixel {
     )
 }
 
-/// The row across the tile on which nothing but the mark is drawn — between
-/// the picture slot and the label band. Checked against a resting tile, which
-/// leaves such a row exactly as it found it, rather than trusted.
+/// The row across the tile on which nothing but the mark is drawn — the
+/// first row of the plate behind the name, above the name's ink. Checked
+/// against a resting tile, which leaves such a row exactly as it found it,
+/// rather than trusted.
 fn clear_row(theme: &Theme) -> u32 {
-    // The name band's first row: the tile halves its inset above the picture
-    // and again below it, so this sits past the picture's shadow and above
-    // the name's ink whatever the inset's parity.
-    let half = Scale::ONE.scale_length(theme.metrics().control_inset) / 2;
-    let row = ONE_LINE.icon_side(TILE, Scale::ONE, theme) + 2 * half;
+    let row = u32::try_from(tile_plate(theme).top() + 1).expect("on the surface");
     let resting = tile_over_backdrop(ControlState::idle(), theme, None);
     for x in 0..TW {
         assert_eq!(
@@ -2062,9 +2176,10 @@ fn the_selection_fill_has_a_hard_edge() {
     // the picture: one step up at the edge, then flat. Each sample is first
     // shown to carry nothing but the mark, so a stray glyph cannot excuse a
     // difference.
-    let (left, top, right, _) = edges(tile_body(&theme));
+    let (left, top, right, _) = edges(tile_plate(&theme));
     let picture_top = top + Scale::ONE.scale_length(theme.metrics().control_inset) / 2;
-    let samples = (left..right)
+    let arc = crate::collection::plate_radius(Scale::ONE, &theme);
+    let samples = (left + arc..right - arc)
         .map(|x| (x, clear))
         .chain((top..picture_top).map(|y| (TW / 2, y)));
     for (x, y) in samples {
@@ -2104,7 +2219,7 @@ fn the_selection_fill_is_rounded_rather_than_square() {
     );
     let s = tile_over_backdrop(selected_state(), &theme, None);
     let behind = BEHIND.premultiply();
-    let (left, top, right, bottom) = edges(tile_body(&theme));
+    let (left, top, right, bottom) = edges(tile_plate(&theme));
 
     for corner in [
         (left, top),
@@ -2204,34 +2319,47 @@ fn a_selected_tile_frosts_the_backdrop_behind_it() {
     IconTile::new("Report.txt", IconKind::Text)
         .with_state(selected_state())
         .render(&mut frosted, bounds, Scale::ONE, &theme, None);
-    let (left, top, right, bottom) = edges(tile_body(&theme));
+    let (left, top, right, bottom) = edges(tile_plate(&theme));
     let (left, top, right, bottom) = (left + AROUND, top + AROUND, right + AROUND, bottom + AROUND);
+    // Measured where the plate's shape covers the row whole, clear of the
+    // corner arcs, which let the backdrop through as a rounded plate must.
+    let arc = crate::collection::plate_radius(Scale::ONE, &theme);
 
     // What a translucent fill over an *untouched* backdrop looks like: every
     // stripe survives, merely tinted. That is the mark before this frost, and
     // what the reported defect looked like.
-    let tinted: Vec<Pixel> = (left..right)
+    let tinted: Vec<Pixel> = (left + arc..right - arc)
         .filter_map(|x| plain.get(x, row))
         .map(|behind| fill_over(&theme, behind, u8::MAX, ROUND_NEAREST))
         .collect();
     let unfrosted: u32 = tinted.windows(2).map(|p| distance(p[0], p[1])).sum();
-    let got = detail(&frosted, row, left, right);
+    let got = detail(&frosted, row, left + arc, right - arc);
     assert!(unfrosted > 0, "the backdrop carries no detail to blur");
     assert!(
         got * 10 < unfrosted,
         "the backdrop was not frosted: {got} of {unfrosted}"
     );
 
+    let picture = ONE_LINE
+        .core_rect(TILE, Scale::ONE, &theme)
+        .expect("a picture");
+    let shifted = |v: i32| u32::try_from(v).expect("on the surface") + AROUND;
     let (columns, rows) = (left..right, top..bottom);
+    let (picture_columns, picture_rows) = (
+        shifted(picture.left())..shifted(picture.right()),
+        shifted(picture.top())..shifted(picture.bottom()),
+    );
     for y in 0..sh {
         for x in 0..sw {
-            if columns.contains(&x) && rows.contains(&y) {
+            let on_plate = columns.contains(&x) && rows.contains(&y);
+            let on_picture = picture_columns.contains(&x) && picture_rows.contains(&y);
+            if on_plate || on_picture {
                 continue;
             }
             assert_eq!(
                 frosted.get(x, y),
                 plain.get(x, y),
-                "({x},{y}) is outside the tile's body and moved"
+                "({x},{y}) is outside the tile's parts and moved"
             );
         }
     }
@@ -2303,7 +2431,6 @@ fn the_frost_arrives_with_the_mark() {
 fn a_faded_selection_mark_is_the_same_fill_at_that_strength() {
     let theme = Theme::dark();
     let clear = clear_row(&theme);
-    let palette = theme.palette();
     let selected = selected_state();
 
     let settled = tile_over_backdrop(selected, &theme, None);
@@ -2326,14 +2453,12 @@ fn a_faded_selection_mark_is_the_same_fill_at_that_strength() {
             .with_selection_fade(128),
         &theme,
     );
-    let want = Color::rgba(
-        palette.selection_fill.r,
-        palette.selection_fill.g,
-        palette.selection_fill.b,
-        div255(u32::from(palette.selection_fill.a) * 128),
-    )
-    .premultiply()
-    .over(BEHIND.premultiply());
+    let want = fill_over(
+        &theme,
+        BEHIND.premultiply(),
+        128,
+        DitherRow::at(clear).bias(TW / 2),
+    );
     assert_eq!(half.get(TW / 2, clear), Some(want));
 
     // …and it is genuinely between nothing and the settled mark.
@@ -2411,15 +2536,20 @@ fn a_high_contrast_theme_keeps_the_crisp_selection_panel() {
         None,
     );
     let accent = premul(theme.palette().accent);
-    // Flat, not a ramp: the panel is the accent outright over almost the whole
-    // body, and its edge is a step.
-    let (left, top, right, bottom) = edges(tile_body(&theme));
-    let flat = s.pixels().iter().filter(|p| **p == accent).count();
-    let area = usize::try_from((right - left) * (bottom - top)).expect("small");
-    assert!(
-        flat * 2 > area,
-        "the high-contrast panel is not solid accent"
-    );
+    // Flat, not a ramp: the panel is the accent outright wherever its shape
+    // covers whole above the name, and its edge is a step.
+    let (left, top, right, _) = edges(tile_plate(&theme));
+    let arc = crate::collection::plate_radius(Scale::ONE, &theme);
+    let above_name = top + Scale::ONE.scale_length(theme.metrics().control_inset) / 2;
+    for y in top..above_name {
+        for x in left + arc..right - arc {
+            assert_eq!(
+                s.get(x, y),
+                Some(accent),
+                "the high-contrast panel is not solid accent at ({x},{y})"
+            );
+        }
+    }
     assert_eq!(
         s.get(TW / 2, top),
         Some(accent),
@@ -2475,7 +2605,7 @@ fn a_focused_tile_draws_the_shared_focus_ring() {
         None,
     );
     // The ring is on the body's perimeter, in the active rim colour.
-    let (left, top, _, bottom) = edges(tile_body(&theme));
+    let (left, top, _, bottom) = edges(tile_plate(&theme));
     assert_eq!(
         focused.get(left, top.midpoint(bottom)),
         Some(premul(theme.palette().rim_active))
@@ -3827,7 +3957,7 @@ fn a_drop_target_washes_and_wears_the_accent_outline_in_every_collection() {
     let accent = premul(theme.palette().accent);
     let target = ControlState::idle().with_pointer(PointerState::DragTarget);
     let tile = tile_over_backdrop(target, &theme, None);
-    let (left, top, _, bottom) = edges(tile_body(&theme));
+    let (left, top, _, bottom) = edges(tile_plate(&theme));
     let edge = (left, top.midpoint(bottom));
     assert_eq!(
         tile.get(edge.0, edge.1),
@@ -3998,9 +4128,9 @@ fn a_beside_tiles_name_runs_from_its_picture_and_is_pressed_there() {
     let name = layout
         .name_target(bounds, Scale::ONE, &theme, "notes.txt", Cut::End)
         .expect("a name");
-    let body = layout
-        .body_rect(bounds, Scale::ONE, &theme, "notes.txt", Cut::End)
-        .expect("a body");
+    let parts = layout
+        .parts(bounds, Scale::ONE, &theme, "notes.txt", Cut::End)
+        .expect("the tile draws");
     assert!(core.left() < name.left(), "the picture leads");
     assert_eq!(
         name.left(),
@@ -4011,8 +4141,11 @@ fn a_beside_tiles_name_runs_from_its_picture_and_is_pressed_there() {
         name.right() < bounds.right(),
         "a short name leaves ground beside it"
     );
-    assert_eq!(body, core.union(&body), "the body holds the picture");
-    assert!(body.right() >= name.right(), "and the name");
+    assert_eq!(parts.picture, Some(core), "the tile holds the picture");
+    assert!(
+        parts.name.is_some_and(|part| part.right() >= name.right()),
+        "and the name"
+    );
     let label = layout
         .label_rect(bounds, Scale::ONE, &theme)
         .expect("a band");

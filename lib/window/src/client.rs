@@ -1584,6 +1584,21 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&WindowRequest::LockScreen)
     }
 
+    /// A read-only delegation of the desktop's civil-time store: the
+    /// `fd_grant` handle the session minted to this process, redeemed from
+    /// [`session`](Self::session).
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal ([`Errno::PermissionDenied`] for any caller but
+    /// its own Settings application, [`Errno::NotFound`] when the desktop
+    /// holds no store), a transport failure, or a malformed reply.
+    pub fn zone_store(&mut self) -> Result<u64, Errno> {
+        let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
+        let len = self.call(&WindowRequest::TakeZoneStore, &mut reply)?;
+        decode_minted_id_reply(&reply[..len])
+    }
+
     /// Ask the session to show the screensaver `document` describes, now, as
     /// a preview.
     ///

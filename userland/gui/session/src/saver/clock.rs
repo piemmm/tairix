@@ -12,10 +12,10 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::time::{WallClockReading, NANOS_PER_MILLI};
-use tairix_browse::format_date;
 use tairix_font::BitmapFont;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::{MotionInteraction, TextRole, Theme};
+use tairix_tz::CivilClock;
 use tairix_wallpaper::ClockOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
@@ -84,22 +84,22 @@ pub(super) struct ClockFace {
 }
 
 impl ClockFace {
-    /// A face for a `screen` at `scale`, telling `wall` as of `now_ns` with the
-    /// lines `options` ask for.
+    /// A face for a `screen` at `scale`, telling `wall` in `civil` as of
+    /// `now_ns` with the lines `options` ask for.
     pub(super) fn new(
         identity: &SaverIdentity,
         theme: &Theme,
         (scale, screen): (Scale, (u32, u32)),
-        (wall, now_ns): (Option<WallClockReading>, u64),
+        time: (Option<WallClockReading>, CivilClock<'static>, u64),
         options: ClockOptions,
     ) -> Self {
+        let now_ns = time.2;
         let display = BitmapFont::for_role(theme.fonts(), TextRole::Display, scale);
         let time_px = (screen.1 / TIME_SHARE).max(scale.scale_length(TIME_MIN_LOGICAL));
         let face =
             |px: u32| BitmapFont::new(display.family(), px.max(1)).with_weight(display.weight());
-        let spelling: DateSpelling = format_date;
         let mut face = Self {
-            telling: Telling::new(options.date.then_some(spelling), (wall, now_ns)),
+            telling: Telling::new(options.date.then_some(DateSpelling::Numeric), time),
             identity: if options.identity {
                 identity.line()
             } else {

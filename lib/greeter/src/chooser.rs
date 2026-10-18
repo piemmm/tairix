@@ -477,8 +477,8 @@ impl Chooser {
         ))
     }
 
-    /// The slot whose tile's body — its disc and name, as the paint draws
-    /// them — is under `point`.
+    /// The slot whose tile's disc or name, as the paint draws them, is under
+    /// `point`.
     pub(crate) fn hit(
         &self,
         point: Point,
@@ -488,10 +488,8 @@ impl Chooser {
     ) -> Option<usize> {
         (0..self.slots()).find(|&slot| {
             self.tile_rect(slot, screen, scale)
-                .and_then(|rect| {
-                    ACCOUNT_TILE.body_rect(rect, scale, theme, self.label(slot), Cut::End)
-                })
-                .is_some_and(|body| body.contains(point))
+                .and_then(|rect| ACCOUNT_TILE.parts(rect, scale, theme, self.label(slot), Cut::End))
+                .is_some_and(|parts| parts.contains(point))
         })
     }
 

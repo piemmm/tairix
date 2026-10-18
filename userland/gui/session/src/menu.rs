@@ -28,14 +28,15 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal, APP_MENU_ENTRY_MAX};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    plate_rect, AboutSheet, ChainChild, ChainModel, Menu, MenuAction, PlatePlacement, RowIcon,
-    TextAction, TextField, TitleBar, TitleBarEvent,
+    plate_rect, AboutSheet, ChainChild, ChainModel, ClipboardChord, Menu, MenuAction,
+    PlatePlacement, RowIcon, TextAction, TextField, TitleBar, TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
 
 use tairix_icon::{ArtworkCache, ArtworkResolver, IconKind, IconPicture, IconRequest};
 
+use crate::clipboard::TextClipboard;
 use crate::windows::seat_menu_refusal;
 use tairix_theme::Theme;
 use tairix_wm::{ChromeEpoch, InputEvent, Key, Modifiers, NamedKey};
@@ -195,6 +196,33 @@ struct EntrySurface {
     rect: Rect,
     /// What of the surface the session has still to paint.
     repaint: Repaint,
+}
+
+impl EntrySurface {
+    /// Where the field sits on screen.
+    fn field_rect(&self, geom: &ChainGeometry<'_>) -> Rect {
+        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(self.rect.height);
+        entry_field_rect(self.rect, band_h, geom)
+    }
+
+    /// Owe the screen rectangles in `damage`, in the surface's own pixels,
+    /// answering what the chain must do about them.
+    fn owe(&mut self, damage: &Region) -> ChainAction {
+        let origin = self.rect.origin;
+        for rect in damage.rects() {
+            self.repaint.add(Rect::new(
+                rect.left().saturating_sub(origin.x),
+                rect.top().saturating_sub(origin.y),
+                rect.width,
+                rect.height,
+            ));
+        }
+        if damage.is_empty() {
+            ChainAction::Consumed
+        } else {
+            ChainAction::Redraw
+        }
+    }
 }
 
 /// How long the pointer may rest on a sibling row it crossed on its way to an
@@ -773,6 +801,45 @@ impl MenuChain {
             .is_some_and(|chain| chain.settle_due(now_ns, geom))
     }
 
+    /// Carry out a clipboard chord in the open quick-entry field, answering
+    /// `None` when no field is open — the chord then routes as any other key.
+    ///
+    /// A cut takes the selection out only once the clipboard holds it, so a
+    /// copy that fails never costs the user their text.
+    pub fn entry_chord(
+        &mut self,
+        chord: ClipboardChord,
+        clipboard: &mut dyn TextClipboard,
+        geom: &ChainGeometry<'_>,
+    ) -> Option<ChainAction> {
+        let chain = self.open.as_mut()?;
+        let entry = chain.entry.as_mut()?;
+        let field = entry.field_rect(geom);
+        let mut damage = damage::sink();
+        match chord {
+            ClipboardChord::Copy => {
+                if let Some(text) = entry.field.selected_text() {
+                    let _ = clipboard.hold_text(text);
+                }
+            }
+            ClipboardChord::Cut => {
+                let held = entry
+                    .field
+                    .selected_text()
+                    .map(|text| clipboard.hold_text(text));
+                if matches!(held, Some(Ok(()))) {
+                    entry.field.delete_selection(field, &mut damage);
+                }
+            }
+            ClipboardChord::Paste => {
+                if let Some(text) = clipboard.text() {
+                    entry.field.insert_text(text, field, &mut damage);
+                }
+            }
+        }
+        Some(entry.owe(&damage))
+    }
+
     /// Close the chain if `window_id` owns it — the window closed, or the
     /// application behind it died. Returns whether it did.
     pub fn dismiss_owner(&mut self, window_id: u64) -> bool {
@@ -796,10 +863,10 @@ impl MenuChain {
             return ChainAction::Consumed;
         };
         let acted = match event {
-            InputEvent::KeyPressed { key, .. } => {
+            InputEvent::KeyPressed { key, modifiers } => {
                 chain.settle = None;
                 chain.last_pointer = Some(pointer);
-                chain.on_key(*key, geom)
+                chain.on_key(*key, *modifiers, geom)
             }
             InputEvent::KeyReleased { .. } | InputEvent::ModifiersChanged { .. } => {
                 ChainAction::Consumed
@@ -953,9 +1020,9 @@ impl OpenChain {
     }
 
     /// The region a child of the plate at `depth` is placed against: that
-    /// plate's own horizontal span, at the height of the row whose child it
-    /// is. Edge-adjacency leaves only the plate's rim between a row and its
-    /// child, and a point on no row closes nothing.
+    /// plate's own horizontal span, lifted from the row whose child it is by
+    /// the child's [`body_lead`], so the child's body — a submenu's first row
+    /// — lies level with that row and its band stands above it.
     fn child_anchor(&self, depth: usize, geom: &ChainGeometry<'_>) -> Rect {
         let Some(plate) = self.plates.get(depth) else {
             return Rect::EMPTY;
@@ -964,7 +1031,12 @@ impl OpenChain {
             .open_row
             .and_then(|index| row_rect(plate, index, geom))
             .unwrap_or(plate.rect);
-        Rect::new(plate.rect.left(), row.top(), plate.rect.width, row.height)
+        Rect::new(
+            plate.rect.left(),
+            row.top().saturating_sub_unsigned(body_lead(geom)),
+            plate.rect.width,
+            row.height,
+        )
     }
 
     /// Where a `width` × `height` information panel hangs: exactly where the
@@ -1413,7 +1485,7 @@ impl OpenChain {
         // the model borrow ends — and only for the child that wants one, so
         // an ordinary arrival allocates nothing.
         let entry_title =
-            matches!(child, ChainChild::Entry(..)).then(|| entry.drawn().label().to_string());
+            matches!(child, ChainChild::Entry { .. }).then(|| entry.drawn().label().to_string());
         // Whether anything was actually taken down, which is what tells a
         // no-child arrival from one that closed a plate.
         let closed = self.plates.len() > depth + 1 || self.info.is_some() || self.entry.is_some();
@@ -1459,13 +1531,18 @@ impl OpenChain {
                 });
                 ChainAction::Redraw
             }
-            ChainChild::Entry(id, initial) => {
+            ChainChild::Entry {
+                id,
+                initial,
+                selected,
+            } => {
                 let (width, height) = entry_extent(geom);
                 let mut band = TitleBar::plate();
                 band.set_title(&entry_title.unwrap_or_default());
                 let mut field = TextField::new()
                     .with_text(&initial)
-                    .with_max_len(APP_MENU_ENTRY_MAX);
+                    .with_max_len(APP_MENU_ENTRY_MAX)
+                    .with_selection(selected);
                 field.set_focused(true);
                 self.entry = Some(EntrySurface {
                     id,
@@ -1491,27 +1568,15 @@ impl OpenChain {
         let Some(entry) = self.entry.as_mut() else {
             return ChainAction::Consumed;
         };
-        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(entry.rect.height);
-        let field = entry_field_rect(entry.rect, band_h, geom);
+        let field = entry.field_rect(geom);
         let mut damage = damage::sink();
         let acted = entry
             .field
             .on_pointer(event, field, geom.scale, geom.theme, &mut damage);
-        let origin = entry.rect.origin;
-        if !damage.is_empty() {
-            for rect in damage.rects() {
-                entry.repaint.add(Rect::new(
-                    rect.left().saturating_sub(origin.x),
-                    rect.top().saturating_sub(origin.y),
-                    rect.width,
-                    rect.height,
-                ));
-            }
-        }
+        let owed = entry.owe(&damage);
         match acted {
             Some(action) => self.entry_action(action),
-            None if damage.is_empty() => ChainAction::Consumed,
-            None => ChainAction::Redraw,
+            None => owed,
         }
     }
 
@@ -1562,13 +1627,13 @@ impl OpenChain {
     }
 
     /// Route a key. Traversal is the service's, not any application's.
-    fn on_key(&mut self, key: Key, geom: &ChainGeometry<'_>) -> ChainAction {
+    fn on_key(&mut self, key: Key, modifiers: Modifiers, geom: &ChainGeometry<'_>) -> ChainAction {
         let deepest = self.plates.len().saturating_sub(1);
         // An open field owns the keyboard: a menu's traversal keys are text
         // in a field, and the field's own Escape closes it before the chain's
         // would dismiss the whole chain.
         if self.entry.is_some() {
-            return self.entry_key(key, geom);
+            return self.entry_key(key, modifiers, geom);
         }
         // Escape closes the deepest open child first, so repeated Escape
         // always gets the user out.
@@ -1625,31 +1690,22 @@ impl OpenChain {
     /// Everything reaches the field, so a name containing `h` is typed rather
     /// than moving a highlight. The field's own commit and cancel are the two
     /// that mean anything to the chain.
-    fn entry_key(&mut self, key: Key, geom: &ChainGeometry<'_>) -> ChainAction {
+    fn entry_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        geom: &ChainGeometry<'_>,
+    ) -> ChainAction {
         let Some(entry) = self.entry.as_mut() else {
             return ChainAction::Consumed;
         };
-        let band_h = TitleBar::band_height(geom.scale, geom.theme).min(entry.rect.height);
-        let field = entry_field_rect(entry.rect, band_h, geom);
+        let field = entry.field_rect(geom);
         let mut damage = damage::sink();
-        // The chain owns the seat's keyboard and reports no modifier state of
-        // its own, so a key reaches the field as an unmodified one.
-        let acted = entry
-            .field
-            .on_key(key, Modifiers::default(), field, &mut damage);
-        let origin = entry.rect.origin;
-        for rect in damage.rects() {
-            entry.repaint.add(Rect::new(
-                rect.left().saturating_sub(origin.x),
-                rect.top().saturating_sub(origin.y),
-                rect.width,
-                rect.height,
-            ));
-        }
+        let acted = entry.field.on_key(key, modifiers, field, &mut damage);
+        let owed = entry.owe(&damage);
         match acted {
             Some(action) => self.entry_action(action),
-            None if damage.is_empty() => ChainAction::Consumed,
-            None => ChainAction::Redraw,
+            None => owed,
         }
     }
 }
@@ -1842,6 +1898,13 @@ fn in_triangle(p: Point, [a, b, c]: [Point; 3]) -> bool {
     };
     let turns = [side(a, b), side(b, c), side(c, a)];
     !(turns.iter().any(|&t| t < 0) && turns.iter().any(|&t| t > 0))
+}
+
+/// How far below a chain surface's top its body begins: the band, then the
+/// plate's rim, which is where a plate's first row starts.
+fn body_lead(geom: &ChainGeometry<'_>) -> u32 {
+    TitleBar::band_height(geom.scale, geom.theme)
+        .saturating_add(tairix_controls::plate_border(geom.theme, geom.scale))
 }
 
 /// The screen rectangle a plate's rows occupy, below its band.

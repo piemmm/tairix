@@ -114,6 +114,43 @@ impl<R: PayloadRegion> ClipboardService for SessionClipboard<R> {
     }
 }
 
+/// The clipboard as the desktop's own fields reach it: text the session holds
+/// itself, never a client's region.
+pub trait TextClipboard {
+    /// The held payload, when it is text.
+    fn text(&self) -> Option<&str>;
+
+    /// Hold `text` in place of what was held.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] past [`CLIPBOARD_MAX_BYTES`] or
+    /// [`Errno::OutOfMemory`], what was held staying held.
+    fn hold_text(&mut self, text: &str) -> Result<(), Errno>;
+}
+
+impl<R> TextClipboard for SessionClipboard<R> {
+    fn text(&self) -> Option<&str> {
+        match &self.held {
+            Some((ClipboardKind::Text, bytes)) => core::str::from_utf8(bytes).ok(),
+            _ => None,
+        }
+    }
+
+    fn hold_text(&mut self, text: &str) -> Result<(), Errno> {
+        if text.len() > CLIPBOARD_MAX_BYTES {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(text.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        bytes.extend_from_slice(text.as_bytes());
+        self.replace(Some((ClipboardKind::Text, bytes)));
+        Ok(())
+    }
+}
+
 impl<R> Drop for SessionClipboard<R> {
     fn drop(&mut self) {
         self.replace(None);
@@ -130,6 +167,16 @@ impl ClipboardService for NoClipboard {
     }
 
     fn get(&mut self, _: ClientRegion) -> Result<ClipboardHeld, Errno> {
+        Err(Errno::NotSupported)
+    }
+}
+
+impl TextClipboard for NoClipboard {
+    fn text(&self) -> Option<&str> {
+        None
+    }
+
+    fn hold_text(&mut self, _: &str) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
 }

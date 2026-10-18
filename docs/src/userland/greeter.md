@@ -47,7 +47,9 @@ ceiling's own tests pin each absence:
   three answers.
 - **No `CAP_FS_ACCESS`.** The ribbon behind the column is drawn rather than
   loaded, and the theme, the pointer and the text all come from built-in
-  sets or other services, so the greeter reads no file at all.
+  sets or other services. The one file it reads, the zone store its clock
+  tells the time by, arrives as a read-only delegation the authority mints
+  it (`SessionRequest::ZoneStore`), so it can open no file itself.
 - **No `CAP_PROC_SPAWN`, `CAP_SPAWN_AS_USER` or `CAP_SANDBOX_SPAWN`.** It
   decodes no untrusted image, so it starts no process of any kind: it cannot
   start the session it is authenticating for, and can never choose *which*
@@ -148,8 +150,9 @@ immediately with no extra present.
 ## How it parks
 
 There is one wait set, holding the seat's input, and its timeout is the
-*next* thing that actually needs doing: the next clock-minute boundary, the
-next one-second tick of a lockout while one is counting down, the next frame
+*next* thing that actually needs doing: the instant the clock's zone next
+turns its minute (`Zone::next_minute`, a change of offset included), the next
+one-second tick of a lockout while one is counting down, the next frame
 of a running animation or of the ribbon, or the moment the display is owed its
 sleep, whichever is nearer. Under reduced motion, with no lockout running,
 that leaves one wake a minute for the clock and the one the sleep is owed at;
@@ -252,9 +255,12 @@ of it, at the icon bar's clock size and in the muted ink:
 - **Top left**, `TAIRiX 0.0.0 (lovelace)`: the OS version and host name from
   the System Information identity, which any process may read. A machine with
   no name shows the version alone; an unreachable service leaves `TAIRiX`.
-- **Top right**, `Wednesday 30 September 2026 14:05`: the wall clock in UTC,
-  like every clock on the system, spelled by `lib/fsmeta`'s shared calendar. A
-  machine holding no trusted time shows none.
+- **Top right**, `Wednesday 30 September 2026 14:05`: the wall clock in the
+  zone store's own zone, the day written out by `lib/fsmeta`'s shared calendar
+  and the time as the store's own region writes it (`lib/tz`'s `CivilClock`),
+  since nobody has signed in to choose another. The store is read once, at
+  start, through the authority's delegation; UTC where none is delegated or it
+  cannot be read (event 19012). A machine holding no trusted time shows none.
 
 Both are rebuilt only when the minute turns. The machine's network address is
 not shown: reading it takes authority the greeter does not hold, and nothing
@@ -378,6 +384,7 @@ authority's own records for the same login are in its `10000..11000` range.
 | 19009 | `DISPLAY_KEPT_BLACK`    | the display could not or would not switch off, so the sleeping screen is kept black |
 | 19010 | `DISPLAY_WAKE_REFUSED`  | the display would not switch back on; the next input asks again |
 | 19011 | `AUTHORITY_ON_LOOP`     | no worker can carry checks to the authority, so the screen waits for each answer |
+| 19012 | `ZONES_UNAVAILABLE`     | the zone store could not be read, so the clock reads UTC |
 
 ## Tests
 

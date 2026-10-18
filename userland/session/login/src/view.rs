@@ -54,7 +54,7 @@ use alloc::string::String;
 use core::cell::{Cell, RefCell};
 use core::time::Duration;
 
-use tairix_abi::sysinfo::{LoadAverage, OsVersion};
+use tairix_abi::sysinfo::{LoadAverage, OsVersion, SYSTEM_NAME};
 use tairix_abi::{Errno, Time64};
 use tairix_curses::{str_width, Event, InputMode, Pos, Screen, Size, Tty, Window};
 use tairix_users::MAX_USERNAME_LEN;
@@ -254,8 +254,8 @@ fn format_mib(bytes: u64) -> String {
 fn top_line(status: &LoginStatus, now: Option<Time64>, cols: usize) -> String {
     let host = status.hostname.as_deref().unwrap_or(UNKNOWN);
     let left = match status.version {
-        Some(version) => format!(" {host} - TAIRiX {version}"),
-        None => format!(" {host} - TAIRiX"),
+        Some(version) => format!(" {host} - {SYSTEM_NAME} {version}"),
+        None => format!(" {host} - {SYSTEM_NAME}"),
     };
     let right = now.map(format_clock).unwrap_or_default();
     pad_between(&left, &right, cols)

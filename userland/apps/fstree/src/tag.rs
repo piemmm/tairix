@@ -370,7 +370,11 @@ impl TagRange {
             let max = high
                 .map(parse_date)
                 .transpose()?
-                .map(|secs| secs + DAY_SECS);
+                .map(|secs| {
+                    secs.checked_add(DAY_SECS)
+                        .ok_or_else(|| String::from("date: the end date is past the last day"))
+                })
+                .transpose()?;
             if let (Some(a), Some(b)) = (min, max) {
                 if a >= b {
                     return Err(String::from("date: bounds are in the wrong order"));
@@ -444,7 +448,7 @@ fn parse_date(text: &str) -> Result<i64, String> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return Err(bad());
     }
-    let days = days_from_civil(year, month, day);
+    let days = days_from_civil(year, month, day).ok_or_else(bad)?;
     if civil_from_days(days) != (year, month, day) {
         return Err(bad());
     }

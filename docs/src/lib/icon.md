@@ -42,10 +42,19 @@ draw site always gets something:
    raster tier would always win and the vector could never be selected.
 3. **Built-in picture (always last).** `builtin_picture(kind, side)` — vector
    art compiled into the crate. For most kinds it is the glyph's coverage
-   mask: `glyph_mask(kind, side)` rasterises `builtin_icon(kind, colour)`'s
-   monochrome silhouette in opaque white so the mask's alpha *is* its
-   coverage, and the drawing control supplies the colour
-   (`Surface::blit_tinted`). A settings category's or pane's is its
+   mask: `glyph_mask(kind, side)` rasterises the kind's monochrome
+   silhouette in opaque white so the mask's alpha *is* its coverage, and the
+   drawing control supplies the colour (`Surface::blit_tinted`). The mask is
+   **fitted to the pixel grid of its side** (`fit::GridFit`): a symbol's
+   strokes are a whole number of pixels wide, at least one, and every
+   axis-aligned edge and contour extreme lands on its grid — a stroke's centre
+   on a pixel's centre or boundary as its width is odd or even, a fill's edge on
+   a boundary — with every other point moved by interpolation between them, so
+   curves stay smooth and the drawing keeps its order. A drawing symmetric
+   about the slot's centre stays symmetric; where its middle stroke cannot lie
+   on the centre and stay crisp (a one-pixel stroke on an even side), the axis
+   moves half a pixel aside. `builtin_icon(kind, colour)` is the same art
+   unfitted, for a caller that scales it. A settings category's or pane's is its
    ready-coloured badge instead ([Desktop icons](../desktop/icons.md));
    `IconPicture::builtin` says which. This tier can never be absent, so the desktop always shows a
    meaningful icon even with no on-disk assets at all (a headless or

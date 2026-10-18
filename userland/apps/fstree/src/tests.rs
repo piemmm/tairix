@@ -3606,6 +3606,11 @@ fn range_parse_covers_sizes_dates_and_refusals() {
     assert!(TagRange::parse("size:9..1").is_err());
     assert!(TagRange::parse("date:2024-02-30..").is_err());
     assert!(TagRange::parse("date:2024-06-02..2024-06-01").is_err());
+    // A year past the calendar's range, and an end date whose following
+    // midnight is, are refused rather than overflowing.
+    assert!(TagRange::parse("date:99999999999999999-01-01..").is_err());
+    assert!(TagRange::parse("date:..292277026596-12-04").is_err());
+    assert!(TagRange::parse("date:292277026596-12-04..").is_ok());
     // A date range includes its end date and never matches the epoch
     // "no stamp" marker.
     let june = TagRange::parse("date:2024-06-01..2024-06-02")
