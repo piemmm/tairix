@@ -5,7 +5,7 @@
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
-use tairix_wm::{Compositor, Point, WindowId};
+use tairix_wm::{Compositor, InputEvent, Point, PointerButton, WindowId};
 
 use crate::alert::{alert_title, AlertWindow, Speaker};
 use crate::shell::DesktopShell;
@@ -127,7 +127,19 @@ impl ChoicePrompt {
         shell: &DesktopShell,
         compositor: &Compositor,
     ) -> Option<Choice> {
-        choice(self.window.click(local, now_ns, shell, compositor))
+        let pressed = InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        };
+        let released = InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        };
+        let _ = self
+            .window
+            .pointer(local, &pressed, now_ns, shell, compositor);
+        choice(
+            self.window
+                .pointer(local, &released, now_ns, shell, compositor),
+        )
     }
 
     /// Redraw the prompt in the look and at the scale now in use.

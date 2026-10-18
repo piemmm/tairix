@@ -29,7 +29,7 @@ use tairix_colour::Rgba;
 use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_input::{past_drag_slop, InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL};
 use tairix_theme::{Palette, TextRole, Theme};
 use tairix_util::utf8::is_hidden;
@@ -1696,11 +1696,7 @@ impl TitleBar {
                     if self.dragging {
                         return Some(TitleBarEvent::DragMoved { to: *to });
                     }
-                    let threshold =
-                        to_i32(scale.scale_length(theme.metrics().control_inset).max(2));
-                    let dx = (to.x - self.press_origin.x).abs();
-                    let dy = (to.y - self.press_origin.y).abs();
-                    if dx.max(dy) >= threshold {
+                    if past_drag_slop(*self.press_origin, *to, scale) {
                         self.dragging = true;
                         return Some(TitleBarEvent::DragBegin);
                     }
@@ -1709,7 +1705,8 @@ impl TitleBar {
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => {
+            }
+            | InputEvent::PointerCancelled => {
                 let was_dragging = self.dragging;
                 self.press_pending = false;
                 self.dragging = false;
@@ -1833,8 +1830,14 @@ pub enum ResizeEdge {
     Left,
     /// The right edge.
     Right,
+    /// The top edge.
+    Top,
     /// The bottom edge.
     Bottom,
+    /// The top-left corner.
+    TopLeft,
+    /// The top-right corner.
+    TopRight,
     /// The bottom-left corner.
     BottomLeft,
     /// The bottom-right corner.
@@ -1862,10 +1865,10 @@ pub enum ResizeEdge {
 /// behind.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct GrabReach {
-    /// The left/right/bottom band's whole thickness, at least one pixel so a
-    /// resizable window always has a grabbable edge.
+    /// An edge band's whole thickness, at least one pixel so a resizable
+    /// window always has a grabbable edge.
     pub edge: u32,
-    /// The bottom-left/bottom-right corner band's thickness along each axis.
+    /// A corner band's thickness along each axis.
     pub corner: u32,
 }
 
@@ -1902,10 +1905,11 @@ impl GrabReach {
     /// `title_bottom` is where the title bar ends: the side bands start
     /// below it, on both sides of the edge, because a window is dragged from
     /// its title bar far more often than it is resized from the sliver
-    /// beside one.
+    /// beside one. The top bands straddle the top edge like the others, but
+    /// [`WindowFrame::hit`] gives the title bar every point of its own band,
+    /// so inside the window they reach only the rim above it.
     ///
-    /// A corner wins over the two edges that form it, and the top edge is
-    /// never a resize edge.
+    /// A corner wins over the two edges that form it.
     fn edge_at(self, bounds: Rect, title_bottom: i32, point: Point) -> Option<ResizeEdge> {
         let near_left = |band: u32| {
             point.x >= bounds.left().saturating_sub(to_i32(Self::outward(band)))
@@ -1919,6 +1923,18 @@ impl GrabReach {
             point.y >= bounds.bottom().saturating_sub(to_i32(Self::inward(band)))
                 && point.y < bounds.bottom().saturating_add(to_i32(Self::outward(band)))
         };
+        let near_top = |band: u32| {
+            point.y >= bounds.top().saturating_sub(to_i32(Self::outward(band)))
+                && point.y < bounds.top().saturating_add(to_i32(Self::inward(band)))
+        };
+        let across = point.x
+            >= bounds
+                .left()
+                .saturating_sub(to_i32(Self::outward(self.edge)))
+            && point.x
+                < bounds
+                    .right()
+                    .saturating_add(to_i32(Self::outward(self.edge)));
         // A side band spans from the title bar's foot to the bottom band's
         // own outward reach, so the two meet without either overhanging the
         // silhouette above or below.
@@ -1929,25 +1945,30 @@ impl GrabReach {
                     .saturating_add(to_i32(Self::outward(self.edge)));
         // A corner band spans the corner itself, so it is bounded by its own
         // two tests rather than by the side band's vertical span.
-        if near_bottom(self.corner) {
-            if near_left(self.corner) {
-                return Some(ResizeEdge::BottomLeft);
+        for (near, left, right) in [
+            (
+                near_bottom(self.corner),
+                ResizeEdge::BottomLeft,
+                ResizeEdge::BottomRight,
+            ),
+            (
+                near_top(self.corner),
+                ResizeEdge::TopLeft,
+                ResizeEdge::TopRight,
+            ),
+        ] {
+            if near && near_left(self.corner) {
+                return Some(left);
             }
-            if near_right(self.corner) {
-                return Some(ResizeEdge::BottomRight);
+            if near && near_right(self.corner) {
+                return Some(right);
             }
         }
-        if near_bottom(self.edge)
-            && point.x
-                >= bounds
-                    .left()
-                    .saturating_sub(to_i32(Self::outward(self.edge)))
-            && point.x
-                < bounds
-                    .right()
-                    .saturating_add(to_i32(Self::outward(self.edge)))
-        {
+        if near_bottom(self.edge) && across {
             return Some(ResizeEdge::Bottom);
+        }
+        if near_top(self.edge) && across {
+            return Some(ResizeEdge::Top);
         }
         if beside && near_left(self.edge) {
             return Some(ResizeEdge::Left);
@@ -2351,8 +2372,8 @@ impl WindowFrame {
     }
 
     /// The rectangle a press may begin one of this frame's resize drags in:
-    /// `bounds` grown by the widest band's outward reach on the three sides
-    /// that carry a band. `None` for a non-resizable frame, which offers none.
+    /// `bounds` grown on every side by the widest band's outward reach.
+    /// `None` for a non-resizable frame, which offers none.
     ///
     /// A band straddles the outer edge ([`GrabReach`]), so a legitimate grab
     /// lands *outside* `bounds`. A host that armed its gesture against the
@@ -2361,19 +2382,19 @@ impl WindowFrame {
     /// that shows a resize cursor and then does nothing. This is a bounding
     /// region, not a second hit map: [`Self::hit`] stays the gate deciding
     /// *which* edge a point grabs, and this only has to contain every point it
-    /// accepts. The top is not grown, because the title bar lives there and no
-    /// band reaches above it.
+    /// accepts.
     #[must_use]
     pub fn grab_region(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
         if !self.furniture.resizable {
             return None;
         }
         let reach = GrabReach::outward(GrabReach::of(scale, theme).corner);
+        let grown = reach.saturating_mul(2);
         Some(Rect::new(
             bounds.left().saturating_sub(to_i32(reach)),
-            bounds.top(),
-            bounds.width.saturating_add(reach.saturating_mul(2)),
-            bounds.height.saturating_add(reach),
+            bounds.top().saturating_sub(to_i32(reach)),
+            bounds.width.saturating_add(grown),
+            bounds.height.saturating_add(grown),
         ))
     }
 
@@ -2680,10 +2701,16 @@ impl ResizeGrabber {
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => {
+            }
+            | InputEvent::PointerCancelled => {
                 let was = self.dragging;
+                let settled = if matches!(event, InputEvent::PointerCancelled) {
+                    PointerState::None
+                } else {
+                    hover_or_none
+                };
                 damage::set(&mut self.dragging, false, hit_bounds, damage);
-                damage::set(&mut self.state.pointer, hover_or_none, hit_bounds, damage);
+                damage::set(&mut self.state.pointer, settled, hit_bounds, damage);
                 was.then_some(ResizeEvent::End)
             }
             _ => None,

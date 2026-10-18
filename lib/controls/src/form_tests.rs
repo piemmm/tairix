@@ -2,7 +2,8 @@
 //!
 //! These cover the three contracts the family exists to keep — room given out
 //! control, label, description; a row's authority shared into the control in
-//! its slot; the owner placing an expanded choice list — plus the slot column
+//! its slot; an expanded choice list placed in the room its owner names and
+//! reported by the row that opens it — plus the slot column
 //! every group's controls line up in, the settle point a durable change is
 //! made on, the distinct rendering of a stated absence, the fail-closed
 //! refusals, the pointer lighting a row's control and never the row, and both
@@ -549,13 +550,15 @@ fn a_combo_is_sized_by_its_widest_choice_not_its_selection() {
     );
 }
 
-// --- The owner places the choice popup ---------------------------------
-
+/// An owner lining several groups up on a column of its own has the list
+/// placed against the open row's slot by the control's own rule, and is
+/// never handed back a placement the group no longer draws.
 #[test]
-fn an_expanded_slot_reports_its_row_and_anchor() {
+fn a_list_is_placed_against_its_slot_in_a_column_the_owner_chose() {
     let theme = Theme::dark();
     let scale = Scale::ONE;
     let bounds = Rect::new(0, 0, W, 200);
+    let viewport = Rect::new(0, 0, W, 400);
     let mut group = FieldGroup::new(
         "GENERAL",
         vec![
@@ -566,12 +569,16 @@ fn an_expanded_slot_reports_its_row_and_anchor() {
             ),
         ],
     );
-    let column = group.slot_column(bounds.width, scale, &theme);
-    let layout = FieldLayout::new(bounds, column);
-    assert_eq!(group.popup_anchor(layout, scale, &theme), None);
+    let column = group.slot_column(bounds.width, scale, &theme) + 12;
+    let shared = FieldLayout::new(bounds, column).within(viewport);
+    let outdated = shared.with_popup(Rect::new(1, 1, 5, 5));
+    assert_eq!(
+        group.place_popup(outdated, scale, &theme).popup,
+        Rect::EMPTY
+    );
 
     let rect = group
-        .row_rect(1, own_layout(&group, bounds, scale, &theme), scale, &theme)
+        .row_rect(1, shared, scale, &theme)
         .expect("a row rect");
     let slot = group.rows()[1]
         .slot_rect(FieldLayout::new(rect, column), scale, &theme)
@@ -590,12 +597,20 @@ fn an_expanded_slot_reports_its_row_and_anchor() {
             button: PointerButton::Primary,
         },
     ] {
-        group.on_pointer(&event, layout, scale, &theme, &mut damage);
+        group.on_pointer(&event, shared, scale, &theme, &mut damage);
     }
+    let FieldControl::Combo(combo) = group.rows()[1].control() else {
+        panic!("the row holds a combo");
+    };
+    let placed = group.place_popup(shared, scale, &theme);
     assert_eq!(
-        group.popup_anchor(layout, scale, &theme),
-        Some((1, slot)),
-        "the owner is told which row to anchor the list to"
+        placed.popup,
+        combo.popup_rect(slot, viewport, scale, &theme)
+    );
+    assert_eq!(
+        (placed.bounds, placed.column, placed.viewport),
+        (bounds, column, viewport),
+        "only the list is placed"
     );
 }
 
@@ -626,6 +641,7 @@ fn a_resolved_layout_carries_the_column_and_the_placed_list() {
         group.slot_column(bounds.width, scale, &theme)
     );
     assert_eq!(closed.popup, Rect::EMPTY, "no list is open");
+    assert_eq!(closed.viewport, viewport);
 
     let slot = {
         let rect = group
@@ -664,11 +680,12 @@ fn a_resolved_layout_carries_the_column_and_the_placed_list() {
     assert!(!open.popup.is_empty());
 }
 
-/// The press that opens a list is routed with a layout that placed none, so
-/// it reports none of the plate: the owner reports it, placing the list again,
-/// and reports what a closing list vacates the same way.
+/// The row that opens a list reports the whole plate it opens into, though
+/// the layout the opening event was routed with placed none, and the plate a
+/// closing list vacates — from the pointer and from the keyboard — so an
+/// owner reports none of it.
 #[test]
-fn an_opened_list_is_reported_by_the_owner_that_places_it() {
+fn a_row_reports_the_list_it_opens_and_the_plate_it_vacates() {
     let theme = Theme::dark();
     let scale = Scale::ONE;
     let bounds = Rect::new(0, 0, W, 200);
@@ -693,7 +710,10 @@ fn an_opened_list_is_reported_by_the_owner_that_places_it() {
         slot.left() + to_i32(slot.width) / 2,
         slot.top() + to_i32(slot.height) / 2,
     );
-    let mut damage = sink();
+    // Owners give the keyboard to the row a press lands on.
+    group.adopt_focus(Some(0));
+    let mut opening = sink();
+    let mut acted = None;
     for event in [
         InputEvent::PointerMoved { to: centre },
         InputEvent::PointerPressed {
@@ -703,29 +723,50 @@ fn an_opened_list_is_reported_by_the_owner_that_places_it() {
             button: PointerButton::Primary,
         },
     ] {
-        group.on_pointer(&event, closed, scale, &theme, &mut damage);
+        acted = group
+            .on_pointer(&event, closed, scale, &theme, &mut opening)
+            .or(acted);
     }
+    assert_eq!(
+        acted.map(|acted| acted.action),
+        Some(FieldAction::Choices { expanded: true })
+    );
     let open = group.layout(bounds, viewport, scale, &theme);
     assert!(!open.popup.is_empty());
-    let covered = |damage: &Region| covers(damage, open.popup);
-    assert!(!covered(&damage), "the opening press cannot name the plate");
-    closed.report_popup_moved(open, &mut damage);
-    assert!(covered(&damage));
-    let mut vacated = sink();
-    open.report_popup_moved(closed, &mut vacated);
-    assert!(covered(&vacated));
-    let mut unmoved = sink();
-    open.report_popup_moved(open, &mut unmoved);
-    assert!(unmoved.is_empty());
-    let opening = FieldAction::Choices { expanded: true };
-    assert!(closed.popup_may_move(&opening));
     assert!(
-        !closed.popup_may_move(&FieldAction::Activated),
-        "no list to move"
+        covers(&opening, open.popup),
+        "the opening press names the plate"
+    );
+
+    let mut vacated = sink();
+    let closing = group.on_key(
+        keystroke(Key::Named(NamedKey::Escape)),
+        open,
+        scale,
+        &theme,
+        &mut vacated,
+    );
+    assert_eq!(
+        closing.map(|acted| acted.action),
+        Some(FieldAction::Choices { expanded: false })
     );
     assert!(
-        open.popup_may_move(&FieldAction::Activated),
-        "an open one may"
+        covers(&vacated, open.popup),
+        "a closing list reports what it vacates"
+    );
+
+    let mut keyed = sink();
+    group.on_key(
+        keystroke(Key::Named(NamedKey::Enter)),
+        closed,
+        scale,
+        &theme,
+        &mut keyed,
+    );
+    assert!(group.rows()[0].popup_open(), "Enter opens the list");
+    assert!(
+        covers(&keyed, open.popup),
+        "a list opened from the keyboard too"
     );
 }
 

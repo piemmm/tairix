@@ -882,13 +882,32 @@ pub fn resize_drag_event(
 ) -> Option<WindowEvent> {
     if ended {
         compositor.hold_window_in_size_range(wm, shell.work_area(compositor));
+        return settled_size_event(wm, compositor, windows);
     }
     let window_id = windows.ipc_id(wm)?;
     let client = compositor.window_client_rect(wm)?;
+    Some(WindowEvent::Resized {
+        window_id,
+        width_px: client.width,
+        height_px: client.height,
+        state: compositor.window(wm)?.size_state(),
+    })
+}
+
+/// The [`WindowEvent::Resized`] owed to the app owning `wm` for the size and
+/// state it has settled at — a resize drag let go, or a move that took it
+/// out of maximization — recorded to be announced once a frame drawn at that
+/// size is on screen. `None` for a window the session does not serve.
+#[must_use]
+pub fn settled_size_event(
+    wm: WindowId,
+    compositor: &Compositor,
+    windows: &mut SessionWindows,
+) -> Option<WindowEvent> {
+    let window_id = windows.ipc_id(wm)?;
+    let client = compositor.window_client_rect(wm)?;
     let state = compositor.window(wm)?.size_state();
-    if ended {
-        windows.note_sized(window_id, state, (client.width, client.height));
-    }
+    windows.note_sized(window_id, state, (client.width, client.height));
     Some(WindowEvent::Resized {
         window_id,
         width_px: client.width,
@@ -909,10 +928,7 @@ pub fn tool_move_event(
     compositor: &Compositor,
     windows: &SessionWindows,
 ) -> Option<WindowEvent> {
-    let window_id = windows.ipc_id(wm)?;
-    let Standing::Tool(parent) = windows.records.get(&window_id)?.standing else {
-        return None;
-    };
+    let (window_id, parent) = tool_window(wm, windows)?;
     let over = compositor
         .window_client_rect(parent)
         .filter(|client| {
@@ -930,6 +946,29 @@ pub fn tool_move_event(
         over,
         ended,
     })
+}
+
+/// The [`WindowEvent::ToolMoved`] owed to the app owning tool window `wm`
+/// when the seat takes its move away: over, and let go over nothing, so a
+/// dock the move marked is cleared and nothing docks.
+#[must_use]
+pub fn tool_move_abandoned_event(wm: WindowId, windows: &SessionWindows) -> Option<WindowEvent> {
+    let (window_id, _) = tool_window(wm, windows)?;
+    Some(WindowEvent::ToolMoved {
+        window_id,
+        over: ToolOver::Elsewhere,
+        ended: true,
+    })
+}
+
+/// Tool window `wm`'s protocol id and the window it belongs to, or `None`
+/// for any other window.
+fn tool_window(wm: WindowId, windows: &SessionWindows) -> Option<(u64, WindowId)> {
+    let window_id = windows.ipc_id(wm)?;
+    match windows.records.get(&window_id)?.standing {
+        Standing::Tool(parent) => Some((window_id, parent)),
+        Standing::TopLevel | Standing::Popup(_) | Standing::Dialog(_) => None,
+    }
 }
 
 /// Perform the window-manager-local half of a title-bar command on the
@@ -5004,6 +5043,22 @@ mod tests {
                 ResizeEdge::Bottom,
                 Point::new(0, -18),
             ),
+            // The top bands' inward half is the rim above the title bar.
+            (
+                Point::new(bounds.left() + 96, bounds.top()),
+                ResizeEdge::Top,
+                Point::new(0, 18),
+            ),
+            (
+                Point::new(bounds.left(), bounds.top()),
+                ResizeEdge::TopLeft,
+                Point::new(24, 18),
+            ),
+            (
+                Point::new(bounds.right() - 1, bounds.top()),
+                ResizeEdge::TopRight,
+                Point::new(-24, 18),
+            ),
         ] {
             let before = compositor.window(wm).expect("live").bounds();
             shell.handle(InputEvent::PointerMoved { to: at }, &mut compositor, 0);
@@ -5574,6 +5629,122 @@ mod tests {
         assert_eq!(
             compositor.window(wm).expect("live").size_state(),
             tairix_wm::WindowSizeState::Restored
+        );
+    }
+
+    /// A maximized window `wm` over the work area, opened with a resizable
+    /// frame in `windows` as served window 7.
+    fn maximized_served(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+    ) -> WindowId {
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut *shell,
+                compositor: &mut *compositor,
+                windows: &mut *windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+            };
+            open_one(&mut host, 7)
+        };
+        assert!(compositor.set_window_frame(wm, resizable_frame()));
+        let work_area = shell.work_area(compositor);
+        window_control_event(
+            WindowControlKind::SizeToggle,
+            wm,
+            work_area,
+            shell,
+            compositor,
+            windows,
+        )
+        .expect("maximized");
+        wm
+    }
+
+    /// The reported defect: a maximized window dragged smaller snapped back
+    /// to fill the work area when the button came up, because the release
+    /// held it to the range a maximized window is sized by.
+    #[test]
+    fn a_maximized_window_dragged_smaller_settles_at_the_dragged_size() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let wm = maximized_served(&mut shell, &mut compositor, &mut windows);
+        let full = compositor.window(wm).expect("live").bounds();
+
+        drag_corner(&mut shell, &mut compositor, wm, Point::new(-80, -60));
+        shell.handle(
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        let event = resize_drag_event(wm, true, &shell, &mut compositor, &mut windows);
+        let dragged = Rect::new(full.left(), full.top(), full.width - 80, full.height - 60);
+        assert_eq!(compositor.window(wm).expect("live").bounds(), dragged);
+        let client = compositor.window_client_rect(wm).expect("client");
+        assert_eq!(
+            event,
+            Some(WindowEvent::Resized {
+                window_id: 7,
+                width_px: client.width,
+                height_px: client.height,
+                state: tairix_wm::WindowSizeState::Restored,
+            })
+        );
+    }
+
+    /// A maximized window dragged by its title bar keeps its size, and its
+    /// app is told it is restored, so it never believes it still fills the
+    /// work area.
+    #[test]
+    fn a_maximized_window_dragged_by_its_bar_tells_its_app_it_is_restored() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let wm = maximized_served(&mut shell, &mut compositor, &mut windows);
+        let full = compositor.window(wm).expect("live").bounds();
+        let client = compositor.window_client_rect(wm).expect("client");
+        let bar = Point::new(
+            i32::midpoint(full.left(), full.right()),
+            i32::midpoint(full.top(), client.top()),
+        );
+        shell.handle(InputEvent::PointerMoved { to: bar }, &mut compositor, 0);
+        shell.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        let outcome = shell.handle(
+            InputEvent::PointerMoved {
+                to: Point::new(bar.x + 40, bar.y + 30),
+            },
+            &mut compositor,
+            0,
+        );
+        assert_eq!(
+            outcome,
+            crate::ShellOutcome::WindowManager(InputResponse::Unmaximized { window: wm })
+        );
+        assert_eq!(
+            settled_size_event(wm, &compositor, &mut windows),
+            Some(WindowEvent::Resized {
+                window_id: 7,
+                width_px: client.width,
+                height_px: client.height,
+                state: tairix_wm::WindowSizeState::Restored,
+            })
         );
     }
 

@@ -1153,6 +1153,61 @@ impl Taskbar {
         false
     }
 
+    /// When a press held on an open popup's scrollbar — the program
+    /// library's or the window picker's — steps next, or `None` when nothing
+    /// held would move.
+    pub fn scroll_repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        let library = if self.library.is_open() {
+            self.library.repeat_deadline(now_ns)
+        } else {
+            None
+        };
+        let picker = if self.picker.is_open() {
+            self.picker.repeat_deadline(now_ns)
+        } else {
+            None
+        };
+        library.into_iter().chain(picker).min()
+    }
+
+    /// Step a press held on an open popup's scrollbar whose repeat is due at
+    /// `now_ns`, latching the repaint of the popup it moved. The picker's lit
+    /// cell follows the grid to the one `pointer` now rests on.
+    pub fn scroll_repeat(&mut self, now_ns: u64, pointer: Point, scale: Scale) {
+        // Laying a popup out is no cost a wake with nothing due pays.
+        if self
+            .scroll_repeat_deadline(now_ns)
+            .is_none_or(|due| due > now_ns)
+        {
+            return;
+        }
+        // What the bars report is the thumb, never the rows a step moved, so
+        // each popup is owed whole and the sink ends here.
+        let mut reported = damage::sink();
+        if self.library.is_open() {
+            let layout = self.library_layout(scale);
+            if self
+                .library
+                .repeat(now_ns, &layout, &self.theme, scale, &mut reported)
+            {
+                self.repaint |= TaskbarRepaint::LIBRARY;
+            }
+        }
+        let Some(layout) = self.picker_layout(scale) else {
+            return;
+        };
+        if self
+            .picker
+            .repeat(now_ns, &layout, (scale, &self.theme), &mut reported)
+        {
+            self.repaint |= TaskbarRepaint::PICKER;
+            if let Some(moved) = self.picker_layout(scale) {
+                let cell = self.picker.cell_at(&moved, pointer);
+                self.picker.set_hover(cell, &moved, &mut reported);
+            }
+        }
+    }
+
     /// Feed one pointer event to the open picker's grid scrollbar, latching
     /// the picker's repaint when it moved. `false` while the picker is
     /// closed or its grid needs no scrolling.

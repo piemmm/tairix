@@ -28,7 +28,9 @@ use tairix_abi::DriverError;
 use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
 use tairix_collections::SmallVec;
-use tairix_controls::{damage, FurniturePart, ResizeEdge, TitleBarEvent, WindowFrame};
+use tairix_controls::{
+    damage, FurniturePart, ResizeEdge, TitleBarCommands, TitleBarEvent, WindowFrame,
+};
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
 use tairix_icon::IconKind;
@@ -40,7 +42,7 @@ use tairix_reclaim::{
     screenful_ui_budget, stacked_ui_budget, CacheAccounting, PressureBand, PressureGauge,
     ReclaimCache, Served,
 };
-use tairix_theme::{CursorKind, Theme};
+use tairix_theme::{CursorKind, MotionInteraction, Theme};
 use tairix_util::fallible;
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
@@ -2548,6 +2550,76 @@ impl Compositor {
         Some(applied)
     }
 
+    /// Advance every shadow easing between its levels to `now_ns`, marking the
+    /// strips each one that changed darkens.
+    pub fn step_elevations(&mut self, now_ns: u64) {
+        let duration = self
+            .theme
+            .motion()
+            .duration(MotionInteraction::WindowActivate);
+        let reach = self.shadow.reach();
+        for index in 0..self.windows.len() {
+            let Some(window) = self.windows.get_mut(index) else {
+                break;
+            };
+            if window.step_shadow(now_ns, duration) {
+                let strips = window.shadow_strips(reach);
+                for strip in strips.into_iter().filter(|strip| !strip.is_empty()) {
+                    self.mark_from(strip, index.saturating_add(1));
+                }
+            }
+        }
+    }
+
+    /// Nanoseconds until a shadow easing between its levels owes its next
+    /// step, or `None` while every one stands still.
+    #[must_use]
+    pub fn next_elevation_frame_in(&self, now_ns: u64) -> Option<u64> {
+        self.windows
+            .iter()
+            .filter_map(|window| window.shadow_frame_in(now_ns))
+            .min()
+    }
+
+    /// Take the maximized window named by `id` out of maximization where it
+    /// stands, answering its client rectangle, or `None`, changing nothing,
+    /// for a window that is not maximized.
+    ///
+    /// The first step of moving or resizing a maximized window. It begins
+    /// casting a shadow and its size toggle offers Maximize again, so its
+    /// footprint and furniture repaint.
+    pub fn unmaximize_in_place(&mut self, id: WindowId) -> Option<Rect> {
+        let reach = self.shadow.reach();
+        self.mutate_frame(id, |window, _, _, damage| {
+            if !window.unmaximize_in_place() {
+                return None;
+            }
+            damage.add(window.footprint(reach));
+            Some(window.client_rect())
+        })
+        .flatten()
+    }
+
+    /// Put the window `placement` names back exactly as it recorded: its size
+    /// state, its rectangle to restore to, and its outer rectangle. Answers
+    /// whether it is there; an unknown window, or a geometry that fails
+    /// closed, changes nothing.
+    pub fn reinstate_placement(&mut self, placement: &Placement) -> bool {
+        let reach = self.shadow.reach();
+        self.mutate_frame(placement.id(), |window, scale, theme, damage| {
+            let before = (window.footprint(reach), window.size_state());
+            if !window.reinstate(placement, scale, theme) {
+                return false;
+            }
+            if (window.footprint(reach), window.size_state()) != before {
+                damage.add(before.0);
+                damage.add(window.footprint(reach));
+            }
+            true
+        })
+        .unwrap_or(false)
+    }
+
     /// Fit every top-level window to the screen as it now is
     /// ([`set_desktop_size`](Self::set_desktop_size), a mode change): a
     /// fullscreen window covers it, a maximized one fills `work_area`, and a
@@ -2845,36 +2917,54 @@ impl Compositor {
         self.window(id).map(Window::client_rect)
     }
 
-    /// Mark the decorated window named by `id` active or inactive, repainting
-    /// its frame rim, title, and controls under the new activation. Returns
-    /// `false` for an unknown or undecorated window.
+    /// Bring every window's look in step with `focus`, the window the
+    /// [`InputRouter`](crate::InputRouter) gives the keyboard to — `None` for
+    /// the desktop:
     ///
-    /// The window manager keeps this in step with the focused window the
-    /// [`InputRouter`](crate::InputRouter) tracks. Only the furniture bands are
-    /// marked dirty — the client area does not change on a focus flip — so a
-    /// focus change never triggers a full-window recomposite. Re-asserting the
-    /// activation a frame already shows marks no damage and keeps its rendered
-    /// furniture.
-    pub fn set_active_frame(&mut self, id: WindowId, active: bool) -> bool {
-        let Some(changes) = self
-            .window(id)
-            .and_then(|window| window.frame_activation_changes(active))
-        else {
-            return false;
-        };
-        if !changes {
-            return true;
+    /// - the frame of the window holding the focus is active, and so is a
+    ///   palette's while its family is in front; every other frame is
+    ///   inactive, so a window opened behind another never wears the look of
+    ///   the one being worked in;
+    /// - the family holding the focus stands lifted, and every other window's
+    ///   shadow rests, each change eased over the theme's window-activation
+    ///   timing from the next [`step_elevations`](Self::step_elevations).
+    ///
+    /// A family is an owner and its transients, so a window keeps its height
+    /// while a menu or a dialog of its own holds the keyboard. Only a decorated
+    /// window's shadow rests: every other floating surface stands lifted
+    /// whatever holds the focus.
+    ///
+    /// An activation change repaints that frame's furniture bands alone, never
+    /// its client, and a shadow is marked only when a step moves it, so
+    /// asserting the look already shown costs one walk of the stack.
+    pub fn follow_focus(&mut self, focus: Option<WindowId>) {
+        let front = focus
+            .and_then(|id| self.window(id))
+            .map(|window| window.parent().unwrap_or(window.id()));
+        for index in 0..self.windows.len() {
+            let Some(window) = self.windows.get_mut(index) else {
+                break;
+            };
+            let id = window.id();
+            let in_front = Some(window.parent().unwrap_or(id)) == front;
+            window.aim_shadow(in_front);
+            let palette = window.frame().is_some_and(|frame| {
+                matches!(
+                    frame.title_bar().commands(),
+                    TitleBarCommands::Tool | TitleBarCommands::Pane
+                )
+            });
+            let active = focus == Some(id) || (palette && in_front);
+            if window.frame_activation_changes(active) == Some(true)
+                && window.set_frame_active(active)
+            {
+                let bands = window.furniture_bands();
+                self.chrome.invalidate(&id);
+                for band in bands.into_iter().filter(|band| !band.is_empty()) {
+                    self.mark_from(band, index.saturating_add(1));
+                }
+            }
         }
-        self.mutate_frame(id, |window, _, _, damage| {
-            if !window.set_frame_active(active) {
-                return false;
-            }
-            for band in window.furniture_bands() {
-                damage.add(band);
-            }
-            true
-        })
-        .unwrap_or(false)
     }
 
     /// Set the decorated window named by `id`'s title, repainting the title

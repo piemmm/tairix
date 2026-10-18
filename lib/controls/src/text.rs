@@ -1016,6 +1016,11 @@ impl FieldCore {
                 damage::set(&mut self.state.pointer, hover_or_none, bounds, damage);
                 None
             }
+            InputEvent::PointerCancelled => {
+                *self.selecting = false;
+                damage::set(&mut self.state.pointer, PointerState::None, bounds, damage);
+                None
+            }
             _ => None,
         }
     }
@@ -2447,7 +2452,19 @@ impl TextArea {
             *self.core.pointer = *to;
         }
         let font = role_font(theme, scale, TextRole::Body);
-        let geom = self.geom(bounds, scale, theme, font)?;
+        let Some(geom) = self.geom(bounds, scale, theme, font) else {
+            // An area too small to lay out has no bar, but a press its bar
+            // still holds must still end.
+            if matches!(
+                event,
+                InputEvent::PointerReleased { .. } | InputEvent::PointerCancelled
+            ) {
+                let _ = self
+                    .bar
+                    .on_pointer(event, Rect::EMPTY, scale, theme, damage);
+            }
+            return None;
+        };
         let (tx, ty, tw, _) = geom.text;
         let inside = bounds.contains(*self.core.pointer);
         let hover_or_none = if inside {
@@ -2458,11 +2475,15 @@ impl TextArea {
 
         // The bar owns the gutter and anything its drag is still holding, so
         // a pointer that slid off the thumb keeps scrolling rather than
-        // placing a caret.
+        // placing a caret. Every motion reaches it, so a part it lit goes out
+        // when the pointer leaves for the text.
         if let Some(rect) = geom.bar {
             let on_bar = rect.contains(*self.core.pointer);
             if on_bar
-                || matches!(event, InputEvent::PointerScrolled { .. })
+                || matches!(
+                    event,
+                    InputEvent::PointerScrolled { .. } | InputEvent::PointerMoved { .. }
+                )
                 || self.bar.is_pressing()
             {
                 self.bar.set_model(self.scroll_model(&geom));
@@ -2510,6 +2531,16 @@ impl TextArea {
             } => {
                 *self.core.selecting = false;
                 damage::set(&mut self.core.state.pointer, hover_or_none, bounds, damage);
+                None
+            }
+            InputEvent::PointerCancelled => {
+                *self.core.selecting = false;
+                damage::set(
+                    &mut self.core.state.pointer,
+                    PointerState::None,
+                    bounds,
+                    damage,
+                );
                 None
             }
             _ => None,
@@ -2693,6 +2724,41 @@ impl TextArea {
             .revealing(top, u64::from(geom.line))
             .offset();
         self.set_scroll(u32::try_from(revealed).unwrap_or(u32::MAX), bounds, damage);
+    }
+
+    /// When the press the area's scrollbar holds steps next, or `None` when
+    /// nothing held would move ([`ScrollBar::repeat_deadline`]).
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.bar.repeat_deadline(now_ns)
+    }
+
+    /// Step the press the area's scrollbar holds if its repeat is due at
+    /// `now_ns`, for the area drawn at `bounds`, reporting `bounds` into
+    /// `damage` when the viewport moved.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if !self.bar.repeat_due(now_ns) {
+            return;
+        }
+        let font = role_font(theme, scale, TextRole::Body);
+        let Some(geom) = self.geom(bounds, scale, theme, font) else {
+            return;
+        };
+        let Some(rect) = geom.bar else {
+            return;
+        };
+        self.bar.set_model(self.scroll_model(&geom));
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.bar.repeat(now_ns, rect, scale, theme, damage)
+        {
+            self.set_scroll(u32::try_from(offset).unwrap_or(u32::MAX), bounds, damage);
+        }
     }
 
     /// Adopt `offset` pixels as the viewport's position, reporting `bounds`

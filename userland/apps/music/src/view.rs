@@ -20,8 +20,8 @@ use tairix_abi::window_ipc::{
 use tairix_audio::target::AudioTarget;
 use tairix_audio::volume::{level_at_permille, permille_of_level, DEFAULT_FLOOR_MILLIBEL};
 use tairix_controls::{
-    ButtonAction, ControlRole, IconButton, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange, SelectionState, Slider, SliderAction,
+    ButtonAction, ControlRole, IconButton, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
+    SelectionState, Slider, SliderAction,
 };
 use tairix_geometry::{Point, Region, Scale};
 use tairix_icon::IconKind;
@@ -736,16 +736,43 @@ impl Player {
                 damage,
             ),
             InputEvent::PointerScrolled { dy, dx } => {
-                if let Some(ScrollAction::ScrollTo { offset }) =
-                    self.controls
-                        .scroll
-                        .wheel(dx, dy, scale, layout.scrollbar(), damage)
+                if self
+                    .controls
+                    .scroll
+                    .wheel(dx, dy, scale, layout.scrollbar(), damage)
+                    .is_some()
                 {
-                    self.scroll_to(offset, layout, damage);
+                    Self::scrolled(layout, damage);
                 }
                 Outcome::default()
             }
             _ => self.pointer(event, now_ns, layout, scale, theme, damage),
+        }
+    }
+
+    /// When the press the list's scrollbar holds steps next, or `None` when
+    /// nothing held would move.
+    pub fn scroll_repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.controls.scroll.repeat_deadline(now_ns)
+    }
+
+    /// Step the press the list's scrollbar holds if its repeat is due at
+    /// `now_ns`, reporting what moved into `damage`.
+    pub fn scroll_repeat(
+        &mut self,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if self
+            .controls
+            .scroll
+            .repeat(now_ns, layout.scrollbar(), scale, theme, damage)
+            .is_some()
+        {
+            Self::scrolled(layout, damage);
         }
     }
 
@@ -777,12 +804,13 @@ impl Player {
         {
             self.volume_action(action, &mut outcome);
         }
-        if let Some(ScrollAction::ScrollTo { offset }) =
-            self.controls
-                .scroll
-                .on_pointer(event, layout.scrollbar(), scale, theme, damage)
+        if self
+            .controls
+            .scroll
+            .on_pointer(event, layout.scrollbar(), scale, theme, damage)
+            .is_some()
         {
-            self.scroll_to(offset, layout, damage);
+            Self::scrolled(layout, damage);
         }
         // Every button sees every event, so a hover or a press elsewhere
         // clears; at most one is activated by it.
@@ -1434,6 +1462,12 @@ impl Player {
             model.line_step(),
             model.page_step(),
         ));
+        Self::scrolled(layout, damage);
+    }
+
+    /// The list's offset moved — the bar holds it, and has already taken it
+    /// when it answers a scroll — so the rows it shows repaint with the bar.
+    fn scrolled(layout: &Layout, damage: &mut Region) {
         damage.add(layout.rows());
         damage.add(layout.scrollbar());
     }

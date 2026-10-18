@@ -163,9 +163,10 @@ const READ_ONLY_MARK: &str = " (read-only)";
 /// What parts the document's name from the application's in a title.
 const APP_SEPARATOR: &str = " \u{2014} ";
 
-/// Write the title a document window shows over `title`, reusing its room:
-/// `name`, marked while it holds unsaved changes and when it may only be
-/// read, then `app` — the name cut to what the bounded title field leaves.
+/// Write the title a window about one named item — a document, an item's
+/// Info — shows over `title`, reusing its room: `name`, marked while it holds
+/// unsaved changes and when it may only be read, then `app` — the name cut to
+/// what the bounded title field leaves.
 pub fn write_document_title(
     title: &mut String,
     name: &str,
@@ -180,37 +181,61 @@ pub fn write_document_title(
         .saturating_sub(modified.len() + read_only.len())
         .saturating_sub(APP_SEPARATOR.len() + app.len());
     title.push_str(modified);
-    push_title_name(title, name, budget);
+    push_shown_name(title, name, budget);
     title.push_str(read_only);
     title.push_str(APP_SEPARATOR);
     title.push_str(app);
 }
 
-/// Append the document name `name` to `title` as a window title carries it,
-/// in at most `budget` bytes: every control character shown as
-/// [`char::REPLACEMENT_CHARACTER`], and a name too long cut on a `char`
-/// boundary before a trailing [`ELLIPSIS`].
+/// Append `name` to `out` as a reader is shown it, in at most `budget` bytes:
+/// every control character shown as [`char::REPLACEMENT_CHARACTER`], and a
+/// name too long given up in the middle behind an [`ELLIPSIS`], its extension
+/// kept whole when that leaves its start at least as much room —
+/// `averylongn….png` — since the extension says what kind of file it is.
 ///
-/// A window title is a bounded field and a name is not, so a long one is
-/// shortened rather than left to make the whole title unacceptable; and a
-/// control character in it would make any title refused.
-pub(crate) fn push_title_name(title: &mut String, name: &str, budget: usize) {
-    let whole: usize = name.chars().map(|ch| shown(ch).len_utf8()).sum();
-    let room = if whole <= budget {
-        budget
-    } else {
-        budget.saturating_sub(ELLIPSIS.len())
+/// A bounded field and a name are different sizes, so a long name is
+/// shortened rather than left to make the whole text unacceptable; and a
+/// control character in it would make any field refuse it.
+pub(crate) fn push_shown_name(out: &mut String, name: &str, budget: usize) {
+    if shown_len(name) <= budget {
+        out.extend(name.chars().map(shown));
+        return;
+    }
+    let Some(room) = budget.checked_sub(ELLIPSIS.len()) else {
+        push_shown_prefix(out, name, budget);
+        return;
     };
+    let ending = extension(name)
+        .filter(|ending| shown_len(ending).saturating_mul(2) <= room)
+        .unwrap_or("");
+    let start = &name[..name.len() - ending.len()];
+    push_shown_prefix(out, start, room - shown_len(ending));
+    out.push_str(ELLIPSIS);
+    out.extend(ending.chars().map(shown));
+}
+
+/// `name`'s extension with its dot — `.png` — or `None` when it has none: its
+/// only dot leads it, as a hidden name's does, or ends it.
+fn extension(name: &str) -> Option<&str> {
+    let dot = name.rfind('.')?;
+    (dot > 0 && dot + 1 < name.len()).then(|| &name[dot..])
+}
+
+/// How many bytes `text` takes as a reader is shown it.
+fn shown_len(text: &str) -> usize {
+    text.chars().map(|ch| shown(ch).len_utf8()).sum()
+}
+
+/// Append the longest prefix of `text`, as a reader is shown it, that fits in
+/// `budget` bytes.
+fn push_shown_prefix(out: &mut String, text: &str, budget: usize) {
     let mut used = 0;
-    for ch in name.chars().map(shown) {
+    for ch in text.chars().map(shown) {
         used += ch.len_utf8();
-        if used > room {
+        if used > budget {
             break;
         }
-        title.push(ch);
-    }
-    if whole > budget && budget >= ELLIPSIS.len() {
-        title.push_str(ELLIPSIS);
+        out.push(ch);
     }
 }
 

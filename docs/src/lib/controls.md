@@ -211,20 +211,16 @@ about the machine:
   control keeps whatever press it holds, so a slider row naming the setting it
   sits on follows a drag without the drag being dropped. The height a row
   measures moves with its words, so the owner lays it out again before drawing.
-- **The owner places the choice popup.** An expanded `ComboBox` list is drawn
-  above every group, so a row cannot paint it — the group's later rows would
-  cover it. `FieldGroup::popup_anchor` names the row and the slot to anchor the
-  list to; the owner places it, hands it back through `FieldLayout::with_popup`,
-  and paints it with `render_popup` once every group is drawn. Only the owner
-  knows the viewport the list has to fit in, which is why it is the one thing
-  the owner supplies: `FieldGroup::layout` takes that viewport and answers the
-  whole layout — the group's slot column and an expanded slot's list, placed —
-  so an owner laying its groups out independently carries none of that
-  arithmetic itself. The owner also reports the list's plate: the press that
-  opens a list is routed with a layout that placed none, so once a group has
-  acted the owner lays it out again and hands both layouts to
-  `FieldLayout::report_popup_moved`, which reports the plate a list opened
-  into, the one it vacated, or both where it moved.
+- **The owner names the room a choice list may hang into.** An expanded
+  `ComboBox` list is drawn above every group, so a row cannot paint it — the
+  group's later rows would cover it — and the owner paints it with
+  `render_popup` once every group is drawn. The viewport it must fit in is the
+  one thing the owner supplies: `FieldGroup::layout` takes it and answers the
+  whole layout, and an owner lining several groups up on one column of its own
+  hands `FieldGroup::place_popup` a layout carrying that column and viewport
+  (`FieldLayout::within`). Input is routed with the layout the group is
+  painted with, so the row that opens or closes a list reports the plate it
+  opens into or vacates, placed by the same rule: no owner reports a list.
 
 A group may also carry a **badge** on its caption's own line
 (`FieldGroup::with_badge`): the `StatusPill` naming the state of the thing the
@@ -357,6 +353,22 @@ whatever its rows are; `ScrollBar::wheel` applies that with the carry in the
 bar and reports the bar, and a wheel over the bar itself scrolls it. The
 owner reports the content it slid.
 
+A `ScrollBar`'s ends are two raised buttons with grid-fitted chevrons, so an
+arrow is whole pixels at every density, and a press toward an end the content
+already rests at presses nothing. **A held press repeats on the control's own
+cadence** (`HoldRepeat`): the first step lands with the press, then one after
+`REPEAT_DELAY_NS` and one every `REPEAT_INTERVAL_NS`, the one cadence every
+press-and-hold stepping control shares. The owner keeps no timer of its own:
+after routing its events it asks `repeat_deadline(now)`, folds the answer into
+its wait, and when that falls due calls `repeat(now, …)`, applying the
+`ScrollAction` it returns exactly as one from `on_pointer`. A hold steps only
+while the pointer is on the part it pressed and that step would move
+something, so a track press stops when the thumb arrives under the pointer and
+nothing is armed at a bound — and with nothing held the deadline is `None`, so
+an idle owner arms no timer. A bar holds its press to the end: an owner routes
+every event to a bar that `is_pressing`, wherever the pointer has gone, and a
+release or a cancel ends the press even once the bar itself has gone.
+
 ### Where a drop-down's list goes
 
 `ComboBox::popup_rect` is the one placement rule every expanded choice list
@@ -368,10 +380,9 @@ by — over the control's own `popup_size`, rather than a copy per owner. A
 field in a footer therefore opens upward without its owner knowing it is
 special: there is simply no room beneath it.
 
-Present-day consumers: the widget gallery's Forms tab, the Settings panes, the
-Date & Time window's two groups of three civil fields, and the file manager's
-Permissions section — an access group of one `FlagSet` row per permission
-class over an ownership group.
+Present-day consumers: the widget gallery's Forms tab, the Settings panes,
+Paint's tool bar, adjustment panels and dialogs, the network map's Probe
+Settings window, and WinterSun's settings window.
 
 ### Reporting a reading, and standing beside a list
 
@@ -414,7 +425,7 @@ it, or frame the content that does:
   above both its peak and `RATE_TRACE_FLOOR`, shared by both halves, so the
   window's busiest point reaches at least half the box and the scale comes back
   down once a burst has scrolled out. The Switchboard's device traces and a
-  drive's Properties both plot through it.
+  drive's Info window both plot through it.
   `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
   for a tile with a column of its own, `Inline` puts the label leading and the
   reading trailing so a narrow stack of readings can be scanned down. The
@@ -498,9 +509,9 @@ doing — until the owner `refuse`s it or takes it down.
   shared scroll engine, so the clamp is the same one every scrollbar uses. A
   chevron is drawn — and pressable — only where there is something that way,
   and a strip wide enough for every tool reserves nothing. A press steps one
-  tool, a held press auto-repeats on the owner's one-shot timer through
-  `Toolbar::repeat` at the cadence `REPEAT_DELAY_NS`/`REPEAT_INTERVAL_NS`
-  every press-and-hold stepping control shares, a wheel detent over the strip
+  tool, a held press repeats on the strip's own cadence — the owner folds
+  `Toolbar::repeat_deadline` into its wait and calls `Toolbar::repeat` when it
+  falls due, as a scrollbar's owner does — a wheel detent over the strip
   steps it one tool (part of a detent carrying into the next), and a keyboard
   focus move scrolls the tool it lands on into view. An owner that must never
   scroll its strip floors its window on `Toolbar::natural_length`; one that
@@ -1184,7 +1195,10 @@ toggle.
   caret, and a text longer than the box grows the shared `ScrollBar` in a
   trailing gutter. The gutter is taken from the text's own column only when
   the text overflows — and narrowing the column can only *add* lines, so the
-  decision settles in one pass and cannot flicker.
+  decision settles in one pass and cannot flicker. The bar sees every motion,
+  so a part it lit goes out when the pointer leaves for the text, and a held
+  press on it repeats through `TextArea::repeat_deadline` and
+  `TextArea::repeat`, as a bar's own owner would drive it.
 - The layout is `lib/font`'s tiling one, so every caret position resolves to a
   line and back with no "between lines" case to defend against, and only the
   lines the viewport shows are laid out.
@@ -1293,6 +1307,16 @@ The erase runs for a plain field too. It is cheap, it is harmless, and one
 editor is better than two. A `SecretField`'s `Debug` output prints nothing of
 the buffer, not even its length, so a diagnostic dump cannot carry a password
 or say how long one is.
+
+## A press can end without a release
+
+A press the desktop takes away — a screen lock, a prompt, a menu, a drag it
+carries — never sees its release. The window channel then delivers
+`PointerAction::Cancelled`, which `pointer_input_events` turns into
+`InputEvent::PointerCancelled`, and every family that latches a press ends it
+there completing nothing: a button lets go without firing, a slider settles
+where it stands, a scrollbar's drag and held step stop, a text selection ends.
+A control never needs to tell a cancel from a release that missed it.
 
 ## A hover has to be able to end without the pointer moving
 

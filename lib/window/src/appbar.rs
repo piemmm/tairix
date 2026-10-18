@@ -236,6 +236,7 @@ mod tests {
             label: AppMenuLabel::new("Profile").expect("within bounds"),
             enabled: true,
             symbol: AppMenuSymbol::Settings,
+            reason: tairix_abi::window_ipc::AppMenuReason::EMPTY,
         };
         assert_eq!(
             declaration(9, AppBarClick::Raise, &[submenu]),

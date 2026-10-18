@@ -568,14 +568,11 @@ The contract it delivers, which no later stage re-derives:
   with the control in the slot, so a denied or pending row cannot hold an
   actionable control. A pane therefore states a refusal by setting the
   *row*, never by remembering to set two states in step.
-- **The owner places the choice popup.** `FieldGroup::popup_anchor` names the
-  row and slot to anchor an expanded `ComboBox` list to; the owner places it,
-  hands it back through `FieldLayout::with_popup`, and paints it with
-  `render_popup` after every group. The pane (DS2) owns the placement rule,
-  because only it knows the viewport the list has to fit in — and DS2 is where
-  the one `ComboBox` placement rule is hoisted, retiring the three private
-  copies (the widget gallery, the wallpaper surface, the Switchboard's task
-  grouping) rather than adding a fourth.
+- **The pane names the room a choice list may hang into.** It lays its groups
+  out on one shared column and hands `FieldGroup::place_popup` each plate's
+  layout carrying the viewport the list has to fit in; the list is placed by
+  the one `ComboBox` placement rule, reported by the row that opens it, and
+  painted with `render_popup` after every group.
 
 ### DS2 — the Settings shell, every category reachable, nothing faked
 

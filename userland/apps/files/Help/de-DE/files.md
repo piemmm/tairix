@@ -71,6 +71,16 @@ verschieben würde, und der Ordner, in dem ein Ablegen landen würde, ist
 hervorgehoben. Eine einzelne Datei, die auf den Platz einer Anwendung auf
 der Symbolleiste gezogen wird, wird dort geöffnet.
 
+Das Rechtsklickmenü beginnt mit *Anzeige*. Darunter nennt ein Untermenü,
+worauf das Menü wirkt — *Datei ‚notes.txt‘*, ein langer Name in der Mitte
+gekürzt, sodass seine Endung sichtbar bleibt, oder *Auswahl*, wenn mehrere
+Einträge ausgewählt sind — und enthält *Öffnen*, *Öffnen mit…*,
+*Informationen…*, *Umbenennen*, *Ausschneiden*, *Kopieren* und *Löschen*;
+eine Zeile, die dort nicht wirken kann, ist ausgegraut und nennt den Grund.
+Danach folgen *Neu*, dann *Alles auswählen* und *Auswahl aufheben* und
+zuletzt *Einfügen*. Ein Rechtsklick auf eine freie Stelle hebt die Auswahl
+auf, sodass das Untermenü des Eintrags ausgegraut ist.
+
 Das Untermenü *Neu* des Rechtsklickmenüs legt einen Ordner oder ein leeres
 Dokument jeder Art an, die ein installierter Editor schreibt, und öffnet
 seinen Namen zum Bearbeiten.
@@ -83,8 +93,8 @@ Laufwerk zeigt stattdessen seinen freien Speicher, sein Dateisystem und wie
 gut es arbeitet. Ein Klick auf den Titel einer Spalte ordnet die Liste
 danach, ein zweiter Klick kehrt die Reihenfolge um.
 
-`Alt+Enter` öffnet ein Fenster *Eigenschaften* für den ausgewählten Eintrag,
-ebenso die Zeile *Eigenschaften* des Rechtsklickmenüs. Es ist ein eigenes
+`Alt+Enter` öffnet das Fenster *Informationen* des ausgewählten Eintrags,
+ebenso *Informationen…* in dessen Untermenü des Rechtsklickmenüs. Es ist ein eigenes
 Fenster, sodass mehrere zugleich offen sein können und die Auflistung
 währenddessen benutzbar bleibt: es zeigt, was der Eintrag ist, seine Größe,
 seine Zeitstempel, wohin ein Alias zeigt, seine Berechtigungen und seinen

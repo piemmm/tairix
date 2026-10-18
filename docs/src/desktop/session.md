@@ -1305,12 +1305,14 @@ conclusion is *accepted*.
 - **Bounded, and shedding only what can be shed.** `HOLD_BACK_CAPACITY` (64
   per window) is what stops an app that never drains from making the desktop
   hold memory on its behalf: a security bound, not a capacity to scale
-  (`AGENTS.md` §24.4). Overflow evicts the oldest *input* event, which is
-  total rather than a preference — folding leaves at most six state edges
-  and one pick conclusion, so an evictable input event always exists.
-  Oldest-first is also the safe direction for a button: a press is shed
-  before its release, so an app can be left with an unmatched release,
-  never an unmatched press it would hold as a latched grab.
+  (`AGENTS.md` §24.4). Overflow evicts the oldest *input* event, never the
+  end of the press a window holds (its primary release, or the cancel that
+  took it): a held press is shed together with its end, so an app learns of
+  neither rather than holding a press for ever. That is total rather than a
+  preference — folding leaves at most six state edges, one pick conclusion,
+  one tool-window move's end and one end of a press already delivered (a
+  window holds one press at a time), so an evictable input event always
+  exists.
 - **A dead owner owes nothing.** A send that answers `NotFound` discards
   everything held for that owner and tears its windows down, exactly as a
   refused direct send does; a reap does the same.
@@ -2321,6 +2323,17 @@ there with a lit control behind a lock screen. It is idempotent, so each drain
 says it on every pass rather than working out which pass was the first, and the
 stream coming back needs no announcement: the next event resolves the pointer
 afresh and the next press starts a new gesture.
+
+A gesture ended this way is still owed its ending. A press the bar held is
+ended on the bar (`TaskbarInput::cancel_press`): the capsule's gesture fires
+nothing and a popup's held scrollbar or slider stops where it stands, with the
+bar's clock left where the last real event put it, since a cancel carries no
+time. What the window manager abandoned (`InputRouter::abandon_gesture`) is
+kept for the serve loop to deliver once the drain is done: the client whose
+press was taken is sent `PointerAction::Cancelled` — an alert or the trusted
+picker is handed it directly — a window a resize was dragging is told the
+size it settled at, and a tool window's owner that its move ended over
+nothing, so a dock it marked clears and nothing docks.
 
 ### What this is worth beyond correctness
 

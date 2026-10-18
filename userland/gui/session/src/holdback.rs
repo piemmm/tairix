@@ -53,6 +53,9 @@
 //!   `shell::continues` predicate the live drain uses.
 //! * Everything else is **discrete** — a key, a button press or release, a
 //!   pick conclusion — and every one is owed.
+//! * The **end of the press a window holds** — its primary release, or the
+//!   cancel that took the press away — is all that stops the app holding
+//!   that press for ever, and is never shed on its own.
 //!
 //! # Bound
 //!
@@ -64,18 +67,20 @@
 //! queue.
 //!
 //! Overflow evicts the oldest *input* event, never a state edge, a pick
-//! conclusion or a move's end — and that is total, not a preference: folding
-//! leaves a window owing at most six state edges, at most one pick
-//! conclusion (a second is refused before it reaches the sink) and at most
-//! one move's end, so a queue at capacity always holds an input event to
-//! shed. Oldest-first is also the safe
-//! direction for a button: a press is shed before its release, so the app
-//! can be left with an unmatched release, never an unmatched press it would
-//! hold as a latched grab.
+//! conclusion, a move's end or a press's end — and that is total, not a
+//! preference. A held press is shed together with its end, so the app learns
+//! of neither rather than holding a press it is never told is over. A window
+//! holds one press at a time, so the only end left without its press is the
+//! one ending a press already delivered. Folding therefore leaves a window
+//! owing at most six state edges, at most one pick conclusion (a second is
+//! refused before it reaches the sink), at most one move's end and at most
+//! one such press's end, and a queue at capacity always holds an input event
+//! to shed.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
+use tairix_abi::input::PointerButtonCode;
 use tairix_abi::touch::PinchPhase;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_abi::Errno;
@@ -87,7 +92,7 @@ use crate::shell::continues;
 ///
 /// A security bound rather than a scalable capacity: it is the ceiling on
 /// what a client that stops draining can make the session hold. Comfortably
-/// above the eight slots folding can leave un-shed, and above the input a
+/// above the nine slots folding can leave un-shed, and above the input a
 /// user produces in the seconds before the owner is declared unresponsive.
 pub const HOLD_BACK_CAPACITY: usize = 64;
 
@@ -476,14 +481,48 @@ const fn is_input(event: &WindowEvent) -> bool {
     )
 }
 
-/// Make room in a queue at capacity by shedding its oldest input event.
+/// Whether `event` is a press the window holds until it is told it ended.
+/// The primary button is the one that grabs; any other press is a click.
+const fn holds_press(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::Pointer {
+            action: PointerAction::Pressed(PointerButtonCode::Primary),
+            ..
+        }
+    )
+}
+
+/// Whether `event` ends the press a window holds: its release, or the cancel
+/// that took it away.
+const fn ends_press(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::Pointer {
+            action: PointerAction::Released(PointerButtonCode::Primary) | PointerAction::Cancelled,
+            ..
+        }
+    )
+}
+
+/// Make room in a queue at capacity by shedding its oldest input event other
+/// than a press's end, and a held press together with its end.
 ///
-/// Folding leaves at most six state edges, one pick conclusion and one move's
-/// end owed per window, so a full queue always holds one; the `None` arm cannot be
-/// reached from a queue this module built, and shedding nothing is the
-/// fail-safe answer if it ever were.
+/// A window holds one press at a time, so the first end after a held press is
+/// that press's own. The module's bound argument is why a full queue always
+/// holds something to shed; the `None` arm cannot be reached from a queue this
+/// module built, and shedding nothing is the fail-safe answer if it ever were.
 fn shed_oldest_input(queue: &mut VecDeque<WindowEvent>) {
-    if let Some(oldest) = queue.iter().position(is_input) {
-        queue.remove(oldest);
+    let Some(oldest) = queue
+        .iter()
+        .position(|event| is_input(event) && !ends_press(event))
+    else {
+        return;
+    };
+    if queue.get(oldest).is_some_and(holds_press) {
+        if let Some(end) = queue.iter().skip(oldest + 1).position(ends_press) {
+            queue.remove(oldest + 1 + end);
+        }
     }
+    queue.remove(oldest);
 }

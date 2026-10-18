@@ -2907,33 +2907,10 @@ impl Form {
             if let Some(action) =
                 group.on_pointer(event, layout, place.scale, place.theme, &mut own)
             {
-                self.report_popup_moved((index, &action), layout, place, &mut own);
                 acted = Some((index, action));
             }
         }
         self.concluded(acted, &own, (place, damage))
-    }
-
-    /// Report where group `index`'s choice list moved since it was laid out
-    /// as `before`, now that it has reported `action`: a list opens from a
-    /// layout that placed none, so only placing it again finds its plate.
-    fn report_popup_moved(
-        &self,
-        (index, action): (usize, &FieldGroupAction),
-        before: FieldLayout,
-        place: FormPlace<'_>,
-        damage: &mut Region,
-    ) {
-        if !before.popup_may_move(&action.action) {
-            return;
-        }
-        if let Some(after) = self
-            .layouts(place)
-            .into_iter()
-            .find_map(|(at, layout)| (at == index).then_some(layout))
-        {
-            before.report_popup_moved(after, damage);
-        }
     }
 
     /// Route one key press.
@@ -2960,9 +2937,6 @@ impl Form {
             // it resolves, so the cursor must not step out from under it.
             let listing = group.rows().iter().any(FieldRow::popup_open);
             kept = acted.is_some() || listing || group.focus() != was;
-            if let Some((index, action)) = &acted {
-                self.report_popup_moved((*index, action), layout, place, &mut own);
-            }
         }
         if !kept {
             // The group clamps at its own ends and says so by not moving:
@@ -3632,31 +3606,10 @@ impl Form {
         })
         .into_iter()
         .filter_map(|(index, rect)| {
-            let group = self.groups.get(index)?;
-            let layout = FieldLayout::new(rect, column);
-            let popup =
-                group
-                    .popup_anchor(layout, scale, theme)
-                    .and_then(|(row, slot)| match group.rows().get(row)?.control() {
-                        FieldControl::Combo(combo) => {
-                            Some(combo.popup_rect(slot, viewport, scale, theme))
-                        }
-                        FieldControl::Toggle(_)
-                        | FieldControl::Checkbox(_)
-                        | FieldControl::Flags(_)
-                        | FieldControl::Slider(_)
-                        | FieldControl::Text(_)
-                        | FieldControl::Secret(_)
-                        | FieldControl::Button(_)
-                        | FieldControl::Reading(_)
-                        | FieldControl::Unmeasured(_) => None,
-                    });
+            let layout = FieldLayout::new(rect, column).within(viewport);
             Some((
                 index,
-                match popup {
-                    Some(rect) => layout.with_popup(rect),
-                    None => layout,
-                },
+                self.groups.get(index)?.place_popup(layout, scale, theme),
             ))
         })
         .collect()
@@ -3684,7 +3637,7 @@ impl Form {
         let field_group = self.groups.get(group)?;
         let bounds = field_group.row_rect(row, layout, place.scale, place.theme)?;
         field_group.rows().get(row)?.control_rect(
-            FieldLayout::new(bounds, layout.column).with_popup(layout.popup),
+            FieldLayout { bounds, ..layout },
             place.scale,
             place.theme,
         )
@@ -3794,7 +3747,7 @@ impl Form {
             .find_map(|(index, layout)| (index == group).then_some(layout))?;
         let bounds = self.row_rect_for_test(group, row, place)?;
         self.groups.get(group)?.rows().get(row)?.control_rect(
-            FieldLayout::new(bounds, layout.column).with_popup(layout.popup),
+            FieldLayout { bounds, ..layout },
             place.scale,
             place.theme,
         )

@@ -35,7 +35,7 @@ use crate::paint::{
     grab_after, paint_chevron, plate_border, route_pointer, surface_rect, to_i32, withheld,
     ChevronDir,
 };
-use crate::scroll::{wheel_steps, ScrollModel, ScrollOrientation, ScrollRange};
+use crate::scroll::{wheel_steps, HoldRepeat, ScrollModel, ScrollOrientation, ScrollRange};
 use crate::state::{ControlState, RenderInvariant};
 
 /// Which region of a tool an activation came from.
@@ -92,6 +92,16 @@ enum Overflow {
     Back,
     /// Toward the trailing edge.
     Forward,
+}
+
+impl Overflow {
+    /// `model` stepped one tool this way.
+    fn step(self, model: ScrollModel) -> ScrollModel {
+        match self {
+            Self::Back => model.line_backward(),
+            Self::Forward => model.line_forward(),
+        }
+    }
 }
 
 /// One tool control hosted by a toolbar.
@@ -154,10 +164,12 @@ pub struct Toolbar {
     /// The tool holding a press, which keeps receiving the stream wherever
     /// the pointer goes — bookkeeping, never drawn.
     armed: RenderInvariant<Option<usize>>,
-    /// The overflow affordance holding a press, so the owner's timer can step
-    /// it again. An affordance draws the same pressed or not, so this is
-    /// bookkeeping rather than a drawn field.
+    /// The overflow affordance holding a press, so it can step again. An
+    /// affordance draws the same pressed or not, so this is bookkeeping
+    /// rather than a drawn field.
     held: RenderInvariant<Option<Overflow>>,
+    /// When the held affordance steps next.
+    cadence: RenderInvariant<HoldRepeat>,
     /// The part of a tool the wheel has turned toward but not yet moved.
     wheel_carry: RenderInvariant<i64>,
 }
@@ -182,6 +194,7 @@ impl Toolbar {
             hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
             held: RenderInvariant::new(None),
+            cadence: RenderInvariant::new(HoldRepeat::default()),
             wheel_carry: RenderInvariant::new(0),
         }
     }
@@ -713,9 +726,9 @@ impl Toolbar {
     /// the tool it left, the tool it entered, and any tool holding a press.
     /// Every other tool is already at rest and would be written back the
     /// state it has. A press on an overflow affordance steps the strip by one
-    /// tool and latches, so the owner's timer can repeat it
-    /// ([`repeat`](Self::repeat)); the affordances sit in reserved room no
-    /// tool occupies, so the two can never both claim one sample.
+    /// tool and latches, so it repeats while held ([`repeat`](Self::repeat));
+    /// the affordances sit in reserved room no tool occupies, so the two can
+    /// never both claim one sample.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -735,12 +748,17 @@ impl Toolbar {
             } => {
                 if let Some(end) = strip.overflow_at(at) {
                     *self.held = Some(end);
+                    self.cadence.release();
                     return outcome(self.step(end, &strip.model, bounds, damage));
                 }
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => *self.held = None,
+            }
+            | InputEvent::PointerCancelled => {
+                *self.held = None;
+                self.cadence.release();
+            }
             _ => {}
         }
 
@@ -832,34 +850,52 @@ impl Toolbar {
         true
     }
 
-    /// Perform one more step of a held overflow press, answering whether the
-    /// tools the strip shows moved.
+    /// When the held overflow press steps next, as a monotonic instant, for
+    /// the strip laid out at `bounds` — `None` when nothing held would move:
+    /// no press, the pointer off the affordance it pressed, or the strip
+    /// already at that end.
     ///
-    /// Press-and-hold auto-repeat is driven by the owner's one-shot timer and
-    /// event-driven wakeups, never a polling loop: the owner arms a timer on
-    /// the press ([`crate::scroll::REPEAT_DELAY_NS`], then
-    /// [`crate::scroll::REPEAT_INTERVAL_NS`]) and calls this on each wake
-    /// while [`is_repeating`](Self::is_repeating) holds. It stops contributing
-    /// when the offset reaches a bound.
+    /// The cadence is the scrollbar's own, armed by the first deadline the
+    /// owner asks for after the press; the owner folds this into its wait and
+    /// calls [`repeat`](Self::repeat) when it comes.
+    pub fn repeat_deadline(
+        &mut self,
+        now_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<u64> {
+        let stepping = self.stepping(&self.strip(bounds, scale, theme));
+        self.cadence.deadline(stepping, now_ns)
+    }
+
+    /// Step the held overflow press once if its repeat is due at `now_ns`,
+    /// answering whether the tools the strip shows moved.
     pub fn repeat(
         &mut self,
+        now_ns: u64,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
+        let strip = self.strip(bounds, scale, theme);
+        if !self.stepping(&strip) || !self.cadence.fire(now_ns) {
+            return false;
+        }
         let Some(end) = *self.held else {
             return false;
         };
-        let model = self.strip(bounds, scale, theme).model;
-        self.step(end, &model, bounds, damage)
+        self.step(end, &strip.model, bounds, damage)
     }
 
-    /// Whether an overflow affordance is held down, so the owner owes this
-    /// strip a repeat wake-up.
-    #[must_use]
-    pub fn is_repeating(&self) -> bool {
-        self.held.is_some()
+    /// Whether the held overflow press is stepping: the pointer is still on
+    /// the affordance it pressed, and a step toward it would move the strip.
+    fn stepping(&self, strip: &Strip) -> bool {
+        self.held.is_some_and(|end| {
+            strip.overflow_at(*self.pointer) == Some(end)
+                && end.step(strip.model).offset() != strip.model.offset()
+        })
     }
 
     /// Step the offset one tool toward `end`.
@@ -870,11 +906,7 @@ impl Toolbar {
         bounds: Rect,
         damage: &mut Region,
     ) -> bool {
-        let moved = match end {
-            Overflow::Back => model.line_backward(),
-            Overflow::Forward => model.line_forward(),
-        };
-        self.scroll_to(moved, bounds, damage)
+        self.scroll_to(end.step(*model), bounds, damage)
     }
 
     /// Adopt `model`'s offset, reporting the strip when it moved: every tool

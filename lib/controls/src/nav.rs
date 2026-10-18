@@ -698,6 +698,10 @@ impl Breadcrumb {
                 *self.armed = over;
                 None
             }
+            InputEvent::PointerCancelled => {
+                *self.armed = None;
+                None
+            }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {

@@ -1369,3 +1369,46 @@ fn an_area_starting_off_the_surface_paints_nothing() {
     );
     assert_eq!(surface.pixels(), before.as_slice());
 }
+
+/// A chevron in a fourteen-pixel end button reads as an arrow: fitted to whole
+/// pixels it is rows one, three, five and seven pixels across, where the
+/// fractional triangle it replaced smeared into a grey dot four pixels wide.
+#[test]
+fn a_small_chevron_is_whole_pixels_across_every_row() {
+    for dir in [
+        crate::paint::ChevronDir::Up,
+        crate::paint::ChevronDir::Down,
+        crate::paint::ChevronDir::Left,
+        crate::paint::ChevronDir::Right,
+    ] {
+        let mut surface = Surface::new(14, 14).expect("a surface");
+        crate::paint::paint_chevron(
+            &mut surface,
+            Rect::new(0, 0, 14, 14),
+            dir,
+            Color::rgb(255, 255, 255),
+        );
+        let solid = |at: &dyn Fn(u32) -> (u32, u32)| {
+            (0..14)
+                .filter(|&i| {
+                    let (x, y) = at(i);
+                    surface.get(x, y).is_some_and(|pixel| pixel.a >= 128)
+                })
+                .count()
+        };
+        let lines: Vec<usize> = (0..14)
+            .map(|line| match dir {
+                crate::paint::ChevronDir::Up | crate::paint::ChevronDir::Down => {
+                    solid(&|i| (i, line))
+                }
+                crate::paint::ChevronDir::Left | crate::paint::ChevronDir::Right => {
+                    solid(&|i| (line, i))
+                }
+            })
+            .filter(|&count| count > 0)
+            .collect();
+        let mut widening = lines.clone();
+        widening.sort_unstable();
+        assert_eq!(widening, [1, 3, 5, 7], "{dir:?}: {lines:?}");
+    }
+}

@@ -68,6 +68,16 @@ copïo a saeth tra byddai'n symud, ac mae'r ffolder y byddai gollwng yn
 glanio ynddi wedi'i hamlygu. Caiff un ffeil a lusgir ar slot rhaglen ar y
 bar eiconau ei hagor yno.
 
+Mae'r ddewislen clic de yn dechrau gyda *Dangos*. Oddi tani mae
+is-ddewislen yn enwi'r hyn y mae'r ddewislen yn gweithredu arno — *Ffeil
+‘notes.txt’*, gydag enw hir wedi'i fyrhau yn ei ganol fel bod ei estyniad yn
+dal i'w weld, neu *Dewis* pan fo sawl eitem wedi'u dewis — ac mae'n dal
+*Agor*, *Agor gyda…*, *Cael gwybodaeth…*, *Ailenwi*, *Torri*, *Copïo* a
+*Dileu*; mae rhes na all weithredu yno wedi'i llwydo ac yn dweud pam. Wedyn
+daw *Newydd*, yna *Dewis y cyfan* a *Clirio'r dewis*, ac yn olaf *Gludo*. Mae
+clic de ar le gwag yn clirio'r dewis, felly mae is-ddewislen yr eitem wedi'i
+llwydo.
+
 Mae is-ddewislen *Newydd* y ddewislen clic de yn creu ffolder, neu ddogfen
 wag o bob math y mae golygydd wedi'i osod yn ei ysgrifennu, ac yn agor ei
 henw i'w olygu.
@@ -80,8 +90,16 @@ dangos yn hytrach y lle sy'n rhydd arno, ei system ffeiliau a pha mor dda y
 mae'n gwasanaethu. Mae clicio ar deitl colofn yn trefnu'r rhestr yn ôl
 honno, ac mae ail glic yn gwrthdroi'r drefn.
 
-Mae `Alt+Enter` yn agor ffenestr *Priodweddau* ar yr eitem a ddewiswyd, fel
-y mae rhes *Priodweddau* y ddewislen clic de. Ffenestr ar ei phen ei hun yw
+Mae is-ddewislen *Dangos* y ddewislen clic de yn dangos yr eitemau fel
+eiconau mawr, y rhagosodiad; fel eiconau bach, pob enw ar un llinell wrth
+ymyl ei lun; neu fel rhestr, un rhes i bob un gyda'i maint, pryd y'i
+newidiwyd ddiwethaf a'i math. Mae gyriant a restrir yn eu plith yn dangos yn
+hytrach y gofod sydd ganddo'n rhydd, ei system ffeiliau a pha mor dda y mae'n
+gwasanaethu. Mae pwyso ar deitl colofn yn trefnu'r rhestr yn ôl honno, ac
+mae ail bwyso yn gwrthdroi'r drefn.
+
+Mae `Alt+Enter` yn agor ffenestr *Gwybodaeth* yr eitem a ddewiswyd, fel y
+mae *Cael gwybodaeth…* yn ei his-ddewislen yn y ddewislen clic de. Ffenestr ar ei phen ei hun yw
 hi, felly gall sawl un fod ar agor ar unwaith ac mae'r rhestriad yn parhau'n
 ddefnyddiadwy tra byddant: mae'n dangos beth yw'r eitem, ei maint, ei
 stampiau amser, i ble mae alias yn pwyntio, ei chaniatâd a'i pherchennog,

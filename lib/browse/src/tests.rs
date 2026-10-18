@@ -6330,7 +6330,7 @@ fn the_context_menu_needs_a_selection_for_the_item_commands() {
         ContextCommand::Cut,
         ContextCommand::Copy,
         ContextCommand::ClearSelection,
-        ContextCommand::Properties,
+        ContextCommand::GetInfo,
         ContextCommand::Delete,
     ] {
         assert!(!menu.is_enabled(command), "{command:?} without a selection");
@@ -6404,7 +6404,7 @@ fn the_context_menu_offers_single_entry_verbs_only_for_one_chosen_entry() {
         ContextCommand::Open,
         ContextCommand::OpenWith,
         ContextCommand::Rename,
-        ContextCommand::Properties,
+        ContextCommand::GetInfo,
     ] {
         assert_eq!(
             several.reason(command),
@@ -6429,7 +6429,7 @@ fn the_context_menu_enables_the_item_commands_on_a_directory() {
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
-    assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(menu.is_enabled(ContextCommand::GetInfo));
     assert!(menu.is_enabled(ContextCommand::Delete));
 }
 
@@ -6447,7 +6447,7 @@ fn the_context_menu_enables_the_item_commands_on_a_bundle() {
     assert!(menu.is_enabled(ContextCommand::Open));
     assert!(!menu.is_enabled(ContextCommand::OpenWith));
     assert!(menu.is_enabled(ContextCommand::Rename));
-    assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(menu.is_enabled(ContextCommand::GetInfo));
     assert!(menu.is_enabled(ContextCommand::Delete));
 }
 
@@ -6465,7 +6465,7 @@ fn the_context_menu_enables_the_item_commands_on_a_file() {
     assert!(menu.is_enabled(ContextCommand::Rename));
     assert!(menu.is_enabled(ContextCommand::Cut));
     assert!(menu.is_enabled(ContextCommand::Copy));
-    assert!(menu.is_enabled(ContextCommand::Properties));
+    assert!(menu.is_enabled(ContextCommand::GetInfo));
     assert!(menu.is_enabled(ContextCommand::Delete));
 }
 
@@ -6486,22 +6486,33 @@ fn context_commands_list_covers_every_variant_once() {
 
     // The declared menu iterates CONTEXT_COMMANDS and a row's id is a command's
     // position in it, so it must hold each command exactly once in a stable
-    // order. New Folder is New ▸'s row, not a command of its own.
+    // order: the selection's plate top to bottom, then the root plate's. New
+    // Folder is New ▸'s row, not a command of its own.
     assert_eq!(
         CONTEXT_COMMANDS,
         &[
             ContextCommand::Open,
             ContextCommand::OpenWith,
+            ContextCommand::GetInfo,
             ContextCommand::Rename,
             ContextCommand::Cut,
             ContextCommand::Copy,
-            ContextCommand::Paste,
+            ContextCommand::Delete,
             ContextCommand::SelectAll,
             ContextCommand::ClearSelection,
-            ContextCommand::Properties,
-            ContextCommand::Delete,
+            ContextCommand::Paste,
         ]
     );
+    for command in CONTEXT_COMMANDS {
+        assert_eq!(
+            command.acts_on_selection(),
+            !matches!(
+                command,
+                ContextCommand::SelectAll | ContextCommand::ClearSelection | ContextCommand::Paste
+            ),
+            "{command:?}"
+        );
+    }
 }
 
 #[test]
@@ -6555,7 +6566,7 @@ fn the_context_menu_row_ids_are_the_inverse_of_the_command_list() {
 }
 
 #[test]
-fn new_sits_above_properties_and_offers_folder_then_the_documents() {
+fn the_root_plate_reads_display_the_selection_new_then_the_folder_verbs() {
     use crate::chrome::{
         context_choice_from_item, context_menu, ContextChoice, ContextMenuModel, ContextQuick,
     };
@@ -6577,39 +6588,47 @@ fn new_sits_above_properties_and_offers_folder_then_the_documents() {
     )
     .expect("the rows fit the bounds");
     let rows: alloc::vec::Vec<_> = menu.rows().collect();
-    let new_at = rows
+    let root: alloc::vec::Vec<_> = rows
         .iter()
-        .position(|(row, _)| {
-            matches!(
-                row,
-                AppMenuRowView::Submenu {
-                    label: "New",
-                    enabled: true,
-                    ..
-                }
-            )
+        .enumerate()
+        .filter(|(_, (_, parent))| parent.is_none())
+        .map(|(at, (row, _))| (at, *row))
+        .collect();
+    let described: alloc::vec::Vec<_> = root
+        .iter()
+        .map(|(_, row)| match row {
+            AppMenuRowView::Item(item) => (item.label, item.enabled, item.reason),
+            AppMenuRowView::Submenu {
+                label,
+                enabled,
+                reason,
+                ..
+            } => (*label, *enabled, *reason),
+            AppMenuRowView::Separator => ("---", false, ""),
+            AppMenuRowView::Info => ("Info", true, ""),
         })
-        .expect("New is declared, and opens");
-    assert_eq!(rows[new_at].1, None, "New is on the root plate");
-    assert!(matches!(rows[new_at - 1].0, AppMenuRowView::Separator));
-    let label_at = |at: usize| match rows[at].0 {
-        AppMenuRowView::Item(item) => item.label,
-        _ => "",
-    };
-    assert_eq!(label_at(new_at - 2), "Clear Selection");
-    assert_eq!(label_at(new_at - 3), "Select All");
-    assert!(matches!(rows[new_at - 4].0, AppMenuRowView::Separator));
-    assert_eq!(label_at(new_at - 5), "Paste");
-    assert!(matches!(
-        rows[new_at + 1].0,
-        AppMenuRowView::Submenu {
-            label: "Display",
-            ..
-        }
-    ));
-    assert!(matches!(rows[new_at + 2].0, AppMenuRowView::Separator));
-    assert_eq!(label_at(new_at + 3), "Properties");
+        .collect();
+    assert_eq!(
+        described,
+        [
+            ("Display", true, ""),
+            ("---", false, ""),
+            ("Selection", false, "nothing selected"),
+            ("New", true, ""),
+            ("---", false, ""),
+            ("Select All", true, ""),
+            ("Clear Selection", false, "nothing selected"),
+            ("---", false, ""),
+            ("Paste", false, "nothing to paste"),
+        ]
+    );
+    let selection_at = root[2].0;
+    assert!(
+        rows.iter().all(|(_, parent)| *parent != Some(selection_at)),
+        "a plate that never opens holds nothing"
+    );
 
+    let new_at = root[3].0;
     let children: alloc::vec::Vec<_> = rows
         .iter()
         .filter(|(_, parent)| *parent == Some(new_at))
@@ -6633,6 +6652,117 @@ fn new_sits_above_properties_and_offers_folder_then_the_documents() {
             Some(ContextChoice::NewDocument(1)),
         ]
     );
+}
+
+/// One chosen item's row says what it is and what it is called, the name cut
+/// in the middle to fit with its extension kept; several are a selection.
+#[test]
+fn the_selection_row_names_the_one_item_it_acts_on() {
+    use crate::chrome::{context_menu, ContextMenuModel, ContextQuick};
+    use tairix_abi::window_ipc::{AppMenuRowView, AppMenuSymbol, APP_MENU_LABEL_MAX};
+    use tairix_font::ELLIPSIS;
+
+    let selection_row = |browser: &Browser<_>, name: &str| {
+        let menu = context_menu(
+            ContextMenuModel::for_browser(browser, false),
+            "Files",
+            ContextQuick {
+                name,
+                ..ContextQuick::default()
+            },
+        )
+        .expect("the rows fit the bounds");
+        let found = menu.rows().find_map(|(row, parent)| match row {
+            AppMenuRowView::Submenu {
+                label,
+                enabled,
+                symbol,
+                ..
+            } if parent.is_none() && label != "Display" && label != "New" => {
+                Some((alloc::string::String::from(label), enabled, symbol))
+            }
+            _ => None,
+        });
+        found.expect("the selection's row")
+    };
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    assert_eq!(
+        selection_row(&browser, "notes.txt"),
+        (
+            alloc::string::String::from("File \u{2018}notes.txt\u{2019}"),
+            true,
+            AppMenuSymbol::File
+        )
+    );
+    let long = "an-extremely-long-name-for-a-photograph.jpeg";
+    let (label, _, _) = selection_row(&browser, long);
+    assert!(label.len() <= APP_MENU_LABEL_MAX, "{label:?}");
+    assert!(
+        label.ends_with(&alloc::format!("{ELLIPSIS}.jpeg\u{2019}")),
+        "{label:?} keeps the extension"
+    );
+    assert!(label.starts_with("File \u{2018}an-extremely"), "{label:?}");
+    let (label, _, _) = selection_row(&browser, "line\nbreak.txt");
+    assert_eq!(label, "File \u{2018}line\u{FFFD}break.txt\u{2019}");
+
+    browser.select(0).expect("select Docs");
+    assert_eq!(
+        selection_row(&browser, "Docs"),
+        (
+            alloc::string::String::from("Folder \u{2018}Docs\u{2019}"),
+            true,
+            AppMenuSymbol::Folder
+        )
+    );
+    browser.select(1).expect("select Editor.app");
+    assert_eq!(
+        selection_row(&browser, "Editor.app").2,
+        AppMenuSymbol::Application
+    );
+
+    browser.select_all();
+    assert_eq!(
+        selection_row(&browser, ""),
+        (
+            alloc::string::String::from("Selection"),
+            true,
+            AppMenuSymbol::File
+        )
+    );
+}
+
+/// A name the Rename field cannot hold leaves the row opening the in-place
+/// editor, and the menu still opens: a hostile name never takes the whole menu
+/// away.
+#[test]
+fn a_name_the_rename_field_cannot_hold_still_opens_the_menu() {
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, ContextQuick};
+    use tairix_abi::window_ipc::AppMenuRowView;
+
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(2).expect("select notes.txt");
+    let menu = context_menu(
+        ContextMenuModel::for_browser(&browser, false),
+        "Files",
+        ContextQuick {
+            name: "bell\u{7}.txt",
+            ..ContextQuick::default()
+        },
+    )
+    .expect("a control character refuses nothing");
+    let rename = menu
+        .rows()
+        .find_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if item.label == ContextCommand::Rename.label() => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .expect("the Rename row");
+    assert!(rename.enabled);
+    assert!(rename.entry.is_none(), "no field it could not hold");
 }
 
 /// Display ▸ offers every view, the one the window shows marked as the
@@ -6762,42 +6892,60 @@ fn the_context_menu_declares_one_row_per_command_with_its_label_and_caption() {
     use tairix_abi::window_ipc::AppMenuRowView;
 
     // The desktop draws the menu, so what this asserts is the *declaration*:
-    // one item row per command in order, carrying that command's own label and
-    // accelerator caption. Separators are declared too, but the chain folds
-    // each into the following row's group break, so they are not rows a reader
-    // has to skip to line a command up with its id.
+    // one item row per command in order, on the plate it belongs to, carrying
+    // that command's own label and accelerator caption. Separators are
+    // declared too, but the chain folds each into the following row's group
+    // break, so they are not rows a reader has to skip to line a command up
+    // with its id.
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
     let model = ContextMenuModel::for_browser(&browser, true);
-    let menu = context_menu(model, "Files", ContextQuick::default())
-        .expect("the fixed rows fit the bounds");
+    let quick = ContextQuick {
+        name: "notes.txt",
+        ..ContextQuick::default()
+    };
+    let menu = context_menu(model, "Files", quick).expect("the fixed rows fit the bounds");
     assert_eq!(menu.title(), "Files");
 
-    let items: alloc::vec::Vec<_> = menu
-        .rows()
+    let rows: alloc::vec::Vec<_> = menu.rows().collect();
+    let selection_at = rows
+        .iter()
+        .position(|(row, parent)| {
+            parent.is_none()
+                && matches!(row, AppMenuRowView::Submenu { label, .. } if label.starts_with("File"))
+        })
+        .expect("the selection's row");
+    let items: alloc::vec::Vec<_> = rows
+        .iter()
         .filter_map(|(row, parent)| match row {
-            AppMenuRowView::Item(item) if parent.is_none() => Some(item),
+            AppMenuRowView::Item(item) if parent.is_none() || *parent == Some(selection_at) => {
+                Some((*item, *parent))
+            }
             _ => None,
         })
         .collect();
     assert_eq!(items.len(), CONTEXT_COMMANDS.len());
-    for (item, &command) in items.iter().zip(CONTEXT_COMMANDS) {
+    for ((item, parent), &command) in items.iter().zip(CONTEXT_COMMANDS) {
         assert_eq!(item.label, command.label(), "{command:?} label");
         assert_eq!(item.shortcut, command.shortcut(), "{command:?} caption");
+        assert_eq!(
+            *parent,
+            command.acts_on_selection().then_some(selection_at),
+            "{command:?} plate"
+        );
     }
 }
 
 #[test]
 fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
-    use crate::chrome::{
-        context_menu, ContextCommand, ContextMenuModel, ContextQuick, CONTEXT_COMMANDS,
-    };
+    use crate::chrome::{context_menu, ContextCommand, ContextMenuModel, ContextQuick};
     use tairix_abi::window_ipc::AppMenuRowView;
 
-    // An empty directory makes every selection-scoped command inactionable.
-    // The menu's shape must not move with the selection, so each is declared
+    // An empty directory makes every command inactionable. A plate's shape
+    // must not move with the selection, so each root command is declared
     // *disabled with its reason* rather than omitted — which is also what keeps
-    // a row's id equal to its command's position however few are actionable.
+    // a row's id equal to its command's position however few are actionable —
+    // and the selection's own row is disabled with its reason.
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.open_index(2).expect("enter System");
     browser.open_index(0).expect("enter the empty Fonts");
@@ -6806,21 +6954,69 @@ fn a_declared_context_row_is_disabled_with_its_reason_never_left_out() {
     let model = ContextMenuModel::for_browser(&browser, false);
     let menu = context_menu(model, "Files", ContextQuick::default())
         .expect("the fixed rows fit the bounds");
-    let items: alloc::vec::Vec<_> = menu
-        .rows()
-        .filter_map(|(row, parent)| match row {
-            AppMenuRowView::Item(item) if parent.is_none() => Some(item),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(items.len(), CONTEXT_COMMANDS.len());
-    for (item, &command) in items.iter().zip(CONTEXT_COMMANDS) {
-        assert!(!item.enabled, "{command:?} is inactionable here");
-        assert_eq!(item.reason, model.reason(command), "{command:?} reason");
-        assert!(!item.reason.is_empty(), "{command:?} says why");
+    let mut declared = 0;
+    for (row, parent) in menu.rows() {
+        match row {
+            AppMenuRowView::Item(item) if parent.is_none() => {
+                let command = crate::chrome::CONTEXT_COMMANDS
+                    .iter()
+                    .copied()
+                    .find(|command| command.label() == item.label)
+                    .expect("a command row");
+                assert!(!item.enabled, "{command:?} is inactionable here");
+                assert_eq!(item.reason, model.reason(command), "{command:?} reason");
+                assert!(!item.reason.is_empty(), "{command:?} says why");
+                declared += 1;
+            }
+            AppMenuRowView::Submenu {
+                label: "Selection",
+                enabled,
+                reason,
+                ..
+            } => {
+                assert!(!enabled);
+                assert_eq!(reason, "nothing selected");
+            }
+            _ => {}
+        }
     }
+    assert_eq!(declared, 3, "Select All, Clear Selection and Paste");
     // The reasons are the model's, never the builder's invention.
     assert_eq!(model.reason(ContextCommand::Paste), "nothing to paste");
+
+    // With one item chosen every verb on its plate is declared, the ones that
+    // cannot act on it disabled with their reasons.
+    let mut browser = Browser::open_root(activation_source()).expect("root");
+    browser.select(0).expect("select Docs");
+    let model = ContextMenuModel::for_browser(&browser, false);
+    let menu = context_menu(
+        model,
+        "Files",
+        ContextQuick {
+            name: "Docs",
+            ..ContextQuick::default()
+        },
+    )
+    .expect("the fixed rows fit the bounds");
+    let on_plate: alloc::vec::Vec<_> = menu
+        .rows()
+        .filter_map(|(row, parent)| match row {
+            AppMenuRowView::Item(item) if parent.is_some() => Some(item),
+            _ => None,
+        })
+        .filter(|item| {
+            crate::chrome::CONTEXT_COMMANDS
+                .iter()
+                .any(|command| command.acts_on_selection() && command.label() == item.label)
+        })
+        .collect();
+    assert_eq!(on_plate.len(), 7);
+    let open_with = on_plate
+        .iter()
+        .find(|item| item.label == ContextCommand::OpenWith.label())
+        .expect("Open With… is declared");
+    assert!(!open_with.enabled);
+    assert_eq!(open_with.reason, "only a file opens with an application");
 }
 
 #[test]
@@ -7527,28 +7723,18 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
         "every command is pushed before any candidate, so a long list crowds none off the plate"
     );
 
-    // An empty directory makes both rows inactionable, so neither quick
-    // action is offered — a field could not commit a rename that cannot
-    // happen, and a submenu could not open a file that is not selected.
+    // An empty directory leaves nothing to act on, so neither quick action is
+    // offered — a field could not commit a rename that cannot happen, and a
+    // submenu could not open a file that is not selected.
     let mut empty = Browser::open_root(MockFs::fixture()).expect("root");
     empty.open_index(2).expect("enter System");
     empty.open_index(0).expect("enter the empty Fonts");
     let menu = context_menu(ContextMenuModel::for_browser(&empty, false), "Files", quick)
         .expect("the rows fit");
-    let rows: alloc::vec::Vec<_> = menu.rows().collect();
-    let open_with = rows
-        .iter()
-        .position(|(row, _)| {
-            matches!(row, AppMenuRowView::Item(item) if item.label == ContextCommand::OpenWith.label())
-        })
-        .expect("the Open With… row");
     assert!(
-        rows.iter().all(|(row, parent)| {
-            *parent != Some(open_with)
-                && match row {
-                    AppMenuRowView::Item(item) => item.entry.is_none(),
-                    _ => true,
-                }
+        menu.rows().all(|(row, _)| match row {
+            AppMenuRowView::Item(item) => item.entry.is_none() && item.label != "Viewer",
+            _ => true,
         }),
         "no field and no candidate where no row can act"
     );
@@ -10651,7 +10837,7 @@ mod trash {
 mod title_location {
     use super::comps;
     use crate::vfs::{
-        push_title_name, spell_absolute_path, spell_title_location, write_document_title,
+        push_shown_name, spell_absolute_path, spell_title_location, write_document_title,
     };
     use alloc::string::String;
     use tairix_abi::window_ipc::{WindowTitle, WINDOW_TITLE_MAX};
@@ -10747,7 +10933,7 @@ mod title_location {
         ] {
             for budget in 0..=24 {
                 let mut title = String::from("*");
-                push_title_name(&mut title, name, budget);
+                push_shown_name(&mut title, name, budget);
                 let spelled = &title[1..];
                 assert!(spelled.len() <= budget, "{spelled:?} exceeds {budget}");
                 assert!(WindowTitle::new(&title).is_ok(), "{title:?} is refused");
@@ -10758,14 +10944,38 @@ mod title_location {
                 if shown.len() <= budget {
                     assert_eq!(spelled, shown);
                 } else if budget >= ELLIPSIS.len() {
-                    let cut = spelled.strip_suffix(ELLIPSIS).expect("the mark");
+                    let (start, end) = spelled.split_once(ELLIPSIS).expect("the mark");
                     assert!(
-                        shown.starts_with(cut),
-                        "{cut:?} is not where {shown:?} starts"
+                        shown.starts_with(start),
+                        "{start:?} is not where {shown:?} starts"
                     );
+                    assert!(
+                        end.is_empty() || (end.starts_with('.') && shown.ends_with(end)),
+                        "{end:?} is not {shown:?}'s extension"
+                    );
+                } else {
+                    assert!(shown.starts_with(spelled));
                 }
             }
         }
+    }
+
+    /// A name too long for its field gives up its middle: the start reads as
+    /// the name and the extension still says what kind of file it is, unless
+    /// keeping it would leave the start less room than the extension takes.
+    #[test]
+    fn a_shortened_name_keeps_its_extension() {
+        let mut shown = String::new();
+        push_shown_name(&mut shown, "averyveryverylongfilename.extension", 25);
+        assert_eq!(shown, alloc::format!("averyveryver{ELLIPSIS}.extension"));
+
+        shown.clear();
+        push_shown_name(&mut shown, "report.a-very-long-extension-indeed", 25);
+        assert_eq!(shown, alloc::format!("report.a-very-long-ext{ELLIPSIS}"));
+
+        shown.clear();
+        push_shown_name(&mut shown, ".a-hidden-name-with-no-extension", 16);
+        assert_eq!(shown, alloc::format!(".a-hidden-nam{ELLIPSIS}"));
     }
 
     /// A budget too small even for the mark and the leaf still yields a

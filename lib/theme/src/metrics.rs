@@ -58,6 +58,11 @@ pub struct Metrics {
     /// dropped by this reach and softened over the same distance: nothing
     /// shows above the top edge, one reach beside each side, and two below.
     pub drop_shadow_reach: u32,
+    /// How far the shadow of a decorated window resting behind the family in
+    /// front reaches, in logical pixels: shorter than
+    /// [`drop_shadow_reach`](Self::drop_shadow_reach), so the window reads as
+    /// standing lower. `0` casts none.
+    pub inactive_drop_shadow_reach: u32,
     /// How far the soft shadow an icon's picture casts reaches past it, in
     /// logical pixels: the picture's own silhouette dropped a third of this
     /// and softened over all of it, in [`drop_shadow`](crate::Palette::drop_shadow).

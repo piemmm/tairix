@@ -722,6 +722,10 @@ impl LibraryPopup {
                     None => changed_outcome(changed),
                 }
             }
+            InputEvent::PointerCancelled => {
+                self.pressed = None;
+                changed_outcome(changed)
+            }
             InputEvent::PointerReleased { .. }
             | InputEvent::Pinch { .. }
             | InputEvent::KeyPressed { .. }
@@ -1084,6 +1088,31 @@ impl LibraryPopup {
             ScrollRange::new(content, u64::from(layout.viewport.height), offset),
             row,
         ));
+    }
+
+    /// When the press the popup's scrollbar holds steps next, or `None` when
+    /// nothing held would move.
+    pub(crate) fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.scroll.repeat_deadline(now_ns)
+    }
+
+    /// Step the press the popup's scrollbar holds if its repeat is due at
+    /// `now_ns`, answering whether the rows moved.
+    pub(crate) fn repeat(
+        &mut self,
+        now_ns: u64,
+        layout: &LibraryLayout,
+        theme: &Theme,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> bool {
+        self.sync_scroll(layout);
+        let Some(bounds) = layout.scrollbar else {
+            return false;
+        };
+        self.scroll
+            .repeat(now_ns, bounds, scale, theme, damage)
+            .is_some()
     }
 
     /// Scroll the viewport to `offset` pixels, clamped.

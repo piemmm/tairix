@@ -493,15 +493,20 @@ fn the_airbrush_lays_more_paint_while_held_still() {
     let middle = |window: &Window| window.colour(40, 40)[0];
     let first = middle(&window);
     assert!(first < 255, "the first dab lands at once");
-    window.view.arm_deadline(window.now);
-    let due = window.view.deadline_ns().expect("an airbrush tick is due");
     let theme = window.registry.active();
+    window
+        .view
+        .arm_deadline(window.now, &window.layout, Scale::ONE, theme);
+    let due = window.view.deadline_ns().expect("an airbrush tick is due");
     window
         .view
         .tick(due, &window.layout, Scale::ONE, theme, &mut Region::new());
     assert!(middle(&window) < first, "the tick built more up");
     window.release(PointerButton::Primary);
-    window.view.arm_deadline(window.now);
+    let theme = window.registry.active();
+    window
+        .view
+        .arm_deadline(window.now, &window.layout, Scale::ONE, theme);
     assert_eq!(
         window.view.deadline_ns(),
         None,

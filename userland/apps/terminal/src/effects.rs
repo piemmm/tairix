@@ -141,6 +141,28 @@ impl Phase {
     }
 }
 
+/// How long the program waits between frames of an animated effect: fifty
+/// milliseconds, twenty frames a second.
+///
+/// Slow enough that an idle terminal with the effects on costs a twentieth of
+/// a repaint's work per second rather than a core, and fast enough that a
+/// travelling wobble and an analogue noise floor read as motion rather than as
+/// a stutter.
+pub const FRAME_INTERVAL_NS: u64 = 50_000_000;
+
+/// When the next animation frame is due at `now_ns`: kept from `armed` while
+/// an effect stays `animated`, so a wake for anything else never pushes the
+/// frame back; armed a [`FRAME_INTERVAL_NS`] out when an effect starts; and
+/// none at all while nothing animates, so the park sleeps outright.
+#[must_use]
+pub const fn frame_due(animated: bool, armed: Option<u64>, now_ns: u64) -> Option<u64> {
+    match (animated, armed) {
+        (false, _) => None,
+        (true, None) => Some(now_ns.saturating_add(FRAME_INTERVAL_NS)),
+        (true, due) => due,
+    }
+}
+
 /// One stage of the pipeline, in the order a frame passes through it.
 ///
 /// The list is what an accelerated path would programme its engine from, so

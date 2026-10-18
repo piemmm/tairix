@@ -324,6 +324,114 @@ fn a_wheel_detent_over_the_pane_scrolls_it_and_stops_at_the_ends() {
     assert_eq!(shell.scroll_offset(), 0);
 }
 
+/// The pane bar's step-down arrow, in a short window over a pane that
+/// scrolls.
+fn pane_down_arrow(shell: &mut Shell, short: Rect, theme: &Theme) -> Point {
+    shell.lay_out(short, Scale::ONE, theme);
+    let bar = shell
+        .frame(short, Scale::ONE, theme)
+        .scrollbar
+        .expect("the pane scrolls");
+    Point::new(bar.left() + to_i32(bar.width / 2), bar.bottom() - 2)
+}
+
+fn pointer(shell: &mut Shell, event: InputEvent, viewport: Rect, theme: &Theme) -> ShellOutcome {
+    shell.on_pointer(&event, viewport, Scale::ONE, theme, &mut damage())
+}
+
+const PRIMARY_PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Primary,
+};
+
+/// A held arrow on the pane's bar steps again on the bar's cadence, and is
+/// still the bar's to end however far the pointer wanders onto the regions
+/// beside it.
+#[test]
+fn a_held_pane_arrow_repeats_and_ends_wherever_the_pointer_has_gone() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 420, 110);
+    let mut shell = stating();
+    let down = pane_down_arrow(&mut shell, short, &theme);
+    pointer(
+        &mut shell,
+        InputEvent::PointerMoved { to: down },
+        short,
+        &theme,
+    );
+    pointer(&mut shell, PRIMARY_PRESS, short, &theme);
+    let pressed = shell.scroll_offset();
+    assert!(pressed > 0, "the press steps once at once");
+
+    let due = shell
+        .repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+    let mut sink = damage();
+    assert!(!shell
+        .repeat(due - 1, short, Scale::ONE, &theme, &mut sink)
+        .changed());
+    assert!(shell
+        .repeat(due, short, Scale::ONE, &theme, &mut sink)
+        .changed());
+    assert!(shell.scroll_offset() > pressed, "the hold stepped again");
+
+    // Carried off over the content, the press is still the bar's, so its
+    // cancel ends it rather than reaching the pane.
+    pointer(
+        &mut shell,
+        InputEvent::PointerMoved {
+            to: Point::new(4, 20),
+        },
+        short,
+        &theme,
+    );
+    pointer(&mut shell, InputEvent::PointerCancelled, short, &theme);
+    assert_eq!(shell.repeat_deadline(due), None, "the press ended");
+}
+
+/// The strip's bar keeps a press it holds when the pointer is carried onto
+/// the pane: the pane, asked first by position, would otherwise take the
+/// cancel and leave the strip's arrow stepping for ever.
+#[test]
+fn a_press_the_strip_bar_holds_is_its_own_over_the_pane() {
+    let theme = theme();
+    let short = Rect::new(0, 0, WIDE.width, 160);
+    let mut shell = shell();
+    shell.lay_out(short, Scale::ONE, &theme);
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let bar = frame
+        .strip_scrollbar
+        .expect("every category does not fit a short strip");
+    let down = Point::new(bar.left() + to_i32(bar.width / 2), bar.bottom() - 2);
+    pointer(
+        &mut shell,
+        InputEvent::PointerMoved { to: down },
+        short,
+        &theme,
+    );
+    pointer(&mut shell, PRIMARY_PRESS, short, &theme);
+    assert!(
+        shell.repeat_deadline(0).is_some(),
+        "the strip's arrow is held"
+    );
+
+    let over_pane = Point::new(
+        frame.content.left() + to_i32(frame.content.width / 2),
+        frame.content.top() + to_i32(frame.content.height / 2),
+    );
+    pointer(
+        &mut shell,
+        InputEvent::PointerMoved { to: over_pane },
+        short,
+        &theme,
+    );
+    pointer(&mut shell, InputEvent::PointerCancelled, short, &theme);
+    assert_eq!(
+        shell.repeat_deadline(0),
+        None,
+        "the strip bar's press ended"
+    );
+}
+
 /// A turn smaller than a detent moves the column nothing yet and is not
 /// lost: the rest of the detent completes the step.
 #[test]

@@ -194,6 +194,11 @@ pub struct Palette {
     /// The shadow a floating surface casts, at its darkest: the colour, and in
     /// its alpha how dark the shadow is where it is deepest.
     pub drop_shadow: Rgba,
+    /// The shadow a decorated window casts while it rests behind the family
+    /// the user is working in: lighter than
+    /// [`drop_shadow`](Self::drop_shadow), so the window in front reads above
+    /// it.
+    pub inactive_drop_shadow: Rgba,
 
     // --- Window-command highlight roles ---------------------------------
     //

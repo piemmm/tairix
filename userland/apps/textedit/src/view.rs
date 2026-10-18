@@ -1608,6 +1608,14 @@ impl View {
             self.modifiers = *modifiers;
             return Outcome::none();
         }
+        // A press a bar holds is the bar's to its end, wherever the pointer
+        // has gone since: the find bar over which it may be let go never
+        // takes it.
+        if self.vertical.is_pressing() || self.horizontal.is_pressing() {
+            return self
+                .bars_pointer(event, layout, scale, theme, damage)
+                .unwrap_or_else(Outcome::none);
+        }
         if matches!(
             event,
             InputEvent::PointerPressed {
@@ -1626,17 +1634,8 @@ impl View {
                 return outcome;
             }
         }
-        if let Some(ScrollAction::ScrollTo { offset }) =
-            self.vertical
-                .on_pointer(event, layout.vertical_bar(), scale, theme, damage)
-        {
-            return self.scroll_to(Some(offset), None, layout, damage);
-        }
-        if let Some(ScrollAction::ScrollTo { offset }) =
-            self.horizontal
-                .on_pointer(event, layout.horizontal_bar(), scale, theme, damage)
-        {
-            return self.scroll_to(None, Some(offset), layout, damage);
+        if let Some(scrolled) = self.bars_pointer(event, layout, scale, theme, damage) {
+            return scrolled;
         }
         if let InputEvent::PointerPressed {
             button: PointerButton::Primary,
@@ -1657,6 +1656,65 @@ impl View {
             }
         }
         self.grid_pointer(event, now_ns, layout, scale, damage)
+    }
+
+    /// Feed `event` to both bars, carrying out the scroll either asks for;
+    /// `None` when neither scrolled.
+    fn bars_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.vertical
+                .on_pointer(event, layout.vertical_bar(), scale, theme, damage)
+        {
+            self.scroll_to(Some(offset), None, layout, damage);
+            return Some(Outcome::none());
+        }
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.horizontal
+                .on_pointer(event, layout.horizontal_bar(), scale, theme, damage)
+        {
+            self.scroll_to(None, Some(offset), layout, damage);
+            return Some(Outcome::none());
+        }
+        None
+    }
+
+    /// When a press either bar holds steps next, or `None` when nothing held
+    /// would move.
+    pub fn scroll_repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        let down = self.vertical.repeat_deadline(now_ns);
+        let across = self.horizontal.repeat_deadline(now_ns);
+        down.into_iter().chain(across).min()
+    }
+
+    /// Step a press either bar holds if its repeat is due at `now_ns`,
+    /// carrying out the scroll it asks for and reporting what moved.
+    pub fn scroll_repeat(
+        &mut self,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.vertical
+                .repeat(now_ns, layout.vertical_bar(), scale, theme, damage)
+        {
+            self.scroll_to(Some(offset), None, layout, damage);
+        }
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.horizontal
+                .repeat(now_ns, layout.horizontal_bar(), scale, theme, damage)
+        {
+            self.scroll_to(None, Some(offset), layout, damage);
+        }
     }
 
     fn find_pointer(
@@ -1778,7 +1836,8 @@ impl View {
                 let offset = |action: Option<ScrollAction>| {
                     action.map(|ScrollAction::ScrollTo { offset }| offset)
                 };
-                self.scroll_to(offset(y), offset(x), layout, damage)
+                self.scroll_to(offset(y), offset(x), layout, damage);
+                Outcome::none()
             }
             _ => Outcome::none(),
         }
@@ -1965,7 +2024,7 @@ impl View {
         across: Option<u64>,
         layout: &Layout,
         damage: &mut Region,
-    ) -> Outcome {
+    ) {
         let (cell_w, cell_h) = layout.cell();
         let (cell_w, cell_h) = (u64::from(cell_w.max(1)), u64::from(cell_h.max(1)));
         let display_before = self.display_shown().map(Display::top);
@@ -2007,7 +2066,6 @@ impl View {
             damage.add(layout.grid());
         }
         self.sync_bars(layout, damage);
-        Outcome::none()
     }
 
     /// Feed a key to the read-only display: it scrolls, and says it is

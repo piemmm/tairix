@@ -15,8 +15,8 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
-    FieldGroupAction, FieldLayout, FieldRow, HelpTip, IconButton, Keystroke, ListRow, Menu, Panel,
-    Progress, Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
+    FieldGroupAction, FieldRow, HelpTip, IconButton, Keystroke, ListRow, Menu, Panel, Progress,
+    Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
     SliderAction, SplitButton, TableRow, TextArea, TextField, Toggle, Toolbar, ToolbarOutcome,
     Tooltip, WindowControl,
 };
@@ -344,21 +344,8 @@ impl DemoWidget {
             DemoWidget::Card(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::Panel(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::FieldGroup(w) => {
-                let before = w.layout(rect, viewport, scale, theme);
-                let acted = w.on_pointer(event, before, scale, theme, damage);
-                field_popup_moved(
-                    w,
-                    before,
-                    rect,
-                    viewport,
-                    scale,
-                    theme,
-                    damage,
-                    acted
-                        .as_ref()
-                        .is_some_and(|acted| before.popup_may_move(&acted.action)),
-                );
-                if let Some(action) = acted {
+                let layout = w.layout(rect, viewport, scale, theme);
+                if let Some(action) = w.on_pointer(event, layout, scale, theme, damage) {
                     commit_field(w, action, rect, damage);
                     return true;
                 }
@@ -391,6 +378,40 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::WindowControl(w) => w.on_pointer(event, rect, damage).is_some(),
+        }
+    }
+
+    /// When the press this widget holds steps next — a scrollbar's arrow or
+    /// track, a text box's bar, a toolbar's overflow arrow — or `None` when
+    /// nothing it holds would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64, ctx: DemoContext<'_>) -> Option<u64> {
+        match self {
+            DemoWidget::ScrollBar(w) => w.repeat_deadline(now_ns),
+            DemoWidget::TextArea(w) => w.repeat_deadline(now_ns),
+            DemoWidget::Toolbar(w) => w.repeat_deadline(now_ns, ctx.rect, ctx.scale, ctx.theme),
+            _ => None,
+        }
+    }
+
+    /// Step the press this widget holds if its repeat is due at `now_ns`,
+    /// answering whether a value moved; what was redrawn is reported into
+    /// `damage`.
+    pub fn repeat(&mut self, now_ns: u64, ctx: DemoContext<'_>, damage: &mut Region) -> bool {
+        let (rect, scale, theme) = (ctx.rect, ctx.scale, ctx.theme);
+        match self {
+            DemoWidget::ScrollBar(w) => match w.repeat(now_ns, rect, scale, theme, damage) {
+                Some(ScrollAction::ScrollTo { offset }) => {
+                    w.set_model(w.model().scroll_to(offset));
+                    committed(rect, damage)
+                }
+                None => false,
+            },
+            DemoWidget::TextArea(w) => {
+                w.repeat(now_ns, rect, scale, theme, damage);
+                false
+            }
+            DemoWidget::Toolbar(w) => w.repeat(now_ns, rect, scale, theme, damage),
+            _ => false,
         }
     }
 
@@ -454,21 +475,8 @@ impl DemoWidget {
             DemoWidget::Card(w) => w.on_key(key).is_some(),
             DemoWidget::Panel(w) => w.on_key(key).is_some(),
             DemoWidget::FieldGroup(w) => {
-                let before = w.layout(rect, viewport, scale, theme);
-                let acted = w.on_key(stroke, before, scale, theme, damage);
-                field_popup_moved(
-                    w,
-                    before,
-                    rect,
-                    viewport,
-                    scale,
-                    theme,
-                    damage,
-                    acted
-                        .as_ref()
-                        .is_some_and(|acted| before.popup_may_move(&acted.action)),
-                );
-                if let Some(action) = acted {
+                let layout = w.layout(rect, viewport, scale, theme);
+                if let Some(action) = w.on_key(stroke, layout, scale, theme, damage) {
                     commit_field(w, action, rect, damage);
                     return true;
                 }
@@ -494,25 +502,6 @@ impl DemoWidget {
             DemoWidget::WindowControl(w) => w.on_key(key, rect, damage).is_some(),
         }
     }
-}
-
-/// Report a choice list that has just appeared or vacated, once the group
-/// has acted in a way that can have `moved` it.
-#[allow(clippy::too_many_arguments)] // The two layouts' inputs, threaded explicitly.
-fn field_popup_moved(
-    group: &FieldGroup,
-    before: FieldLayout,
-    rect: Rect,
-    viewport: Rect,
-    scale: Scale,
-    theme: &Theme,
-    damage: &mut Region,
-    moved: bool,
-) {
-    if !moved {
-        return;
-    }
-    before.report_popup_moved(group.layout(rect, viewport, scale, theme), damage);
 }
 
 /// Commit the boolean a selector asked for through `apply`, and report the

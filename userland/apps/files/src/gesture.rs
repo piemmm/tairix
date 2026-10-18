@@ -39,12 +39,7 @@ use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::BundleIntent;
 use tairix_geometry::{Point, Scale};
-use tairix_input::{ClickKind, DoubleClickTracker, PointerButton};
-
-/// How far a held primary press travels, in *logical* pixels along either
-/// axis, before it is a drag rather than a click: past the jitter of a hand
-/// holding still.
-pub const DRAG_SLOP: u32 = 4;
+use tairix_input::{past_drag_slop, ClickKind, DoubleClickTracker, PointerButton};
 
 /// A primary press on a file, from which a drag may begin.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -58,10 +53,7 @@ impl DragArm {
     /// at `scale`, for the press to be a drag.
     #[must_use]
     pub fn travelled(&self, to: Point, scale: Scale) -> bool {
-        let slop = i64::from(scale.scale_length(DRAG_SLOP));
-        let dx = (i64::from(to.x) - i64::from(self.at.x)).abs();
-        let dy = (i64::from(to.y) - i64::from(self.at.y)).abs();
-        dx.max(dy) >= slop
+        past_drag_slop(self.at, to, scale)
     }
 }
 
@@ -210,6 +202,9 @@ pub enum PressInput {
     OtherPressed,
     /// Any other pointer event: another button up, or the wheel.
     OtherPointer,
+    /// The press ended without its release reaching the window: the desktop
+    /// took the pointer for a surface of its own.
+    Cancelled,
     /// `Escape` went down.
     Escape,
     /// Any other key event.
@@ -231,6 +226,7 @@ impl PressInput {
                 PointerAction::Released(PointerButtonCode::Primary) => Self::PrimaryReleased,
                 PointerAction::Pressed(_) => Self::OtherPressed,
                 PointerAction::Released(_) => Self::OtherPointer,
+                PointerAction::Cancelled => Self::Cancelled,
             },
             WindowEvent::Scrolled { .. } | WindowEvent::Pinch { .. } => Self::OtherPointer,
             WindowEvent::Key {
@@ -382,6 +378,7 @@ impl RenameArm {
             PressInput::PrimaryPressed
             | PressInput::OtherPressed
             | PressInput::OtherPointer
+            | PressInput::Cancelled
             | PressInput::Escape
             | PressInput::Key
             | PressInput::Unfocused => None,
@@ -436,12 +433,13 @@ pub enum PressStep {
 /// ended it went elsewhere, so it ends the band and is routed as the press it
 /// is. An arm has changed nothing yet, so a key, another button, a second
 /// press, or the window losing the keyboard lets it go: a menu or dialog that
-/// took its release never leaves it to begin on the next hover.
+/// took its release never leaves it to begin on the next hover. A press the
+/// desktop took ends where it stands, keeping what it selected.
 #[must_use]
 pub const fn press_step(hold: PressHold, input: PressInput) -> PressStep {
     match (hold, input) {
         (_, PressInput::Moved) => PressStep::Grow,
-        (_, PressInput::PrimaryReleased) => PressStep::End,
+        (_, PressInput::PrimaryReleased | PressInput::Cancelled) => PressStep::End,
         (PressHold::Dragging, PressInput::Escape) => PressStep::Cancel,
         (
             PressHold::Dragging,
@@ -460,7 +458,7 @@ mod tests {
     use super::{
         bundle_intent, press_step, primary_press as press_with, DragArm, Keyboard, NamePress,
         PressHit, PressHold, PressInput, PressStep, PrimaryPress, RenameArm, RenameCommit,
-        SelectHow, SelectKeys, DRAG_SLOP,
+        SelectHow, SelectKeys,
     };
     use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
     use tairix_abi::window_ipc::{PointerAction, WindowEvent};
@@ -469,7 +467,7 @@ mod tests {
     use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
     use tairix_abi::time::Duration64;
     use tairix_browse::BundleIntent;
-    use tairix_input::DoubleClickTracker;
+    use tairix_input::{DoubleClickTracker, DRAG_SLOP};
 
     /// A press with no selection keys held, on an item not already among
     /// several selected (`None` is the chrome).
@@ -751,6 +749,38 @@ mod tests {
         assert_eq!(live(PressInput::PrimaryPressed), PressStep::EndAndRoute);
         assert_eq!(live(PressInput::Unfocused), PressStep::EndAndRoute);
         assert_eq!(live(PressInput::Other), PressStep::Route);
+    }
+
+    /// A press the desktop took — the lock, a prompt, a menu, a drag it
+    /// carries — ends a band where it stands and lets an arm go, rather than
+    /// leaving the band to grow under every hover until the next press.
+    #[test]
+    fn a_cancelled_press_ends_a_band_and_lets_an_arm_go() {
+        assert_eq!(
+            PressInput::of(&WindowEvent::Pointer {
+                window_id: 1,
+                x: 4,
+                y: 4,
+                action: PointerAction::Cancelled,
+                modifiers: Modifiers::default(),
+            }),
+            PressInput::Cancelled
+        );
+        for hold in [PressHold::Dragging, PressHold::Armed] {
+            assert_eq!(press_step(hold, PressInput::Cancelled), PressStep::End);
+        }
+        let interval = Duration64::from_millis(400);
+        let arm = RenameArm::on_press(3, Point::new(10, 10), name_click()).expect("armed");
+        assert_eq!(
+            arm.step(
+                PressInput::Cancelled,
+                Point::new(10, 10),
+                0,
+                interval,
+                Scale::ONE
+            ),
+            None
+        );
     }
 
     /// The press that brings a window forward arrives straight after its focus

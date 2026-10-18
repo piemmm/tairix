@@ -125,6 +125,27 @@ impl Panel {
         view.on_pointer(event, bounds, scale, theme, font, &mut self.damage)
     }
 
+    /// When a press the open composition's bars hold steps next, or `None`
+    /// when nothing held would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.view.as_mut()?.repeat_deadline(now_ns)
+    }
+
+    /// Step a held bar press whose repeat is due at `now_ns`, accumulating
+    /// what it repainted, on the same terms as [`Panel::on_pointer`].
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        if let Some(view) = self.view.as_mut() {
+            view.repeat(now_ns, bounds, scale, theme, font, &mut self.damage);
+        }
+    }
+
     /// Route one key into the open composition, on the same terms as
     /// [`Panel::on_pointer`].
     pub fn on_key(

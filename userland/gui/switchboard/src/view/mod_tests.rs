@@ -1711,3 +1711,32 @@ fn heavy_contrast_draws_a_thicker_edge_wake() {
         "heavy contrast widens the wake: {strong} against {normal}"
     );
 }
+
+#[test]
+fn a_held_list_arrow_steps_again_on_the_bars_cadence() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let (x, _) = centre(layout.scroll);
+    let down = layout.scroll.bottom() - 2;
+    for event in [moved(x, down), PRESS] {
+        feed(&mut sb, &theme, &event);
+    }
+    let pressed = sb.scroll_offset();
+    assert!(pressed > 0, "the press steps once at once");
+
+    let due = sb.repeat_deadline(0).expect("a held arrow arms a repeat");
+    let font = crate::view::test_support::font();
+    let mut moved_list = tairix_controls::damage::sink();
+    sb.repeat(due - 1, bounds(), Scale::ONE, &theme, font, &mut moved_list);
+    assert_eq!(sb.scroll_offset(), pressed, "nothing before it is due");
+    sb.repeat(due, bounds(), Scale::ONE, &theme, font, &mut moved_list);
+    assert!(sb.scroll_offset() > pressed, "and a step when it is");
+    assert!(
+        moved_list.contains(centre_point(list_info(&sb, &theme).viewport)),
+        "the list it moved repaints"
+    );
+
+    feed(&mut sb, &theme, &RELEASE);
+    assert_eq!(sb.repeat_deadline(due), None, "let go, nothing repeats");
+}

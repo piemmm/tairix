@@ -69,6 +69,16 @@ una freccia finché sposterebbe, e la cartella in cui finirebbe il rilascio è
 evidenziata. Un singolo file trascinato sulla posizione di un'applicazione
 nella barra delle icone vi viene aperto.
 
+Il menu contestuale si apre con *Visualizza*. Sotto, un sottomenu nomina ciò
+su cui agisce il menu — *File «notes.txt»*, con un nome lungo accorciato nel
+mezzo perché l'estensione resti visibile, o *Selezione* quando sono
+selezionate più voci — e contiene *Apri*, *Apri con…*, *Ottieni
+informazioni…*, *Rinomina*, *Taglia*, *Copia* ed *Elimina*; una voce che lì
+non può agire è in grigio e ne dice il motivo. Seguono *Nuovo*, poi
+*Seleziona tutto* e *Annulla selezione*, e infine *Incolla*. Un clic destro
+su uno spazio vuoto annulla la selezione, quindi il sottomenu della voce è in
+grigio.
+
 Il sottomenu *Nuovo* del menu contestuale crea una cartella, o un documento
 vuoto di ogni tipo che un editor installato sa scrivere, e ne apre il nome
 per la modifica.
@@ -81,8 +91,8 @@ esse mostra invece lo spazio libero, il file system e quanto bene funziona.
 Un clic sul titolo di una colonna ordina l'elenco in base a essa, e un
 secondo clic inverte l'ordine.
 
-`Alt+Enter` apre una finestra *Proprietà* sulla voce selezionata, come fa la
-voce *Proprietà* del menu contestuale. È una finestra a sé, per cui se ne
+`Alt+Enter` apre la finestra delle *informazioni* della voce selezionata, come
+fa *Ottieni informazioni…* nel suo sottomenu del menu contestuale. È una finestra a sé, per cui se ne
 possono aprire diverse insieme e l'elenco resta utilizzabile nel frattempo:
 mostra che cosa è la voce, la sua dimensione, le sue date, dove punta un
 alias, i suoi permessi e il suo proprietario, e gli attributi estesi che il

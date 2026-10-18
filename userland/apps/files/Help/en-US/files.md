@@ -65,6 +65,14 @@ pointer shows a plus while a drop would copy and an arrow while it would
 move, and the folder a drop would land in is highlighted. A single file
 dragged onto an application's icon-bar slot opens it there.
 
+The right-click menu opens with *Display*. Beneath it a submenu names what
+the menu acts on — *File ‘notes.txt’*, a long name shortened in the middle so
+its extension still shows, or *Selection* when several items are selected —
+and holds *Open*, *Open With…*, *Get Info…*, *Rename*, *Cut*, *Copy* and
+*Delete*; a row that cannot act there is greyed and says why. *New* follows
+it, then *Select All* and *Clear Selection*, and *Paste* last. A right-click
+on empty space clears the selection, so the item's submenu is greyed.
+
 The right-click menu's *New* submenu makes a folder, or an empty document of
 each kind an installed editor writes, and opens its name for editing.
 
@@ -75,8 +83,8 @@ drive listed among them shows instead the space it has free, its filesystem
 and how well it is serving. A press on a column's title orders the list by
 it, and a second press reverses the order.
 
-`Alt+Enter` opens a *Properties* window on the selected item, as does the
-right-click menu's *Properties* row. It is a window of its own, so several can
+`Alt+Enter` opens the selected item's *Info* window, as does *Get Info…* on
+its right-click submenu. It is a window of its own, so several can
 be open at once and the listing stays usable while they are: it shows what the
 item is, its size, its timestamps, where an alias points, its permissions and
 owner, and the extended attributes the volume stores for it. Permissions,

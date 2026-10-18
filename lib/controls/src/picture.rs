@@ -775,6 +775,11 @@ impl PictureChoice {
                 self.mark(&[over], bounds, scale, theme, damage);
                 None
             }
+            InputEvent::PointerCancelled => {
+                let armed = self.armed.take()?;
+                self.mark(&[Some(armed)], bounds, scale, theme, damage);
+                None
+            }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {

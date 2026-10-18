@@ -1061,7 +1061,7 @@ mod program {
                     // shot, to the next frame any window actually asks for —
                     // and park. With nothing animating, nothing is armed.
                     let now = tairix_rt::clock_get();
-                    deadline.set(next_deadline(&mut windows, now));
+                    deadline.set(next_deadline(&mut windows, now, theme, scale));
                     let woken = events.wait(&mut client);
                     // A frame may be due whether the park ended on the
                     // deadline or on an event; the render it calls for is
@@ -1226,12 +1226,14 @@ mod program {
         false
     }
 
-    /// The nearest animation frame any window owes, or `None` when none is
-    /// timed — in which case the park arms no timer at all.
-    fn next_deadline(windows: &mut [Window], now: u64) -> Option<u64> {
+    /// The nearest animation frame or held control's repeat any window owes,
+    /// or `None` when none is timed — in which case the park arms no timer at
+    /// all.
+    fn next_deadline(windows: &mut [Window], now: u64, theme: &Theme, scale: Scale) -> Option<u64> {
         let mut nearest = None;
         for window in windows.iter_mut() {
-            window.view.arm_deadline(now);
+            let layout = window.layout(theme, scale);
+            window.view.arm_deadline(now, &layout, scale, theme);
             if let Some(due) = window.view.deadline_ns() {
                 nearest = Some(nearest.map_or(due, |held: u64| held.min(due)));
             }

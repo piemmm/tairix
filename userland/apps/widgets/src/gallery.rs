@@ -498,6 +498,76 @@ impl Gallery {
         reported(&drew, damage) || changed
     }
 
+    /// When the press a part holds steps next — the column's bar, or a demo
+    /// control's arrow, track or overflow — or `None` when nothing held would
+    /// move.
+    pub fn repeat_deadline(
+        &mut self,
+        now_ns: u64,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<u64> {
+        match self.pressed? {
+            Part::Bar => self.scroll.repeat_deadline(now_ns),
+            Part::Item(idx) => {
+                let frame = self.frame(viewport, scale, theme);
+                let rect = frame.items.get(idx).copied()?;
+                self.panels[self.current.index()]
+                    .get_mut(idx)?
+                    .widget
+                    .repeat_deadline(now_ns, ctx(rect, frame.client, scale, theme))
+            }
+            Part::Tabs => None,
+        }
+    }
+
+    /// Step the press a part holds if its repeat is due at `now_ns`, returning
+    /// whether the view should repaint.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(part) = self.pressed else {
+            return false;
+        };
+        let frame = self.frame(viewport, scale, theme);
+        let mut drew = damage::sink();
+        let changed = match part {
+            Part::Bar => {
+                let stepped = frame.bar.is_some_and(|bar| {
+                    self.scroll
+                        .repeat(now_ns, bar, scale, theme, &mut drew)
+                        .is_some()
+                });
+                if stepped {
+                    drew.add(frame.view.viewport());
+                }
+                stepped
+            }
+            Part::Item(idx) => {
+                let (Some(rect), Some(item)) = (
+                    frame.items.get(idx).copied(),
+                    self.panels[self.current.index()].get_mut(idx),
+                ) else {
+                    return false;
+                };
+                let mut moved = damage::sink();
+                let changed =
+                    item.widget
+                        .repeat(now_ns, ctx(rect, frame.client, scale, theme), &mut moved);
+                frame.reach(false).report(&moved, &mut drew);
+                changed
+            }
+            Part::Tabs => false,
+        };
+        reported(&drew, damage) || changed
+    }
+
     /// Where a pointer event goes: to the part holding the pointer if one
     /// is, else to the part under it and, for a move, to the part it left. A
     /// wheel turn the part under the pointer does not use scrolls the column.
@@ -515,7 +585,7 @@ impl Gallery {
         let frame = self.frame(viewport, scale, theme);
         if let Some(holder) = self.holder() {
             let mut changed = self.deliver(holder, event, &frame, scale, theme, damage);
-            if is_primary_release(event) && self.pressed.take().is_some() {
+            if ends_press(event) && self.pressed.take().is_some() {
                 // The press kept every other part from seeing the pointer
                 // arrive, so the part it was released over is told now.
                 changed |= self.follow_pointer(viewport, scale, theme, damage);
@@ -986,12 +1056,13 @@ const fn is_primary_press(event: &InputEvent) -> bool {
     )
 }
 
-/// Whether `event` is a primary release, which ends a held press.
-const fn is_primary_release(event: &InputEvent) -> bool {
+/// Whether `event` ends a held press: its primary release, or the cancel the
+/// desktop sends when it takes the pointer away.
+const fn ends_press(event: &InputEvent) -> bool {
     matches!(
         event,
         InputEvent::PointerReleased {
             button: PointerButton::Primary
-        }
+        } | InputEvent::PointerCancelled
     )
 }

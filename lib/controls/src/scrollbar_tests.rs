@@ -15,7 +15,9 @@ use tairix_theme::Theme;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
 use crate::damage::sink;
-use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange, WHEEL_STEP};
+use crate::scroll::{
+    ScrollModel, ScrollOrientation, ScrollRange, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS, WHEEL_STEP,
+};
 use crate::scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 use crate::state::{AuthorityState, ControlState};
 use crate::testkit::{has_pixel, high_contrast, premul};
@@ -433,22 +435,236 @@ fn part_rect_is_the_forward_mirror_of_part_at() {
     }
 }
 
+/// Step the held press of `bar` at `now_ns`, answering the offset it asked for.
+fn repeat_at(bar: &mut ScrollBar, now_ns: u64) -> Option<u64> {
+    off(bar.repeat(now_ns, vbounds(), Scale::ONE, &theme(), &mut sink()))
+}
+
 #[test]
-fn press_hold_repeat_steps_the_held_part_and_stops_at_a_bound() {
+fn press_hold_repeat_steps_on_its_own_cadence_and_stops_at_a_bound() {
     let theme = theme();
     let mut bar = vbar();
     bar.set_model(bar.model().scroll_to(25));
+    bar.on_pointer(&moved(5, 5), vbounds(), Scale::ONE, &theme, &mut sink());
     bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()); // decrement, held
     assert_eq!(bar.held(), Some(ScrollPart::Decrement));
-    assert_eq!(bar.model().offset(), 15);
-    assert_eq!(off(bar.repeat(vbounds(), &mut sink())), Some(5));
-    // The next repeat reaches the start; a further one contributes nothing.
-    assert_eq!(off(bar.repeat(vbounds(), &mut sink())), Some(0));
-    assert_eq!(bar.repeat(vbounds(), &mut sink()), None);
+    assert_eq!(bar.model().offset(), 15, "the press itself steps");
+
+    let start = 1_000;
+    let first = start + REPEAT_DELAY_NS;
+    assert_eq!(
+        bar.repeat_deadline(start),
+        Some(first),
+        "armed by the press"
+    );
+    assert_eq!(bar.repeat_deadline(start + 5), Some(first), "and only once");
+    assert_eq!(repeat_at(&mut bar, first - 1), None, "not before it is due");
+    assert_eq!(repeat_at(&mut bar, first), Some(5));
+    assert_eq!(
+        bar.repeat_deadline(first),
+        Some(first + REPEAT_INTERVAL_NS),
+        "then at the repeat interval"
+    );
+    // The next repeat reaches the start, after which nothing is owed.
+    assert_eq!(repeat_at(&mut bar, first + REPEAT_INTERVAL_NS), Some(0));
+    assert_eq!(bar.repeat_deadline(first + REPEAT_INTERVAL_NS), None);
+    assert_eq!(repeat_at(&mut bar, first + 2 * REPEAT_INTERVAL_NS), None);
     // Releasing clears the held part.
     bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut sink());
     assert_eq!(bar.held(), None);
-    assert_eq!(bar.repeat(vbounds(), &mut sink()), None);
+    assert_eq!(bar.repeat_deadline(0), None);
+}
+
+#[test]
+fn a_held_step_goes_on_only_while_the_pointer_stays_on_its_button() {
+    let theme = theme();
+    let mut bar = vbar();
+    let on_increment = (5, i32::try_from(VH).expect("small") - 5);
+    bar.on_pointer(
+        &moved(on_increment.0, on_increment.1),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(bar.held(), Some(ScrollPart::Increment));
+    assert!(bar.repeat_deadline(0).is_some());
+
+    bar.on_pointer(&moved(5, 150), vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bar.repeat_deadline(0),
+        None,
+        "slid off the button, it stops"
+    );
+    assert_eq!(repeat_at(&mut bar, u64::MAX), None);
+
+    bar.on_pointer(
+        &moved(on_increment.0, on_increment.1),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert!(
+        bar.repeat_deadline(0).is_some(),
+        "and goes on once back on it"
+    );
+}
+
+#[test]
+fn a_held_track_press_pages_until_the_thumb_reaches_the_pointer() {
+    let theme = theme();
+    let mut bar = vbar();
+    let target = i32::try_from(VH * 2 / 3).expect("small");
+    bar.on_pointer(
+        &moved(5, target),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(bar.held(), Some(ScrollPart::TrackAfter));
+    let mut now = 0;
+    let mut steps = 0;
+    while let Some(due) = bar.repeat_deadline(now) {
+        now = due;
+        repeat_at(&mut bar, now);
+        steps += 1;
+        assert!(steps < 32, "a track press that never stops");
+    }
+    assert_eq!(
+        bar.part_at(vbounds(), Point::new(5, target), Scale::ONE, &theme),
+        ScrollPart::Thumb,
+        "the thumb came to rest under the pointer"
+    );
+    assert!(
+        bar.model().offset() < bar.model().range().max_offset(),
+        "rather than paging on to the end"
+    );
+}
+
+#[test]
+fn a_press_toward_an_end_already_reached_presses_nothing() {
+    let theme = theme();
+    let mut bar = vbar();
+    bar.on_pointer(&moved(5, 5), vbounds(), Scale::ONE, &theme, &mut sink());
+    let mut damage = sink();
+    assert_eq!(
+        bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut damage),
+        None
+    );
+    assert_eq!(bar.held(), None, "nothing is held");
+    assert!(damage.is_empty(), "and nothing looks pressed");
+    assert_eq!(bar.repeat_deadline(0), None, "or owes a repeat");
+}
+
+#[test]
+fn a_release_ends_the_press_even_once_the_bar_has_collapsed() {
+    let theme = theme();
+    let mut bar = vbar();
+    bar.on_pointer(&moved(5, 290), vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert!(bar.is_pressing());
+    let collapsed = Rect::new(0, 0, 0, 0);
+    bar.on_pointer(&RELEASE, collapsed, Scale::ONE, &theme, &mut sink());
+    assert!(!bar.is_pressing());
+    assert_eq!(bar.repeat_deadline(0), None);
+}
+
+/// A press the desktop took — the lock, a prompt, a menu — ends where it
+/// stands: a held step stops, and a dragged thumb stays where it was left.
+#[test]
+fn a_cancelled_press_ends_without_moving_anything() {
+    let theme = theme();
+    let mut bar = vbar();
+    bar.on_pointer(&moved(5, 290), vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    let held = bar.model().offset();
+    bar.on_pointer(
+        &InputEvent::PointerCancelled,
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(bar.held(), None);
+    assert_eq!(bar.repeat_deadline(0), None);
+    assert_eq!(bar.model().offset(), held);
+
+    let thumb = bar
+        .part_rect(ScrollPart::Thumb, vbounds(), Scale::ONE, &theme)
+        .expect("a thumb");
+    let grip = thumb.center();
+    bar.on_pointer(
+        &moved(grip.x, grip.y),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(
+        &moved(grip.x, grip.y + 40),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    let dragged = bar.model().offset();
+    assert!(bar.is_pressing());
+    assert_eq!(
+        bar.on_pointer(
+            &InputEvent::PointerCancelled,
+            vbounds(),
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        None
+    );
+    assert!(!bar.is_pressing());
+    bar.on_pointer(
+        &moved(grip.x, grip.y + 120),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(bar.model().offset(), dragged, "the drag is over");
+}
+
+/// Each end button is a plate raised in the channel with its chevron across
+/// it, in the theme's foreground, so the arrows read at a glance; one toward
+/// an end the content already rests at draws no plate.
+#[test]
+fn an_end_button_is_a_raised_plate_unless_there_is_nothing_that_way() {
+    let theme = theme();
+    let mut bar = vbar();
+    bar.set_model(bar.model().scroll_to(300));
+    let surface = render(&bar, vbounds(), &theme);
+    let button = bar
+        .part_rect(ScrollPart::Decrement, vbounds(), Scale::ONE, &theme)
+        .expect("a decrement button");
+    let inside = |surface: &Surface, colour| {
+        (0..button.height)
+            .any(|y| (0..button.width).any(|x| surface.get(x, y) == Some(premul(colour))))
+    };
+    let palette = theme.palette();
+    assert!(inside(&surface, palette.scroll_thumb), "a plate");
+    assert!(inside(&surface, palette.on_surface), "a readable chevron");
+
+    bar.set_model(bar.model().to_start());
+    let at_start = render(&bar, vbounds(), &theme);
+    assert!(
+        !inside(&at_start, palette.scroll_thumb),
+        "no plate at the start"
+    );
+    assert!(
+        !inside(&at_start, palette.on_surface),
+        "and a dimmed chevron"
+    );
 }
 
 #[test]
@@ -660,15 +876,17 @@ fn the_part_under_the_pointer_is_a_drawn_property() {
     let theme = theme();
     // The end button beneath the pointer brightens, so *which* part the
     // pointer sits over does compare — excluding it would let the gate pass a
-    // bar that paints a lit chevron off as one that does not.
+    // bar that paints a lit chevron off as one that does not. The increment,
+    // because at the start there is nothing above for the decrement to light.
+    let foot = i32::try_from(VH).expect("small") - 2;
     let mut on_end = vbar();
-    on_end.on_pointer(&moved(2, 2), vbounds(), Scale::ONE, &theme, &mut sink());
+    on_end.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut sink());
     let mut on_track = vbar();
     on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink());
 
     assert_ne!(
         on_end, on_track,
-        "a lit decrement chevron is a different composition"
+        "a lit increment chevron is a different composition"
     );
     assert_ne!(
         render(&on_end, vbounds(), &theme).pixels(),

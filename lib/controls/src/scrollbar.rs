@@ -6,11 +6,12 @@
 //! [`ScrollOrientation`] only decides how the shared one-dimensional thumb math
 //! ([`crate::scroll`]) maps onto the screen. This module is the *drawn* form of
 //! that component: it lays a bar out into a decrement button, a track (before
-//! thumb / thumb / after thumb), and an increment button; paints the quiet
-//! Scroll Channel, the thumb, and the end-button chevrons from the active
-//! [`Theme`] and [`Scale`]; classifies a pointer position; and maps pointer
-//! drag, track paging, end-button line steps, the wheel, and arrow/page/home/
-//! end keys back to a clamped offset through the shared [`ScrollModel`].
+//! thumb / thumb / after thumb), and an increment button; paints the recessed
+//! Scroll Channel with the two end buttons and the thumb raised in it from the
+//! active [`Theme`] and [`Scale`]; classifies a pointer position; and maps
+//! pointer drag, track paging, end-button line steps, the wheel, and
+//! arrow/page/home/end keys back to a clamped offset through the shared
+//! [`ScrollModel`].
 //!
 //! The control does **not** keep a private offset beside the owning viewport:
 //! it holds the viewport's own [`ScrollModel`] (refreshed by the owner through
@@ -30,7 +31,8 @@ use crate::paint::{
     withheld, ChevronDir, ChromeLayer,
 };
 use crate::scroll::{
-    wheel_steps, ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit, WHEEL_STEP,
+    wheel_steps, HoldRepeat, ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit,
+    WHEEL_STEP,
 };
 use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
 
@@ -165,11 +167,20 @@ impl BarLayout {
         (!rect.is_empty()).then_some(rect)
     }
 
-    /// The thumb's surface rectangle, inset from the channel walls by `margin`
-    /// on the short axis so it reads as floating in the Scroll Channel.
-    fn thumb_rect(&self, margin: u32) -> Rect {
+    /// How far a raised part — the thumb or an end button — stands in from
+    /// the channel's walls, so it reads as sitting in the Scroll Channel.
+    fn inset(&self) -> u32 {
+        self.breadth / 6
+    }
+
+    /// The thumb's surface rectangle, inset from the channel walls on the
+    /// short axis.
+    fn thumb_rect(&self) -> Rect {
         let ThumbSpan { start, length } = self.geometry.thumb();
-        let short = self.breadth.saturating_sub(margin.saturating_mul(2)).max(1);
+        let short = self
+            .breadth
+            .saturating_sub(self.inset().saturating_mul(2))
+            .max(1);
         let off = self.breadth.saturating_sub(short) / 2;
         match self.orientation {
             ScrollOrientation::Vertical => Rect::new(
@@ -199,21 +210,28 @@ impl BarLayout {
 /// [`ScrollAction`]; a denied or disabled bar keeps its position and ignores
 /// input rather than looking merely inert (spec §13).
 ///
+/// A held end button or track press repeats on its own cadence: the owner
+/// folds [`repeat_deadline`](Self::repeat_deadline) into its wait and calls
+/// [`repeat`](Self::repeat) when it comes. A held step goes on only while the
+/// pointer stays on the part it pressed, so a press on the track pages until
+/// the thumb reaches the pointer and no further.
+///
 /// Equal bars draw the same pixels, so a host may use `==` as its repaint
 /// gate. The visible interaction state compares: the hovered part lights its
 /// end chevron, and `dragging`/`held` brighten the thumb and the held end. The
-/// raw pointer coordinate and the drag anchor do not — both are hit-testing
-/// bookkeeping no render path reads, so a sample that lands on a new
-/// coordinate without changing which part is under it draws the same pixels
-/// and must not force the host to repaint.
+/// raw pointer coordinate, the drag anchor and the repeat cadence do not —
+/// they are input bookkeeping no render path reads, so a sample that lands on
+/// a new coordinate without changing which part is under it draws the same
+/// pixels and must not force the host to repaint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ScrollBar {
     orientation: ScrollOrientation,
     model: ScrollModel,
     state: ControlState,
     /// The part the pointer currently sits over, resolved when the pointer
-    /// moves — drawn (an end button brightens under the pointer), unlike the
-    /// raw coordinate below.
+    /// moves and after every step that moved the thumb under it — drawn (an
+    /// end button brightens under the pointer), unlike the raw coordinate
+    /// below.
     hover: ScrollPart,
     /// The last pointer position, classified on the next press or re-mapped on
     /// the next drag move — hit-testing input, never a drawn property.
@@ -223,6 +241,8 @@ pub struct ScrollBar {
     /// offset under the pointer instead of jumping its start to it.
     anchor: RenderInvariant<i32>,
     held: Option<ScrollPart>,
+    /// When the held press steps next.
+    cadence: RenderInvariant<HoldRepeat>,
     /// Wheel scroll short of a whole pixel, carried to the next turn.
     wheel_carry: RenderInvariant<i64>,
 }
@@ -240,6 +260,7 @@ impl ScrollBar {
             dragging: false,
             anchor: RenderInvariant::new(0),
             held: None,
+            cadence: RenderInvariant::new(HoldRepeat::default()),
             wheel_carry: RenderInvariant::new(0),
         }
     }
@@ -285,17 +306,6 @@ impl ScrollBar {
         self.held
     }
 
-    /// Whether an end-button or track press is held down, so the owner owes
-    /// this bar a repeat wake-up ([`repeat`](Self::repeat)).
-    ///
-    /// The same question [`crate::toolbar::Toolbar::is_repeating`] answers,
-    /// spelled the same way, so an owner driving both from one timer asks
-    /// them the same thing.
-    #[must_use]
-    pub fn is_repeating(&self) -> bool {
-        self.held.is_some()
-    }
-
     /// Whether a primary press is currently captured on the bar — a thumb
     /// drag in progress or an end/track button held down. An owner uses this
     /// to decide that a subsequent move or release belongs to the bar (the
@@ -303,6 +313,51 @@ impl ScrollBar {
     #[must_use]
     pub fn is_pressing(&self) -> bool {
         self.dragging || self.held.is_some()
+    }
+
+    /// When the held press steps next, as a monotonic instant, or `None` when
+    /// nothing held would move: no press, the pointer off the part it pressed,
+    /// or the offset already at the end that part steps toward.
+    ///
+    /// The first step of a press just made is armed
+    /// [`REPEAT_DELAY_NS`](crate::scroll::REPEAT_DELAY_NS) after `now_ns`, so
+    /// the owner asks for this after every event it routes and folds the
+    /// answer into its wait; nothing here polls.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        let stepping = self.stepping();
+        self.cadence.deadline(stepping, now_ns)
+    }
+
+    /// Whether the held press's next step is due at `now_ns`: what an owner
+    /// asks before laying out what [`repeat`](Self::repeat) needs, so a wake
+    /// with nothing due costs no layout. Arms a new press's first step as
+    /// [`repeat_deadline`](Self::repeat_deadline) does.
+    pub fn repeat_due(&mut self, now_ns: u64) -> bool {
+        self.repeat_deadline(now_ns)
+            .is_some_and(|due| due <= now_ns)
+    }
+
+    /// Step the held press once if its repeat is due at `now_ns`, for the bar
+    /// drawn at `bounds`, returning the requested offset when it moved.
+    ///
+    /// Reports `bounds` into `damage` for a moved thumb, and re-reads the part
+    /// under the pointer, so a track press stops paging when the thumb
+    /// arrives beneath it.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<ScrollAction> {
+        if !self.stepping() || !self.cadence.fire(now_ns) {
+            return None;
+        }
+        let step = step_for(self.held?)?;
+        let action = self.apply(step, bounds, damage);
+        self.rehover(bounds, scale, theme, damage);
+        action
     }
 
     /// Classify a surface `point` into a [`ScrollPart`] for the bar drawn at
@@ -354,6 +409,33 @@ impl ScrollBar {
             )
     }
 
+    /// Whether a press on `part` would move the offset: the end buttons and
+    /// the track regions toward an end the content does not already rest at.
+    fn moves(&self, part: ScrollPart) -> bool {
+        step_for(part).is_some_and(|step| step(self.model).offset() != self.model.offset())
+    }
+
+    /// Whether the held press is stepping: the pointer is still on the part
+    /// it pressed, and that part would move the offset.
+    fn stepping(&self) -> bool {
+        self.held.is_some_and(|held| {
+            held == self.hover && self.state.is_actionable() && self.moves(held)
+        })
+    }
+
+    /// Re-read the part under the pointer for the bar drawn at `bounds`, after
+    /// a step moved the thumb beneath it.
+    fn rehover(&mut self, bounds: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
+        if let Some(layout) = self.layout(bounds, scale, theme) {
+            damage::set(
+                &mut self.hover,
+                layout.part_at(*self.pointer),
+                bounds,
+                damage,
+            );
+        }
+    }
+
     /// Apply `change` to the held model, returning the requested offset when it
     /// actually moved (fail closed: no movement means no action) and reporting
     /// `bounds` — a moved offset is a moved thumb.
@@ -370,13 +452,24 @@ impl ScrollBar {
         moved.then_some(ScrollAction::ScrollTo { offset })
     }
 
+    /// End a press: the drag and the held step stop where they are, and the
+    /// bar takes `pointer` as its look.
+    fn end_press(&mut self, pointer: PointerState, bounds: Rect, damage: &mut Region) {
+        damage::set(&mut self.dragging, false, bounds, damage);
+        damage::set(&mut self.held, None, bounds, damage);
+        damage::set(&mut self.state.pointer, pointer, bounds, damage);
+        self.cadence.release();
+    }
+
     /// Feed a pointer event for the bar drawn at `bounds`.
     ///
     /// An end-button press steps one line, a track press pages one step, and a
     /// thumb press captures a drag whose pointer-to-thumb anchor is preserved so
     /// the content does not jump; a subsequent move re-maps and re-clamps the
-    /// offset (so a mid-drag range change stays valid). A denied, disabled,
-    /// pending, or failed-closed bar ignores presses (fail closed).
+    /// offset (so a mid-drag range change stays valid). A press toward an end
+    /// the content already rests at presses nothing. A denied, disabled,
+    /// pending, or failed-closed bar ignores presses (fail closed), and a
+    /// release or a cancel always ends the press, whatever became of the bar.
     /// The bar reports `bounds` into `damage` when the event changed how it
     /// draws — a moved thumb, a part hovered or released, the awake look
     /// arriving or leaving. It is the whole bar because that look is the whole
@@ -392,6 +485,25 @@ impl ScrollBar {
     ) -> Option<ScrollAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
+        }
+        match event {
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            } => {
+                let over = if bounds.contains(*self.pointer) {
+                    PointerState::Hover
+                } else {
+                    PointerState::None
+                };
+                self.end_press(over, bounds, damage);
+                return None;
+            }
+            InputEvent::PointerCancelled => {
+                self.end_press(PointerState::None, bounds, damage);
+                damage::set(&mut self.hover, ScrollPart::Outside, bounds, damage);
+                return None;
+            }
+            _ => {}
         }
         let layout = self.layout(bounds, scale, theme)?;
         let over_bar = if layout.bar.contains(*self.pointer) {
@@ -421,6 +533,10 @@ impl ScrollBar {
                 }
                 let part = layout.part_at(*self.pointer);
                 if let Some(step) = step_for(part) {
+                    if !self.moves(part) {
+                        return None;
+                    }
+                    damage::set(&mut self.hover, part, bounds, damage);
                     damage::set(&mut self.held, Some(part), bounds, damage);
                     damage::set(
                         &mut self.state.pointer,
@@ -428,7 +544,10 @@ impl ScrollBar {
                         bounds,
                         damage,
                     );
-                    return self.apply(step, bounds, damage);
+                    self.cadence.release();
+                    let action = self.apply(step, bounds, damage);
+                    self.rehover(bounds, scale, theme, damage);
+                    return action;
                 }
                 if part == ScrollPart::Thumb && layout.geometry.draggable() {
                     let thumb_start = to_i32(layout.geometry.thumb().start);
@@ -443,34 +562,11 @@ impl ScrollBar {
                 }
                 None
             }
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            } => {
-                damage::set(&mut self.dragging, false, bounds, damage);
-                damage::set(&mut self.held, None, bounds, damage);
-                damage::set(&mut self.state.pointer, over_bar, bounds, damage);
-                None
-            }
             InputEvent::PointerScrolled { dx, dy } if over_bar == PointerState::Hover => {
                 self.wheel(*dx, *dy, scale, bounds, damage)
             }
             _ => None,
         }
-    }
-
-    /// Perform one more step of a held end-button or track press.
-    ///
-    /// Press-and-hold auto-repeat is driven by the owner's one-shot timer and
-    /// event-driven wakeups (never a polling loop, spec §11.28): the owner arms
-    /// a timer on the press and calls this on each wake while the button is
-    /// held. It stops contributing when the offset reaches a bound (fail
-    /// closed) or the press is released.
-    pub fn repeat(&mut self, bounds: Rect, damage: &mut Region) -> Option<ScrollAction> {
-        if !self.state.is_actionable() {
-            return None;
-        }
-        let step = step_for(self.held?)?;
-        self.apply(step, bounds, damage)
     }
 
     /// Feed a key event to a focused, actionable bar: the orientation's arrow
@@ -589,11 +685,14 @@ impl ScrollBar {
 
     /// Paint the bar into `surface` at `bounds` for the active theme.
     ///
-    /// The Scroll Channel fills the whole bar; the thumb rounds through the
-    /// shared raster fill and brightens to the reactive rim when the bar is
-    /// awake; each end button draws its orientation-appropriate chevron,
-    /// brightening when it is the pointer target or is held; a focused bar draws
-    /// a reactive outline distinct from a hover. Content changes are never
+    /// The Scroll Channel is recessed into the surface, and the two end
+    /// buttons and the thumb are raised in it alike: each end button a plate
+    /// carrying its chevron across the whole button, the thumb a rounded bar.
+    /// An end button whose step would move nothing — the content already at
+    /// that end — draws no plate and a dimmed chevron, so it reads as having
+    /// nothing that way. The hovered button's chevron and the awake thumb
+    /// brighten, a held button's plate lights, and a focused bar draws a
+    /// reactive outline distinct from a hover. Content changes are never
     /// animated — the thumb follows the offset immediately — so the bar is
     /// already reduced-motion correct (spec §11.28).
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
@@ -613,62 +712,28 @@ impl ScrollBar {
         let channel = ground_fill(theme, palette.scroll_track, ChromeLayer::Inlay);
         surface.fill_rect(bx, by, bw, bh, Color::from(channel));
 
-        let active = self.is_active();
-        let disposition = self.state.disposition();
-        let disabled = matches!(disposition, ControlDisposition::DisabledByState);
-        let denied = matches!(disposition, ControlDisposition::DeniedByAuthority);
-
-        // End-button chevrons.
-        let chevron_idle = Color::from(if disabled {
-            palette.border
-        } else {
-            palette.on_surface_muted
-        });
-        let chevron_hot = Color::from(palette.rim_active);
         let (dec_dir, inc_dir) = match self.orientation {
             ScrollOrientation::Vertical => (ChevronDir::Up, ChevronDir::Down),
             ScrollOrientation::Horizontal => (ChevronDir::Left, ChevronDir::Right),
         };
-        let dec_hot = self.state.is_actionable()
-            && (self.held == Some(ScrollPart::Decrement) || self.hover == ScrollPart::Decrement);
-        let inc_hot = self.state.is_actionable()
-            && (self.held == Some(ScrollPart::Increment) || self.hover == ScrollPart::Increment);
-        paint_button(
-            surface,
-            layout.decrement,
-            dec_dir,
-            if dec_hot { chevron_hot } else { chevron_idle },
-        );
-        paint_button(
-            surface,
-            layout.increment,
-            inc_dir,
-            if inc_hot { chevron_hot } else { chevron_idle },
-        );
+        self.paint_end(surface, &layout, ScrollPart::Decrement, dec_dir, theme);
+        self.paint_end(surface, &layout, ScrollPart::Increment, inc_dir, theme);
 
-        // Thumb.
+        let disposition = self.state.disposition();
+        let disabled = matches!(disposition, ControlDisposition::DisabledByState);
+        let denied = matches!(disposition, ControlDisposition::DeniedByAuthority);
         let draggable = layout.geometry.draggable();
         let thumb_color = if disabled {
             Color::from(palette.border)
         } else if denied {
             Color::from(authority_rgba(palette, self.state.authority))
-        } else if draggable && active {
+        } else if draggable && self.is_active() {
             Color::from(palette.rim_active)
         } else {
             Color::from(palette.scroll_thumb)
         };
-        let margin = (layout.breadth / 6).min(layout.breadth / 2);
-        let thumb = layout.thumb_rect(margin);
-        if let Some((tx, ty, tw, th)) = surface_rect(thumb) {
-            if tw > 0 && th > 0 {
-                let radius = (layout.breadth / 2).min(tw / 2).min(th / 2);
-                surface.fill_round_rect(tx, ty, tw, th, radius, thumb_color);
-                if heavy_contrast(theme) {
-                    // A high-contrast theme rims the thumb so it reads without
-                    // relying on the channel/thumb brightness difference alone.
-                    draw_thumb_rim(surface, (tx, ty, tw, th), Color::from(palette.on_surface));
-                }
-            }
+        if let Some(thumb) = surface_rect(layout.thumb_rect()) {
+            paint_raised(surface, thumb, layout.breadth / 2, thumb_color, theme);
         }
 
         // Focus ring around the whole bar, distinct from a hover brighten.
@@ -685,32 +750,76 @@ impl ScrollBar {
             );
         }
     }
-}
 
-/// Paint one end button: its chevron centred in `rect`, inset so the glyph does
-/// not touch the channel walls.
-fn paint_button(surface: &mut Surface, rect: Rect, dir: ChevronDir, color: Color) {
-    if rect.width == 0 || rect.height == 0 {
-        return;
+    /// Paint end button `part` of `layout`, its chevron pointing `dir`.
+    fn paint_end(
+        &self,
+        surface: &mut Surface,
+        layout: &BarLayout,
+        part: ScrollPart,
+        dir: ChevronDir,
+        theme: &Theme,
+    ) {
+        let rect = match part {
+            ScrollPart::Decrement => layout.decrement,
+            _ => layout.increment,
+        };
+        let palette = theme.palette();
+        let live = self.state.is_actionable() && self.moves(part);
+        let held = live && self.held == Some(part);
+        if live {
+            let inset = layout.inset();
+            let plate = Rect::new(
+                rect.left() + to_i32(inset),
+                rect.top() + to_i32(inset),
+                rect.width.saturating_sub(inset.saturating_mul(2)),
+                rect.height.saturating_sub(inset.saturating_mul(2)),
+            );
+            let face = Color::from(if held {
+                palette.rim_active
+            } else {
+                palette.scroll_thumb
+            });
+            if let Some(plate) = surface_rect(plate) {
+                paint_raised(surface, plate, layout.breadth / 4, face, theme);
+            }
+        }
+        let glyph = if !live {
+            palette.on_surface_muted
+        } else if !held && self.hover == part {
+            palette.rim_active
+        } else {
+            palette.on_surface
+        };
+        paint_chevron(surface, rect, dir, Color::from(glyph));
     }
-    let pad = rect.width.min(rect.height) / 4;
-    let inner = Rect::new(
-        rect.left() + to_i32(pad),
-        rect.top() + to_i32(pad),
-        rect.width.saturating_sub(pad.saturating_mul(2)),
-        rect.height.saturating_sub(pad.saturating_mul(2)),
-    );
-    paint_chevron(surface, inner, dir, color);
 }
 
-/// Draw a one-pixel rim around a thumb rectangle (high-contrast only).
-fn draw_thumb_rim(surface: &mut Surface, rect: (u32, u32, u32, u32), color: Color) {
-    let (x, y, w, h) = rect;
+/// Paint one raised part of the bar — the thumb or an end button — as a
+/// rounded plate of `color` at most `radius` round, rimmed under a
+/// high-contrast theme so it reads without relying on its brightness against
+/// the channel alone.
+fn paint_raised(
+    surface: &mut Surface,
+    (x, y, w, h): (u32, u32, u32, u32),
+    radius: u32,
+    color: Color,
+    theme: &Theme,
+) {
     if w == 0 || h == 0 {
         return;
     }
-    surface.fill_rect(x, y, w, 1, color);
-    surface.fill_rect(x, y + h - 1, w, 1, color);
-    surface.fill_rect(x, y, 1, h, color);
-    surface.fill_rect(x + w - 1, y, 1, h, color);
+    let radius = radius.min(w / 2).min(h / 2);
+    surface.fill_round_rect(x, y, w, h, radius, color);
+    if heavy_contrast(theme) {
+        draw_outline(
+            surface,
+            x,
+            y,
+            w,
+            h,
+            1,
+            Color::from(theme.palette().on_surface),
+        );
+    }
 }

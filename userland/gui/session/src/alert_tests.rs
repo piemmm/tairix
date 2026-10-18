@@ -5,12 +5,32 @@
 
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
-use tairix_wm::{Compositor, Point, Rect, Surface, WindowId};
+use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Surface, WindowId};
 
 use super::{alert_title, extent, Alerts, Answer, Speaker, ALERT_ARM_NS};
 use crate::hold::Holds;
 use crate::shell::DesktopShell;
 use crate::tests::headless_desktop;
+
+/// A primary press and release on alert window `wm` at `at`, both at
+/// `now_ns`, and the answer the click gave.
+fn click(
+    alerts: &mut Alerts,
+    (wm, at): (WindowId, Point),
+    now_ns: u64,
+    holds: &mut Holds,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) -> Option<Answer> {
+    let pressed = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
+    let released = InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    };
+    let _ = alerts.pointer(wm, at, &pressed, now_ns, holds, shell, comp);
+    alerts.pointer(wm, at, &released, now_ns, holds, shell, comp)
+}
 
 fn spec(buttons: &[(&str, AlertButtonRole)]) -> AlertSpec {
     let buttons: alloc::vec::Vec<AlertButton> = buttons
@@ -152,16 +172,23 @@ fn an_alert_answers_only_once_its_buttons_have_armed() {
     let wm = alerts.up[0].window.wm();
     let at = first_button(&alerts, wm, &shell, &comp);
     assert_eq!(
-        alerts.click(wm, at, 1_000, &mut holds, &mut shell, &mut comp),
+        click(
+            &mut alerts,
+            (wm, at),
+            1_000,
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ),
         None,
         "not before the serve loop has seen it"
     );
     alerts.stamp(1_000);
     alerts.stamp(5_000_000_000);
     assert_eq!(
-        alerts.click(
-            wm,
-            at,
+        click(
+            &mut alerts,
+            (wm, at),
             1_000 + ALERT_ARM_NS - 1,
             &mut holds,
             &mut shell,
@@ -183,9 +210,9 @@ fn an_alert_answers_only_once_its_buttons_have_armed() {
         "nor by a key typed into what was there"
     );
     assert_eq!(
-        alerts.click(
-            wm,
-            at,
+        click(
+            &mut alerts,
+            (wm, at),
             1_000 + ALERT_ARM_NS,
             &mut holds,
             &mut shell,
@@ -199,7 +226,14 @@ fn an_alert_answers_only_once_its_buttons_have_armed() {
     assert!(comp.window(wm).is_none(), "an answered alert is down");
     assert_eq!(holds.holder(files), None, "and holds nothing");
     assert_eq!(
-        alerts.click(wm, at, u64::MAX, &mut holds, &mut shell, &mut comp),
+        click(
+            &mut alerts,
+            (wm, at),
+            u64::MAX,
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ),
         None,
         "and answers no more"
     );
@@ -326,7 +360,14 @@ fn the_newest_alert_holding_a_window_stays_its_front_one() {
     alerts.stamp(0);
     let at = first_button(&alerts, oldest, &shell, &comp);
     assert_eq!(
-        alerts.click(oldest, at, ALERT_ARM_NS, &mut holds, &mut shell, &mut comp),
+        click(
+            &mut alerts,
+            (oldest, at),
+            ALERT_ARM_NS,
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ),
         Some(Answer {
             alert_id: 1,
             index: 0
@@ -424,7 +465,14 @@ fn a_desktop_notice_holds_nothing_and_its_answer_is_relayed_to_no_one() {
     alerts.stamp(0);
     let at = first_button(&alerts, wm, &shell, &comp);
     assert_eq!(
-        alerts.click(wm, at, ALERT_ARM_NS, &mut holds, &mut shell, &mut comp),
+        click(
+            &mut alerts,
+            (wm, at),
+            ALERT_ARM_NS,
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ),
         None,
         "answered, and owed to no application"
     );
@@ -649,5 +697,59 @@ fn no_application_speaks_as_the_desktop() {
         super::dialog_title(app_speaker("Desk\u{200b}top", bundle), "Authenticate"),
         "/Users/ann/Applications/Desktop.app \u{2014} Authenticate",
         "nor does a dialog"
+    );
+}
+
+/// What counts is when a click *began*: one pressed before the buttons armed
+/// answers nothing however late it is let go, since it was meant for what was
+/// there before the alert.
+#[test]
+fn a_click_begun_before_the_buttons_armed_answers_nothing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let files = owner(&mut shell, &mut comp);
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    assert!(alerts.open(
+        (9, Some(77), Some(files)),
+        (&ok(), "Error from Files"),
+        (true, false),
+        &mut holds,
+        &mut shell,
+        &mut comp
+    ));
+    let wm = alerts.up[0].window.wm();
+    let at = first_button(&alerts, wm, &shell, &comp);
+    alerts.stamp(1_000);
+    let pressed = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
+    let released = InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    };
+    let early = 1_000 + ALERT_ARM_NS - 1;
+    let late = 1_000 + ALERT_ARM_NS;
+    assert_eq!(
+        alerts.pointer(wm, at, &pressed, early, &mut holds, &mut shell, &mut comp),
+        None
+    );
+    assert_eq!(
+        alerts.pointer(wm, at, &released, late, &mut holds, &mut shell, &mut comp),
+        None,
+        "the release came after the arm, the press before it"
+    );
+    assert!(alerts.owns(wm), "the alert is still up");
+    assert_eq!(
+        click(
+            &mut alerts,
+            (wm, at),
+            late,
+            &mut holds,
+            &mut shell,
+            &mut comp
+        ),
+        Some(Answer {
+            alert_id: 9,
+            index: 0
+        })
     );
 }

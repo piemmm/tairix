@@ -139,9 +139,10 @@ mod program {
     use tairix_browse::render::{
         delete_alert, draw_open_with_chooser, draw_progress_window, draw_properties_window,
         draw_rename_field, drop_folder_at, manager_tool_at, open_with_action_at, open_with_reveal,
-        open_with_row_at, open_with_scroll_pointer, open_with_scroll_wheel, progress_window_extent,
-        properties_drive_damage, properties_reveal, properties_scroll_pointer,
-        properties_scroll_wheel, render_into, scroll_pointer, scroll_wheel, AttrAction, Frame,
+        open_with_row_at, open_with_scroll_pointer, open_with_scroll_repeat,
+        open_with_scroll_wheel, progress_window_extent, properties_drive_damage, properties_reveal,
+        properties_scroll_pointer, properties_scroll_repeat, properties_scroll_wheel, render_into,
+        scroll_pointer, scroll_repeat, scroll_wheel, sidebar_scroll_repeat, AttrAction, Frame,
         Identity, OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls,
         PropertiesFrame, PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView,
         SectionsShown, DELETE_CONFIRM_INDEX,
@@ -678,10 +679,43 @@ mod program {
             change
         }
 
-        /// When this window next needs the loop with no event to bring it: its
-        /// drive's next reading.
-        fn due(&self) -> Option<u64> {
-            self.drive.as_ref().and_then(|watch| watch.due)
+        /// When this window next needs the loop with no event to bring it, now
+        /// it is `now`: its drive's next reading, or a held scrollbar press
+        /// stepping its section.
+        fn due(&mut self, now: u64) -> Option<u64> {
+            let drive = self.drive.as_ref().and_then(|watch| watch.due);
+            [drive, self.scroll.repeat_deadline(now)]
+                .into_iter()
+                .flatten()
+                .min()
+        }
+
+        /// Step the section's held scrollbar press if it is due at `now`,
+        /// answering whether the section moved.
+        fn step_scroll(
+            &mut self,
+            (window, scale, theme): (Rect, Scale, &Theme),
+            now: u64,
+            damage: &mut Region,
+        ) -> bool {
+            let view = self.view();
+            let PropertiesState::Ready(props) = &self.state else {
+                return false;
+            };
+            let shown = sections_shown(
+                self.can_chown,
+                self.owner.as_ref(),
+                &self.section,
+                self.drive.as_ref(),
+            );
+            properties_scroll_repeat(
+                &mut self.scroll,
+                props,
+                (view, shown),
+                (window, scale, theme),
+                now,
+                damage,
+            )
         }
 
         /// The reading to ask for now, if one is due at `now` and none is out.
@@ -807,15 +841,71 @@ mod program {
             true
         }
 
-        /// When this window next needs the loop with no event to bring it: the
-        /// band held over it steps the listing, or a clicked name opens.
-        fn due(&self) -> Option<u64> {
+        /// When this window next needs the loop with no event to bring it, now
+        /// it is `now`: the band held over it steps the listing, a clicked
+        /// name opens, or a held scrollbar press steps its column.
+        fn due(&mut self, now: u64) -> Option<u64> {
             let band = match &self.overlays.sweep {
                 Some(Sweep::Live(band)) => band.due(),
                 _ => None,
             };
             let rename = self.overlays.rename_arm.and_then(|arm| arm.due());
-            band.into_iter().chain(rename).min()
+            let chooser = self
+                .overlays
+                .open_with
+                .as_mut()
+                .and_then(|overlay| overlay.chooser.scroll_repeat_deadline(now));
+            [
+                band,
+                rename,
+                chooser,
+                self.browser.scroll_repeat_deadline(now),
+                self.places.scroll_mut().repeat_deadline(now),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+        }
+
+        /// Step every held scrollbar press in this window due at `now` — the
+        /// listing's, the rail's while it shows, the chooser's — reporting
+        /// what it repainted here. The chooser presents in its own pane.
+        fn step_scrollbars(
+            &mut self,
+            canvas: Canvas<'_>,
+            now: u64,
+            damage: &mut Region,
+        ) -> Repaint {
+            let (scale, theme, toolbar) = (canvas.scale, canvas.theme(), canvas.chrome.toolbar);
+            let mut moved = scroll_repeat(
+                &mut self.browser,
+                (scale, theme),
+                canvas.viewport(&self.places),
+                toolbar,
+                now,
+                damage,
+            );
+            if canvas.chrome.rail(&self.places).is_some() {
+                moved |= sidebar_scroll_repeat(
+                    &mut self.places,
+                    (canvas.window(), scale, theme),
+                    toolbar,
+                    now,
+                    damage,
+                );
+            }
+            if let Some(overlay) = self.overlays.open_with.as_mut() {
+                let mode = *overlay.pane.mode();
+                let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+                overlay.owed |= open_with_scroll_repeat(
+                    &mut overlay.chooser,
+                    (scale, theme),
+                    viewport,
+                    now,
+                    &mut damage::sink(),
+                );
+            }
+            Repaint::reported_if(moved)
         }
 
         /// Open the rename a click on a name armed once it is due at `now`,
@@ -2009,7 +2099,8 @@ mod program {
     /// Serve what falls due with no event to bring it, answering whether any
     /// window moved: a band held where its listing scrolls steps it, a click
     /// on a chosen name whose double-click interval has run out opens the
-    /// rename it armed, and a drive window on show asks for its next reading.
+    /// rename it armed, a held scrollbar press steps its column, and a drive
+    /// window on show asks for its next reading.
     fn serve_due(windows: &mut [OpenWindow], reads: &Reads, theme: &Theme, scale: Scale) -> bool {
         let now = tairix_rt::clock_get();
         let mut moved = false;
@@ -2026,13 +2117,20 @@ mod program {
                         chrome: state.chrome,
                     };
                     let stepped = state.step_band(canvas, now, &mut damage);
-                    stepped.merged(state.open_due_rename(canvas, now, &mut damage))
+                    stepped
+                        .merged(state.open_due_rename(canvas, now, &mut damage))
+                        .merged(state.step_scrollbars(canvas, now, &mut damage))
                 }
                 WindowKind::Properties(props) => {
                     if let Some(job) = props.take_due_drive(now) {
                         reads.want_drive(id, job);
                     }
-                    Repaint::Nothing
+                    let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+                    Repaint::reported_if(props.step_scroll(
+                        (window, scale, theme),
+                        now,
+                        &mut damage,
+                    ))
                 }
                 // A count is shown as it is adopted, never on a timer here.
                 WindowKind::Progress(_) => Repaint::Nothing,
@@ -6178,6 +6276,12 @@ mod program {
             }
             return (Repaint::Nothing, false);
         }
+        if *action == PointerAction::Cancelled {
+            // The press never completed, so it collapses no selection.
+            overlays.drag = None;
+            overlays.collapse_on_release = None;
+            return (Repaint::Nothing, false);
+        }
         if matches!(action, PointerAction::Released(_)) {
             overlays.drag = None;
             if let Some(index) = overlays.collapse_on_release.take() {
@@ -8159,7 +8263,7 @@ mod program {
             ContextCommand::ClearSelection => {
                 return apply_selection_verb(browser, frame, SelectionVerb::Clear, damage);
             }
-            ContextCommand::Properties => ask_properties(browser, acts.properties),
+            ContextCommand::GetInfo => ask_properties(browser, acts.properties),
             // The same modal-confirmed removal the `Delete` key opens: the menu
             // adds no authority — the confirmed walk is the user's own
             // permission-checked `fs_unlink`s.
@@ -8750,7 +8854,10 @@ mod program {
         (false, false)
     }
 
-    /// Open a Properties window on the node `request` names.
+    /// What an item's Info window is called after the item's name.
+    const INFO_WINDOW_NAME: &str = "Info";
+
+    /// Open an Info window on the node `request` names.
     ///
     /// The read leaves the loop: a node is one `fs_stat` plus one call per
     /// extended-attribute key, which on a contended volume is a visible stall
@@ -8778,7 +8885,14 @@ mod program {
             target,
             drive,
         } = request;
-        let title = alloc::format!("{} — Properties", path_leaf(&path));
+        let mut title = String::new();
+        tairix_browse::vfs::write_document_title(
+            &mut title,
+            path_leaf(&path),
+            false,
+            false,
+            INFO_WINDOW_NAME,
+        );
         // A mount point that does not parse names no drive: it is described
         // as a node, never read as whatever volume an empty path would match.
         let drive = drive.and_then(|art| Some((art, drive_job(&path)?)));
@@ -8794,14 +8908,14 @@ mod program {
         let screen = desktop.screen();
         let mode = app::mode_for(w.min(screen.width), h.min(screen.height));
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-            report_error("window surface refused; no Properties window opened");
+            report_error("window surface refused; no Info window opened");
             return;
         };
         let sizing = tairix_browse::properties_sizing(desktop.scale(), grounds.popups);
         let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
             Ok((pane, _)) => pane,
             Err(err) => {
-                report_error(&alloc::format!("{err}; no Properties window opened"));
+                report_error(&alloc::format!("{err}; no Info window opened"));
                 return;
             }
         };
@@ -8848,7 +8962,7 @@ mod program {
             reads.forget_properties(id);
             reads.forget_drive(id);
             let _ = win.pane.close(client);
-            report_error("the Properties window could not be painted; it was closed again");
+            report_error("the Info window could not be painted; it was closed again");
             return;
         }
         windows.push(win);
@@ -10655,12 +10769,13 @@ mod program {
             if moved || !drained {
                 continue;
             }
+            let now = tairix_rt::clock_get();
             due.set(
                 windows
-                    .iter()
-                    .filter_map(|win| match &win.kind {
-                        WindowKind::Browser(state) => state.due(),
-                        WindowKind::Properties(props) => props.due(),
+                    .iter_mut()
+                    .filter_map(|win| match &mut win.kind {
+                        WindowKind::Browser(state) => state.due(now),
+                        WindowKind::Properties(props) => props.due(now),
                         WindowKind::Progress(progress) => progress.operation.due_ns,
                     })
                     .min(),

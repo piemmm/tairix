@@ -97,7 +97,7 @@
 
 use tairix_taskbar::{Taskbar, TaskbarInput, TaskbarResponse};
 use tairix_wm::{
-    Compositor, InputEvent, InputResponse, InputRouter, Modifiers, Point, PointerButton,
+    Abandoned, Compositor, InputEvent, InputResponse, InputRouter, Modifiers, Point, PointerButton,
     PointerFocus, Scale, WindowId,
 };
 
@@ -262,8 +262,10 @@ impl SessionInputRouter {
     }
 
     /// Resolve whichever of the hover picker's timed edges has come due at
-    /// `now_ns`.
-    pub fn tick(&mut self, taskbar: &mut Taskbar, now_ns: u64) -> TaskbarResponse {
+    /// `now_ns`, and step a press held on an open popup's scrollbar whose
+    /// repeat is due.
+    pub fn tick(&mut self, taskbar: &mut Taskbar, now_ns: u64, scale: Scale) -> TaskbarResponse {
+        self.taskbar.scroll_repeat(taskbar, now_ns, scale);
         self.taskbar.tick(taskbar, now_ns)
     }
 
@@ -457,12 +459,23 @@ impl SessionInputRouter {
     /// every pass rather than reasoning about which pass was the first. The
     /// stream coming back needs no announcement: the next event resolves the
     /// pointer from the stack, and the next press starts a fresh gesture.
-    pub fn yield_pointer(&mut self, compositor: &mut Compositor, taskbar: &mut Taskbar) {
+    ///
+    /// Answers what the window manager abandoned, so the embedder can tell the
+    /// client whose press it took that the press is over. A press the bar held
+    /// is ended here, on the bar itself.
+    pub fn yield_pointer(
+        &mut self,
+        compositor: &mut Compositor,
+        taskbar: &mut Taskbar,
+    ) -> Abandoned {
         let scale = compositor.scale();
         self.buttons = 0;
-        self.grab = None;
-        self.wm.abandon_gesture();
+        if self.grab.take() == Some(PointerOwner::Chrome) {
+            self.taskbar.cancel_press(taskbar, scale);
+        }
+        let abandoned = self.wm.abandon_gesture(compositor);
         self.focus_on(None, compositor, taskbar, scale);
+        abandoned
     }
 
     /// Follow the device to `to` while the stream is

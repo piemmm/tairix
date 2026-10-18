@@ -1181,8 +1181,8 @@ A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 - The Frame Rim is one quiet neutral at every activation, a single step away from the window surface. It is the line the eye reads a window's shape by, so it never brightens on focus: a rim that did made the boundary the loudest mark on the desktop and left every unfocused window reading as switched off.
 - Focus is shown inside the frame instead, by the title bar's stronger title contrast, and under high contrast by a non-color distinction as well — a doubled inner rim line, which follows the plate's own corners, or a title-weight change.
 - **The rim is bevelled by the desktop's one key light, at the upper left.** A ring as wide as the frame border is lifted by `bevel_light` where the edge faces the light and deepened by `bevel_shade` where it faces away, turning through each corner with the edge's own direction. The washes are translucent, so they say which way an edge faces without changing its tone. The rim is the title band's top and sides as well, so the band adds only its foot — one border deep in `bevel_shade` where it meets the client, laid after the bar's marks so it runs unbroken under a lit command — and every bevel line is one border wide, never two side by side.
-- A restored window casts a drop shadow onto what lies beneath it; a maximized or fullscreen one casts none, because it fills the area it was given.
-- The inactive frame is structurally identical and equally legible; only its title contrast is quieter.
+- A restored window casts a drop shadow onto what lies beneath it; a maximized or fullscreen one casts none, because it fills the area it was given. The family holding the focus stands lifted; a decorated window resting behind it casts a lighter, shorter shadow, so it reads as standing lower, and the change between the two is eased over the window-activation timing — immediate under reduced motion.
+- The inactive frame is structurally identical and equally legible; only its title contrast is quieter. A frame is active exactly while its window, or a transient of its own, holds the focus, so a window opened behind another never wears the active look.
 - An attention request adds a bounded Signal Bead or rim segment. It does not steal focus and does not pulse indefinitely.
 - Client pixels are clipped to the client viewport and never paint into the title bar, borders, root scrollbars, or resize grabber.
 - **Client pixels are clipped to the frame's rounded plate, so content can never square off the window's corner.** A client's rows are square and the frame's silhouette is a curve, so the compositor cuts the client to the plate the frame fills inside its rim: a pixel the plate does not fully cover is the frame's, whose rim and plate *are* the curve there. The top and bottom furniture strips reach at least the rim's radius so a corner row is drawn as furniture over its whole width — the one place furniture and client share a row, and never further in than the radius.
@@ -1190,6 +1190,7 @@ A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 - Frame activation, theme change, and hover do not change the client origin or outer dimensions.
 - Maximized geometry uses the session work area and therefore respects taskbars, reserved screen edges, and the current logical scale.
 - The furniture band on the left, right, and bottom edges is the thin frame rim, whether or not the window is resizable. A band wide enough to grab is not reserved: it would show as dead space around the content on every resizable window.
+- Every edge and every corner resizes, the top ones included. The title bar keeps every point of its own band, so the top zone reaches inward only over the rim above it, and a dragged top edge stops at the work area's top so the title bar stays reachable.
 - A resizable window's resize *hit* zone therefore reaches inward over the client's own outermost pixels, by the theme's invisible hit slop — the invisible resize border macOS, GNOME, and Windows use. The application still draws every client pixel; it does not receive presses on the few it trades for a grabbable edge, and where it declares root-viewport furniture the frame's zone takes that outer strip first. A non-resizable window trades nothing: every client pixel reaches it.
 - Drawing stays strictly separated even so: the frame paints no furniture mark inside the client, and the client paints no furniture.
 - The frame owns the hit map for move, resize, command buttons, and any root-viewport scrollbars.
@@ -1274,7 +1275,8 @@ The resize grabber is the corner resize gesture. A window frame's resize zone is
 
 - Where one is drawn it appears at the logical bottom-trailing corner and uses Grip Teeth or another shape mark that remains visible without color.
 - Its visible size and pointer hit region are separate. The hit region may extend invisibly into the frame and, on a window frame, into the client's own outer pixels, but never into another control or scrollbar thumb.
-- Press and drag capture the pointer until release or cancel. Geometry follows the pointer on the next frame with no easing.
+- Press and drag capture the pointer until release or cancel. Geometry follows the pointer on the next frame with no easing, once the pointer has travelled past the shared drag slop, so a press that is a click resizes nothing.
+- A drag on a maximized window's edge takes it out of maximization where it stands, at the size it has, so the drag continues and nothing snaps back when it ends; cancelling the drag puts the exact starting placement back, maximized included.
 - The window manager enforces typed minimum, maximum, aspect, and work-area constraints before presenting each new rectangle.
 - When both root scrollbars are visible, the grabber owns their junction cell. A non-resizable window uses a neutral `ScrollCorner` there instead.
 - Maximized and non-resizable windows hide or disable the grabber consistently with the active theme.
@@ -1401,7 +1403,8 @@ ScrollBar
 - Idle: low-contrast thumb and quiet Scroll Channel.
 - Hover, keyboard focus, wheel input, or active scrolling: thumb and relevant end control brighten without changing geometry.
 - Thumb drag captures the pointer and preserves the initial pointer-to-thumb anchor so the content does not jump when the drag begins.
-- A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop.
+- A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop. The cadence is the control's own: it states when its next step is due and steps when asked at that time, and its owner folds that one deadline into its wait rather than keeping a timer beside the control. A hold steps only while the pointer is on the part it pressed and the step would move something, and a press toward a bound already reached presses nothing.
+- A press the bar holds is the bar's to its end: its owner routes every event to it wherever the pointer has gone, and a release or a cancel ends it even when the bar itself has gone.
 - Mouse wheel, touchpad, keyboard, and accessibility actions update the same scroll model. The control does not maintain a private offset separate from the owning viewport.
 - **A view scrolls by pixels.** Its content is laid out at its natural size and the viewport rests at any pixel of it; an item the viewport's edge crosses is drawn whole and cut by the edge, never squeezed into what shows or dropped. The line step is the view's own row pitch, and a page is the viewport less one line, so a page turn keeps the last line it showed.
 - **One scrolled view maps the content and the window.** Paint is confined to the viewport and shifted by the offset, so no item is ever drawn at a negative coordinate; a window point maps into the layout for hit testing and a layout rectangle maps back to the part that shows for damage. Lines are placed at their absolute content coordinate, so content taller than `i32::MAX` pixels loses its end: `plans/OPEN-DEFECTS.md` D327. A pointer outside the viewport keeps its place across the scrolling axis and stands just before the content's start along it, so no control can hover or arm the part scrolled out of sight while a drag across the axis — a slider in a scrolling column — keeps following it.
@@ -2082,17 +2085,16 @@ a `FieldGroup` is the captioned plate its rows sit on.
   construction, because a state that moves while the reader works must not
   cost a rebuild of rows holding a caret and a selection; the capsule rides a
   band of its own either way, so an owner that sets one re-measures.
-- **The owner places the choice popup.** An expanded list is drawn above every
-  group, so a row cannot paint it — the group's later rows would cover it. The
-  group names the row and slot to anchor it to; the owner places it within the
-  viewport it alone knows and paints it after every group is drawn. That
-  viewport is the *only* thing the owner has to supply: `FieldGroup::layout`
-  takes it and answers the whole layout — the group's slot column, and the
-  list placed by the one drop-down placement rule (§11.9) — so an owner laying
-  its groups out independently carries none of that arithmetic. An owner
-  sharing one column across several groups takes the widest
-  (`FieldGroup::shared_column`) and places the list through the anchor
-  instead. The column is an input to every row question a group answers —
+- **The owner names the room a choice list may hang into.** An expanded list
+  is drawn above every group, so a row cannot paint it — the group's later rows
+  would cover it; the owner paints it after every group is drawn. The viewport
+  it must fit in is the *only* thing the owner supplies, and the layout carries
+  it: `FieldGroup::layout` takes it and answers the whole layout — the group's
+  slot column, and the list placed by the one drop-down placement rule (§11.9)
+  — and an owner sharing one column across several groups takes the widest
+  (`FieldGroup::shared_column`) and hands `FieldGroup::place_popup` a layout
+  carrying it. The row that opens or closes a list reports the plate it opens
+  into or vacates from that same viewport, so no owner reports a list. The column is an input to every row question a group answers —
   its height, its rows' rectangles and hit test, its focus damage — because
   it decides what a description wraps into: a group measured in its own
   narrower column and drawn in a wider shared one would cut the

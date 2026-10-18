@@ -335,9 +335,9 @@ coded per window action. The window manager's `select` module
   gesture — the pointer routinely runs past that edge, and re-deriving the
   shape from where it now is would flicker mid-drag. Otherwise a point on a
   decorated window's resize edge yields the double arrow of the axis that edge
-  moves along (the two sides share the horizontal arrow, the two corners take
-  opposite diagonals), so a grabbable edge announces itself before it is
-  pressed. Over a decorated window's title bar, controls or rim it is the
+  moves along (the two sides share the horizontal arrow, the top and bottom
+  edges the vertical one, and opposite corners share a diagonal), so a
+  grabbable edge announces itself before it is pressed. Over a decorated window's title bar, controls or rim it is the
   `Arrow`: the frame is the window manager's, not the application's to
   restyle. Over a window's content the pointer takes the **cursor hint** of
   the top-most window under it; over the desktop background it is the plain

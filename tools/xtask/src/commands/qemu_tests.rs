@@ -16255,10 +16255,11 @@ fn reconstruct_manager_item_click(
     ))
 }
 
-/// Screen points of the two gestures that activate the planted document `name`
-/// through the **file manager's own item context menu**, in the `slot`-th
-/// served window: the secondary press on the item, and the *Open* row of the
-/// plate the desktop draws for it.
+/// Screen points of the three gestures that activate the planted document
+/// `name` through the **file manager's own item context menu**, in the
+/// `slot`-th served window: the secondary press on the item, the row naming the
+/// item on the plate the desktop draws for it, and the *Open* row of the plate
+/// that row opens.
 ///
 /// The press is [`reconstruct_manager_item_click`]'s, so the item aimed at is
 /// the one every other file-manager gesture aims at. The plate is placed from
@@ -16270,15 +16271,23 @@ fn reconstruct_manager_item_click(
 /// The rows are the manager's own — its engine composes them from
 /// [`tairix_browse::CONTEXT_COMMANDS`] under the model a *selected* entry
 /// offers, which is what the app does before it asks for the plate — so
-/// nothing here restates a row by position or a label by hand. Only the
-/// selected entry's **kind** reaches the model, so the browser is rebuilt for
-/// the selection rather than the index.
+/// nothing here restates a row by position or a label by hand: the row naming
+/// the item is found as the one whose plate holds *Open*. Only the selected
+/// entry's **kind** reaches the model, so the browser is rebuilt for the
+/// selection rather than the index.
 fn reconstruct_manager_item_menu(
     theme: &tairix_theme::Theme,
     slot: u64,
     name: &[u8],
     what: &str,
-) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
+) -> Result<
+    (
+        tairix_geometry::Point,
+        tairix_geometry::Point,
+        tairix_geometry::Point,
+    ),
+    String,
+> {
     use tairix_geometry::Rect;
 
     let press = reconstruct_manager_item_click(theme, slot, name, what)?;
@@ -16315,13 +16324,29 @@ fn reconstruct_manager_item_menu(
     // No information row is declared, so the attested identity a chain would
     // draw one from is never read.
     let model = tairix_controls::ChainModel::from_app_menu(wire.title(), &wire, None);
-    let (_, row) = chain_plate_and_row(
+    let open = tairix_browse::ContextCommand::Open.label();
+    let item_row = model
+        .rows()
+        .iter()
+        .find(|row| row.drawn().label() == open)
+        .and_then(tairix_controls::ChainRow::parent)
+        .and_then(|parent| model.rows().get(parent))
+        .map(|row| String::from(row.drawn().label()))
+        .ok_or_else(|| format!("{what}: no row of the menu opens the Open row's plate"))?;
+    let (_, rows) = chain_path(
         model,
         tairix_desktop_session::windows::window_menu_placement(Rect::new(press.x, press.y, 0, 0)),
-        tairix_browse::ContextCommand::Open.label(),
+        &[&item_row, open],
         what,
     )?;
-    Ok((press, rect_centre(row, "Open row")?))
+    let [item, open] = rows[..] else {
+        return Err(format!("{what}: the path reached {} rows", rows.len()));
+    };
+    Ok((
+        press,
+        rect_centre(item, "item row")?,
+        rect_centre(open, "Open row")?,
+    ))
 }
 
 /// Create a folder on the desktop through the backdrop's own menu.
@@ -16668,9 +16693,10 @@ const WINDOW_RAISED_MARKER: &str = tairix_desktop_session::WINDOW_RAISED_MESSAGE
 /// resolves a slot's application from, and while it did, this vertical could
 /// not have failed.
 ///
-/// Each activation is a secondary press on the item and a primary press on the
-/// *Open* row of the plate the desktop draws for it
-/// ([`reconstruct_manager_item_menu`]). That row runs the manager's own
+/// Each activation is a secondary press on the item, then primary presses on
+/// the row naming the item on the plate the desktop draws for it and on the
+/// *Open* row of the plate that row opens ([`reconstruct_manager_item_menu`]).
+/// That row runs the manager's own
 /// `activate` — the same call a double-click's second press reaches, over the
 /// paths the engine's rustdoc pins the menu to — so the authority this proves
 /// travelling is the same, and the claim is unchanged. The menu route is what
@@ -16698,13 +16724,16 @@ const WINDOW_RAISED_MARKER: &str = tairix_desktop_session::WINDOW_RAISED_MESSAGE
 ///   create reply would say only that the window exists, and the listing
 ///   arrives on a worker, so anything earlier races the frame the items are
 ///   in.
-/// - Each *Open* row click waits on [`MENU_SHOWN_MARKER`], the session's own
-///   witness that a frame carrying the chain went out. It is also the one
-///   statement anywhere that the press *reached the item*: the manager asks
-///   for a plate only once it has hit-tested an entry under the pointer, so a
-///   drawn plate is proof the gesture landed where the reconstruction aimed
-///   it, and its absence localises a failure to the aim rather than leaving a
-///   silent timeout.
+/// - Each activation's menu clicks wait on [`MENU_SHOWN_MARKER`], the
+///   session's own witness that a frame carrying the chain went out. It is
+///   also the one statement anywhere that the press *reached the item*: the
+///   manager asks for a plate only once it has hit-tested an entry under the
+///   pointer, so a drawn plate is proof the gesture landed where the
+///   reconstruction aimed it, and its absence localises a failure to the aim
+///   rather than leaving a silent timeout. The *Open* click follows the item
+///   row's at once: the chain takes every event queued behind the press that
+///   opened it, so the plate the item row opens is the chain's by
+///   construction.
 /// - The viewer's window is placed over the manager window, so each later
 ///   activation first presses the manager's slot, which asks for the folder
 ///   the manager window shows and so raises it. That press waits on the
@@ -16729,7 +16758,7 @@ fn handover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
     let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
-    let (item, open) =
+    let (item, item_row, open) =
         reconstruct_manager_item_menu(theme, HANDOVER_MANAGER_WINDOW, picture, WHAT)?;
     for nth in 0..ACTIVATIONS {
         // The first slot press opens the manager's window and the first frame
@@ -16747,6 +16776,9 @@ fn handover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
             );
             pen.click(WINDOW_RAISED_MARKER, nth, MouseButton::Secondary, item);
         }
+        // The chain takes every event queued behind the press that opened it,
+        // so the item's plate is open by the time the second click arrives.
+        pen.click(MENU_SHOWN_MARKER, nth + 1, MouseButton::Primary, item_row);
         pen.click(MENU_SHOWN_MARKER, nth + 1, MouseButton::Primary, open);
     }
     Ok(pen.steps())
@@ -16984,33 +17016,64 @@ fn reconstruction_chain_geometry(
 /// The root plate of the chain the desktop opens for `model` at `placement`,
 /// and the screen rectangle of the row labelled `label` on it.
 ///
-/// Reconstructed by driving the **production** chain — the same model, the same
-/// placement rule, the same row geometry the guest lays out — so a script
-/// clicks where the desktop actually draws rather than at coordinates copied
-/// from a screenshot.
-///
-/// The chain is opened for the backdrop as its owner because the owner decides
-/// only where an *answer* goes; placement reads the model, the placement and
-/// the screen, all of which are the same for any owner.
-///
-/// One definition, because every menu a pointer script clicks a row of is
-/// reconstructed this way: an application's own window menu, the clock's, and
-/// the icon-bar slot's alike.
+/// The one-row case of [`chain_path`], which every menu a script clicks on its
+/// root plate is.
 fn chain_plate_and_row(
     model: tairix_controls::ChainModel,
     placement: tairix_controls::PlatePlacement,
     label: &str,
     what: &str,
 ) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
+    let (plate, rows) = chain_path(model, placement, &[label], what)?;
+    let row = rows
+        .last()
+        .copied()
+        .ok_or_else(|| format!("{what}: the path reached no row"))?;
+    Ok((plate, row))
+}
+
+/// The root plate of the chain the desktop opens for `model` at `placement`,
+/// and the screen rectangle of each row of `path`: the first on the root plate,
+/// each later one on the plate the row before it opens.
+///
+/// Reconstructed by driving the **production** chain — the same model, the same
+/// placement rule, the same row geometry the guest lays out — so a script
+/// clicks where the desktop actually draws rather than at coordinates copied
+/// from a screenshot. A plate past the root is opened as the pointer arriving
+/// on its row opens it in the guest.
+///
+/// The chain is opened for the backdrop as its owner because the owner decides
+/// only where an *answer* goes; placement reads the model, the placement and
+/// the screen, all of which are the same for any owner.
+///
+/// One definition, because every menu a pointer script clicks a row of is
+/// reconstructed this way: an application's own window menu, the clock's, the
+/// icon-bar slot's and the file manager's item menu alike.
+fn chain_path(
+    model: tairix_controls::ChainModel,
+    placement: tairix_controls::PlatePlacement,
+    path: &[&str],
+    what: &str,
+) -> Result<(tairix_geometry::Rect, Vec<tairix_geometry::Rect>), String> {
     use tairix_desktop_session::menu::{ChainOwner, MenuChain};
 
     let theme = booted_theme().floating();
     let geom = reconstruction_chain_geometry(&theme);
-    let row = model
-        .rows()
-        .iter()
-        .position(|row| row.drawn().label() == label)
-        .ok_or_else(|| format!("{what}: the menu has no {label:?} row"))?;
+    // Each row's index among the rows of its own plate, which is what the
+    // chain lays a plate out by.
+    let mut steps = Vec::with_capacity(path.len());
+    let mut parent = None;
+    for label in path {
+        let plate: Vec<usize> = (0..model.rows().len())
+            .filter(|&at| model.rows()[at].parent() == parent)
+            .collect();
+        let local = plate
+            .iter()
+            .position(|&at| model.rows()[at].drawn().label() == *label)
+            .ok_or_else(|| format!("{what}: the menu has no {label:?} row there"))?;
+        steps.push((*label, local));
+        parent = Some(plate[local]);
+    }
     let mut chain = MenuChain::new();
     chain
         .open(ChainOwner::Backdrop, model, placement, &geom)
@@ -17020,10 +17083,21 @@ fn chain_plate_and_row(
         .first()
         .ok_or_else(|| format!("{what}: the open chain lists no surface"))?
         .rect;
-    let row = chain
-        .row_rect(0, row, &geom)
-        .ok_or_else(|| format!("{what}: the {label:?} row lays nothing out"))?;
-    Ok((plate, row))
+    let mut rows = Vec::with_capacity(steps.len());
+    for (depth, (label, local)) in steps.into_iter().enumerate() {
+        let row = chain
+            .row_rect(depth, local, &geom)
+            .ok_or_else(|| format!("{what}: the {label:?} row lays nothing out"))?;
+        let centre = rect_centre(row, label)?;
+        let _ = chain.handle(
+            &tairix_input::InputEvent::PointerMoved { to: centre },
+            centre,
+            &geom,
+            0,
+        );
+        rows.push(row);
+    }
+    Ok((plate, rows))
 }
 
 /// The plate the terminal's window menu opens at `press`, and the screen
@@ -19433,15 +19507,17 @@ mod tests {
         );
 
         let (width, height) = ramfb_screen();
-        let (_, row) =
+        let (_, item, row) =
             reconstruct_manager_item_menu(&theme, HANDOVER_MANAGER_WINDOW, picture, "test")
                 .expect("the manager window's menu reconstructs");
         #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
         let (w, h) = (width as i32, height as i32);
-        assert!(
-            row.x >= 0 && row.x < w && row.y >= 0 && row.y < h,
-            "the Open row at {row:?} is off a {width}x{height} screen",
-        );
+        for (what, at) in [("item", item), ("Open", row)] {
+            assert!(
+                at.x >= 0 && at.x < w && at.y >= 0 && at.y < h,
+                "the {what} row at {at:?} is off a {width}x{height} screen",
+            );
+        }
     }
 
     /// The MIME claims an association is built from.
@@ -19449,8 +19525,8 @@ mod tests {
         claims.iter().map(|c| String::from(*c)).collect()
     }
 
-    /// The *Open* row's aim stays inside the row the guest actually draws,
-    /// whatever the quick-action candidates add to the plate.
+    /// The item row's and the *Open* row's aims stay inside the rows the guest
+    /// actually draws, whatever the quick-action candidates add to the plates.
     ///
     /// The reconstruction states no candidate applications, because the host
     /// cannot observe whether the app's warm bundle scan has landed. The
@@ -19463,16 +19539,13 @@ mod tests {
     fn the_open_rows_aim_stays_inside_the_row_whatever_the_candidates_add() {
         use super::{
             planted_entry_index, planted_home_browser, reconstruct_manager_item_menu,
-            reconstruction_chain_geometry, HANDOVER_MANAGER_WINDOW,
+            HANDOVER_MANAGER_WINDOW,
         };
-        use tairix_desktop_session::menu::{ChainOwner, MenuChain};
         use tairix_geometry::Rect;
 
         let theme = tairix_theme::Theme::dark();
         let picture = tairix_test_arxfs_image::HOME_PICTURE_NAME;
         let name = core::str::from_utf8(picture).expect("a planted name is UTF-8");
-        let floating = tairix_theme::Theme::dark().floating();
-        let geom = reconstruction_chain_geometry(&floating);
 
         // The app's own candidate for this picture: the viewer, which the
         // manager launches and which claims it.
@@ -19482,7 +19555,7 @@ mod tests {
             alloc_vec_of(&["image/png"]),
         );
 
-        let (press, aim) =
+        let (press, item_aim, aim) =
             reconstruct_manager_item_menu(&theme, HANDOVER_MANAGER_WINDOW, picture, "test")
                 .expect("the manager window's menu reconstructs");
 
@@ -19511,30 +19584,36 @@ mod tests {
                 && row.drawn().is_submenu()),
             "the viewer candidate put no submenu on the Open With… row",
         );
-        let row = model
+        let open = tairix_browse::ContextCommand::Open.label();
+        let item_row = model
             .rows()
             .iter()
-            .position(|row| row.drawn().label() == tairix_browse::ContextCommand::Open.label())
-            .expect("the menu has an Open row");
-        let mut chain = MenuChain::new();
-        chain
-            .open(
-                ChainOwner::Backdrop,
-                model,
-                tairix_desktop_session::windows::window_menu_placement(Rect::new(
-                    press.x, press.y, 0, 0,
-                )),
-                &geom,
-            )
-            .expect("the wider menu opens");
-        let drawn = chain
-            .row_rect(0, row, &geom)
-            .expect("the Open row lays out on the wider plate");
+            .find(|row| row.drawn().label() == open)
+            .and_then(tairix_controls::ChainRow::parent)
+            .and_then(|parent| model.rows().get(parent))
+            .map(|row| String::from(row.drawn().label()))
+            .expect("a row opens the Open row's plate");
+        let (_, drawn) = super::chain_path(
+            model,
+            tairix_desktop_session::windows::window_menu_placement(Rect::new(
+                press.x, press.y, 0, 0,
+            )),
+            &[&item_row, open],
+            "test",
+        )
+        .expect("the wider menu opens onto the item's plate");
 
         assert!(
-            drawn.contains(aim),
-            "the aim {aim:?} falls outside the Open row {drawn:?} the guest draws once its \
+            drawn[0].contains(item_aim),
+            "the aim {item_aim:?} falls outside the item row {:?} the guest draws once its \
              candidate scan has landed",
+            drawn[0],
+        );
+        assert!(
+            drawn[1].contains(aim),
+            "the aim {aim:?} falls outside the Open row {:?} the guest draws once its \
+             candidate scan has landed",
+            drawn[1],
         );
     }
 

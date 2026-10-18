@@ -1885,6 +1885,9 @@ impl Shell {
         if self.body.is_listing() {
             return self.pressed_pane(event, &frame, viewport, scale, theme, damage);
         }
+        if let Some(outcome) = self.held_bar(event, &frame, scale, theme, damage) {
+            return outcome;
+        }
 
         // Each region learns the pointer has left it, so nothing there stays
         // lit for a pointer that is elsewhere.
@@ -1900,7 +1903,7 @@ impl Shell {
             return outcome;
         }
         if let Some(rect) = frame.scrollbar {
-            if self.points_into(rect) || self.scroll.is_pressing() {
+            if self.points_into(rect) {
                 let acted = self.scroll.on_pointer(event, rect, scale, theme, damage);
                 return ShellOutcome::of(scrolled(frame.content, acted, damage));
             }
@@ -1916,6 +1919,65 @@ impl Shell {
             return self.pressed_pane(event, &frame, viewport, scale, theme, damage);
         }
         self.pressed_chrome(event, &frame, viewport, scale, theme, damage)
+    }
+
+    /// Route `event` to the bar holding a press, if one is: it has the pointer
+    /// until it lets go, wherever the pointer has gone since, and a release
+    /// or a cancel ends its press even once the bar itself has gone.
+    fn held_bar(
+        &mut self,
+        event: &InputEvent,
+        frame: &ShellFrame,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<ShellOutcome> {
+        let (bar, rect, column) = if self.scroll.is_pressing() {
+            (&mut self.scroll, frame.scrollbar, Some(frame.content))
+        } else if self.strip_scroll.is_pressing() {
+            (&mut self.strip_scroll, frame.strip_scrollbar, frame.sidebar)
+        } else {
+            return None;
+        };
+        let acted = bar.on_pointer(event, rect.unwrap_or(Rect::EMPTY), scale, theme, damage);
+        Some(ShellOutcome::of(scrolled(
+            column.unwrap_or(Rect::EMPTY),
+            acted,
+            damage,
+        )))
+    }
+
+    /// When the press a bar holds steps next — the pane's or the strip's —
+    /// or `None` when nothing held would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        let pane = self.scroll.repeat_deadline(now_ns);
+        let strip = self.strip_scroll.repeat_deadline(now_ns);
+        pane.into_iter().chain(strip).min()
+    }
+
+    /// Step the press a bar holds if its repeat is due at `now_ns`, presented
+    /// whenever it moved anything.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> ShellOutcome {
+        let frame = self.frame(viewport, scale, theme);
+        let mut drew = tairix_controls::damage::sink();
+        if let Some(rect) = frame.scrollbar {
+            let acted = self.scroll.repeat(now_ns, rect, scale, theme, &mut drew);
+            scrolled(frame.content, acted, &mut drew);
+        }
+        if let (Some(rect), Some(sidebar)) = (frame.strip_scrollbar, frame.sidebar) {
+            let acted = self
+                .strip_scroll
+                .repeat(now_ns, rect, scale, theme, &mut drew);
+            scrolled(sidebar, acted, &mut drew);
+        }
+        adopt_drawn(ShellOutcome::Idle, &drew, damage)
     }
 
     /// Show `region` the move that took the pointer out of it.
@@ -2087,7 +2149,7 @@ impl Shell {
             }
         }
         if let (Some(rect), Some(sidebar)) = (frame.strip_scrollbar, frame.sidebar) {
-            if self.points_into(rect) || self.strip_scroll.is_pressing() {
+            if self.points_into(rect) {
                 let acted = self
                     .strip_scroll
                     .on_pointer(event, rect, scale, theme, damage);

@@ -1953,6 +1953,7 @@ fn the_menu_states_exactly_the_rows_the_application_declared() {
         label: menu_label("Profile"),
         enabled: true,
         symbol: AppMenuSymbol::Settings,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("fits");
     menu.push_under(item(5, "Amber"), 6).expect("fits");
@@ -2099,6 +2100,7 @@ fn a_declared_submenu_becomes_a_child_plate_whose_rows_keep_their_own_ids() {
         label: menu_label("Profile"),
         enabled: true,
         symbol: AppMenuSymbol::Settings,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("fits");
     menu.push_under(item(7, "Amber"), 0).expect("fits");
@@ -2142,6 +2144,7 @@ fn a_separator_inside_a_declared_submenu_opens_a_group_rather_than_a_blank_row()
         label: menu_label("Profile"),
         enabled: true,
         symbol: AppMenuSymbol::Settings,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("fits");
     menu.push_under(item(7, "Amber"), 0).expect("fits");
@@ -9077,4 +9080,133 @@ fn adopting_landed_class_artwork_covers_every_pixel_it_moves() {
             "the paint moved a pixel at {point:?} that the adopt did not name"
         );
     }
+}
+
+/// Where the open picker's grid bar has its step-down arrow.
+fn picker_down_arrow(bar: &Taskbar) -> Point {
+    let scrollbar = bar
+        .picker_layout(Scale::ONE)
+        .expect("open")
+        .scrollbar
+        .expect("the grid overflows");
+    Point::new(centre_of(scrollbar).x, scrollbar.bottom() - 2)
+}
+
+/// A held arrow on the picker's grid bar steps on the bar's own cadence when
+/// the embedder ticks the bar, and the press ends when the desktop takes the
+/// pointer.
+#[test]
+fn a_held_picker_bar_arrow_repeats_and_a_cancel_ends_it() {
+    let (mut bar, mut input) = scrolling_picker();
+    let down = picker_down_arrow(&bar);
+    for event in [
+        InputEvent::PointerMoved { to: down },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        input.handle(event, &mut bar, Scale::ONE, NOW_NS);
+    }
+    let pressed = bar.picker_layout(Scale::ONE).expect("open").offset;
+    assert!(pressed > 0, "the press steps once at once");
+    let _ = bar.take_repaint();
+
+    let due = bar
+        .scroll_repeat_deadline(NOW_NS)
+        .expect("a held arrow arms a repeat");
+    input.scroll_repeat(&mut bar, due, Scale::ONE);
+    assert!(
+        bar.picker_layout(Scale::ONE).expect("open").offset > pressed,
+        "the hold stepped again"
+    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::PICKER);
+
+    input.cancel_press(&mut bar, Scale::ONE);
+    assert_eq!(bar.scroll_repeat_deadline(due), None, "the press ended");
+}
+
+/// A cancel carries no time: the bar's clock stays where the last real event
+/// left it, so a grace counted after it is the grace, not a deadline already
+/// passed.
+#[test]
+fn a_cancel_does_not_wind_the_bars_clock_back() {
+    let mut bar = bottom_bar();
+    for id in 1..=2 {
+        bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+    }
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+        Scale::ONE,
+    );
+    let mut input = TaskbarInput::new();
+    let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+    dwell_on(&mut input, &mut bar, slot);
+    assert!(bar.picker().is_open());
+    let left_ns = NOW_NS + PICKER_OPEN_DELAY_NS;
+
+    input.handle(InputEvent::PointerCancelled, &mut bar, Scale::ONE, 0);
+    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
+    assert_eq!(
+        input.park_deadline_ns(left_ns, u64::MAX),
+        PICKER_CLOSE_GRACE_NS,
+        "the grace is counted from the last real event"
+    );
+}
+
+/// A held arrow on the program library's bar steps on the bar's own cadence
+/// when the embedder ticks the bar.
+#[test]
+fn a_held_library_bar_arrow_repeats_when_the_bar_is_ticked() {
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 300),
+        &Theme::dark().floating(),
+    );
+    let mut cat = Catalog::new();
+    for index in 0..30 {
+        cat.insert(entry(
+            &format!("app{index:02}"),
+            &format!("App {index:02}"),
+            LibraryCategory::Utilities,
+        ))
+        .expect("fits");
+    }
+    bar.library_mut().set_catalog(cat);
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let scrollbar = bar
+        .library_layout(Scale::ONE)
+        .scrollbar
+        .expect("an overflow shows a scrollbar");
+    let down = Point::new(centre_of(scrollbar).x, scrollbar.bottom() - 2);
+    for event in [
+        InputEvent::PointerMoved { to: down },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        input.handle(event, &mut bar, Scale::ONE, NOW_NS);
+    }
+    let pressed = bar.library_layout(Scale::ONE).offset;
+    assert!(pressed > 0, "the press steps once at once");
+    let _ = bar.take_repaint();
+
+    let due = bar
+        .scroll_repeat_deadline(NOW_NS)
+        .expect("a held arrow arms a repeat");
+    input.scroll_repeat(&mut bar, due, Scale::ONE);
+    assert!(
+        bar.library_layout(Scale::ONE).offset > pressed,
+        "the hold stepped again"
+    );
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::LIBRARY);
+
+    input.handle(
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert_eq!(bar.scroll_repeat_deadline(due), None, "let go");
 }

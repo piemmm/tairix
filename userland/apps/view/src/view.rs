@@ -13,8 +13,7 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_controls::{
     wheel_steps, ControlRole, IconButton, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange, Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome, REPEAT_DELAY_NS,
-    REPEAT_INTERVAL_NS,
+    ScrollRange, Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -244,10 +243,11 @@ pub struct View {
     playing: bool,
     /// When the next animation frame is due, in monotonic nanoseconds.
     frame_ns: Option<u64>,
-    /// When a held control's next auto-repeat step is due, in monotonic
-    /// nanoseconds. The toolbar's overflow affordances and both scrollbars
-    /// are driven by this one deadline, so two held controls in one window
-    /// cannot step at different rates.
+    /// When the nearest held control's next auto-repeat step is due, in
+    /// monotonic nanoseconds, as the controls answered it when the deadline
+    /// was last armed. Each keeps its own cadence, shared across every
+    /// press-and-hold control, so two held controls cannot step at different
+    /// rates.
     repeat_ns: Option<u64>,
     /// The canvas the last layout resolved, so a command that refits has the
     /// geometry to refit against without being handed one.
@@ -761,8 +761,7 @@ impl View {
         self.go_to_page(next)
     }
 
-    /// Step every held control once if their shared repeat is due, and re-arm
-    /// it at the interval while anything is still held.
+    /// Step every held control whose repeat is due at `now_ns`.
     fn repeat(
         &mut self,
         now_ns: u64,
@@ -771,37 +770,24 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        let Some(due) = self.repeat_ns else {
-            return false;
-        };
-        if now_ns < due {
-            return false;
-        }
-        self.repeat_ns = None;
         // Each control reports its own step, and a pan owes nothing more
         // until the render it asks for lands.
-        let mut changed = self.toolbar.repeat(layout.tools(), scale, theme, damage);
+        let mut changed = self
+            .toolbar
+            .repeat(now_ns, layout.tools(), scale, theme, damage);
         if let Some(ScrollAction::ScrollTo { offset }) =
-            self.vertical.repeat(layout.vertical_bar(), damage)
+            self.vertical
+                .repeat(now_ns, layout.vertical_bar(), scale, theme, damage)
         {
             changed |= self.pan_to(None, Some(offset));
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
-            self.horizontal.repeat(layout.horizontal_bar(), damage)
+            self.horizontal
+                .repeat(now_ns, layout.horizontal_bar(), scale, theme, damage)
         {
             changed |= self.pan_to(Some(offset), None);
         }
-        self.repeat_ns = self
-            .holding()
-            .then(|| now_ns.saturating_add(REPEAT_INTERVAL_NS));
         changed
-    }
-
-    /// Whether any control is holding a press that wants repeat wake-ups.
-    fn holding(&self) -> bool {
-        self.toolbar.is_repeating()
-            || self.vertical.is_repeating()
-            || self.horizontal.is_repeating()
     }
 
     /// The render the current state calls for, or `None` when what is held is
@@ -1380,18 +1366,23 @@ impl View {
     }
 
     /// Arm the deadlines the current state calls for: the next animation
-    /// frame, and the first auto-repeat step of a freshly held control.
+    /// frame, and the next auto-repeat step of any held control laid out at
+    /// `layout`.
     ///
     /// Called by the embedder once it knows the clock, because the engine
     /// holds no clock of its own: a frame's delay is the container's and the
     /// instant it lands on is the machine's. A press released before its
     /// first step disarms rather than firing once more.
-    pub fn arm_deadline(&mut self, now_ns: u64) {
-        self.repeat_ns = match (self.holding(), self.repeat_ns) {
-            (true, None) => Some(now_ns.saturating_add(REPEAT_DELAY_NS)),
-            (true, armed) => armed,
-            (false, _) => None,
-        };
+    pub fn arm_deadline(&mut self, now_ns: u64, layout: &Layout, scale: Scale, theme: &Theme) {
+        self.repeat_ns = [
+            self.toolbar
+                .repeat_deadline(now_ns, layout.tools(), scale, theme),
+            self.vertical.repeat_deadline(now_ns),
+            self.horizontal.repeat_deadline(now_ns),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         if !self.playing || self.frame_ns.is_some() {
             return;
         }

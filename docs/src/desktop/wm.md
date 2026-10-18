@@ -546,9 +546,25 @@ the composite that needs it and dropped once nothing on screen rounds by that
 radius. An allocation refused anywhere costs a shadow its corner notches, or the
 desktop its shadows — never a frame.
 
+**Two levels, and the change between them is eased.** The family the user is
+working in — the window holding the focus with its transients — stands
+*lifted*, and every other decorated window *rests*: its shadow is lighter
+(`Palette::inactive_drop_shadow`) and shorter (`Metrics::inactive_drop_shadow_reach`),
+so it reads as standing lower. Every other floating surface stays lifted
+whatever holds the focus. The kit (`ShadowKit`) holds an exact `Level` for each,
+and a window whose height changes eases between them over the theme's
+window-activation timing (`MotionInteraction::WindowActivate`), casting both
+shadows at once weighted by how far it has risen — a crossfade between two
+exact shadows rather than a guess at one between them. Under *reduce motion*
+the timing is zero and the change lands in one frame. The ease is stepped from
+the session's frame pacer (`Compositor::step_elevations`, its next frame asked
+through `next_elevation_frame_in`), so a desktop with nothing easing arms no
+timer, and a step marks a shadow only when it moves it.
+
 **The footprint.** A caster's footprint is its bounds grown by what its shadow
-darkens, and `tairix_wm::shadow_footprint(bounds, scale, theme)` is the one
-definition. It replaces the bounds wherever the question is *which pixels can
+darkens — at the larger of its two levels, so a window easing between them
+never darkens a pixel its footprint does not cover — and
+`tairix_wm::shadow_footprint(bounds, scale, theme)` is the one definition. It replaces the bounds wherever the question is *which pixels can
 this window change*: the damage a move, restack, restyle, hide or close marks,
 the windows a dirty rectangle considers, and the rectangle a hardware layer
 spans. The bounds stay for everything about the window itself — hit-testing,
@@ -598,7 +614,11 @@ actions, reporting each through `InputResponse`:
   to the top of the z-order and gives it focus, returning
   `Activated { window, local }` with the press position in the window's
   surface coordinates. A press on the desktop background clears focus
-  (`DesktopPressed`).
+  (`DesktopPressed`). The look follows the focus through one pass,
+  `Compositor::follow_focus`: the focused window's frame is active (and a
+  palette's while its family is in front), every other frame inactive, and the
+  focused family lifted while every other window's shadow rests — so a window
+  opened behind another never wears the look of the one being worked in.
 - **Input that lands on nothing is reported, not swallowed** — the desktop
   layer beneath the window stack is a real surface with a real owner, so
   pointer motion that resolves to no window and starts no grab comes back
@@ -614,11 +634,34 @@ actions, reporting each through `InputResponse`:
 - **Move-grabs** — dragging a window is an explicit grab started by
   `InputRouter::begin_move` (which decorations call when a press lands on
   a window's move handle, e.g. a title bar), not a behaviour armed on
-  every press. Holding the grab offset constant, subsequent pointer
-  motion drags the window (`Moved`); releasing the primary button, or the
-  window vanishing mid-drag, ends it (`MoveEnded`). Separating content
+  every press. Nothing moves until the pointer travels past the shared drag
+  slop (`tairix_input::DRAG_SLOP`), so a click — the first of a double-click
+  above all — never nudges the window; past it, holding the grab offset
+  constant, motion drags the window (`Moved`). Releasing the button, or the
+  window vanishing mid-drag, ends a move that moved (`MoveEnded`); a press
+  that never travelled was a click and ends no move. Separating content
   clicks from window dragging avoids a "drag anywhere" hack
   (`AGENTS.md` §2.1).
+- **A drag out of maximization keeps the window's size.** The first step past
+  the slop of a move or a resize on a maximized window takes it out of
+  maximization where it stands (`Compositor::unmaximize_in_place`, reported as
+  `Unmaximized`), so the drag carries on at the size the window has and nothing
+  snaps back when it ends. `Escape` during a resize puts back exactly the
+  placement it began from (`Compositor::reinstate_placement`), maximized
+  included.
+- **A press holds the pointer until its own button comes up.** While any grab
+  is in flight — a move, a resize, a window command, a scrollbar thumb or a
+  client's press — a secondary press changes nothing, so a client holding a
+  press is never left holding it without being told it ended.
+- **A gesture the desktop takes away ends where it stands.** A screen lock, a
+  modal prompt, a menu or a drag the desktop carries drains the seat's stream
+  into itself, so the router never sees the release.
+  `InputRouter::abandon_gesture` ends every grab in place and answers what is
+  owed (`Abandoned`): the client whose press was taken is sent
+  `PointerAction::Cancelled` at the place it last saw the pointer, a window a
+  resize was dragging is told the size it settled at, and a tool window's owner
+  is told its move ended over nothing. A pressed window command is released
+  without firing.
 - **A dragged window keeps a grabbable patch of its title bar on screen.**
   The grab captures the bar's move surface — `TitleBarLayout::drag`, the
   span between the two command clusters — in window-local coordinates, and
@@ -1374,8 +1417,9 @@ as its colour. See [theming](./theming.md) for the four roles.
   row the frame draws the curve and the client is clipped out of it — which is
   the only way furniture and client share a row, and it reaches no further in
   than the radius. The furniture is animation-free, so it is reduced-motion
-  correct by construction, and high contrast thickens the command-glyph
-  strokes.
+  correct by construction — the one eased change a window makes, its shadow's
+  height, honours *reduce motion* itself ([Drop shadows](#drop-shadows)) — and
+  high contrast thickens the command-glyph strokes.
 - **Retention (bounded and reclaimable).** The strips are *derived* pixels,
   so the compositor holds them in one shared, pressure-governed
   `ReclaimCache` keyed by `WindowId` rather than each window pinning its own
@@ -1407,9 +1451,8 @@ as its colour. See [theming](./theming.md) for the four roles.
   a hover that reaches one command control costs that control's rectangle
   rather than the band it sits in. Neither the marking nor the invalidation is
   a caller's to remember.
-- **Activation and title.** `Compositor::set_active_frame` repaints a
-  window's title and controls for the focused/unfocused state the
-  `InputRouter` tracks. The *rim* is not part of that: every window wears the
+- **Activation and title.** `Compositor::follow_focus` repaints a window's
+  title and controls for the focused/unfocused state the `InputRouter` tracks. The *rim* is not part of that: every window wears the
   one quiet `frame` neutral at every activation, because the rim is the line
   the eye reads a window's shape by — brightening it on focus made the
   boundary the loudest mark on the desktop and left every other window looking
@@ -1450,11 +1493,12 @@ as its colour. See [theming](./theming.md) for the four roles.
   the drawn band is only the thin rim, a resizable window's resize zones are a
   hit region with no pixels of their own — the invisible resize border macOS,
   GNOME, and Windows use. `GrabReach` resolves the theme's `resize_edge_grab`
-  for the left, right, and bottom edges and the wider `resize_corner_grab` for
-  the two bottom corners, whose square would otherwise narrow to the edge width
-  at its very tip and be the hardest thing on the frame to hit. The corner wins
-  over the two edges that form it and is clamped never to fall below the edge
-  band.
+  for all four edges and the wider `resize_corner_grab` for all four corners,
+  whose square would otherwise narrow to the edge width at its very tip and be
+  the hardest thing on the frame to hit. The corner wins over the two edges
+  that form it and is clamped never to fall below the edge band. A dragged top
+  edge rises no higher than the screen's top, so the title bar it carries stays
+  where the pointer can reach it, and the bottom edge holds still.
   - **Centred, not inward-only.** Each band is that thickness measured *across*
     the outer edge: `GrabReach::outward` is half of it (rounding down) and
     `GrabReach::inward` the rest, so the odd pixel goes inward and a one-pixel
@@ -1486,11 +1530,13 @@ as its colour. See [theming](./theming.md) for the four roles.
   - **The title bar keeps its whole band** — it is resolved first, and the side
     bands are explicitly bounded to start at its foot on *both* sides of the
     edge, so the outward half never claims a column beside a band it does not
-    reach on the inside.
+    reach on the inside. The top bands straddle the top edge like the others,
+    so inside the window they reach only the rim above the bar, and a window
+    command seated in a corner of the bar is never a resize corner.
   - **The gesture is armed against the frame's grab region, not the window.**
     `WindowFrame::grab_region` (via `Compositor::window_grab_region`) is the
-    outer rectangle grown by the widest band's outward reach on the three
-    sides that carry one, and it is what the shared `ResizeGrabber` is handed
+    outer rectangle grown by the widest band's outward reach on all four
+    sides, and it is what the shared `ResizeGrabber` is handed
     as its hit region. Handing it the window rectangle instead refused
     precisely the outward half the hit map had just accepted: the grab
     latched, the pointer kept its double arrow, and no motion moved an edge —
@@ -1769,14 +1815,16 @@ user set across the resize, and fails closed (keeping the current surface and
 geometry) if a new frame region cannot be allocated or the session refuses the
 re-map. Files and the terminal open resizable too.
 
-`DesktopShell::sync_active_frame` keeps exactly one window showing its active
-frame: on every focus change — a click-to-activate press, a taskbar activation,
-an open, a close, a minimize — the newly focused decorated window is activated
-and the previously active one reverts to inactive. It is a no-op for an
-undecorated focus, so the session's own **trusted file picker** — session
-chrome dismissed by its own keys, not an app the window manager dresses — opens
-undecorated and never gains an inert title bar, while still correctly
-deactivating whatever app window it drew focus away from.
+`DesktopShell::follow_focus` brings every window's look in step with the window
+manager's focus on every focus change — a click-to-activate press, a taskbar
+activation, an open, a close, a minimize: the focused window's frame is active
+(a palette's too, while its family is in front), every other frame inactive,
+and the focused family lifted while every other window's shadow rests. A
+window opened without the focus is inactive from its first frame. The session's
+own **trusted file picker** — session chrome dismissed by its own keys, not an
+app the window manager dresses — opens undecorated and never gains an inert
+title bar, while still correctly deactivating whatever app window it drew focus
+away from.
 
 ## App-owned popup surfaces
 
@@ -2382,7 +2430,10 @@ current density — never narrower than `ALERT_MIN_WIDTH` or its row of buttons,
 and exactly as tall as the severity mark, the wrapped headline and detail and
 the buttons along its foot need, the default one warm. Each axis stays within
 the screen's share; past it the whole text, headline included, scrolls a line
-at a time and the buttons stay at the foot. Nothing is elided. Its frame is the dialog frame: a title band holding
+at a time and the buttons stay at the foot, by the wheel, the paging keys or
+the bar beside the text — a live `ScrollBar` whose arrows step, whose track
+pages and whose held press repeats on the session's timed wake. Nothing is
+elided. Its frame is the dialog frame: a title band holding
 only put-to-back, no close, minimise or size control, and no resize edge. The
 title is the session's — "Error from *App*", "Warning from *App*", "Message
 from *App*", the bundle's attested name, or its bundle path for one titled as
@@ -2392,7 +2443,11 @@ drop. One without is a window
 of its own. It takes the keyboard only when its owner or application holds it,
 or when it answers the user's own gesture — otherwise it opens beneath the
 window holding the keyboard — and its buttons arm `ALERT_ARM_NS` after it is
-first on screen, so a click meant for what was there cannot answer it. As it
+first on screen, so a click meant for what was there cannot answer it: what
+counts is when a click *began*, so one pressed before the arm answers nothing
+however late it is let go. The session hands an alert the raw press, motion,
+release and cancel, so a button lights under the pointer and a press carried
+off it chooses nothing. As it
 comes down it hands the keyboard to the holder behind it — an alert or an
 owner-modal dialog holding the same window — else that window, else the window
 it took it from. Buttons that do not

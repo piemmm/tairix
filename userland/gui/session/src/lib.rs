@@ -324,8 +324,8 @@ pub use switchboard::{
     SwitchboardRefusal, SwitchboardServe, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
 };
 pub use switchuser::{
-    ResumeFailure, SeatDeparture, SeatReturn, SessionAuthority, SwitchRefusal, SwitchUser,
-    WakeRefusal,
+    park_within, ResumeFailure, SeatDeparture, SeatReturn, SessionAuthority, SwitchRefusal,
+    SwitchUser, WakeRefusal,
 };
 pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
@@ -337,10 +337,11 @@ pub use wallpaper::{
 };
 pub use windows::{
     chain_geometry, desktop_info, focus_reports, resize_drag_event, resolve_window_identities,
-    seat_held, seat_menu_refusal, size_state_name, tool_move_event, window_control_alternate_event,
-    window_control_event, ScreensaverServe, SessionWindows, ShellWindowHost, SizedRecord,
-    CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, HAND_OVER_WITHHELD, HAND_OVER_WITHHELD_MESSAGE,
-    MENU_SHOWN, MENU_SHOWN_MESSAGE, RAISE_REFUSED, RAISE_REFUSED_MESSAGE, WINDOW_RAISED,
-    WINDOW_RAISED_MESSAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
-    WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
+    seat_held, seat_menu_refusal, settled_size_event, size_state_name, tool_move_abandoned_event,
+    tool_move_event, window_control_alternate_event, window_control_event, ScreensaverServe,
+    SessionWindows, ShellWindowHost, SizedRecord, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+    HAND_OVER_WITHHELD, HAND_OVER_WITHHELD_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE, RAISE_REFUSED,
+    RAISE_REFUSED_MESSAGE, WINDOW_RAISED, WINDOW_RAISED_MESSAGE, WINDOW_RETITLED,
+    WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
+    WINDOW_SIZED_MESSAGE,
 };

@@ -236,9 +236,7 @@ impl Properties {
     #[must_use]
     pub const fn kind_label_for(kind: EntryKind) -> &'static str {
         match kind {
-            EntryKind::Directory => "Folder",
-            EntryKind::File => "File",
-            EntryKind::Bundle => "Application",
+            EntryKind::Directory | EntryKind::File | EntryKind::Bundle => kind.noun(),
             // A link is labelled by what it names, because that is what
             // opening it reaches; a link that names nothing says so rather
             // than borrowing a kind it does not have.

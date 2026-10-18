@@ -16,8 +16,7 @@ use tairix_browse::vfs::write_document_title;
 use tairix_colour::Rgba;
 use tairix_controls::{
     ColourModel, ColourPicker, Keystroke, PickerView, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SwatchGrid, SwatchMark, TitleBar, Toolbar, REPEAT_DELAY_NS,
-    REPEAT_INTERVAL_NS,
+    ScrollOrientation, ScrollRange, SwatchGrid, SwatchMark, TitleBar, Toolbar,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{desktop_palette, IndexDepth, Rgba8};
@@ -2015,17 +2014,20 @@ impl View {
         }
     }
 
-    /// Arm the deadlines the state calls for, now it is `now_ns`.
-    pub fn arm_deadline(&mut self, now_ns: u64) {
-        let holding = self.tool_box.is_repeating()
-            || self.commands.is_repeating()
-            || self.vertical.is_repeating()
-            || self.horizontal.is_repeating();
-        self.repeat_due = match (holding, self.repeat_due) {
-            (true, None) => Some(now_ns.saturating_add(REPEAT_DELAY_NS)),
-            (true, armed) => armed,
-            (false, _) => None,
-        };
+    /// Arm the deadlines the state calls for, now it is `now_ns`, with the
+    /// held controls laid out at `layout`.
+    pub fn arm_deadline(&mut self, now_ns: u64, layout: &Layout, scale: Scale, theme: &Theme) {
+        self.repeat_due = [
+            self.tool_box
+                .repeat_deadline(now_ns, layout.tools(), scale, theme),
+            self.commands
+                .repeat_deadline(now_ns, layout.view_strip(), scale, theme),
+            self.vertical.repeat_deadline(now_ns),
+            self.horizontal.repeat_deadline(now_ns),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let airbrushing =
             matches!(self.gesture, Some(Gesture::Stroke { .. })) && self.tool == Tool::Airbrush;
         self.airbrush_due = match (airbrushing, self.airbrush_due) {
@@ -2049,21 +2051,21 @@ impl View {
             self.airbrush_due = Some(now_ns.saturating_add(AIRBRUSH_INTERVAL_NS));
             self.airbrush(layout, damage);
         }
-        if self.repeat_due.is_some_and(|due| due <= now_ns) {
-            self.repeat_due = Some(now_ns.saturating_add(REPEAT_INTERVAL_NS));
-            self.tool_box.repeat(layout.tools(), scale, theme, damage);
-            self.commands
-                .repeat(layout.view_strip(), scale, theme, damage);
-            if let Some(ScrollAction::ScrollTo { offset }) =
-                self.vertical.repeat(layout.vertical_bar(), damage)
-            {
-                self.scroll_to(None, Some(offset), layout, damage);
-            }
-            if let Some(ScrollAction::ScrollTo { offset }) =
-                self.horizontal.repeat(layout.horizontal_bar(), damage)
-            {
-                self.scroll_to(Some(offset), None, layout, damage);
-            }
+        self.tool_box
+            .repeat(now_ns, layout.tools(), scale, theme, damage);
+        self.commands
+            .repeat(now_ns, layout.view_strip(), scale, theme, damage);
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.vertical
+                .repeat(now_ns, layout.vertical_bar(), scale, theme, damage)
+        {
+            self.scroll_to(None, Some(offset), layout, damage);
+        }
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.horizontal
+                .repeat(now_ns, layout.horizontal_bar(), scale, theme, damage)
+        {
+            self.scroll_to(Some(offset), None, layout, damage);
         }
     }
 

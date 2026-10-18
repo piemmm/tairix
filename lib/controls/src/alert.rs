@@ -27,7 +27,7 @@ use crate::paint::{
     TextBlock,
 };
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
-use crate::scrollbar::ScrollBar;
+use crate::scrollbar::{ScrollAction, ScrollBar};
 use crate::state::{ControlRole, RenderInvariant};
 
 /// The narrowest an alert window is, frame included, in logical pixels.
@@ -72,6 +72,9 @@ pub struct Alert {
     /// How many of the text's lines, the headline's first, are scrolled
     /// past; zero unless it overflows.
     scroll: usize,
+    /// The bar beside text that overflows. It holds the press on it; where it
+    /// stands is read from `scroll` each time it is used.
+    bar: ScrollBar,
     pointer: RenderInvariant<Point>,
     hovered: RenderInvariant<Option<usize>>,
     armed: RenderInvariant<Option<usize>>,
@@ -247,6 +250,10 @@ impl Alert {
             roles,
             focus,
             scroll: 0,
+            bar: ScrollBar::new(
+                ScrollOrientation::Vertical,
+                ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1),
+            ),
             pointer: RenderInvariant::new(Point::ORIGIN),
             hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
@@ -405,9 +412,14 @@ impl Alert {
                 detail,
             );
             if layout.scroll_room > 0 {
-                let bar = Self::scrollbar_rect(&layout, scale, theme);
-                self.scrollbar(&layout, headline + detail)
-                    .render(surface, bar, scale, theme);
+                let mut bar = self.bar;
+                bar.set_model(self.bar_model(&layout));
+                bar.render(
+                    surface,
+                    Self::scrollbar_rect(&layout, scale, theme),
+                    scale,
+                    theme,
+                );
             }
         }
         for (button, rect) in self.buttons.iter().zip(&layout.buttons) {
@@ -438,6 +450,23 @@ impl Alert {
             let bar = Self::scrollbar_rect(&layout, scale, theme);
             self.scroll_by(lines, &layout, bar, damage);
             return None;
+        }
+        // The bar holds a press on it to its end, and every motion reaches
+        // it, so a part it lit goes out when the pointer leaves.
+        if layout.scroll_room > 0 || self.bar.is_pressing() {
+            let rect = Self::scrollbar_rect(&layout, scale, theme);
+            let held = rect.contains(*self.pointer) || self.bar.is_pressing();
+            if held || matches!(event, InputEvent::PointerMoved { .. }) {
+                self.bar.set_model(self.bar_model(&layout));
+                if let Some(ScrollAction::ScrollTo { offset }) =
+                    self.bar.on_pointer(event, rect, scale, theme, damage)
+                {
+                    self.scrolled_to(offset, &layout, damage);
+                }
+            }
+            if held {
+                return None;
+            }
         }
         let over = layout
             .buttons
@@ -653,16 +682,63 @@ impl Alert {
         to_u32(-highest - to_i32(metrics.pad))
     }
 
-    /// The bar beside text that overflows, `shown` of its lines in view, as
-    /// a reading of where it is.
-    fn scrollbar(&self, layout: &Layout, shown: usize) -> ScrollBar {
+    /// Where the bar beside text that overflows stands: a line a step, the
+    /// lines in view a page.
+    fn bar_model(&self, layout: &Layout) -> ScrollModel {
         let as_u64 = |lines: usize| u64::try_from(lines).unwrap_or(u64::MAX);
+        let first = self.scroll.min(layout.scroll_room);
+        let (headline, detail) = layout.lines.fitting(first, layout.text.height);
+        let shown = headline + detail;
         let range = ScrollRange::new(
             as_u64(layout.scroll_room.saturating_add(shown)),
             as_u64(shown),
-            as_u64(self.scroll.min(layout.scroll_room)),
+            as_u64(first),
         );
-        ScrollBar::new(ScrollOrientation::Vertical, ScrollModel::new(range, 1, 1))
+        ScrollModel::new(range, 1, as_u64(shown.max(1)))
+    }
+
+    /// Adopt the line `offset` the bar moved to, held within what the text
+    /// holds, repainting the text when it moved.
+    fn scrolled_to(&mut self, offset: u64, layout: &Layout, damage: &mut Region) {
+        let next = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(layout.scroll_room);
+        if next != self.scroll {
+            self.scroll = next;
+            damage.add(layout.text);
+        }
+    }
+
+    /// When the press the bar holds steps next, or `None` when nothing held
+    /// would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.bar.repeat_deadline(now_ns)
+    }
+
+    /// Step the press the bar holds if its repeat is due at `now_ns`, with
+    /// `bounds` the client area, reporting what moved into `damage`.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if !self.bar.repeat_due(now_ns) {
+            return;
+        }
+        let layout = self.layout(bounds, scale, theme);
+        if layout.scroll_room == 0 {
+            return;
+        }
+        let rect = Self::scrollbar_rect(&layout, scale, theme);
+        self.bar.set_model(self.bar_model(&layout));
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.bar.repeat(now_ns, rect, scale, theme, damage)
+        {
+            self.scrolled_to(offset, &layout, damage);
+        }
     }
 
     /// Where the bar sits: just past the text's right edge, inside the pad.

@@ -434,10 +434,11 @@ pub fn pointer_point(x: u32, y: u32) -> Point {
 /// Every app that hands pointer input to the shared control family needs the
 /// same translation, so it has one definition here rather than a private copy
 /// per app. A wire pointer event always carries a position, while the
-/// controls' button transitions do not: the position is therefore always
-/// delivered first as an [`InputEvent::PointerMoved`], and a press or release
-/// follows it, so a control is never asked to decide about a button at a
-/// position it has not been told about yet.
+/// controls' button transitions do not: the position is therefore delivered
+/// first as an [`InputEvent::PointerMoved`], and a press or release follows
+/// it, so a control is never asked to decide about a button at a position it
+/// has not been told about yet. A cancel is the one exception: it ends the
+/// press where it stands, so it moves nothing.
 ///
 /// The mapping is total — every action and every button code has exactly one
 /// meaning — so an app filters what it does not want by matching the events,
@@ -446,18 +447,29 @@ pub fn pointer_input_events(
     action: PointerAction,
     point: Point,
 ) -> impl Iterator<Item = InputEvent> {
-    let transition = match action {
-        PointerAction::Moved => None,
-        PointerAction::Pressed(button) => Some(InputEvent::PointerPressed {
-            button: pointer_button(button),
-        }),
-        PointerAction::Released(button) => Some(InputEvent::PointerReleased {
-            button: pointer_button(button),
-        }),
+    let (moved, transition) = match action {
+        PointerAction::Moved => (true, None),
+        PointerAction::Pressed(button) => (
+            true,
+            Some(InputEvent::PointerPressed {
+                button: pointer_button(button),
+            }),
+        ),
+        PointerAction::Released(button) => (
+            true,
+            Some(InputEvent::PointerReleased {
+                button: pointer_button(button),
+            }),
+        ),
+        // No move first: a drag the desktop took stays where it was left.
+        PointerAction::Cancelled => (false, Some(InputEvent::PointerCancelled)),
     };
-    [Some(InputEvent::PointerMoved { to: point }), transition]
-        .into_iter()
-        .flatten()
+    [
+        moved.then_some(InputEvent::PointerMoved { to: point }),
+        transition,
+    ]
+    .into_iter()
+    .flatten()
 }
 
 /// The shared input events one delivered wheel turn at window-local `point`

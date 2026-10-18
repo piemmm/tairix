@@ -537,15 +537,15 @@ and can never reach a neighbouring window.
 
 ### C.5 One shell present per drained batch
 `DesktopShell::handle` is split into `apply` (route the event, mutate state) and
-`settle` (taskbar `present()`, then `sync_active_frame`, then `refresh_cursor`).
+`settle` (taskbar `present()`, then `follow_focus`, then `refresh_cursor`).
 `handle` remains both, so a single event is unchanged; `pump` runs `apply` per
 drained event **in order** and `settle` **once**, and not at all when nothing was
 drained. The keyboard drain and the pinboard backdrop menu fold the same way.
 
 Folding is exact rather than merely cheaper because each settled item is
 level-triggered: the taskbar `present()` drains a set-like idempotent
-per-surface repaint latch; `sync_active_frame` reconciles the *current* focus and
-early-returns when it already matches; `refresh_cursor` re-runs the shape policy
+per-surface repaint latch; `follow_focus` reconciles the *current* focus and
+marks nothing when it already matches; `refresh_cursor` re-runs the shape policy
 against the current pointer. No frame is published between samples, so
 intermediate values were never observable. A source that faults mid-drain still
 settles what it delivered. `mirror_focus`'s conditional second present is
@@ -890,7 +890,7 @@ the furniture reported rather than all four bands. No caller computes a band or
 invalidates a cache entry of its own.
 
 - `raise`/`lower` on a family already at the end it is being moved to, and
-  `set_active_frame`/`set_window_title` re-asserting what is already shown, each
+  `follow_focus`/`set_window_title` re-asserting what is already shown, each
   early-out. The activation rule has a single definition
   (`window::activation_for`) shared by the setter and the
   `frame_activation_changes` query, so the guard and the mutation cannot drift.

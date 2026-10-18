@@ -1851,6 +1851,51 @@ impl Switchboard {
         action
     }
 
+    /// When the press a bar holds steps next — the list's or the rail's — or
+    /// `None` when nothing held would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        let list = self.scroll.repeat_deadline(now_ns);
+        let rail = self.rail_scroll.repeat_deadline(now_ns);
+        list.into_iter().chain(rail).min()
+    }
+
+    /// Step the press a bar holds if its repeat is due at `now_ns`, for the
+    /// window drawn at `bounds`, reporting what moved into `damage`.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        damage: &mut Region,
+    ) {
+        // Laying the section out again is no cost a wake with nothing due pays.
+        if !self.scroll.repeat_due(now_ns) && !self.rail_scroll.repeat_due(now_ns) {
+            return;
+        }
+        let placed = self.placement();
+        let list = self.sync_scroll(bounds, scale, theme);
+        let layout = Self::compute_layout(bounds, scale, theme);
+        let rail = self.sync_rail(layout.rail, scale, theme);
+        if let Some(ScrollAction::ScrollTo { offset }) =
+            self.scroll
+                .repeat(now_ns, layout.scroll, scale, theme, damage)
+        {
+            self.scrolled_to(offset, list.viewport, damage);
+        }
+        if let Some(bar) = rail.bar {
+            if self
+                .rail_scroll
+                .repeat(now_ns, bar, scale, theme, damage)
+                .is_some()
+            {
+                damage.add(rail.viewport);
+            }
+        }
+        self.rehover(placed, bounds, scale, theme, font, damage);
+    }
+
     /// Where the lists stand: the section on show, how far its list is
     /// scrolled, and how far the rail is — what moves the content under a
     /// pointer that did not move.

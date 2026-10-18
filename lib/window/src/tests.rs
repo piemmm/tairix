@@ -19,13 +19,14 @@ use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick,
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuRowView, AppMenuSymbol,
-    BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DocumentName, DragAt,
-    DragItems, DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
-    MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
-    SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX,
-    WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow, AppMenuRowView,
+    AppMenuSymbol, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DialogModality,
+    DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget, HandOverDocument,
+    HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, PickPurpose, PointerAction,
+    PreviewOutcome, PreviewSubject, SaveEndings, TerrainPlate, TooltipText, WindowEvent,
+    WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
+    HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -3976,6 +3977,7 @@ fn sample_open_menu() -> AppMenu {
         label: AppMenuLabel::new("Paste Special").expect("a valid label"),
         enabled: true,
         symbol: AppMenuSymbol::Paste,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("room for a submenu row");
     menu
@@ -4720,6 +4722,20 @@ fn a_wire_pointer_event_translates_to_the_position_then_the_button() {
             ]
         );
     }
+}
+
+/// A cancel is one event and moves nothing: a drag the desktop took stays
+/// where it was left rather than jumping to where the window last saw the
+/// pointer.
+#[test]
+fn a_wire_cancel_translates_to_one_cancel_and_no_move() {
+    use crate::pointer_input_events;
+    use tairix_geometry::Point;
+    use tairix_input::InputEvent;
+
+    let cancelled: Vec<InputEvent> =
+        pointer_input_events(PointerAction::Cancelled, Point::new(5, 9)).collect();
+    assert_eq!(cancelled, [InputEvent::PointerCancelled]);
 }
 
 #[test]

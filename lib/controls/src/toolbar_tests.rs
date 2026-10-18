@@ -24,7 +24,7 @@ use tairix_theme::Theme;
 
 use crate::button::{ButtonContent, IconButton, SplitButton};
 use crate::damage::sink;
-use crate::scroll::ScrollOrientation;
+use crate::scroll::{ScrollOrientation, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS};
 use crate::state::ControlRole;
 use crate::testkit::{has_pixel, premul, region_has};
 use crate::toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
@@ -627,19 +627,44 @@ fn pressing_the_trailing_affordance_steps_one_tool_and_holding_repeats() {
         1,
         "a press steps exactly one tool"
     );
-    assert!(toolbar.is_repeating(), "the press latched for the timer");
+    let due = toolbar
+        .repeat_deadline(0, bounds, Scale::ONE, &theme)
+        .expect("the press latched for a repeat");
+    assert_eq!(
+        due, REPEAT_DELAY_NS,
+        "armed the shared delay after the press"
+    );
+    assert!(!toolbar.repeat(due - 1, bounds, Scale::ONE, &theme, &mut sink()));
 
-    assert!(toolbar.repeat(bounds, Scale::ONE, &theme, &mut sink()));
+    assert!(toolbar.repeat(due, bounds, Scale::ONE, &theme, &mut sink()));
     assert_eq!(
         toolbar.scroll_model(bounds, Scale::ONE, &theme).offset(),
         2,
-        "a held press steps again on the owner's wake"
+        "a held press steps again when its repeat comes"
+    );
+    assert_eq!(
+        toolbar.repeat_deadline(due, bounds, Scale::ONE, &theme),
+        Some(due + REPEAT_INTERVAL_NS)
     );
 
-    // Released, the latch is gone and a further wake steps nothing.
+    // Slid off the affordance, the hold steps nothing until it is back.
+    feed(&mut toolbar, moved(bounds.left() + xi(CH * 2), at.y));
+    assert_eq!(
+        toolbar.repeat_deadline(due, bounds, Scale::ONE, &theme),
+        None
+    );
+    feed(&mut toolbar, moved(at.x, at.y));
+    assert!(toolbar
+        .repeat_deadline(due, bounds, Scale::ONE, &theme)
+        .is_some());
+
+    // Released, the latch is gone and nothing further is owed.
     feed(&mut toolbar, RELEASE);
-    assert!(!toolbar.is_repeating());
-    assert!(!toolbar.repeat(bounds, Scale::ONE, &theme, &mut sink()));
+    assert_eq!(
+        toolbar.repeat_deadline(due, bounds, Scale::ONE, &theme),
+        None
+    );
+    assert!(!toolbar.repeat(u64::MAX, bounds, Scale::ONE, &theme, &mut sink()));
 
     // And the repeat stops contributing at the end rather than running on.
     let end = toolbar.scroll_model(bounds, Scale::ONE, &theme).to_end();
@@ -652,7 +677,8 @@ fn pressing_the_trailing_affordance_steps_one_tool_and_holding_repeats() {
         &mut sink(),
     );
     feed(&mut toolbar, PRESS);
-    assert!(!toolbar.repeat(bounds, Scale::ONE, &theme, &mut sink()));
+    assert_eq!(toolbar.repeat_deadline(0, bounds, Scale::ONE, &theme), None);
+    assert!(!toolbar.repeat(u64::MAX, bounds, Scale::ONE, &theme, &mut sink()));
 }
 
 #[test]
@@ -760,7 +786,9 @@ fn the_offset_compares_but_the_affordance_press_latch_does_not() {
     let at = Point::new(bounds.right() - xi(CH / 2), xi(H / 2));
     pressed.on_pointer(&moved(at.x, at.y), bounds, Scale::ONE, &theme, &mut sink());
     pressed.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
-    assert!(pressed.is_repeating());
+    assert!(pressed
+        .repeat_deadline(0, bounds, Scale::ONE, &theme)
+        .is_some());
     assert_eq!(pressed, scrolled, "the press latch is not a drawn property");
 }
 

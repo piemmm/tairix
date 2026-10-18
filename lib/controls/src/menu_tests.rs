@@ -1815,6 +1815,7 @@ fn a_declared_separator_becomes_the_next_rows_group_break_on_every_plate() {
         label: wire_label("More"),
         enabled: true,
         symbol: AppMenuSymbol::Open,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("a submenu");
     let parent = wire.len() - 1;

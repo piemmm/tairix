@@ -647,6 +647,15 @@ impl Slider {
                     permille: self.value,
                 })
             }
+            // A drag the desktop took ends where it was left, and settles
+            // there, so the owner keeps the value on screen.
+            InputEvent::PointerCancelled => {
+                let dragged = core::mem::replace(&mut *self.dragging, false);
+                damage::set(&mut self.state.pointer, PointerState::None, bounds, damage);
+                dragged.then_some(SliderAction::Settled {
+                    permille: self.value,
+                })
+            }
             _ => None,
         }
     }

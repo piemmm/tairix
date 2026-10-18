@@ -561,16 +561,45 @@ pub fn sidebar_scroll_pointer(
     pointer: (Point, &InputEvent),
     damage: &mut Region,
 ) -> Option<bool> {
+    let (model, bar, rows) = sidebar_column(places, (window, scale, theme), toolbar)?;
+    places
+        .scroll_mut()
+        .route(model, (bar, rows), scale, theme, pointer, damage)
+}
+
+/// Step the places rail's held scrollbar press once if its repeat is due at
+/// `now_ns`, answering whether the rail moved. A move reports the bar and the
+/// rows it slid.
+pub fn sidebar_scroll_repeat(
+    places: &mut Places,
+    frame: (Rect, Scale, &Theme),
+    toolbar: ToolbarBand,
+    now_ns: u64,
+    damage: &mut Region,
+) -> bool {
+    if !places.scroll_mut().repeat_due(now_ns) {
+        return false;
+    }
+    let Some((model, bar, rows)) = sidebar_column(places, frame, toolbar) else {
+        return false;
+    };
+    let (_, scale, theme) = frame;
+    places
+        .scroll_mut()
+        .repeat(now_ns, model, (bar, rows), (scale, theme), damage)
+}
+
+/// The places rail's scrolled column in `window`: the model it is drawn at,
+/// its bar's rectangle and the rows it shows through, or `None` for a rail
+/// whose rows fit and so draws no bar.
+fn sidebar_column(
+    places: &Places,
+    (window, scale, theme): (Rect, Scale, &Theme),
+    toolbar: ToolbarBand,
+) -> Option<(ScrollModel, Rect, Rect)> {
     let view = sidebar_view(window, scale, theme, Some(places), toolbar)?;
     let bar = view.bar_rect()?;
-    places.scroll_mut().route(
-        view.scroll_model(),
-        (bar, view.rows_area()),
-        scale,
-        theme,
-        pointer,
-        damage,
-    )
+    Some((view.scroll_model(), bar, view.rows_area()))
 }
 
 /// Scroll the places rail by a wheel turn of `(dx, dy)`, in the seat's scroll
@@ -583,19 +612,12 @@ pub fn sidebar_scroll_wheel(
     delta: (i32, i32),
     damage: &mut Region,
 ) -> bool {
-    let Some(view) = sidebar_view(window, scale, theme, Some(places), toolbar) else {
+    let Some((model, bar, rows)) = sidebar_column(places, (window, scale, theme), toolbar) else {
         return false;
     };
-    let Some(bar) = view.bar_rect() else {
-        return false;
-    };
-    places.scroll_mut().wheel(
-        view.scroll_model(),
-        delta,
-        scale,
-        (bar, view.rows_area()),
-        damage,
-    )
+    places
+        .scroll_mut()
+        .wheel(model, delta, scale, (bar, rows), damage)
 }
 
 /// Scroll the places rail the least that shows its keyboard cursor's row
@@ -926,9 +948,10 @@ pub fn scrollbar_bounds(
 /// nothing to do with the bar (the caller handles it as content input).
 ///
 /// The bar owns the interaction the press started: a press on an end button or
-/// track region steps the offset once, a press on the thumb captures a drag,
-/// and the subsequent motions and the release are routed here (the window
-/// manager's client pointer grab delivers them) until the release ends it. A
+/// track region steps the offset, and goes on stepping while it is held
+/// ([`scroll_repeat`]), a press on the thumb captures a drag, and the
+/// subsequent motions and the release are routed here (the window manager's
+/// client pointer grab delivers them) until the release ends it. A
 /// hover over the bar is taken so the bar can brighten. The bar reports its
 /// own look, and a move reports the item area it slid. `event` must carry the
 /// window-local pointer position (a press/release is preceded here by a
@@ -944,13 +967,50 @@ pub fn scroll_pointer<S: DirectorySource>(
     event: &InputEvent,
     damage: &mut Region,
 ) -> Option<bool> {
+    let (model, bounds, shown) = listing_column(browser, scale, theme, viewport, toolbar)?;
+    browser
+        .scroll_mut()
+        .route(model, (bounds, shown), scale, theme, (point, event), damage)
+}
+
+/// Step the listing's held scrollbar press once if its repeat is due at
+/// `now_ns`, answering whether the listing moved. A move reports the bar and
+/// the items it slid.
+pub fn scroll_repeat<S: DirectorySource>(
+    browser: &mut Browser<S>,
+    (scale, theme): (Scale, &Theme),
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    now_ns: u64,
+    damage: &mut Region,
+) -> bool {
+    if !browser.scroll_mut().repeat_due(now_ns) {
+        return false;
+    }
+    let Some((model, bounds, shown)) = listing_column(browser, scale, theme, viewport, toolbar)
+    else {
+        return false;
+    };
+    browser
+        .scroll_mut()
+        .repeat(now_ns, model, (bounds, shown), (scale, theme), damage)
+}
+
+/// The listing's scrolled column at `viewport`: the model it is drawn at, its
+/// bar's rectangle and the item area it shows through, or `None` when the
+/// window has no room for a bar.
+fn listing_column<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+) -> Option<(ScrollModel, Rect, Rect)> {
     let bounds = scrollbar_bounds(scale, theme, viewport, toolbar)?;
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let model = view.scroll_model(browser.scroll_offset());
     let shown = view.view(model.offset()).viewport();
-    browser
-        .scroll_mut()
-        .route(model, (bounds, shown), scale, theme, (point, event), damage)
+    Some((model, bounds, shown))
 }
 
 /// Build the [`TableRow`] for one list entry listed in `parent`, under
@@ -1538,12 +1598,10 @@ pub fn scroll_wheel<S: DirectorySource>(
     delta: (i32, i32),
     damage: &mut Region,
 ) -> bool {
-    let Some(bounds) = scrollbar_bounds(scale, theme, viewport, toolbar) else {
+    let Some((model, bounds, shown)) = listing_column(browser, scale, theme, viewport, toolbar)
+    else {
         return false;
     };
-    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
-    let model = view.scroll_model(browser.scroll_offset());
-    let shown = view.view(model.offset()).viewport();
     browser
         .scroll_mut()
         .wheel(model, delta, scale, (bounds, shown), damage)
@@ -4130,19 +4188,44 @@ pub fn properties_scroll_wheel(
     delta: (i32, i32),
     damage: &mut Region,
 ) -> bool {
-    let Some((scrolled, _)) = section_column(props, view, perms, frame) else {
+    let Some((model, gutter, shown)) = properties_column(props, view, perms, frame) else {
         return false;
     };
-    let Some(gutter) = scrolled.gutter else {
+    scroll.wheel(model, delta, frame.1, (gutter, shown), damage)
+}
+
+/// Step the selected section's held scrollbar press once if its repeat is
+/// due at `now_ns`, answering whether the section moved. A move reports the
+/// column and its bar.
+pub fn properties_scroll_repeat(
+    scroll: &mut ScrollColumn,
+    props: &Properties,
+    (view, perms): (PropertiesView, SectionsShown<'_>),
+    frame: (Rect, Scale, &Theme),
+    now_ns: u64,
+    damage: &mut Region,
+) -> bool {
+    if !scroll.repeat_due(now_ns) {
+        return false;
+    }
+    let Some((model, gutter, shown)) = properties_column(props, view, perms, frame) else {
         return false;
     };
-    scroll.wheel(
-        scrolled.model,
-        delta,
-        frame.1,
-        (gutter, scrolled.view.viewport()),
-        damage,
-    )
+    let (_, scale, theme) = frame;
+    scroll.repeat(now_ns, model, (gutter, shown), (scale, theme), damage)
+}
+
+/// The selected section's scrolled column: the model it is drawn at, its
+/// bar's rectangle and the area it shows through, or `None` for a section
+/// that fits and so draws no bar.
+fn properties_column(
+    props: &Properties,
+    view: PropertiesView,
+    perms: SectionsShown<'_>,
+    frame: (Rect, Scale, &Theme),
+) -> Option<(ScrollModel, Rect, Rect)> {
+    let (scrolled, _) = section_column(props, view, perms, frame)?;
+    Some((scrolled.model, scrolled.gutter?, scrolled.view.viewport()))
 }
 
 /// Route a pointer `event` at window-local `point` to the selected section's
@@ -4161,17 +4244,9 @@ pub fn properties_scroll_pointer(
     pointer: (Point, &InputEvent),
     damage: &mut Region,
 ) -> Option<bool> {
-    let (scrolled, _) = section_column(props, view, perms, frame)?;
-    let gutter = scrolled.gutter?;
+    let (model, gutter, shown) = properties_column(props, view, perms, frame)?;
     let (_, scale, theme) = frame;
-    scroll.route(
-        scrolled.model,
-        (gutter, scrolled.view.viewport()),
-        scale,
-        theme,
-        pointer,
-        damage,
-    )
+    scroll.route(model, (gutter, shown), scale, theme, pointer, damage)
 }
 
 /// Scroll the selected section the least that shows its keyboard cursor —
@@ -4947,17 +5022,48 @@ pub fn open_with_scroll_pointer(
     event: &InputEvent,
     damage: &mut Region,
 ) -> Option<bool> {
+    let (model, gutter, list) = open_with_column(chooser, viewport, scale, theme)?;
+    chooser
+        .scroll_mut()
+        .route(model, (gutter, list), scale, theme, (point, event), damage)
+}
+
+/// Step the chooser's held scrollbar press once if its repeat is due at
+/// `now_ns`, answering whether its list moved. A move reports the bar and
+/// the rows it slid.
+pub fn open_with_scroll_repeat(
+    chooser: &mut OpenWithChooser,
+    (scale, theme): (Scale, &Theme),
+    viewport: Rect,
+    now_ns: u64,
+    damage: &mut Region,
+) -> bool {
+    if !chooser.scroll_mut().repeat_due(now_ns) {
+        return false;
+    }
+    let Some((model, gutter, list)) = open_with_column(chooser, viewport, scale, theme) else {
+        return false;
+    };
+    chooser
+        .scroll_mut()
+        .repeat(now_ns, model, (gutter, list), (scale, theme), damage)
+}
+
+/// The chooser's scrolled list at `viewport`: the model it is drawn at, its
+/// bar's rectangle and the rows it shows through, or `None` for a list that
+/// fits and so draws no bar.
+fn open_with_column(
+    chooser: &OpenWithChooser,
+    viewport: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<(ScrollModel, Rect, Rect)> {
     let (rows, gutter) = open_with_rows(chooser, viewport, scale, theme)?;
-    let gutter = gutter?;
-    let model = rows.scroll_model(chooser.offset());
-    chooser.scroll_mut().route(
-        model,
-        (gutter, rows.list_area()),
-        scale,
-        theme,
-        (point, event),
-        damage,
-    )
+    Some((
+        rows.scroll_model(chooser.offset()),
+        gutter?,
+        rows.list_area(),
+    ))
 }
 
 /// Scroll the chooser's list by a wheel turn of `(dx, dy)`, in the seat's
@@ -4973,13 +5079,12 @@ pub fn open_with_scroll_wheel(
     delta: (i32, i32),
     damage: &mut Region,
 ) -> bool {
-    let Some((rows, Some(gutter))) = open_with_rows(chooser, viewport, scale, theme) else {
+    let Some((model, gutter, list)) = open_with_column(chooser, viewport, scale, theme) else {
         return false;
     };
-    let model = rows.scroll_model(chooser.offset());
     chooser
         .scroll_mut()
-        .wheel(model, delta, scale, (gutter, rows.list_area()), damage)
+        .wheel(model, delta, scale, (gutter, list), damage)
 }
 
 /// Scroll the chooser's list the least that shows the current candidate whole,

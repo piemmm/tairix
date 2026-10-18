@@ -684,6 +684,10 @@ mod program {
         link: &'a Link,
         desktop_moved: &'a Cell<bool>,
         pressure_moved: &'a Cell<bool>,
+        /// When the list's held scrollbar press next steps, or `None` with
+        /// nothing held, so the park sleeps outright. The loop writes it just
+        /// before each wait.
+        deadline_ns: &'a Cell<Option<u64>>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -694,7 +698,14 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            match app::park(self.set)? {
+            let woken = match self.deadline_ns.get() {
+                Some(deadline) => match app::park_until(self.set, deadline)? {
+                    Some(woken) => woken,
+                    None => return Ok(Parked::Interrupted),
+                },
+                None => app::park(self.set)?,
+            };
+            match woken {
                 // Each wake is a level, so one left undrained would make the
                 // park spin.
                 Wake::App(WORKER_TOKEN) => {
@@ -1464,6 +1475,7 @@ mod program {
 
         let desktop_moved = Cell::new(false);
         let pressure_moved = Cell::new(false);
+        let deadline_ns = Cell::new(None);
         let worker_handle = Arc::clone(&app_state.worker);
         let link_handle = Arc::clone(&app_state.link);
         let mut events = WindowEvents::new(RtEventSource {
@@ -1473,6 +1485,7 @@ mod program {
             link: &link_handle,
             desktop_moved: &desktop_moved,
             pressure_moved: &pressure_moved,
+            deadline_ns: &deadline_ns,
         });
         loop {
             let mut reported = damage::sink();
@@ -1529,11 +1542,18 @@ mod program {
                     Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
                 }
             }
+            // A held scrollbar press may be due whether the last wait ended on
+            // its deadline or on input.
+            let now = tairix_rt::clock_get();
+            app_state
+                .player
+                .scroll_repeat(now, &app_state.layout, scale, theme, &mut reported);
             app_state.raise_notices(endpoint);
             if app_state.present(repaint, &reported, theme, scale).is_err() {
                 app_state.link.leave();
                 return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
             }
+            deadline_ns.set(app_state.player.scroll_repeat_deadline(now));
             match events.wait(&mut app_state.client) {
                 Ok(Some(event)) => {
                     let mut reported = damage::sink();

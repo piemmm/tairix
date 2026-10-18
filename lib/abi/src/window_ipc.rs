@@ -979,6 +979,10 @@ pub enum AppMenuRow {
         enabled: bool,
         /// What the rows it opens are for.
         symbol: AppMenuSymbol,
+        /// Why it cannot be opened, shown as the seat's tooltip like a
+        /// chooseable row's ([`AppMenuItem::with_reason`]); empty when it
+        /// states none.
+        reason: AppMenuReason,
     },
     /// The application-information row, whose child is the session's own
     /// info panel, drawn from the **signed manifest** of the bundle the
@@ -1058,6 +1062,8 @@ pub enum AppMenuRowView<'a> {
         enabled: bool,
         /// What the rows it opens are for.
         symbol: AppMenuSymbol,
+        /// Why it cannot be opened, empty when it states no reason.
+        reason: &'a str,
     },
     /// The application-information row.
     Info,
@@ -1329,6 +1335,7 @@ impl AppMenu {
                 label,
                 enabled: record.enabled,
                 symbol,
+                reason: self.text_field(reason_at, record.reason_len),
             },
             RowKind::Info => AppMenuRowView::Info,
         }
@@ -1382,10 +1389,11 @@ impl AppMenu {
                 label,
                 enabled,
                 symbol,
+                reason,
             } => {
                 record.kind = RowKind::Submenu(symbol);
                 record.enabled = enabled;
-                (label, AppMenuShortcut::EMPTY, AppMenuReason::EMPTY)
+                (label, AppMenuShortcut::EMPTY, reason)
             }
             AppMenuRow::Info => {
                 record.kind = RowKind::Info;
@@ -4954,15 +4962,15 @@ fn read_app_menu_row(
     };
     // Only a chooseable row states any of this, so a row of another kind
     // carrying it is refused rather than read with the extra silently
-    // dropped.
+    // dropped. A submenu may state why it cannot open, as an item may.
     let item_only = shortcut.is_empty()
-        && reason.is_empty()
         && initial.is_empty()
         && icon == AppMenuIcon::None
         && entry_id == 0
         && mark == AppMenuMark::None
         && role == AppMenuRole::Neutral;
-    let bare = item_only && label.is_empty() && !enabled && id == 0 && symbol == 0;
+    let bare =
+        item_only && reason.is_empty() && label.is_empty() && !enabled && id == 0 && symbol == 0;
     let row = match record[0] {
         APP_MENU_KIND_ITEM => {
             let symbol = AppMenuSymbol::from_wire(symbol)?;
@@ -4990,6 +4998,7 @@ fn read_app_menu_row(
             label,
             enabled,
             symbol: AppMenuSymbol::from_wire(symbol)?,
+            reason,
         },
         APP_MENU_KIND_SEPARATOR if bare => AppMenuRow::Separator,
         APP_MENU_KIND_INFO if bare => AppMenuRow::Info,
@@ -6949,11 +6958,13 @@ const PTR_MOVED: u16 = 0;
 const PTR_PRESSED: u16 = 1;
 /// Wire pointer-action discriminant of [`PointerAction::Released`].
 const PTR_RELEASED: u16 = 2;
+/// Wire pointer-action discriminant of [`PointerAction::Cancelled`].
+const PTR_CANCELLED: u16 = 3;
 
 /// What a routed pointer event did at its window-local position.
 ///
-/// The type makes illegal states unrepresentable: a move carries no
-/// button, a press/release exactly one resolved button.
+/// The type makes illegal states unrepresentable: a move and a cancel carry
+/// no button, a press/release exactly one resolved button.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PointerAction {
     /// The pointer moved to the carried position.
@@ -6962,6 +6973,12 @@ pub enum PointerAction {
     Pressed(PointerButtonCode),
     /// A button came up at the carried position.
     Released(PointerButtonCode),
+    /// The press this window held ended without a release reaching it: the
+    /// desktop took the pointer for a surface of its own — the lock, a
+    /// prompt, a menu, a drag it carries. Whatever the press began completes
+    /// nothing. The carried position is where the window last saw the
+    /// pointer.
+    Cancelled,
 }
 
 /// One window event the session delivers to a window's owning app.
@@ -7542,6 +7559,7 @@ impl WindowEvent {
                     PointerAction::Moved => (PTR_MOVED, crate::input::BUTTON_NONE),
                     PointerAction::Pressed(button) => (PTR_PRESSED, button.code()),
                     PointerAction::Released(button) => (PTR_RELEASED, button.code()),
+                    PointerAction::Cancelled => (PTR_CANCELLED, crate::input::BUTTON_NONE),
                 };
                 put_u16(&mut out, 24, kind);
                 put_u16(&mut out, 26, button);
@@ -8020,6 +8038,12 @@ fn read_pointer_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno
         }
         PTR_PRESSED => PointerAction::Pressed(PointerButtonCode::from_code(button)?),
         PTR_RELEASED => PointerAction::Released(PointerButtonCode::from_code(button)?),
+        PTR_CANCELLED => {
+            if button != crate::input::BUTTON_NONE {
+                return Err(Errno::OutOfRange);
+            }
+            PointerAction::Cancelled
+        }
         _ => return Err(Errno::OutOfRange),
     };
     Ok(WindowEvent::Pointer {
@@ -8548,6 +8572,7 @@ mod tests {
             label: label("Display"),
             enabled: true,
             symbol: AppMenuSymbol::Open,
+            reason: AppMenuReason::EMPTY,
         })
         .expect("room for a submenu");
         menu.push_under(
@@ -8569,6 +8594,7 @@ mod tests {
                 label: label("Colour"),
                 enabled: true,
                 symbol: AppMenuSymbol::Open,
+                reason: AppMenuReason::EMPTY,
             },
             1,
         )
@@ -8642,6 +8668,7 @@ mod tests {
                 label: label(&wide),
                 enabled: true,
                 symbol: AppMenuSymbol::Open,
+                reason: AppMenuReason::EMPTY,
             })
             .unwrap_or_else(|error| panic!("room for plate {plate}: {error:?}"));
         }
@@ -9508,6 +9535,7 @@ mod tests {
             label: label("Display"),
             enabled: true,
             symbol: AppMenuSymbol::Display,
+            reason: AppMenuReason::EMPTY,
         })
         .expect("room for the submenu");
         menu.push_under(
@@ -9543,6 +9571,7 @@ mod tests {
             label: label("New"),
             enabled: true,
             symbol: AppMenuSymbol::NewDocument,
+            reason: AppMenuReason::EMPTY,
         })
         .expect("room for the submenu");
         menu.push(AppMenuRow::Item(AppMenuItem::new(
@@ -9860,6 +9889,7 @@ mod tests {
             label: label("Root"),
             enabled: true,
             symbol: AppMenuSymbol::Open,
+            reason: AppMenuReason::EMPTY,
         })
         .expect("the root plate's submenu");
         let mut parent = 0;
@@ -9871,6 +9901,7 @@ mod tests {
                     label: label("Deeper"),
                     enabled: true,
                     symbol: AppMenuSymbol::Open,
+                    reason: AppMenuReason::EMPTY,
                 },
                 parent,
             )
@@ -9884,7 +9915,8 @@ mod tests {
                 AppMenuRow::Submenu {
                     label: label("Too deep"),
                     enabled: true,
-                    symbol: AppMenuSymbol::Open
+                    symbol: AppMenuSymbol::Open,
+                    reason: AppMenuReason::EMPTY,
                 },
                 parent
             ),
@@ -9916,7 +9948,8 @@ mod tests {
             menu.push(AppMenuRow::Submenu {
                 label: label(""),
                 enabled: true,
-                symbol: AppMenuSymbol::Open
+                symbol: AppMenuSymbol::Open,
+                reason: AppMenuReason::EMPTY,
             }),
             Err(Errno::OutOfRange)
         );
@@ -9942,6 +9975,7 @@ mod tests {
             label: label("Plate"),
             enabled: true,
             symbol: AppMenuSymbol::Open,
+            reason: AppMenuReason::EMPTY,
         })
         .expect("a submenu");
         let submenu = menu.len() - 1;
@@ -9962,6 +9996,7 @@ mod tests {
                 label: label("Plate"),
                 enabled: true,
                 symbol: AppMenuSymbol::Open,
+                reason: AppMenuReason::EMPTY,
             })
             .expect("a submenu to spill into");
         let mut id = 1u16;
@@ -9988,6 +10023,7 @@ mod tests {
                 label: label("Plate"),
                 enabled: true,
                 symbol: AppMenuSymbol::Open,
+                reason: AppMenuReason::EMPTY,
             })
             .unwrap_or_else(|error| panic!("plate {plate}: {error:?}"));
         }
@@ -11800,35 +11836,6 @@ mod tests {
                 window_id: 4,
                 key: sample_key(),
             },
-            WindowEvent::Pointer {
-                window_id: 4,
-                x: 17,
-                y: 23,
-                action: PointerAction::Moved,
-                modifiers: Modifiers::default(),
-            },
-            WindowEvent::Pointer {
-                window_id: 4,
-                x: 0,
-                y: 0,
-                action: PointerAction::Pressed(PointerButtonCode::Primary),
-                modifiers: Modifiers {
-                    shift: true,
-                    ..Modifiers::default()
-                },
-            },
-            WindowEvent::Pointer {
-                window_id: 4,
-                x: 1,
-                y: 2,
-                action: PointerAction::Released(PointerButtonCode::Middle),
-                modifiers: Modifiers {
-                    ctrl: true,
-                    alt: true,
-                    meta: true,
-                    ..Modifiers::default()
-                },
-            },
             WindowEvent::CloseRequested { window_id: 4 },
             WindowEvent::AlternateCloseRequested { window_id: 4 },
             WindowEvent::FilePicked {
@@ -11879,6 +11886,52 @@ mod tests {
             },
             WindowEvent::RedrawRequested { window_id: 4 },
             WindowEvent::ContentReleased { window_id: 4 },
+        ] {
+            let bytes = event.to_le_bytes();
+            assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+            assert_eq!(event.window_id(), Some(4));
+        }
+    }
+
+    #[test]
+    fn pointer_events_round_trip() {
+        for event in [
+            WindowEvent::Pointer {
+                window_id: 4,
+                x: 17,
+                y: 23,
+                action: PointerAction::Moved,
+                modifiers: Modifiers::default(),
+            },
+            WindowEvent::Pointer {
+                window_id: 4,
+                x: 0,
+                y: 0,
+                action: PointerAction::Pressed(PointerButtonCode::Primary),
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            },
+            WindowEvent::Pointer {
+                window_id: 4,
+                x: 1,
+                y: 2,
+                action: PointerAction::Released(PointerButtonCode::Middle),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    meta: true,
+                    ..Modifiers::default()
+                },
+            },
+            WindowEvent::Pointer {
+                window_id: 4,
+                x: 9,
+                y: 11,
+                action: PointerAction::Cancelled,
+                modifiers: Modifiers::default(),
+            },
         ] {
             let bytes = event.to_le_bytes();
             assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
@@ -12938,6 +12991,17 @@ mod tests {
         .to_le_bytes();
         moved[26] = 1;
         assert_eq!(WindowEvent::from_bytes(&moved), Err(Errno::OutOfRange));
+        // A button on a cancel, which ends every press the window held.
+        let mut cancelled = WindowEvent::Pointer {
+            window_id: 4,
+            x: 1,
+            y: 2,
+            action: PointerAction::Cancelled,
+            modifiers: Modifiers::default(),
+        }
+        .to_le_bytes();
+        cancelled[26] = 1;
+        assert_eq!(WindowEvent::from_bytes(&cancelled), Err(Errno::OutOfRange));
         // No button on a press, and an unknown pointer action.
         let mut pressed = WindowEvent::Pointer {
             window_id: 4,

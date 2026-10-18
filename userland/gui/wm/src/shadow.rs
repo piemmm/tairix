@@ -20,11 +20,20 @@
 //! so that span is one solid blend; per-pixel work is confined to the columns
 //! a ramp or a corner can reach, and beside a straight edge the ramp is read
 //! from a profile the kit computes once.
+//!
+//! # Two levels
+//!
+//! A decorated window resting behind the family the user is working in casts
+//! a lesser shadow than the window in front and every floating surface:
+//! lighter and shorter, so it reads as standing lower. The kit holds a
+//! `Level` for each. A window easing between them after a change of focus
+//! casts both at once, each weighted by how far it has risen, so the change is
+//! a crossfade between two exact shadows rather than a guess at one between.
 
 use alloc::vec::Vec;
 
 use tairix_raster::{blend_solid_span, round_rect_coverage, DitherRow};
-use tairix_theme::Theme;
+use tairix_theme::{Fade, Theme};
 use tairix_util::fallible;
 
 use crate::color::{div255, Color, Pixel};
@@ -42,15 +51,103 @@ const ONE: u32 = 1 << 15;
 /// for it.
 const MAX_REACH: u32 = 255;
 
-/// How far a shadow cast at `scale` under `theme` reaches, in physical pixels:
-/// `0` where the theme casts none.
-fn reach(scale: Scale, theme: &Theme) -> u32 {
-    if theme.palette().drop_shadow.a == 0 {
+/// How high a window's shadow stands: [`LIFTED`](Self::LIFTED) for the window
+/// being worked in and every floating surface,
+/// [`RESTING`](Self::RESTING) for a decorated window behind another family,
+/// and between the two while it eases from one to the other.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Elevation(pub(crate) u8);
+
+impl Elevation {
+    /// The shadow of a surface standing in front.
+    pub(crate) const LIFTED: Self = Self(u8::MAX);
+    /// The shadow of a decorated window resting behind the family in front.
+    pub(crate) const RESTING: Self = Self(0);
+}
+
+/// A window's shadow easing between the levels: the level drawn, the one it
+/// is going to, and the fade carrying it there.
+///
+/// A change of target waits for the next [`step`](Self::step) to start
+/// easing, from where the shadow is drawn then — the compositor reads no
+/// clock, so the first frame after a change is where its ease begins.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Lift {
+    drawn: u8,
+    target: u8,
+    fade: Fade,
+}
+
+impl Lift {
+    /// A shadow standing still at `elevation`.
+    pub(crate) fn at(elevation: Elevation) -> Self {
+        let Elevation(level) = elevation;
+        Self {
+            drawn: level,
+            target: level,
+            fade: Fade::start(0, 0, level, level),
+        }
+    }
+
+    /// The level the shadow is drawn at.
+    pub(crate) const fn drawn(&self) -> Elevation {
+        Elevation(self.drawn)
+    }
+
+    /// Send the shadow toward `elevation`: eased from the next step, or
+    /// there at once when `at_once`, for a window nobody can watch rise.
+    pub(crate) fn aim(&mut self, elevation: Elevation, at_once: bool) {
+        if at_once {
+            *self = Self::at(elevation);
+        } else {
+            self.target = elevation.0;
+        }
+    }
+
+    /// Advance the ease to `now_ns`, starting one of `duration_ms` toward a
+    /// target that changed, and answer whether the level drawn moved. A
+    /// zero duration — reduced motion — arrives on this step.
+    pub(crate) fn step(&mut self, now_ns: u64, duration_ms: u16) -> bool {
+        if self.target != self.fade.target() {
+            self.fade = Fade::start(now_ns, duration_ms, self.drawn, self.target);
+        }
+        let level = self.fade.strength(now_ns);
+        if level == self.fade.target() {
+            self.fade.settle();
+        }
+        let moved = level != self.drawn;
+        self.drawn = level;
+        moved
+    }
+
+    /// Nanoseconds until the next step is owed, or `None` for a shadow at
+    /// rest: at once for a change no step has started.
+    pub(crate) fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+        if self.target != self.fade.target() {
+            return Some(0);
+        }
+        self.fade.next_frame_in(now_ns)
+    }
+}
+
+/// How far a shadow of logical `reach`, at its darkest `alpha`, reaches at
+/// `scale`, in physical pixels: `0` where it casts none.
+fn physical_reach(scale: Scale, alpha: u8, reach: u32) -> u32 {
+    if alpha == 0 {
         return 0;
     }
-    scale
-        .scale_length(theme.metrics().drop_shadow_reach)
-        .min(MAX_REACH)
+    scale.scale_length(reach).min(MAX_REACH)
+}
+
+/// How far the further of the two shadows `theme` casts at `scale` reaches,
+/// in physical pixels: `0` where it casts none.
+fn reach(scale: Scale, theme: &Theme) -> u32 {
+    let (palette, metrics) = (theme.palette(), theme.metrics());
+    physical_reach(scale, palette.drop_shadow.a, metrics.drop_shadow_reach).max(physical_reach(
+        scale,
+        palette.inactive_drop_shadow.a,
+        metrics.inactive_drop_shadow_reach,
+    ))
 }
 
 /// `bounds` grown by what a shadow of `reach` darkens: nothing above it,
@@ -69,7 +166,7 @@ pub(crate) fn spread(bounds: Rect, reach: u32) -> Rect {
 
 /// The screen area a surface at `bounds` covers once its shadow at `scale`
 /// under `theme` is counted: its own rectangle and everything the shadow
-/// darkens beside and below it.
+/// darkens beside and below it, at whichever level it stands.
 ///
 /// The one footprint definition: the compositor marks it when a caster
 /// changes, and a caller that must keep clear of every pixel a window can
@@ -93,8 +190,116 @@ struct Tile {
 }
 
 /// Everything shadows are drawn from on one output, rebuilt whenever its scale
-/// or theme changes.
+/// or theme changes: a [`Level`] for a surface in front and one for a window
+/// resting behind it.
 pub(crate) struct ShadowKit {
+    lifted: Level,
+    resting: Level,
+}
+
+impl ShadowKit {
+    /// The kit for an output at `scale` under `theme`: each level's kernel,
+    /// and its notch tiles for the window and popup radii the theme rounds by.
+    ///
+    /// An allocation refused anywhere leaves that level casting no shadows,
+    /// which costs the desktop its depth and never a frame.
+    pub(crate) fn new(scale: Scale, theme: &Theme) -> Self {
+        let (palette, metrics) = (theme.palette(), theme.metrics());
+        let standard = [
+            scale.scale_length(metrics.window_corner_radius),
+            scale.scale_length(metrics.popup_corner_radius),
+        ];
+        Self {
+            lifted: Level::new(
+                scale,
+                Color::from(palette.drop_shadow),
+                metrics.drop_shadow_reach,
+                standard,
+            ),
+            resting: Level::new(
+                scale,
+                Color::from(palette.inactive_drop_shadow),
+                metrics.inactive_drop_shadow_reach,
+                standard,
+            ),
+        }
+    }
+
+    /// How far the further of the two shadows reaches on this output, `0` for
+    /// none: the bound every caster's footprint is grown by.
+    pub(crate) fn reach(&self) -> u32 {
+        self.lifted.reach.max(self.resting.reach)
+    }
+
+    /// Drop every tile but the theme's own radii and those `in_use` answers
+    /// for, in both levels.
+    pub(crate) fn retain_tiles(&mut self, in_use: impl Fn(u32) -> bool) {
+        self.lifted.retain_tiles(&in_use);
+        self.resting.retain_tiles(&in_use);
+    }
+
+    /// Build the tiles for `radius` that are not already held.
+    pub(crate) fn ensure_tile(&mut self, radius: u32) {
+        self.lifted.ensure_tile(radius);
+        self.resting.ensure_tile(radius);
+    }
+
+    /// The shadow the silhouette `shape` at `bounds`, drawn at `opacity` and
+    /// standing at `elevation`, casts across screen row `y`, or `None` where
+    /// it casts nothing there.
+    pub(crate) fn row(
+        &self,
+        bounds: Rect,
+        shape: Option<WindowShape>,
+        opacity: u8,
+        elevation: Elevation,
+        y: i32,
+    ) -> Option<ShadowRow<'_>> {
+        let Elevation(lift) = elevation;
+        let lifted = if lift > 0 {
+            self.lifted.row(bounds, shape, opacity, y)
+        } else {
+            None
+        };
+        let resting = if lift < u8::MAX {
+            self.resting.row(bounds, shape, opacity, y)
+        } else {
+            None
+        };
+        match (lifted, resting) {
+            (None, None) => None,
+            (Some(row), None) if lift == u8::MAX => Some(ShadowRow::One(row)),
+            (None, Some(row)) if lift == 0 => Some(ShadowRow::One(row)),
+            (lifted, resting) => Some(ShadowRow::Mixed {
+                lifted,
+                resting,
+                lift,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn level(&self, elevation: Elevation) -> &Level {
+        if elevation == Elevation::RESTING {
+            &self.resting
+        } else {
+            &self.lifted
+        }
+    }
+
+    #[cfg(test)]
+    fn level_mut(&mut self, elevation: Elevation) -> &mut Level {
+        if elevation == Elevation::RESTING {
+            &mut self.resting
+        } else {
+            &mut self.lifted
+        }
+    }
+}
+
+/// One shadow a surface can cast: its reach, its colour, the kernel it is
+/// softened by and the corner tiles it is cut by.
+struct Level {
     /// The reach, in physical pixels; `0` draws no shadow at all.
     reach: u32,
     /// The shadow colour at its darkest, premultiplied.
@@ -113,39 +318,33 @@ pub(crate) struct ShadowKit {
     standard: [u32; 2],
 }
 
-impl ShadowKit {
-    /// The kit for an output at `scale` under `theme`: its kernel, and the
-    /// notch tiles for the window and popup radii the theme rounds by.
-    ///
-    /// An allocation refused anywhere leaves the kit casting no shadows, which
-    /// costs the desktop its depth and never a frame.
-    pub(crate) fn new(scale: Scale, theme: &Theme) -> Self {
-        let reach = reach(scale, theme);
-        let metrics = theme.metrics();
-        let standard = [
-            scale.scale_length(metrics.window_corner_radius),
-            scale.scale_length(metrics.popup_corner_radius),
-        ];
+impl Level {
+    /// The level of a shadow in `color` reaching a logical `reach` at
+    /// `scale`, holding the tiles for the `standard` radii. Casts nothing
+    /// when the colour darkens nothing, the reach is zero, or the allocator
+    /// refuses its kernel.
+    fn new(scale: Scale, color: Color, reach: u32, standard: [u32; 2]) -> Self {
+        let reach = physical_reach(scale, color.a, reach);
         let Some(ramp) = kernel_ramp(reach) else {
             return Self::none();
         };
         let edge = edge_profile(&ramp, reach).unwrap_or_default();
-        let mut kit = Self {
+        let mut level = Self {
             reach,
-            color: Color::from(theme.palette().drop_shadow).premultiply(),
+            color: color.premultiply(),
             ramp,
             edge,
             tiles: Vec::new(),
             standard,
         };
         for radius in standard {
-            kit.ensure_tile(radius);
+            level.ensure_tile(radius);
         }
-        kit
+        level
     }
 
-    /// A kit that draws nothing.
-    pub(crate) const fn none() -> Self {
+    /// A level that draws nothing.
+    const fn none() -> Self {
         Self {
             reach: 0,
             color: Pixel::TRANSPARENT,
@@ -156,18 +355,13 @@ impl ShadowKit {
         }
     }
 
-    /// How far a shadow reaches on this output, `0` for none.
-    pub(crate) const fn reach(&self) -> u32 {
-        self.reach
-    }
-
     /// Drop every tile but the theme's own radii and those `in_use` answers
     /// for.
     ///
     /// Tiles for other radii exist because a window too small for its corners
     /// rounds by less, so what this keeps is bounded by what is on screen
     /// rather than by every window that ever cast a shadow.
-    pub(crate) fn retain_tiles(&mut self, in_use: impl Fn(u32) -> bool) {
+    fn retain_tiles(&mut self, in_use: &impl Fn(u32) -> bool) {
         let standard = self.standard;
         self.tiles
             .retain(|tile| standard.contains(&tile.radius) || in_use(tile.radius));
@@ -177,7 +371,7 @@ impl ShadowKit {
     /// allocator refuses is simply absent: that shadow is drawn without its
     /// corner notches, a little dark under the corners, rather than not at
     /// all.
-    pub(crate) fn ensure_tile(&mut self, radius: u32) {
+    fn ensure_tile(&mut self, radius: u32) {
         if radius == 0 || self.reach == 0 || self.tile(radius).is_some() {
             return;
         }
@@ -207,14 +401,15 @@ impl ShadowKit {
     }
 
     /// The shadow the silhouette `shape` at `bounds`, drawn at `opacity`,
-    /// casts across screen row `y`, or `None` where it casts nothing there.
-    pub(crate) fn row(
+    /// casts across screen row `y` at this level, or `None` where it casts
+    /// nothing there.
+    fn row(
         &self,
         bounds: Rect,
         shape: Option<WindowShape>,
         opacity: u8,
         y: i32,
-    ) -> Option<ShadowRow<'_>> {
+    ) -> Option<LevelRow<'_>> {
         if self.reach == 0 || opacity == 0 || bounds.is_empty() {
             return None;
         }
@@ -254,8 +449,8 @@ impl ShadowKit {
                 .filter(|shape| shape.clips_row(ly))
                 .map_or(0, |_| radius),
         };
-        Some(ShadowRow {
-            kit: self,
+        Some(LevelRow {
+            level: self,
             left: bounds.left(),
             right: bounds.right(),
             arc,
@@ -386,8 +581,63 @@ fn notch_at(row: &[u16], offset: i64) -> u64 {
 }
 
 /// One screen row of a window's shadow, resolved once for the whole row.
-pub(crate) struct ShadowRow<'a> {
-    kit: &'a ShadowKit,
+pub(crate) enum ShadowRow<'a> {
+    /// A shadow standing at one level.
+    One(LevelRow<'a>),
+    /// A shadow between the levels while its window eases from one to the
+    /// other: each level weighted by how far the window has risen, `lift` out
+    /// of [`u8::MAX`] toward the lifted one. A level that casts nothing on
+    /// this row is absent.
+    Mixed {
+        /// The lifted level's row.
+        lifted: Option<LevelRow<'a>>,
+        /// The resting level's row.
+        resting: Option<LevelRow<'a>>,
+        /// How far toward the lifted level the window has risen.
+        lift: u8,
+    },
+}
+
+impl ShadowRow<'_> {
+    /// The shadow's own pixel at screen column `x` — what a layer bakes under
+    /// the window's body there — or `None` where it draws nothing.
+    pub(crate) fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
+        match self {
+            Self::One(row) => row.sample(x, bias),
+            Self::Mixed {
+                lifted,
+                resting,
+                lift,
+            } => {
+                let pixel = mixed_pixel(lifted.as_ref(), resting.as_ref(), *lift, x, bias);
+                (pixel.a > 0).then_some(pixel)
+            }
+        }
+    }
+
+    /// Blend this row's shadow over `dst`, whose first pixel is screen column
+    /// `first_x`, reporting how many pixels it darkened.
+    pub(crate) fn blend_into(&self, dst: &mut [Pixel], first_x: i32, dither: DitherRow) -> u64 {
+        match self {
+            Self::One(row) => row.blend_into(dst, first_x, dither),
+            Self::Mixed {
+                lifted,
+                resting,
+                lift,
+            } => blend_mixed(
+                lifted.as_ref(),
+                resting.as_ref(),
+                *lift,
+                (dst, first_x),
+                dither,
+            ),
+        }
+    }
+}
+
+/// One screen row of a window's shadow at one level.
+pub(crate) struct LevelRow<'a> {
+    level: &'a Level,
     left: i32,
     right: i32,
     /// How far in from each side the shadow varies column by column: past
@@ -407,7 +657,7 @@ pub(crate) struct ShadowRow<'a> {
     opacity: u8,
 }
 
-impl ShadowRow<'_> {
+impl LevelRow<'_> {
     /// The shadow's weight at screen column `x`, `0` where it draws nothing.
     fn weight(&self, x: i32) -> u8 {
         let covered = self.covered(x);
@@ -415,11 +665,11 @@ impl ShadowRow<'_> {
             return 0;
         }
         let h = self
-            .kit
+            .level
             .cum(i64::from(x) - i64::from(self.left))
-            .saturating_sub(self.kit.cum(i64::from(x) - i64::from(self.right)));
+            .saturating_sub(self.level.cum(i64::from(x) - i64::from(self.right)));
         let full = (u64::from(h) * u64::from(self.v) + u64::from(ONE / 2)) >> 15;
-        let reach = i64::from(self.kit.reach);
+        let reach = i64::from(self.level.reach);
         let from_left = i64::from(x) - i64::from(self.left) + reach;
         let from_right = i64::from(self.right) + reach - 1 - i64::from(x);
         let notches: u64 = self
@@ -444,11 +694,25 @@ impl ShadowRow<'_> {
         shape.map_or(u8::MAX, |shape| shape.coverage(lx, ly))
     }
 
-    /// The shadow's own pixel at screen column `x` — what a layer bakes under
-    /// the window's body there — or `None` where it draws nothing.
-    pub(crate) fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
+    /// The shadow's own pixel at screen column `x`, or `None` where it draws
+    /// nothing.
+    fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
         let weight = self.weight(x);
-        (weight > 0).then(|| self.kit.color.scale_alpha_biased(weight, bias))
+        (weight > 0).then(|| self.level.color.scale_alpha_biased(weight, bias))
+    }
+
+    /// The screen columns this row can darken.
+    fn span(&self) -> (i64, i64) {
+        let reach = i64::from(self.level.reach);
+        (i64::from(self.left) - reach, i64::from(self.right) + reach)
+    }
+
+    /// Across the window, the columns between its arcs, which the silhouette
+    /// covers whole so no shadow is laid there; `None` beneath it.
+    fn interior(&self) -> Option<(i64, i64)> {
+        let arc = i64::from(self.arc);
+        self.inside
+            .map(|_| (i64::from(self.left) + arc, i64::from(self.right) - arc))
     }
 
     /// Blend this row's shadow over `dst`, whose first pixel is screen column
@@ -457,11 +721,10 @@ impl ShadowRow<'_> {
     /// Only the columns a ramp, a corner or an arc can reach are evaluated one
     /// by one. Below the window, the span between the corners is the kernel's
     /// vertical term alone, so it is one solid blend at the same rounding.
-    pub(crate) fn blend_into(&self, dst: &mut [Pixel], first_x: i32, dither: DitherRow) -> u64 {
-        let reach = i64::from(self.kit.reach);
+    fn blend_into(&self, dst: &mut [Pixel], first_x: i32, dither: DitherRow) -> u64 {
         let (left, right) = (i64::from(self.left), i64::from(self.right));
         let arc = i64::from(self.arc);
-        let (lo, hi) = (left - reach, right + reach);
+        let (lo, hi) = self.span();
         // A row is laid a segment at a time, and most segments are nowhere near
         // a given shadow, or wholly across the window that casts it.
         let start = i64::from(first_x);
@@ -478,7 +741,12 @@ impl ShadowRow<'_> {
         let mut blended = 0u64;
         let mut per_pixel = |dst: &mut [Pixel], from: i64, until: i64| {
             for (dst, x) in clipped(dst, first_x, from, until) {
-                blended += self.darken(dst, self.weight(x), dither.bias(x.cast_unsigned()));
+                blended += darken(
+                    dst,
+                    self.level.color,
+                    self.weight(x),
+                    dither.bias(x.cast_unsigned()),
+                );
             }
         };
         if left + arc >= right - arc {
@@ -491,7 +759,7 @@ impl ShadowRow<'_> {
             let weight = strength(u64::from(self.v), 0, self.opacity);
             if let Some((span, column)) = middle(dst, first_x, left + arc, right - arc) {
                 if weight > 0 {
-                    blend_solid_span(span, self.kit.color, weight, dither, column);
+                    blend_solid_span(span, self.level.color, weight, dither, column);
                     blended += u64::try_from(span.len()).unwrap_or(u64::MAX);
                 }
             }
@@ -499,32 +767,18 @@ impl ShadowRow<'_> {
         blended
     }
 
-    /// Lay the shadow colour over `dst` at `weight`, rounding at `bias`,
-    /// reporting whether it darkened anything.
-    fn darken(&self, dst: &mut Pixel, weight: u8, bias: u32) -> u64 {
-        if weight == 0 {
-            return 0;
-        }
-        *dst = self
-            .kit
-            .color
-            .scale_alpha_biased(weight, bias)
-            .over_biased(*dst, bias);
-        1
-    }
-
-    /// The kit's straight-edge profile, where this row's ramps can be read
+    /// The level's straight-edge profile, where this row's ramps can be read
     /// from it: across the window clear of its corners, with the vertical term
     /// whole, beside a window at least as wide as the reach, so each ramp sees
     /// only its own edge.
     fn straight_edge(&self) -> Option<&[u8]> {
-        let wide = i64::from(self.right) - i64::from(self.left) >= i64::from(self.kit.reach);
+        let wide = i64::from(self.right) - i64::from(self.left) >= i64::from(self.level.reach);
         let straight = self.inside.is_some()
             && self.arc == 0
             && self.v == ONE
             && self.notches.iter().all(|row| row.is_empty())
             && wide;
-        (straight && !self.kit.edge.is_empty()).then_some(self.kit.edge.as_slice())
+        (straight && !self.level.edge.is_empty()).then_some(self.level.edge.as_slice())
     }
 
     /// [`blend_into`](Self::blend_into) for a row [`straight_edge`](Self::straight_edge)
@@ -537,7 +791,7 @@ impl ShadowRow<'_> {
         dither: DitherRow,
         edge: &[u8],
     ) -> u64 {
-        let reach = i64::from(self.kit.reach);
+        let reach = i64::from(self.level.reach);
         let (left, right) = (i64::from(self.left), i64::from(self.right));
         let Some((leading, trailing)) = edge.split_at_checked(edge.len() / 2) else {
             return 0;
@@ -551,11 +805,94 @@ impl ShadowRow<'_> {
                     .copied()
                     .unwrap_or(0);
                 let weight = div255(u32::from(level) * u32::from(self.opacity));
-                blended += self.darken(dst, weight, dither.bias(x.cast_unsigned()));
+                blended += darken(
+                    dst,
+                    self.level.color,
+                    weight,
+                    dither.bias(x.cast_unsigned()),
+                );
             }
         }
         blended
     }
+}
+
+/// The pixel a shadow between its levels lays at screen column `x`: each
+/// level's own pixel scaled by its share of `lift`, summed.
+///
+/// The two shares sum to one, so the sum is a premultiplied pixel no more
+/// opaque than the darker level's, and at either end it is that level's own.
+fn mixed_pixel(
+    lifted: Option<&LevelRow<'_>>,
+    resting: Option<&LevelRow<'_>>,
+    lift: u8,
+    x: i32,
+    bias: u32,
+) -> Pixel {
+    let part = |row: Option<&LevelRow<'_>>, share: u8| {
+        row.map_or(Pixel::TRANSPARENT, |row| {
+            let weight = div255(u32::from(row.weight(x)) * u32::from(share));
+            row.level.color.scale_alpha_biased(weight, bias)
+        })
+    };
+    let (a, b) = (part(lifted, lift), part(resting, u8::MAX - lift));
+    Pixel {
+        r: a.r.saturating_add(b.r),
+        g: a.g.saturating_add(b.g),
+        b: a.b.saturating_add(b.b),
+        a: a.a.saturating_add(b.a),
+    }
+}
+
+/// [`ShadowRow::blend_into`] for a shadow between its levels: every column
+/// either level can reach is weighed one by one — across the window only
+/// those its arcs and ramps reach — which only a window easing between levels
+/// pays, and only while it eases.
+fn blend_mixed(
+    lifted: Option<&LevelRow<'_>>,
+    resting: Option<&LevelRow<'_>>,
+    lift: u8,
+    (dst, first_x): (&mut [Pixel], i32),
+    dither: DitherRow,
+) -> u64 {
+    let rows = [lifted, resting];
+    let lo = rows.iter().flatten().map(|row| row.span().0).min();
+    let hi = rows.iter().flatten().map(|row| row.span().1).max();
+    let (Some(lo), Some(hi)) = (lo, hi) else {
+        return 0;
+    };
+    let mut blended = 0u64;
+    let mut weigh = |dst: &mut [Pixel], from: i64, until: i64| {
+        for (dst, x) in clipped(dst, first_x, from, until) {
+            let bias = dither.bias(x.cast_unsigned());
+            let pixel = mixed_pixel(lifted, resting, lift, x, bias);
+            if pixel.a > 0 {
+                *dst = pixel.over_biased(*dst, bias);
+                blended += 1;
+            }
+        }
+    };
+    // Both levels share the window's silhouette, so they share its interior.
+    match rows.iter().flatten().find_map(|row| row.interior()) {
+        Some((from, until)) if from < until => {
+            weigh(dst, lo, from);
+            weigh(dst, until, hi);
+        }
+        _ => weigh(dst, lo, hi),
+    }
+    blended
+}
+
+/// Lay `color` over `dst` at `weight`, rounding at `bias`, reporting whether
+/// it darkened anything.
+fn darken(dst: &mut Pixel, color: Pixel, weight: u8, bias: u32) -> u64 {
+    if weight == 0 {
+        return 0;
+    }
+    *dst = color
+        .scale_alpha_biased(weight, bias)
+        .over_biased(*dst, bias);
+    1
 }
 
 /// A shadow strength of `intensity` [`ONE`] units at a pixel the silhouette
@@ -572,7 +909,7 @@ fn level(intensity: u64) -> u8 {
     u8::try_from(level).unwrap_or(u8::MAX)
 }
 
-/// The kit's straight-edge profile ([`ShadowKit::edge`]) from the kernel's
+/// The level's straight-edge profile ([`Level::edge`]) from the kernel's
 /// running sum: beside a left edge the rectangle's horizontal term is the sum
 /// so far, beside a right one what remains of it. `None` when the allocator
 /// refuses the table.

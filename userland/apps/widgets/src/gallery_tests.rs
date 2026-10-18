@@ -1111,3 +1111,94 @@ fn every_wheel_turn_reports_every_pixel_it_changes() {
         }
     }
 }
+
+// ---- held presses ----------------------------------------------------------
+
+/// The vertical demo bar's offset, from the model it holds.
+fn demo_bar_offset(gallery: &Gallery) -> u64 {
+    match &gallery.current_panel()[1].widget {
+        DemoWidget::ScrollBar(bar) => bar.model().offset(),
+        other => panic!("item 1 of the bars panel is a scroll bar, not {other:?}"),
+    }
+}
+
+/// A held arrow on a demo bar steps once at the press, then again each time
+/// the gallery is asked to step on the bar's own cadence, and stops when let
+/// go.
+#[test]
+fn a_held_demo_bar_arrow_repeats_through_the_gallery() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Bars);
+    let bar = item_rect(&gallery, 1);
+    let down = Point::new(centre_of(bar).x, bar.bottom() - 2);
+    let mut damage = damage::sink();
+    point(
+        &mut gallery,
+        &InputEvent::PointerMoved { to: down },
+        &mut damage,
+    );
+    point(
+        &mut gallery,
+        &InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut damage,
+    );
+    let pressed = demo_bar_offset(&gallery);
+
+    let due = gallery
+        .repeat_deadline(0, window(), Scale::ONE, theme)
+        .expect("a held arrow arms a repeat");
+    let mut stepped = damage::sink();
+    assert!(!gallery.repeat(due - 1, window(), Scale::ONE, theme, &mut stepped));
+    assert!(gallery.repeat(due, window(), Scale::ONE, theme, &mut stepped));
+    assert!(
+        demo_bar_offset(&gallery) > pressed,
+        "the hold stepped again"
+    );
+    assert!(stepped.intersects(bar), "and reported the bar it moved");
+
+    point(
+        &mut gallery,
+        &InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        &mut damage,
+    );
+    assert_eq!(
+        gallery.repeat_deadline(due, window(), Scale::ONE, theme),
+        None
+    );
+}
+
+/// The desktop taking the pointer ends the press the gallery holds, so the
+/// part under the pointer hears it again rather than the held one hearing
+/// every move for ever.
+#[test]
+fn a_cancelled_press_lets_the_gallery_follow_the_pointer_again() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Bars);
+    let bar = item_rect(&gallery, 1);
+    let down = Point::new(centre_of(bar).x, bar.bottom() - 2);
+    let mut damage = damage::sink();
+    point(
+        &mut gallery,
+        &InputEvent::PointerMoved { to: down },
+        &mut damage,
+    );
+    point(
+        &mut gallery,
+        &InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        &mut damage,
+    );
+    point(&mut gallery, &InputEvent::PointerCancelled, &mut damage);
+    assert_eq!(
+        gallery.repeat_deadline(0, window(), Scale::ONE, theme),
+        None,
+        "nothing is held after the cancel"
+    );
+}

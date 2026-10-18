@@ -16,7 +16,7 @@ use tairix_font::{BitmapFont, Cut, TextLine, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Ring, Surface};
+use tairix_raster::{Color, Ring, Surface, SUBPIXEL};
 use tairix_theme::{edge_weight, Contrast, Palette, SignalRole, SurfaceGround, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
@@ -881,6 +881,10 @@ pub(crate) fn press_latch(
             *armed = false;
             activated
         }
+        InputEvent::PointerCancelled => {
+            *armed = false;
+            false
+        }
         _ => false,
     }
 }
@@ -932,7 +936,8 @@ pub(crate) fn grab_after(
         } => over,
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
-        } => None,
+        }
+        | InputEvent::PointerCancelled => None,
         _ => armed,
     }
 }
@@ -976,6 +981,8 @@ pub(crate) fn pointer_activation(
         InputEvent::PointerReleased {
             button: PointerButton::Primary,
         } => Some(hover_or_none),
+        // The pointer is another surface's now, so nothing here is under it.
+        InputEvent::PointerCancelled => Some(PointerState::None),
         _ => None,
     };
     if let Some(next) = next {
@@ -1769,34 +1776,67 @@ pub(crate) enum ChevronDir {
 /// disclosure, a menu's submenu anchor, and a scrollbar's end-button steps, so
 /// no family carries its own triangle recipe.
 ///
-/// `rect` is the *region the mark sits in*, not the mark: the triangle is
-/// inset well within it — a little over a third of the region wide and a
-/// little over a fifth of it tall — so a caller hands over the whole control
-/// (or end button) it belongs to and the chevron places itself. A caller that
-/// passes a mark-sized region instead gets a triangle only a pixel or two
-/// across, which area coverage spreads across its neighbours as a grey smudge
-/// with no direction left to read.
+/// `rect` is the *region the mark sits in*, not the mark: the triangle's base
+/// is a little over a third of the region across, so a caller hands over the
+/// whole control (or end button) it belongs to and the chevron places itself
+/// — but never less than seven pixels, the smallest arrow that reads at a
+/// glance, while the region holds one.
+///
+/// The triangle is fitted to whole pixels: its base lies on a pixel edge and
+/// its sides run at 45 degrees from an apex at a pixel's centre, so each row
+/// is whole pixels across with only a sliver of coverage at its ends. A mark
+/// whose geometry fell between pixels came out a grey smudge with no
+/// direction left to read. It is filled in place, confined to `rect`.
 pub(crate) fn paint_chevron(surface: &mut Surface, rect: Rect, dir: ChevronDir, color: Color) {
     let Some((x, y, w, h)) = surface_rect(rect) else {
         return;
     };
-    if w == 0 || h == 0 {
+    let side = w.min(h);
+    let half = (side.saturating_mul(36) / 200)
+        .max(MIN_CHEVRON_HALF)
+        .min(side.saturating_sub(1) / 2);
+    if half == 0 {
         return;
     }
-    let Some(mut glyph) = Surface::new(w, h) else {
-        return;
+    let (span, depth) = (half * 2 + 1, half + 1);
+    let (mark_w, mark_h) = match dir {
+        ChevronDir::Up | ChevronDir::Down => (span, depth),
+        ChevronDir::Left | ChevronDir::Right => (depth, span),
     };
-    // Triangles authored on a 100×100 grid mapped across the region, so they
-    // scale with the region at any density.
+    let at = |v: u32| to_i32(v).saturating_mul(SUBPIXEL);
+    let (left, top) = (at(x + (w - mark_w) / 2), at(y + (h - mark_h) / 2));
+    let mid = SUBPIXEL / 2;
+    let (span, depth, half) = (at(span), at(depth), at(half));
     let points: [(i32, i32); 3] = match dir {
-        ChevronDir::Up => [(32, 58), (68, 58), (50, 36)],
-        ChevronDir::Down => [(32, 42), (68, 42), (50, 64)],
-        ChevronDir::Left => [(58, 32), (58, 68), (36, 50)],
-        ChevronDir::Right => [(40, 32), (40, 68), (64, 50)],
+        ChevronDir::Up => [
+            (left + half + mid, top),
+            (left + span + mid, top + depth),
+            (left - mid, top + depth),
+        ],
+        ChevronDir::Down => [
+            (left - mid, top),
+            (left + span + mid, top),
+            (left + half + mid, top + depth),
+        ],
+        ChevronDir::Left => [
+            (left, top + half + mid),
+            (left + depth, top - mid),
+            (left + depth, top + span + mid),
+        ],
+        ChevronDir::Right => [
+            (left, top - mid),
+            (left + depth, top + half + mid),
+            (left, top + span + mid),
+        ],
     };
-    glyph.fill_polygon(&points, 100, color);
-    surface.blit(to_i32(x), to_i32(y), &glyph);
+    surface.with_clip(x, y, w, h, |clipped| {
+        clipped.fill_polygon_subpixel(&points, color);
+    });
 }
+
+/// The half-base, in whole pixels past the apex column, below which a chevron
+/// stops reading as an arrow: a seven-pixel base four rows deep.
+const MIN_CHEVRON_HALF: u32 = 3;
 
 /// Outline `rect` in the accent when `state` marks the control a drop target:
 /// where a carried drag would land, over whatever else the control wears.

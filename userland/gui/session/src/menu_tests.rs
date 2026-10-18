@@ -8,8 +8,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, AppMenuSymbol, MenuRefusal,
-    APP_MENU_MAX_DEPTH,
+    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow, AppMenuSymbol,
+    MenuRefusal, APP_MENU_MAX_DEPTH,
 };
 use tairix_controls::{ChainChild, ChainModel, ChainRow, Fact, FactList, MenuItem, PlatePlacement};
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -1288,6 +1288,7 @@ fn a_declared_separator_becomes_the_next_rows_group_break_on_every_plate() {
         label: label("More"),
         enabled: true,
         symbol: AppMenuSymbol::Settings,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("a submenu");
     let parent = wire.len() - 1;
@@ -1353,6 +1354,7 @@ fn a_submenu_on_the_deepest_plate_is_refused_by_the_wire_model() {
         label: label("L1"),
         enabled: true,
         symbol: AppMenuSymbol::Settings,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("a submenu");
     let mut parent = wire.len() - 1;
@@ -1362,6 +1364,7 @@ fn a_submenu_on_the_deepest_plate_is_refused_by_the_wire_model() {
                 label: label(&alloc::format!("L{level}")),
                 enabled: true,
                 symbol: AppMenuSymbol::Settings,
+                reason: AppMenuReason::EMPTY,
             },
             parent,
         )
@@ -1374,6 +1377,7 @@ fn a_submenu_on_the_deepest_plate_is_refused_by_the_wire_model() {
                 label: label("too deep"),
                 enabled: true,
                 symbol: AppMenuSymbol::Settings,
+                reason: AppMenuReason::EMPTY,
             },
             parent,
         )

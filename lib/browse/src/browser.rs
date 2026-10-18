@@ -277,6 +277,12 @@ impl<S: DirectorySource> Browser<S> {
         &mut self.scroll
     }
 
+    /// When the item view's held scrollbar press steps next, as a monotonic
+    /// instant, or `None` when nothing held would move.
+    pub fn scroll_repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.scroll.repeat_deadline(now_ns)
+    }
+
     /// The order the current listing is shown in.
     #[must_use]
     pub const fn sort_mode(&self) -> SortMode {

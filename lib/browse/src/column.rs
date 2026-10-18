@@ -122,7 +122,8 @@ impl ScrollColumn {
             ),
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => (
+            }
+            | InputEvent::PointerCancelled => (
                 held,
                 self.bar.on_pointer(event, bar, scale, theme, &mut drew),
             ),
@@ -136,6 +137,39 @@ impl ScrollColumn {
             damage.add(*rect);
         }
         taken.then_some(!drew.is_empty())
+    }
+
+    /// When the bar's held press steps next, as a monotonic instant, or
+    /// `None` when nothing held would move ([`ScrollBar::repeat_deadline`]).
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.bar.repeat_deadline(now_ns)
+    }
+
+    /// Whether the bar's held press steps at `now_ns`
+    /// ([`ScrollBar::repeat_due`]), asked before the column is laid out.
+    pub fn repeat_due(&mut self, now_ns: u64) -> bool {
+        self.bar.repeat_due(now_ns)
+    }
+
+    /// Step the bar's held press once if its repeat is due at `now_ns`, for
+    /// the bar drawn at `bar` over `model`, answering whether the column
+    /// moved. A move reports the bar and `shown`, the column's on-screen
+    /// area.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        model: ScrollModel,
+        (bar, shown): (Rect, Rect),
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) -> bool {
+        self.bar.set_model(model);
+        let Some(ScrollAction::ScrollTo { offset }) =
+            self.bar.repeat(now_ns, bar, scale, theme, damage)
+        else {
+            return false;
+        };
+        self.adopt(offset, shown, damage)
     }
 
     /// Take the offset the bar asked for, reporting `shown` when it moved.

@@ -2624,7 +2624,10 @@ fn each_band_s_outward_half_drags_and_cancels() {
     for (edge, delta, grew) in [
         (ResizeEdge::Left, (-24, 0), (24, 0)),
         (ResizeEdge::Right, (24, 0), (24, 0)),
+        (ResizeEdge::Top, (0, -18), (0, 18)),
         (ResizeEdge::Bottom, (0, 18), (0, 18)),
+        (ResizeEdge::TopLeft, (-24, -18), (24, 18)),
+        (ResizeEdge::TopRight, (24, -18), (24, 18)),
         (ResizeEdge::BottomLeft, (-24, 18), (24, 18)),
         (ResizeEdge::BottomRight, (24, 18), (24, 18)),
     ] {
@@ -2671,12 +2674,21 @@ fn each_band_s_outward_half_drags_and_cancels() {
 fn outward_aim(edge: ResizeEdge, outer: Rect) -> Point {
     let mid_x = i32::midpoint(outer.left(), outer.right());
     let mid_y = i32::midpoint(outer.top(), outer.bottom());
+    let (left, right, top, bottom) = (
+        outer.left() - 1,
+        outer.right(),
+        outer.top() - 1,
+        outer.bottom(),
+    );
     match edge {
-        ResizeEdge::Left => Point::new(outer.left() - 1, mid_y),
-        ResizeEdge::Right => Point::new(outer.right(), mid_y),
-        ResizeEdge::Bottom => Point::new(mid_x, outer.bottom()),
-        ResizeEdge::BottomLeft => Point::new(outer.left() - 1, outer.bottom()),
-        ResizeEdge::BottomRight => Point::new(outer.right(), outer.bottom()),
+        ResizeEdge::Left => Point::new(left, mid_y),
+        ResizeEdge::Right => Point::new(right, mid_y),
+        ResizeEdge::Top => Point::new(mid_x, top),
+        ResizeEdge::Bottom => Point::new(mid_x, bottom),
+        ResizeEdge::TopLeft => Point::new(left, top),
+        ResizeEdge::TopRight => Point::new(right, top),
+        ResizeEdge::BottomLeft => Point::new(left, bottom),
+        ResizeEdge::BottomRight => Point::new(right, bottom),
     }
 }
 
@@ -2730,12 +2742,25 @@ fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
     let (mut c, id) = decorated_compositor();
     assert!(c.set_window_cursor(id, CursorKind::Text));
     let client = c.window_client_rect(id).expect("decorated");
+    let bounds = c.window(id).expect("the window").bounds();
     let mut router = InputRouter::new();
     let middle = centre(client);
 
-    // Each edge names the axis it moves the window along; the two corners take
-    // opposite diagonals so a user can tell them apart.
+    // Each edge names the axis it moves the window along; the corners take
+    // the diagonal they move along, so opposite corners share one.
     for (point, expected) in [
+        (
+            Point::new(middle.x, bounds.top() - 1),
+            CursorKind::ResizeVertical,
+        ),
+        (
+            Point::new(bounds.left() - 1, bounds.top() - 1),
+            CursorKind::ResizeDiagonalFalling,
+        ),
+        (
+            Point::new(bounds.right(), bounds.top() - 1),
+            CursorKind::ResizeDiagonalRising,
+        ),
         (
             Point::new(client.left(), middle.y),
             CursorKind::ResizeHorizontal,
@@ -4079,6 +4104,7 @@ fn shadowless(base: &Theme) -> Theme {
         *base.palette(),
         tairix_theme::Metrics {
             drop_shadow_reach: 0,
+            inactive_drop_shadow_reach: 0,
             ..*base.metrics()
         },
         *base.fonts(),
@@ -4153,7 +4179,7 @@ fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
 
     let (mut inactive, other) = decorated_compositor();
     assert!(inactive.set_window_title(other, "Documents"));
-    assert!(inactive.set_active_frame(other, false));
+    inactive.follow_focus(None);
     inactive.composite();
 
     let bounds = active.window(id).unwrap().bounds();
@@ -4180,17 +4206,26 @@ fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
     );
 
     // Toggling activation leaves the rim exactly as it was, both ways.
-    assert!(active.set_active_frame(id, false));
+    active.follow_focus(None);
     active.composite();
     assert_eq!(frame_pixel(&active, rim_x, rim_y), quiet);
-    assert!(active.set_active_frame(id, true));
+    active.follow_focus(Some(id));
     active.composite();
     assert_eq!(frame_pixel(&active, rim_x, rim_y), quiet);
 
-    // An undecorated or unknown window has no frame to activate.
+    // Focus on an undecorated window, or on none the compositor knows, leaves
+    // no frame active.
     let plain = active.add_window(Point::new(150, 150), opaque(10, 10, RED));
-    assert!(!active.set_active_frame(plain, false));
-    assert!(!active.set_active_frame(WindowId(9_999), false));
+    for focus in [plain, WindowId(9_999)] {
+        active.follow_focus(Some(id));
+        active.follow_focus(Some(focus));
+        assert_eq!(
+            active
+                .window_frame(id)
+                .map(|frame| frame.furniture().activation),
+            Some(WindowActivationState::Inactive)
+        );
+    }
 }
 
 #[test]
@@ -4203,7 +4238,7 @@ fn a_focus_flip_repaints_only_the_furniture() {
     let bounds = c.window(id).unwrap().bounds();
 
     // Flipping focus repaints the furniture and marks it dirty...
-    assert!(c.set_active_frame(id, false));
+    c.follow_focus(None);
     assert!(c.has_damage());
 
     // ...but the client interior is never in the damage — a focus change does
@@ -4991,8 +5026,10 @@ fn a_secondary_press_off_the_title_bar_still_raises() {
     assert!(router.is_moving());
     assert_eq!(
         router.handle(release_primary(), &mut c, T0),
-        InputResponse::MoveEnded { window: lower }
+        InputResponse::Ignored,
+        "a press that never travelled moved nothing"
     );
+    assert!(!router.is_moving());
 }
 
 #[test]
@@ -6238,6 +6275,392 @@ fn maximize_and_restore_toggles_size_state_and_geometry() {
         c.window_frame(id).unwrap().furniture().size,
         WindowSizeState::Restored
     );
+}
+
+// ---- a gesture on a maximized window leaves maximization where it stands --
+
+/// Maximize `id` over the whole screen, answering the rectangle a restore
+/// would return it to.
+fn maximized(c: &mut Compositor, id: WindowId) -> Rect {
+    let restored = c.window(id).unwrap().bounds();
+    let work_area = c.screen_rect();
+    c.toggle_window_size(id, work_area).expect("maximize");
+    restored
+}
+
+/// One less than the drag slop at the reference scale: a hand holding still.
+fn jitter() -> i32 {
+    i32::try_from(tairix_input::DRAG_SLOP).expect("small") - 1
+}
+
+#[test]
+fn dragging_a_maximized_window_un_maximizes_it_at_the_size_it_has() {
+    let (mut c, id) = decorated_compositor();
+    maximized(&mut c, id);
+    let full = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+    router.handle(moved(bar.x, bar.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+
+    assert_eq!(
+        router.handle(moved(bar.x + 30, bar.y + 20), &mut c, T0),
+        InputResponse::Unmaximized { window: id },
+        "the step that starts the drag says it took the window out"
+    );
+    let window = c.window(id).unwrap();
+    assert_eq!(window.size_state(), WindowSizeState::Restored);
+    assert_eq!(
+        window.bounds(),
+        Rect::new(full.left() + 30, full.top() + 20, full.width, full.height),
+        "moved, at the size it had"
+    );
+    assert!(window.casts_shadow(), "a restored window floats again");
+    assert_eq!(
+        c.window_frame(id).unwrap().furniture().size,
+        WindowSizeState::Restored,
+        "and its toggle offers Maximize"
+    );
+    assert!(matches!(
+        router.handle(moved(bar.x + 40, bar.y + 20), &mut c, T0),
+        InputResponse::Moved { window, .. } if window == id
+    ));
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::MoveEnded { window: id }
+    );
+    let (state, _) = c.toggle_window_size(id, c.screen_rect()).expect("a toggle");
+    assert_eq!(
+        state,
+        WindowSizeState::Maximized,
+        "nothing is held to restore to, so the toggle maximizes it again"
+    );
+}
+
+#[test]
+fn a_maximized_title_bar_press_that_only_jitters_keeps_the_window_maximized() {
+    let (mut c, id) = decorated_compositor();
+    let restored = maximized(&mut c, id);
+    let full = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+    router.handle(moved(bar.x, bar.y), &mut c, 1_000);
+    router.handle(press_primary(), &mut c, 1_000);
+    assert_eq!(
+        router.handle(moved(bar.x + jitter(), bar.y - jitter()), &mut c, 1_000),
+        InputResponse::Ignored
+    );
+    router.handle(release_primary(), &mut c, 1_000);
+    assert_eq!(c.window(id).unwrap().bounds(), full);
+    assert_eq!(
+        c.window(id).unwrap().size_state(),
+        WindowSizeState::Maximized
+    );
+
+    // That press was the first half of a double-click, and the pair still
+    // restores the geometry the window had before it was maximized.
+    let half = c.double_click().saturating_total_nanos() / 2;
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 1_000 + half),
+        InputResponse::WindowControl {
+            window: id,
+            control: WindowControlKind::SizeToggle,
+        }
+    );
+    let (state, _) = c.toggle_window_size(id, c.screen_rect()).expect("restore");
+    assert_eq!(state, WindowSizeState::Restored);
+    assert_eq!(c.window(id).unwrap().bounds(), restored);
+}
+
+#[test]
+fn a_title_bar_press_moves_nothing_until_it_travels_past_the_slop() {
+    let (mut c, id) = decorated_compositor();
+    let start = c.window(id).unwrap().origin();
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+    router.handle(moved(bar.x, bar.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert_eq!(
+        router.handle(moved(bar.x + jitter(), bar.y), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert_eq!(c.window(id).unwrap().origin(), start);
+    assert!(matches!(
+        router.handle(moved(bar.x + jitter() + 1, bar.y), &mut c, T0),
+        InputResponse::Moved { window, .. } if window == id
+    ));
+    assert_eq!(
+        c.window(id).unwrap().origin(),
+        Point::new(start.x + jitter() + 1, start.y),
+        "once past the slop the window follows the pointer exactly"
+    );
+}
+
+#[test]
+fn resizing_a_maximized_window_leaves_it_where_it_was_dragged() {
+    let (mut c, id) = decorated_compositor();
+    maximized(&mut c, id);
+    let full = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let at = Point::new(full.right() - 1, i32::midpoint(full.top(), full.bottom()));
+    router.handle(moved(at.x, at.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert_eq!(router.resizing_edge(), Some(ResizeEdge::Right));
+
+    assert_eq!(
+        router.handle(moved(at.x - 60, at.y), &mut c, T0),
+        InputResponse::Resized { window: id }
+    );
+    let dragged = Rect::new(full.left(), full.top(), full.width - 60, full.height);
+    let window = c.window(id).unwrap();
+    assert_eq!(window.size_state(), WindowSizeState::Restored);
+    assert_eq!(window.bounds(), dragged);
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert_eq!(c.window(id).unwrap().bounds(), dragged);
+}
+
+#[test]
+fn escape_puts_a_resized_maximized_window_back_maximized() {
+    let (mut c, id) = decorated_compositor();
+    let restored = maximized(&mut c, id);
+    let full = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let at = Point::new(i32::midpoint(full.left(), full.right()), full.bottom() - 1);
+    router.handle(moved(at.x, at.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(at.x, at.y - 50), &mut c, T0);
+    assert_eq!(
+        c.window(id).unwrap().size_state(),
+        WindowSizeState::Restored
+    );
+
+    assert_eq!(
+        router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c, T0),
+        InputResponse::ResizeEnded { window: id }
+    );
+    let window = c.window(id).unwrap();
+    assert_eq!(window.bounds(), full);
+    assert_eq!(window.size_state(), WindowSizeState::Maximized);
+    assert_eq!(
+        c.window_frame(id).unwrap().furniture().size,
+        WindowSizeState::Maximized
+    );
+    let (state, _) = c.toggle_window_size(id, c.screen_rect()).expect("restore");
+    assert_eq!(state, WindowSizeState::Restored);
+    assert_eq!(
+        c.window(id).unwrap().bounds(),
+        restored,
+        "the geometry to restore to came back with it"
+    );
+}
+
+#[test]
+fn a_resize_press_that_never_travels_past_the_slop_changes_nothing() {
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let at = outward_aim(ResizeEdge::Right, before);
+    router.handle(moved(at.x, at.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert_eq!(
+        router.handle(moved(at.x + jitter(), at.y), &mut c, T0),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert_eq!(c.window(id).unwrap().bounds(), before);
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert_eq!(c.window(id).unwrap().bounds(), before);
+}
+
+#[test]
+fn the_top_edge_resizes_against_the_bottom_and_stops_at_the_screen_top() {
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let at = outward_aim(ResizeEdge::Top, before);
+    router.handle(moved(at.x, at.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert_eq!(router.resizing_edge(), Some(ResizeEdge::Top));
+
+    router.handle(moved(at.x, at.y - 200), &mut c, T0);
+    let after = c.window(id).unwrap().bounds();
+    assert_eq!(
+        after.top(),
+        c.screen_rect().top(),
+        "the title bar the edge carries stays where the pointer can reach it"
+    );
+    assert_eq!(
+        after.bottom(),
+        before.bottom(),
+        "the bottom edge holds still"
+    );
+    assert_eq!((after.left(), after.width), (before.left(), before.width));
+
+    router.handle(moved(at.x, before.top() + 30), &mut c, T0);
+    let lowered = c.window(id).unwrap().bounds();
+    assert_eq!(lowered.top(), before.top() + 31);
+    assert_eq!(lowered.bottom(), before.bottom());
+}
+
+// ---- a gesture the embedder takes away ends where it stands ------------
+
+#[test]
+fn an_abandoned_resize_stays_where_it_was_dragged_and_is_owed_its_size() {
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).unwrap().bounds();
+    let mut router = InputRouter::new();
+    let at = outward_aim(ResizeEdge::Right, before);
+    router.handle(moved(at.x, at.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(at.x - 60, at.y), &mut c, T0);
+    let dragged = c.window(id).unwrap().bounds();
+    assert_eq!(dragged.width, before.width - 60);
+
+    assert_eq!(
+        router.abandon_gesture(&mut c),
+        crate::Abandoned {
+            client: None,
+            resized: Some(id),
+            moved: None,
+        }
+    );
+    assert!(router.resizing_edge().is_none());
+    assert_eq!(c.window(id).unwrap().bounds(), dragged);
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::Ignored,
+        "the release the router never saw coming ends nothing twice"
+    );
+}
+
+#[test]
+fn an_abandoned_move_is_owed_only_once_it_moved_the_window() {
+    let (mut c, id) = decorated_compositor();
+    let start = c.window(id).unwrap().origin();
+    let bar = title_point(&c, id);
+    let mut router = InputRouter::new();
+    router.handle(moved(bar.x, bar.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(bar.x + jitter(), bar.y), &mut c, T0);
+    assert_eq!(
+        router.abandon_gesture(&mut c),
+        crate::Abandoned::default(),
+        "a press that never travelled moved nothing to tell of"
+    );
+    assert!(!router.is_moving());
+
+    router.handle(moved(bar.x, bar.y), &mut c, 1_000_000_000);
+    router.handle(press_primary(), &mut c, 1_000_000_000);
+    router.handle(moved(bar.x + 30, bar.y + 10), &mut c, 1_000_000_000);
+    let dragged = Point::new(start.x + 30, start.y + 10);
+    assert_eq!(c.window(id).unwrap().origin(), dragged);
+    assert_eq!(
+        router.abandon_gesture(&mut c),
+        crate::Abandoned {
+            client: None,
+            resized: None,
+            moved: Some(id),
+        }
+    );
+    assert!(!router.is_moving());
+    assert_eq!(c.window(id).unwrap().origin(), dragged);
+}
+
+#[test]
+fn an_abandoned_client_press_names_the_client_and_where_the_pointer_was() {
+    let (mut c, id) = decorated_compositor();
+    let client = c.window_client_rect(id).expect("decorated");
+    let mut router = InputRouter::new();
+    let pressed = centre(client);
+    router.handle(moved(pressed.x, pressed.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert_eq!(router.client_grab(), Some(id));
+    // Held outside the client, the press still belongs to it: the point is
+    // clamped into the client as every client-grab sample is.
+    router.handle(moved(client.right() + 40, pressed.y), &mut c, T0);
+
+    assert_eq!(
+        router.abandon_gesture(&mut c),
+        crate::Abandoned {
+            client: Some((
+                id,
+                Point::new(
+                    i32::try_from(client.width).expect("small") - 1,
+                    pressed.y - client.top()
+                )
+            )),
+            resized: None,
+            moved: None,
+        }
+    );
+    assert_eq!(router.client_grab(), None);
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::Ignored,
+        "no release reaches a client told its press is over"
+    );
+}
+
+#[test]
+fn a_secondary_press_never_takes_the_press_a_client_holds() {
+    let (mut c, id) = decorated_compositor();
+    let other = c.add_window(Point::new(40, 190), opaque(240, 40, GREEN));
+    assert!(c.set_window_frame(other, WindowFrame::new(decorated())));
+    let client = c.window_client_rect(id).expect("decorated");
+    let mut router = InputRouter::new();
+    let pressed = centre(client);
+    router.handle(moved(pressed.x, pressed.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    assert_eq!(router.client_grab(), Some(id));
+
+    let bar = title_point(&c, other);
+    router.handle(moved(bar.x, bar.y), &mut c, T0);
+    assert_eq!(
+        router.handle(press_secondary(), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert!(!router.is_moving(), "no drag starts under the held press");
+    assert_eq!(router.client_grab(), Some(id));
+    assert!(matches!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::ClientPointerReleased { window, .. } if window == id
+    ));
+}
+
+#[test]
+fn an_abandoned_press_on_a_window_command_releases_it_without_firing() {
+    let (mut c, id) = decorated_compositor();
+    let close = command_rect(&c, id, WindowControlKind::Close);
+    let mut router = InputRouter::new();
+    let on = inside(close);
+    router.handle(moved(on.x, on.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    let pointer_on_close = |c: &Compositor| {
+        c.window_frame(id)
+            .and_then(|frame| frame.title_bar().control(WindowControlKind::Close))
+            .map(|control| control.state().pointer)
+    };
+    assert_eq!(
+        pointer_on_close(&c),
+        Some(tairix_controls::PointerState::Pressed)
+    );
+
+    assert_eq!(router.abandon_gesture(&mut c), crate::Abandoned::default());
+    assert_ne!(
+        pointer_on_close(&c),
+        Some(tairix_controls::PointerState::Pressed)
+    );
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
+        InputResponse::Ignored,
+        "the close never fires"
+    );
+    assert!(c.window(id).is_some());
 }
 
 // ---- exclusive fullscreen (the third size state) ---------------------
@@ -7624,7 +8047,7 @@ fn a_focus_change_invalidates_only_that_window_s_furniture() {
     c.composite();
     assert_eq!(c.chrome_cache_len(), 2);
 
-    assert!(c.set_active_frame(first, false));
+    c.follow_focus(Some(second));
     assert!(!c.chrome_resident(first));
     assert!(c.chrome_resident(second));
 }
@@ -7636,13 +8059,13 @@ fn re_asserting_the_activation_a_frame_already_shows_repaints_nothing() {
     composite_checked(&mut c);
     assert!(c.chrome_resident(id));
 
-    assert!(c.set_active_frame(id, true), "the window is decorated");
+    c.follow_focus(Some(id));
     assert!(!c.has_damage(), "it already wears the active frame");
     assert!(c.chrome_resident(id));
 
-    assert!(c.set_active_frame(id, false));
+    c.follow_focus(None);
     composite_checked(&mut c);
-    assert!(c.set_active_frame(id, false), "the window is decorated");
+    c.follow_focus(None);
     assert!(!c.has_damage(), "it already wears the inactive frame");
     assert!(c.chrome_resident(id));
 }
@@ -7661,7 +8084,7 @@ fn an_attention_request_survives_being_told_it_is_inactive_again() {
     assert!(c.set_window_title(id, "attention"));
     composite_checked(&mut c);
 
-    assert!(c.set_active_frame(id, false), "the window is decorated");
+    c.follow_focus(None);
     assert_eq!(
         c.window_frame(id).map(|f| f.furniture().activation),
         Some(WindowActivationState::AttentionRequested)
@@ -9052,8 +9475,12 @@ fn a_released_window_still_hit_tests_shows_furniture_focuses_and_resizes() {
     });
     assert!(painted, "a released window still draws its furniture");
     // Still takes focus, and the activation flip still repaints furniture.
-    assert!(c.set_active_frame(id, false));
-    assert!(c.set_active_frame(id, true));
+    c.composite();
+    c.follow_focus(None);
+    assert!(c.has_damage());
+    c.composite();
+    c.follow_focus(Some(id));
+    assert!(c.has_damage());
     // Still resizes: the retained client size follows, with no buffer to
     // grow.
     assert!(c.resize_window_client(id, 80, 50));
@@ -11807,4 +12234,170 @@ fn a_present_marks_each_changed_rectangle_rather_than_their_box() {
     assert!(c.damage_covers(at(0, 0)));
     assert!(c.damage_covers(at(10, 10)));
     assert!(!c.damage_covers(at(5, 5)), "the space between is untouched");
+}
+
+// ---- the family in front stands lifted, and every other window rests ------
+
+/// Two decorated windows side by side over a grey ground, each casting its
+/// shadow onto it.
+fn two_framed() -> (Compositor, WindowId, WindowId) {
+    let mut c = new_compositor(mode(320, 200), GREY).expect("compositor");
+    let left = c.add_window(Point::new(20, 30), opaque(100, 80, RED));
+    let right = c.add_window(Point::new(180, 30), opaque(100, 80, RED));
+    for id in [left, right] {
+        assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+    }
+    c.composite();
+    (c, left, right)
+}
+
+/// How dark the shadow `id` casts is just below the middle of its foot.
+fn shadow_under(c: &Compositor, id: WindowId) -> u8 {
+    let bounds = c.window(id).expect("placed").bounds();
+    let x = i32::midpoint(bounds.left(), bounds.right());
+    u8::MAX - composed(c, x, bounds.bottom() + 1).r
+}
+
+/// One step at `now_ns` and the composite that shows it.
+fn stepped(c: &mut Compositor, now_ns: u64) {
+    c.step_elevations(now_ns);
+    c.composite();
+}
+
+/// Long past any ease the built-in themes run.
+const SETTLED_NS: u64 = 1_000_000_000;
+
+#[test]
+fn the_family_in_front_stands_lifted_and_every_other_window_rests() {
+    let (mut c, left, right) = two_framed();
+    assert_eq!(
+        shadow_under(&c, left),
+        shadow_under(&c, right),
+        "unsorted, every window stands lifted"
+    );
+    let lifted = shadow_under(&c, left);
+
+    c.follow_focus(Some(left));
+    stepped(&mut c, 0);
+    stepped(&mut c, SETTLED_NS);
+    assert_eq!(shadow_under(&c, left), lifted);
+    let resting = shadow_under(&c, right);
+    assert!(resting < lifted, "{resting} is not lighter than {lifted}");
+    assert!(resting > 0, "a resting window still casts a shadow");
+
+    c.follow_focus(Some(right));
+    stepped(&mut c, SETTLED_NS);
+    stepped(&mut c, 2 * SETTLED_NS);
+    assert_eq!(shadow_under(&c, right), lifted);
+    assert_eq!(shadow_under(&c, left), resting);
+
+    c.follow_focus(None);
+    stepped(&mut c, 2 * SETTLED_NS);
+    stepped(&mut c, 3 * SETTLED_NS);
+    assert_eq!(
+        (shadow_under(&c, left), shadow_under(&c, right)),
+        (resting, resting),
+        "with the desktop in front every window rests"
+    );
+}
+
+#[test]
+fn a_change_of_level_eases_and_repaints_only_the_shadow() {
+    let (mut c, left, right) = two_framed();
+    let resting = c.window(right).expect("placed").bounds();
+    let below = Point::new(
+        i32::midpoint(resting.left(), resting.right()),
+        resting.bottom() + 1,
+    );
+    c.follow_focus(Some(left));
+    assert!(
+        !c.damage_covers(below),
+        "aiming a shadow marks none of it; only its title bar dims"
+    );
+    assert_eq!(c.next_elevation_frame_in(0), Some(0), "a step is owed now");
+    c.composite();
+
+    c.step_elevations(0);
+    let half = u64::from(
+        c.theme()
+            .motion()
+            .duration(tairix_theme::MotionInteraction::WindowActivate),
+    ) * 500_000;
+    assert!(half > 0, "the built-in theme eases a change of focus");
+    let wait = c.next_elevation_frame_in(0).expect("easing");
+    assert!(wait > 0 && wait <= tairix_theme::Timeline::FRAME_NS);
+    c.composite();
+
+    c.step_elevations(half);
+    assert!(c.has_damage(), "the resting shadow moved");
+    let bounds = c.window(right).expect("placed").bounds();
+    let client = c.window_client_rect(right).expect("framed");
+    assert!(c.damage_covers(Point::new(
+        i32::midpoint(bounds.left(), bounds.right()),
+        bounds.bottom() + 1
+    )));
+    assert!(
+        !c.damage_covers(centre(client)),
+        "the window's own pixels did not change"
+    );
+    let other = c.window(left).expect("placed").bounds();
+    assert!(
+        !c.damage_covers(Point::new(other.left() - 1, other.top() + 20)),
+        "the window that stays lifted is not repainted"
+    );
+    c.composite();
+    let midway = shadow_under(&c, right);
+
+    stepped(&mut c, SETTLED_NS);
+    assert_eq!(
+        c.next_elevation_frame_in(SETTLED_NS),
+        None,
+        "and it settles"
+    );
+    assert!(
+        shadow_under(&c, right) < midway,
+        "midway is between the two"
+    );
+}
+
+#[test]
+fn reduced_motion_rests_a_window_on_the_first_step() {
+    let (mut c, left, right) = two_framed();
+    assert!(c.set_theme(with_reduced_motion(&Theme::dark())));
+    c.composite();
+    let lifted = shadow_under(&c, right);
+    c.follow_focus(Some(left));
+    stepped(&mut c, 0);
+    assert!(shadow_under(&c, right) < lifted);
+    assert_eq!(c.next_elevation_frame_in(0), None, "no frame and no timer");
+}
+
+#[test]
+fn a_window_keeps_its_height_while_its_own_popup_holds_the_focus() {
+    let (mut c, left, right) = two_framed();
+    let lifted = shadow_under(&c, left);
+    let popup = c
+        .add_transient_window(left, Point::new(40, 50), opaque(30, 20, RED))
+        .expect("a popup");
+    c.follow_focus(Some(popup));
+    stepped(&mut c, 0);
+    stepped(&mut c, SETTLED_NS);
+    assert_eq!(shadow_under(&c, left), lifted, "its owner stands in front");
+    assert!(shadow_under(&c, right) < lifted);
+}
+
+#[test]
+fn a_hidden_window_takes_its_new_level_without_an_ease() {
+    let (mut c, left, right) = two_framed();
+    assert!(c.set_visible(right, false));
+    c.follow_focus(Some(left));
+    assert_eq!(
+        c.next_elevation_frame_in(0),
+        None,
+        "nobody can watch it rest"
+    );
+    assert!(c.set_visible(right, true));
+    c.composite();
+    let resting = shadow_under(&c, right);
+    assert!(resting < shadow_under(&c, left), "it is already resting");
 }

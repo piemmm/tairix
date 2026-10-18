@@ -2425,7 +2425,8 @@ fn a_scaled_frame_grabs_by_the_scaled_reach() {
 /// The side bands start at the title bar's foot on *both* sides of the edge:
 /// a window is dragged from its title bar far more often than it is resized
 /// from the sliver beside one, and the outward half must not quietly claim a
-/// column beside a band it does not reach on the inside.
+/// column beside a band it does not reach on the inside. Only the top corner
+/// reaches down beside the bar, as far as it reaches in.
 #[test]
 fn a_side_band_starts_below_the_title_bar_outside_the_window_too() {
     let theme = Theme::dark();
@@ -2435,14 +2436,24 @@ fn a_side_band_starts_below_the_title_bar_outside_the_window_too() {
     let reach = GrabReach::of(Scale::ONE, &theme);
     let outward = i32::try_from(GrabReach::outward(reach.edge)).expect("outward");
     let corner_out = i32::try_from(GrabReach::outward(reach.corner)).expect("corner");
+    let corner_in = i32::try_from(GrabReach::inward(reach.corner)).expect("corner");
     let hit = |x: i32, y: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
     let beside = bounds.left() - 1;
     assert!(outward >= 1, "there is an outward half to test");
+    assert!(
+        bounds.top() + corner_in < layout.title_bar.bottom(),
+        "the corner stops short of the bar's foot"
+    );
 
     assert_eq!(
         hit(beside, layout.title_bar.top()),
+        FurniturePart::ResizeEdge(ResizeEdge::TopLeft),
+        "the top corner reaches down beside the bar"
+    );
+    assert_eq!(
+        hit(beside, bounds.top() + corner_in),
         FurniturePart::Outside,
-        "beside the title bar is not a resize edge"
+        "beside the title bar below the corner is not a resize edge"
     );
     assert_eq!(
         hit(beside, layout.title_bar.bottom()),
@@ -2482,28 +2493,27 @@ fn the_grab_region_holds_every_point_a_band_claims() {
     let reach = GrabReach::of(Scale::ONE, &theme);
     let corner_out = i32::try_from(GrabReach::outward(reach.corner)).expect("corner");
 
-    // Every point of the outward columns and row a band can claim, sampled
-    // one pixel apart, is inside the region.
-    for x in bounds.left() - corner_out..bounds.right() + corner_out {
-        for y in bounds.top()..bounds.bottom() + corner_out {
+    // Every point of the outward columns and rows a band can claim, sampled
+    // one pixel apart, is inside the region — with a margin past it, so a
+    // band that reached further would be caught too.
+    let mut above = false;
+    for x in bounds.left() - corner_out - 2..bounds.right() + corner_out + 2 {
+        for y in bounds.top() - corner_out - 2..bounds.bottom() + corner_out + 2 {
             let at = Point::new(x, y);
             if matches!(
                 frame.hit(bounds, Scale::ONE, &theme, at),
                 FurniturePart::ResizeEdge(_)
             ) {
                 assert!(region.contains(at), "{at:?} is claimed but out of reach");
+                above |= y < bounds.top();
             }
         }
     }
 
+    assert!(above, "the top bands reach above the window");
     assert!(
         region.contains(Point::new(bounds.left(), bounds.top())),
         "and the window's own pixels are inside it too"
-    );
-    assert_eq!(
-        region.top(),
-        bounds.top(),
-        "the title bar tops the window, so no band reaches above it"
     );
     assert!(
         WindowFrame::new(WindowFurnitureState {
@@ -2668,28 +2678,61 @@ fn every_resize_edge_resolves_from_the_band_and_the_client_overlap() {
         FurniturePart::ResizeEdge(ResizeEdge::BottomRight)
     );
 
-    // The top edge is never a resize edge: a window is sized from its three
-    // free edges, and the row below the rim is the title bar's to drag.
+    // The top band takes the rim above the title bar and the band's outward
+    // half; the title bar keeps every row of its own, so the drag surface
+    // starts one rim below the edge exactly as it did.
     let border = i32::try_from(
         Scale::ONE
             .scale_length(theme.metrics().border_thickness)
             .max(1),
     )
     .expect("border");
-    assert_eq!(hit(mid_x, bounds.top()), FurniturePart::Frame);
     // Taken from the laid-out drag span rather than a guessed offset: the
     // command cells are as wide as the band is tall, so a fixed column that
     // once cleared them would now land inside one.
     let band = frame.layout(bounds, Scale::ONE, &theme).title_bar;
     let drag = frame.title_bar().layout(band, Scale::ONE, &theme).drag;
     assert!(drag.width > 0, "the band is wide enough to drag by");
-    assert_eq!(
-        hit(
-            i32::midpoint(drag.left(), drag.right()),
-            bounds.top() + border
-        ),
-        FurniturePart::TitleBar
-    );
+    let drag_x = i32::midpoint(drag.left(), drag.right());
+    for (x, y, edge) in [
+        (drag_x, bounds.top(), ResizeEdge::Top),
+        (drag_x, bounds.top() - 1, ResizeEdge::Top),
+        (bounds.left(), bounds.top(), ResizeEdge::TopLeft),
+        (bounds.left() - 1, bounds.top() - 1, ResizeEdge::TopLeft),
+        (bounds.right() - 1, bounds.top(), ResizeEdge::TopRight),
+        (bounds.right(), bounds.top() - 1, ResizeEdge::TopRight),
+    ] {
+        assert_eq!(hit(x, y), FurniturePart::ResizeEdge(edge), "({x}, {y})");
+    }
+    assert_eq!(hit(drag_x, bounds.top() + border), FurniturePart::TitleBar);
+}
+
+/// A command sits flush in each corner of the title bar, inside the reach of
+/// the top corner band: the command wins every pixel it is drawn over, so
+/// reaching for a corner can never close or maximize a window instead.
+#[test]
+fn a_command_in_a_title_bar_corner_is_never_a_resize_corner() {
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let band = frame.layout(bounds, Scale::ONE, &theme).title_bar;
+    let layout = frame.title_bar().layout(band, Scale::ONE, &theme);
+    let reach = GrabReach::of(Scale::ONE, &theme);
+    let corner_in = i32::try_from(GrabReach::inward(reach.corner)).expect("corner");
+    let hit = |x: i32, y: i32| frame.hit(bounds, Scale::ONE, &theme, Point::new(x, y));
+    let mut seen = 0;
+    for &(kind, cell) in layout.controls() {
+        for y in band.top()..bounds.top() + corner_in {
+            for x in cell.left()..cell.right() {
+                let near_corner = x < bounds.left() + corner_in || x >= bounds.right() - corner_in;
+                if near_corner {
+                    assert_eq!(hit(x, y), FurniturePart::WindowControl(kind), "({x}, {y})");
+                    seen += 1;
+                }
+            }
+        }
+    }
+    assert!(seen > 0, "the corner reach overlaps a command");
 }
 
 #[test]

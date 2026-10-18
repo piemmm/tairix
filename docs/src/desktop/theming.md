@@ -147,8 +147,11 @@ bundles, under a stable `ThemeId`:
     one, because a pale ground needs more white to read as lit and less black
     to read as turned away. `drop_shadow` is the shadow at its deepest, its
     alpha how dark that is; the tests hold it translucent, so what it falls on
-    still reads, and darker than the desktop, on both appearances. How the
-    window manager draws either is in [the window manager](./wm.md#drop-shadows).
+    still reads, and darker than the desktop, on both appearances.
+    `inactive_drop_shadow` is the lighter shadow of a decorated window resting
+    behind the one being worked in, so a window out of focus reads as standing
+    lower. How the window manager draws either is in
+    [the window manager](./wm.md#drop-shadows).
   - `window_close`, `window_minimize`, `window_maximize`, and
     `window_put_to_back` are the four hues a title-bar command lights up in
     under the pointer: red to close, yellow to minimize, green to the size
@@ -227,6 +230,9 @@ bundles, under a stable `ThemeId`:
     reach beside each side and two below. Far enough that a menu or a window
     reads as standing clear of what it is over, short enough that a shadow
     never reads as a second, darker surface.
+  - `inactive_drop_shadow_reach` is the shorter reach of a decorated window's
+    shadow while it rests behind the one being worked in, `4` logical pixels in
+    both themes, so it reads as standing closer to what it is over.
   - `selection_backdrop_blur` is how far the *backdrop* behind a selected item
     is blurred, `6` logical pixels in both themes. The `selection_fill` laid
     over it keeps a crisp, rounded edge; it is the pixels the item covers — a
@@ -337,6 +343,8 @@ bundles, under a stable `ThemeId`:
   - `PointerEnlarge` (`160` ms) is a shaken pointer growing so it can be
     found, and `PointerRestore` (`360` ms) it settling back to its own size
     once it rests: slower than it grew, so the eye can follow it home.
+  - `WindowActivate` (`115` ms) is a window's shadow easing between its lifted
+    and resting heights as the focus moves to or from its family.
   - A theme in reduced motion reports **every** duration as `0`, which a
     consumer reads as "change it now". That is the whole reduced-motion path:
     the state still changes visibly, through contrast and shape, and no

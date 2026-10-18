@@ -1005,27 +1005,29 @@ never resolves a write tool, and `NewEntry::suggest_name` disambiguation) and
 
 **The context menu is the desktop's** (`plans/NEW-MENUS.md`
 M3.3). A secondary-button (right-click) press selects the item under the pointer
-(or clears the selection on empty space, so only the directory-scoped Paste is
-offered) and asks the one menu service to bring a chain up:
-`chrome::context_menu` declares one row per `chrome::CONTEXT_COMMANDS` entry
-(its `ContextCommand::label()` + `shortcut()` caption, *disabled with its
-reason* — never hidden — when the model reports it inapplicable, so the menu's
-shape does not move with the selection), and the `Run` binary sends it as an
+(or clears the selection on empty space) and asks the one menu service to bring
+a chain up: `chrome::context_menu` declares the root plate — Display ▸, the
+selection's own submenu (`File ‘notes.txt’`, the name shortened in the middle
+with its extension kept, or `Selection`; disabled with its reason when nothing
+is selected), New ▸, Select All, Clear Selection, Paste — and on the
+selection's submenu Open, Open With…, Get Info…, Rename, Cut, Copy and Delete,
+each command its `ContextCommand::label()` + `shortcut()` caption, *disabled
+with its reason* — never hidden — when the model reports it inapplicable, so a
+plate's shape does not move with the selection; the `Run` binary sends it as an
 `OpenMenu` anchored at the window-local press point. `ContextMenuModel::reason`
 is the one rule and `is_enabled` derives from it, so a row cannot grey out with
 nothing to say; the desktop shows that reason as the seat's tip on dwell and
 never as a caption beside the label, which used to size the whole plate to
 "only a file opens with an application" (`plans/NEW-MENUS.md` D33); removal
 declares the destructive emphasis; a row's id is its command's position in
-`CONTEXT_COMMANDS`, and `context_command_from_item` is that numbering's exact
+`CONTEXT_COMMANDS`, and `context_choice_from_item` is that numbering's exact
 inverse.
 
 The answer is one `MenuClosed` matched against the open id the window minted, so
 an answer to a settled gesture cannot run a stale command. The `Run` binary
 routes the chosen command through `dispatch_context_command` to the *exact same*
-app verbs the toolbar and keyboard already drive — Open (`activate`), Open and
-Close (the same activation with the window closed behind the hand-off), Open
-With… (FM6b), Rename (FM5), Cut/Copy/Paste (FM7), Properties (FM8), Delete
+app verbs the toolbar and keyboard already drive — Open (`activate`), Open
+With… (FM6b), Rename (FM5), Cut/Copy/Paste (FM7), Get Info… (FM8), Delete
 (FM9-c) — so the menu can never diverge from them (§2.2) and adds no authority
 (every verb is the user's own §5.3-checked action). A refusal is stated on
 `stderr` and the window carries on. The file manager draws no menu pixel and
@@ -1564,7 +1566,7 @@ cursor lands on (`render::properties_reveal`) move the window's one
 `ScrollColumn`, a section switch starts the new section at its top, and a press
 lands only on what the scroll shows. The attribute rows scroll in the band
 above the `key = value` editor, which stays put. `files.app` opens one with
-`Alt+Enter` or the context menu's *Properties* row: the node is resolved from
+`Alt+Enter` or *Get Info…* on the context menu's item submenu: the node is resolved from
 the listing that named it (`Browser::chosen_target_path`), the window is
 appended once the round's borrow of its own window has ended, and the **read
 leaves the loop** — one `fs_stat` plus one `fs_attr_get` per attribute key is a

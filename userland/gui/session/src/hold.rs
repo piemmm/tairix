@@ -72,14 +72,14 @@ impl Holds {
 }
 
 /// Whether `event` still reaches a held window: nothing that starts anything
-/// does — a press, a motion, a key, a scroll, a pinch — but a release does, so
-/// a press the window saw before it was held is not left down when the hold
-/// ends.
+/// does — a press, a motion, a key, a scroll, a pinch — but a release or a
+/// cancel does, so a press the window saw before it was held is not left down
+/// when the hold ends.
 #[must_use]
 pub const fn reaches_held_window(event: &WindowEvent) -> bool {
     match event {
         WindowEvent::Pointer {
-            action: PointerAction::Released(_),
+            action: PointerAction::Released(_) | PointerAction::Cancelled,
             ..
         }
         | WindowEvent::Key {

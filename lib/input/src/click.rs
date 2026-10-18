@@ -1,6 +1,7 @@
 //! Click pairing: the one pure rule that turns a stream of pointer presses
 //! into single clicks, double clicks, and the longer runs a text surface
-//! counts ([`ClickRun`]).
+//! counts ([`ClickRun`]), and the slop past which a held press is a drag
+//! rather than a click ([`past_drag_slop`]).
 //!
 //! A double-click is two presses of the *same button* on the *same subject*
 //! within the desktop's one double-click interval, which its session publishes
@@ -27,8 +28,24 @@
 //! capability), and performs the action itself under the user's own identity.
 
 use tairix_abi::time::Duration64;
+use tairix_geometry::{Point, Scale};
 
 use crate::PointerButton;
+
+/// How far a held press travels, in *logical* pixels along either axis,
+/// before it is a drag rather than a click: past the jitter of a hand holding
+/// still.
+pub const DRAG_SLOP: u32 = 4;
+
+/// Whether a press held at `from` has become a drag with the pointer at `to`
+/// on a screen at `scale`: it has travelled [`DRAG_SLOP`] along either axis.
+#[must_use]
+pub fn past_drag_slop(from: Point, to: Point, scale: Scale) -> bool {
+    let slop = i64::from(scale.scale_length(DRAG_SLOP));
+    let dx = (i64::from(to.x) - i64::from(from.x)).abs();
+    let dy = (i64::from(to.y) - i64::from(from.y)).abs();
+    dx.max(dy) >= slop
+}
 
 /// What a press resolved to once the double-click rule was applied.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -188,11 +205,37 @@ impl DoubleClickTracker {
 #[cfg(test)]
 mod tests {
     use tairix_abi::time::Duration64;
+    use tairix_geometry::{Point, Scale};
 
-    use super::{ClickKind, ClickRun, DoubleClickTracker, PointerButton};
+    use super::{
+        past_drag_slop, ClickKind, ClickRun, DoubleClickTracker, PointerButton, DRAG_SLOP,
+    };
 
     /// The interval every case pairs under unless it names its own.
     const INTERVAL: Duration64 = Duration64::from_millis(500);
+
+    /// A press is a drag once it travels the slop along either axis, measured
+    /// in logical pixels, so a denser screen asks for more physical ones.
+    #[test]
+    fn a_press_is_a_drag_once_it_travels_the_slop_along_either_axis() {
+        let at = Point::new(100, 100);
+        let slop = i32::try_from(DRAG_SLOP).expect("small");
+        assert!(!past_drag_slop(
+            at,
+            Point::new(100 + slop - 1, 100 - slop + 1),
+            Scale::ONE
+        ));
+        assert!(past_drag_slop(at, Point::new(100, 100 - slop), Scale::ONE));
+        assert!(past_drag_slop(at, Point::new(100 - slop, 100), Scale::ONE));
+        let doubled = Scale::from_percent(200).expect("a valid scale");
+        assert!(!past_drag_slop(at, Point::new(100 + slop, 100), doubled));
+        assert!(past_drag_slop(at, Point::new(100 + 2 * slop, 100), doubled));
+        assert!(past_drag_slop(
+            Point::new(i32::MIN, 0),
+            Point::new(i32::MAX, 0),
+            Scale::ONE
+        ));
+    }
 
     /// [`INTERVAL`] in the nanoseconds a press is stamped with.
     fn interval_ns() -> u64 {

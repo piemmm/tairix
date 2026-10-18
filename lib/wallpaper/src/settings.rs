@@ -1074,8 +1074,6 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
     }
 }
 
-/// Store the switch `value` spells in `field`, answering whether it spelled
-/// one.
 /// A speed spelled as a bare decimal percentage, within the speeds offered.
 fn parse_speed(value: &str) -> Option<PointerSpeed> {
     parse_decimal(value)
@@ -1083,6 +1081,8 @@ fn parse_speed(value: &str) -> Option<PointerSpeed> {
         .and_then(PointerSpeed::from_percent)
 }
 
+/// Store the switch `value` spells in `field`, answering whether it spelled
+/// one.
 fn put_bool(field: &mut bool, value: &str) -> bool {
     put(field, tairix_appconf::as_bool(value).ok())
 }

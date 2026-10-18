@@ -64,8 +64,8 @@ use tairix_wallpaper::{
     ScreensaverOptions, SettingsKey,
 };
 use tairix_wm::{
-    cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
-    Modifiers, PinchPhase, Point, PointerCatch, Rect, Scale, Surface, Window,
+    cursor_cache, Abandoned, Color, Compositor, Corners, CursorController, InputEvent,
+    InputResponse, Modifiers, PinchPhase, Point, PointerCatch, Rect, Scale, Surface, Window,
     WindowActivationState, WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
 };
 
@@ -79,6 +79,7 @@ use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
 use crate::notify::{is_settings_surface, producer_of, NotifySources};
 use crate::presenter::TaskbarPresenter;
 use crate::session::DesktopSession;
+use crate::switchuser::park_within;
 use crate::tasks::TaskBridge;
 use crate::thumbs::WindowThumbnails;
 use crate::tip::{SeatTooltip, TipSource};
@@ -203,11 +204,9 @@ pub struct DesktopShell {
     /// entirely from built-in glyphs rather than reaching for I/O it does not
     /// hold.
     artwork_resolver: Box<dyn ArtworkResolver>,
-    /// The decorated window currently shown with its active frame rim, kept
-    /// in step with the window manager's focused window by
-    /// [`sync_active_frame`](Self::sync_active_frame). `None` when focus rests
-    /// on the desktop or an undecorated window.
-    active_frame: Option<WindowId>,
+    /// What yielding the pointer left owed to the clients it took it from,
+    /// until the serve loop delivers it.
+    abandoned: Abandoned,
     /// The screen-sized, already-fitted wallpaper the desktop layer is painted
     /// over, or `None` while the backdrop colour is the whole base. The
     /// embedder prepares it (it holds the read capability and the decode
@@ -340,8 +339,8 @@ pub fn alert_rect(
 pub(crate) struct SettleWork {
     /// Calls into [`DesktopShell::present`].
     pub(crate) presents: u32,
-    /// Calls into `DesktopShell::sync_active_frame`.
-    pub(crate) active_frame_syncs: u32,
+    /// Calls into `DesktopShell::follow_focus`.
+    pub(crate) focus_syncs: u32,
     /// Calls into [`DesktopShell::refresh_cursor`].
     pub(crate) cursor_refreshes: u32,
 }
@@ -358,7 +357,6 @@ impl core::fmt::Debug for DesktopShell {
             .field("tasks", &self.tasks)
             .field("cursor", &self.cursor)
             .field("artwork_bytes", &self.artwork.charged_bytes())
-            .field("active_frame", &self.active_frame)
             .finish_non_exhaustive()
     }
 }
@@ -426,7 +424,7 @@ impl DesktopShell {
             cursor: CursorController::new(cursors),
             artwork,
             artwork_resolver: Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam)),
-            active_frame: None,
+            abandoned: Abandoned::default(),
             wallpaper: None,
             backdrop_fade: BackdropFade::default(),
             menu_windows: Vec::new(),
@@ -741,7 +739,7 @@ impl DesktopShell {
         // Focus moved to the new window; keep the decorated active frame in
         // step (a no-op for this bare window, but it deactivates whatever
         // decorated window previously held focus).
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         self.present(compositor);
         Some(window)
     }
@@ -811,7 +809,7 @@ impl DesktopShell {
         ) {
             return false;
         }
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         self.present(compositor);
         true
     }
@@ -873,7 +871,7 @@ impl DesktopShell {
         compositor.set_corners(window, Corners::painted(radius));
         compositor.set_casts_shadow(window, true);
         self.router.focus(window, compositor);
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         Some(window)
     }
 
@@ -901,6 +899,7 @@ impl DesktopShell {
         let window = compositor.add_floating_window(parent, outer.origin, surface)?;
         compositor.set_window_frame(window, frame);
         compositor.set_window_title(window, title);
+        self.follow_focus(compositor);
         Some(window)
     }
 
@@ -947,7 +946,7 @@ impl DesktopShell {
         } else if focus {
             self.router.focus(window, compositor);
         }
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         Some(window)
     }
 
@@ -972,7 +971,7 @@ impl DesktopShell {
         if held && !next.is_some_and(|next| self.router.focus(next, compositor)) {
             self.router.unfocus();
         }
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         true
     }
 
@@ -984,7 +983,7 @@ impl DesktopShell {
             return false;
         }
         let focused = self.router.focus(holder, compositor);
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         focused
     }
 
@@ -1029,7 +1028,7 @@ impl DesktopShell {
         } else if raise {
             self.router.focus(window, compositor);
         }
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         Some(window)
     }
 
@@ -1105,38 +1104,26 @@ impl DesktopShell {
             return false;
         }
         compositor.set_window_title(window, title);
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         true
     }
 
-    /// Bring the compositor's decorated-window activation in step with the
-    /// window manager's focused window: the newly focused decorated window
-    /// shows its active frame rim, title, and controls, and the
-    /// previously-active one reverts to inactive. Focus onto the desktop or an
-    /// undecorated window leaves no window active.
+    /// Bring every window's look in step with the window manager's focused
+    /// window: its frame is the active one, its family stands lifted, and
+    /// every other window rests ([`Compositor::follow_focus`]).
     ///
     /// This is the single place activation follows focus, so every focus
     /// change — a click-to-activate press, a taskbar activation, an
-    /// open/close/minimize — keeps exactly one active frame. It early-returns
-    /// when focus has not moved and is a no-op for an undecorated focus
-    /// ([`set_active_frame`](Compositor::set_active_frame) returns `false`), so
-    /// it costs nothing when no decorated window is involved.
-    fn sync_active_frame(&mut self, compositor: &mut Compositor) {
+    /// open/close/minimize, a window opened behind the one being worked in —
+    /// leaves exactly the right frame active. Each look is derived from the
+    /// focus as it stands rather than remembered, so a frame attached after
+    /// the focus moved is put right on the same pass.
+    fn follow_focus(&mut self, compositor: &mut Compositor) {
         #[cfg(test)]
         {
-            self.settled.active_frame_syncs += 1;
+            self.settled.focus_syncs += 1;
         }
-        let focus = self.router.focused();
-        if self.active_frame == focus {
-            return;
-        }
-        if let Some(old) = self.active_frame {
-            compositor.set_active_frame(old, false);
-        }
-        self.active_frame = match focus {
-            Some(window) if compositor.set_active_frame(window, true) => Some(window),
-            _ => None,
-        };
+        compositor.follow_focus(self.router.focused());
     }
 
     /// Retitle `window`: relabel its taskbar entry and, when it wears the
@@ -1178,7 +1165,7 @@ impl DesktopShell {
         ) {
             return false;
         }
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         self.present(compositor);
         true
     }
@@ -1199,7 +1186,7 @@ impl DesktopShell {
         ) {
             return false;
         }
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         self.present(compositor);
         true
     }
@@ -1766,7 +1753,7 @@ impl DesktopShell {
             // the same answer: nothing to show.
             None => self.withdraw_chain_tooltip(),
         };
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         drawn
     }
 
@@ -2120,11 +2107,13 @@ impl DesktopShell {
 
     /// `park_ns` shortened to the next moment a time-driven bar gesture is
     /// due — the hover picker's opening dwell or closing grace, a held
-    /// Switchboard capsule press — or left exactly as it is when none is
-    /// pending.
+    /// Switchboard capsule press, the next step of a press held on a popup's
+    /// scrollbar — or left exactly as it is when none is pending.
     #[must_use]
-    pub fn taskbar_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        self.router.park_deadline_ns(now_ns, park_ns)
+    pub fn taskbar_park_deadline_ns(&mut self, now_ns: u64, park_ns: u64) -> u64 {
+        let park = self.router.park_deadline_ns(now_ns, park_ns);
+        let held = self.session.taskbar_mut().scroll_repeat_deadline(now_ns);
+        park_within(park, held.map(|due| due.saturating_sub(now_ns)))
     }
 
     /// Resolve whatever timed bar gesture has come due at `now_ns`,
@@ -2137,7 +2126,8 @@ impl DesktopShell {
     /// elsewhere out the grace — and both are the shell's to carry out, so
     /// there is nothing here for the embedder to route.
     pub fn tick_taskbar(&mut self, compositor: &mut Compositor, now_ns: u64) {
-        let response = self.router.tick(self.session.taskbar_mut(), now_ns);
+        let scale = compositor.scale();
+        let response = self.router.tick(self.session.taskbar_mut(), now_ns, scale);
         self.resolve_taskbar(&response, compositor);
         // A picker that went down is a surface going away: the pointer's
         // focus is re-resolved and the latched repaint drawn by the one
@@ -2502,7 +2492,7 @@ impl DesktopShell {
             .set_focused(Some(task));
         let raised = self.tasks.raise(compositor, &mut self.router, task);
         if raised {
-            self.sync_active_frame(compositor);
+            self.follow_focus(compositor);
             self.present(compositor);
         }
         raised
@@ -2621,9 +2611,28 @@ impl DesktopShell {
     /// which pass was the first. The drain follows the device with
     /// [`track_pointer`](Self::track_pointer), so a press straight after the
     /// stream comes back lands where the pointer is.
+    ///
+    /// The client whose press was taken, a window a resize settled, and a
+    /// window a move left are owed word of it; they are kept for the serve
+    /// loop to deliver ([`take_abandoned`](Self::take_abandoned)).
     pub fn yield_pointer(&mut self, compositor: &mut Compositor) {
-        self.router
+        let Abandoned {
+            client,
+            resized,
+            moved,
+        } = self
+            .router
             .yield_pointer(compositor, self.session.taskbar_mut());
+        self.abandoned.client = self.abandoned.client.or(client);
+        self.abandoned.resized = self.abandoned.resized.or(resized);
+        self.abandoned.moved = self.abandoned.moved.or(moved);
+    }
+
+    /// What the last yields of the pointer left the serve loop to tell — the
+    /// client whose press is over, a window a resize settled, a window a move
+    /// left — leaving nothing owed.
+    pub fn take_abandoned(&mut self) -> Abandoned {
+        core::mem::take(&mut self.abandoned)
     }
 
     /// Follow the device to `to` while the stream is
@@ -2656,7 +2665,7 @@ impl DesktopShell {
         // Whatever the events did to focus — a click-to-activate, a taskbar
         // activate/minimise, a desktop press — keep the decorated active frame
         // in step, so exactly the focused window shows its active title bar.
-        self.sync_active_frame(compositor);
+        self.follow_focus(compositor);
         // A tip shown, moved, or taken down by this batch reaches the screen
         // with it, so the plate never lags the pointer that asked for it.
         self.present_tooltip(compositor);
@@ -2697,6 +2706,7 @@ impl DesktopShell {
             | InputResponse::DesktopKey { .. }
             | InputResponse::Moved { .. }
             | InputResponse::MoveEnded { .. }
+            | InputResponse::Unmaximized { .. }
             | InputResponse::Resized { .. }
             | InputResponse::ResizeEnded { .. }
             | InputResponse::WindowControl { .. }

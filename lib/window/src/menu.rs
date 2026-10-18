@@ -7,7 +7,7 @@
 
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-    AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol,
+    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, AppMenuSymbol,
 };
 use tairix_abi::Errno;
 
@@ -257,6 +257,7 @@ impl MenuBuilder {
                 label,
                 enabled: true,
                 symbol,
+                reason: AppMenuReason::EMPTY,
             },
             plate,
         )

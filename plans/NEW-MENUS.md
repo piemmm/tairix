@@ -653,8 +653,8 @@ drawn-menu renderers (`build_context_menu`, `context_menu_rect`,
 `menu_enabled_row_at` they shared) are all gone. It is a **wire** client, so
 M3.1 is its template: `lib/browse::chrome` is now the row model alone —
 `CONTEXT_COMMANDS` built into an `AppMenu` by `context_menu`, read back by
-`context_command_from_item`, with the one-based `row_id`/`from_item` inverses so
-ids need no second table — and `run.rs`'s `open_context_menu` sends `OpenMenu`
+`context_choice_from_item` through the one-based `AppMenuItemId::for_index` /
+`index` numbering, so ids need no second table — and `run.rs`'s `open_context_menu` sends `OpenMenu`
 with the window-local point the press was reported at, storing the returned open
 id on the window (`OpenWindow::menu`). The answer is one `MenuClosed` matched
 against that id, so an answer to a settled gesture cannot run a stale command; a
@@ -662,9 +662,12 @@ refusal is stated on `stderr` and the window carries on.
 
 Two rules landed with it rather than being carried over. A row's id is its
 command's own position in `CONTEXT_COMMANDS` (M3.2's rule), and because every
-command is declared *disabled with its reason* rather than left out, position on
-the plate and position in the list are the same thing however few are
-actionable. And `ContextMenuModel::is_enabled` is now **derived from** a new
+command is declared *disabled with its reason* rather than left out, a row's
+position on its plate does not move however few are actionable. The verbs that
+act on the selection sit on a submenu the selection's own row opens — `File
+‘notes.txt’`, or `Selection` — which a submenu row's own reason
+(`AppMenuRow::Submenu::reason`) explains when nothing is selected to open it
+for. And `ContextMenuModel::is_enabled` is now **derived from** a new
 `reason`, so a row cannot be greyed with nothing to say — the reason field M1b
 landed has its first client, and the three ways Open With… can be inapplicable
 (no selection, not a file, a link that leads nowhere) each say which.

@@ -1244,9 +1244,10 @@ mod program {
         /// Set when the memory-pressure band moved, cleared when the loop has
         /// trimmed the window's icon cache to it.
         pressure_moved: &'a Cell<bool>,
-        /// When a password marker on show next moves its dots, written by the
-        /// loop just before it parks. `None` arms no timer at all.
-        secret_due: &'a Cell<Option<u64>>,
+        /// When the window next has something timed to do — a password
+        /// marker's dots, a held scrollbar press's step — written by the loop
+        /// just before it parks. `None` arms no timer at all.
+        timed_due: &'a Cell<Option<u64>>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -1257,7 +1258,7 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.secret_due.get() {
+            let woken = match self.timed_due.get() {
                 Some(due) => match app::park_until(self.set, due)? {
                     Some(woken) => woken,
                     None => return Ok(Parked::Interrupted),
@@ -1933,7 +1934,7 @@ mod program {
         shell: &'a mut Shell,
         desktop_moved: &'a Cell<bool>,
         pressure_moved: &'a Cell<bool>,
-        secret_due: &'a Cell<Option<u64>>,
+        timed_due: &'a Cell<Option<u64>>,
         pictures: &'a mut Pictures,
         desks: Desks<'a>,
     }
@@ -2251,6 +2252,33 @@ mod program {
             .is_ok()
     }
 
+    /// Step a held scrollbar press whose repeat is due and present what moved,
+    /// answering whether the window is still presentable.
+    fn step_held_bars(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+    ) -> bool {
+        let mut damage = tairix_controls::damage::sink();
+        let outcome = shell.repeat(
+            tairix_rt::clock_get(),
+            surface.viewport(),
+            desktop.scale(),
+            themes.active(),
+            &mut damage,
+        );
+        if !outcome.changed() {
+            return true;
+        }
+        let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
+            return true;
+        };
+        surface
+            .present(shell, themes, desktop.scale(), area)
+            .is_ok()
+    }
+
     /// What carrying out an event's conclusion changed beyond what the event
     /// itself reported.
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -2401,6 +2429,7 @@ mod program {
         }
         if !adopt_answers(surface, shell, themes, desktop, desks)
             || !advance_secrets(surface, shell, themes, desktop)
+            || !step_held_bars(surface, shell, themes, desktop)
         {
             return false;
         }
@@ -2424,7 +2453,7 @@ mod program {
             shell,
             desktop_moved,
             pressure_moved,
-            secret_due,
+            timed_due,
             pictures,
             mut desks,
         } = session;
@@ -2439,7 +2468,8 @@ mod program {
             }
             // A verdict that landed while parked may have answered it.
             surface.settle_question(shell, themes, desktop.scale());
-            secret_due.set(shell.secret_deadline_ns());
+            let held = shell.repeat_deadline(tairix_rt::clock_get());
+            timed_due.set(shell.secret_deadline_ns().into_iter().chain(held).min());
             let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
                 // A wait that ended without an event is the desktop notice; a
@@ -2912,14 +2942,14 @@ mod program {
 
         let desktop_moved = Cell::new(false);
         let pressure_moved = Cell::new(false);
-        let secret_due = Cell::new(None);
+        let timed_due = Cell::new(None);
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
             workers: &workers,
             desktop_moved: &desktop_moved,
             pressure_moved: &pressure_moved,
-            secret_due: &secret_due,
+            timed_due: &timed_due,
         });
         run_event_loop(
             Session {
@@ -2929,7 +2959,7 @@ mod program {
                 shell: &mut shell,
                 desktop_moved: &desktop_moved,
                 pressure_moved: &pressure_moved,
-                secret_due: &secret_due,
+                timed_due: &timed_due,
                 pictures: &mut Pictures::new(),
                 desks: Desks::of(&workers),
             },

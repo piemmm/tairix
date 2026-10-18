@@ -108,6 +108,9 @@ mod program {
         /// adopts it. Shared through a cell because the park sets it and the
         /// loop reads it, on the one thread both run on.
         desktop_moved: &'a Cell<bool>,
+        /// When a held control next steps, or `None` with nothing held, so
+        /// the park sleeps outright. The loop writes it just before each wait.
+        deadline_ns: &'a Cell<Option<u64>>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -118,7 +121,14 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            match app::park(self.set)? {
+            let woken = match self.deadline_ns.get() {
+                Some(deadline) => match app::park_until(self.set, deadline)? {
+                    Some(woken) => woken,
+                    None => return Ok(Parked::Interrupted),
+                },
+                None => app::park(self.set)?,
+            };
+            match woken {
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
                     Ok(Parked::Served)
@@ -362,10 +372,34 @@ mod program {
         event_endpoint: u64,
         mode: &DisplayMode,
         desktop_moved: &Cell<bool>,
+        deadline_ns: &Cell<Option<u64>>,
         mut events: WindowEvents<RtEventSource<'_>>,
     ) -> i32 {
+        let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
         loop {
-            let event = match events.wait(surface.window.client()) {
+            let (theme, scale) = (themes.active(), desktop.scale());
+            deadline_ns.set(gallery.repeat_deadline(
+                tairix_rt::clock_get(),
+                viewport,
+                scale,
+                theme,
+            ));
+            let woken = events.wait(surface.window.client());
+            // A held control may be due whether the wait ended on its
+            // deadline or on an event.
+            let mut stepped = tairix_controls::damage::sink();
+            let (theme, scale) = (themes.active(), desktop.scale());
+            if gallery.repeat(tairix_rt::clock_get(), viewport, scale, theme, &mut stepped) {
+                if let Some(damage) = present_damage(mode, Repaint::Reported, &stepped) {
+                    if surface
+                        .present(gallery, theme, scale, mode, damage)
+                        .is_err()
+                    {
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+                    }
+                }
+            }
+            let event = match woken {
                 Ok(Some(event)) => event,
                 // A wait that ended without an event is the desktop notice
                 // (the only source this app parks on besides its mailbox);
@@ -514,10 +548,12 @@ mod program {
         };
 
         let desktop_moved = Cell::new(false);
+        let deadline_ns = Cell::new(None);
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
             desktop_moved: &desktop_moved,
+            deadline_ns: &deadline_ns,
         });
         run_event_loop(
             &mut surface,
@@ -527,6 +563,7 @@ mod program {
             event_endpoint,
             &mode,
             &desktop_moved,
+            &deadline_ns,
             events,
         )
     }

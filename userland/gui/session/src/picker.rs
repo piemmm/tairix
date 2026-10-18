@@ -818,6 +818,41 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         true
     }
 
+    /// When the press the showing picker's listing bar holds steps next, or
+    /// `None` when nothing held would move.
+    pub fn scroll_repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.active.as_mut()?.browser.scroll_repeat_deadline(now_ns)
+    }
+
+    /// Step the press the showing picker's listing bar holds if its repeat is
+    /// due at `now_ns`, repainting what it moved into the picker's own
+    /// buffer.
+    pub fn scroll_repeat(
+        &mut self,
+        now_ns: u64,
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        if self.question_wm().is_some() {
+            return;
+        }
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let scale = compositor.scale();
+        let mut drew = damage::sink();
+        if tairix_browse::render::scroll_repeat(
+            &mut active.browser,
+            (scale, shell.session().active_theme()),
+            picker_viewport(scale),
+            PICKER_TOOLBAR,
+            now_ns,
+            &mut drew,
+        ) {
+            repaint(active, &drew, shell, compositor);
+        }
+    }
+
     /// Scroll the showing picker's listing by a wheel turn of `(dx, dy)`, in
     /// the seat's scroll units, through the listing's own bar, answering
     /// whether it moved.

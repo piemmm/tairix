@@ -54,6 +54,7 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI28 | Small icons: a small picture beside a one-line name, laid in rows across the window | done |
 | FI29 | List: one row per entry under a header — name, size, modified, type; a drive states its free space, filesystem and health | done |
 | FI30 | No activate-then-close command: the context menu's Open and Close row and its hand-off rule are deleted | done |
+| FI31 | The context menu names what it acts on: Display ▸, then the selection's own submenu holding the item verbs, New ▸, Select All, Clear Selection and Paste; Properties is Get Info… | done |
 
 ## FI1 — item names one point smaller
 
@@ -723,6 +724,21 @@ free space, filesystem and health.
 The context menu's Open and Close row is deleted, and with it
 `AfterHandoff`, the only route to closing a window after a hand-off. Activating
 an entry never closes the window it was activated from.
+
+## FI31 — the selection's submenu
+
+The root plate reads Display ▸, a rule, the selection's own submenu and New ▸,
+a rule, Select All and Clear Selection, a rule, and Paste. The selection's
+submenu holds Open, Open With… ▸, Get Info…, Rename, Cut, Copy and Delete, in
+groups, and is labelled with what it acts on: the one chosen item's kind and
+name — `File ‘notes.txt’`, `Folder ‘Docs’`, `Application ‘Paint.app’`, `Alias
+‘…’` — or `Selection` for several items. The name is spelled as a reader is
+shown it (`vfs::push_shown_name`): a control character as U+FFFD, a name too
+long for the label cut in the middle so its extension still shows. With nothing
+selected the submenu is disabled with its reason (`AppMenuRow::Submenu`
+carries one) and holds no row. Properties is renamed Get Info… and its window
+is titled `name — Info`, spelled the same way, so no name can refuse it a
+title.
 
 ## Sequencing
 

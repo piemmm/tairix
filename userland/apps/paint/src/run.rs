@@ -657,10 +657,13 @@ mod program {
 
         /// When the soonest window deadline falls.
         fn deadline(host: &mut Host<Self>, now_ns: u64) -> Option<u64> {
+            let (theme, scale) = (host.themes.active(), host.desktop.scale());
             host.windows
                 .iter_mut()
                 .filter_map(|window| {
-                    window.view.arm_deadline(now_ns);
+                    window
+                        .view
+                        .arm_deadline(now_ns, &window.layout, scale, theme);
                     window.view.deadline_ns()
                 })
                 .min()

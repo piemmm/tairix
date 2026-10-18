@@ -65,15 +65,16 @@ use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
-    tool_move_event, AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex,
-    DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay, FrameContent, FramePacer,
-    FrameReportGate, Handover, IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable,
-    LaunchTarget, LockOutcome, OwnerBundleGate, OwnerWindow, PresentedOwners, SaverIdentity,
-    SaverSetup, ScreenFade, ScreenLock, Screensaver, SessionFileReader, SessionInputResponse,
-    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
-    UnlockAsk, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
+    tool_move_abandoned_event, tool_move_event, AppBarService, AppGroup, ArtworkFileReader,
+    ArtworkSandbox, BundleIndex, DesktopSession, DesktopShell, DocumentAuthority, DocumentRelay,
+    FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser, InputSource, Launch,
+    LaunchHost, LaunchTable, LaunchTarget, LockOutcome, OwnerBundleGate, OwnerWindow,
+    PresentedOwners, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
+    SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
+    ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAsk, DESKTOP_REVEALED,
+    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
@@ -1621,6 +1622,7 @@ fn a_primary_release_ends_a_move_grab() {
 
     seat.press_at(250, 250);
     assert!(seat.router.begin_move(&seat.comp));
+    seat.moved_to(280, 270);
 
     assert_eq!(
         seat.handle(PRIMARY_RELEASE),
@@ -1776,6 +1778,48 @@ fn yielding_the_pointer_ends_a_gesture_whose_release_the_seat_will_never_see() {
     assert_eq!(
         seat.press_at(library.x, library.y),
         SessionInputResponse::Taskbar(TaskbarResponse::OpenLibrary)
+    );
+}
+
+/// The client whose press the yield took is owed word that it is over, with
+/// where in its client the pointer was; asked again, nothing more is owed.
+#[test]
+fn yielding_the_pointer_answers_the_client_whose_press_it_took() {
+    let mut seat = Seat::new();
+    let window = seat.window(Point::new(200, 200), 300, 300);
+    seat.press_at(250, 260);
+
+    let abandoned = seat
+        .router
+        .yield_pointer(&mut seat.comp, seat.session.taskbar_mut());
+    assert_eq!(abandoned.client, Some((window, Point::new(50, 60))));
+    assert_eq!(
+        seat.router
+            .yield_pointer(&mut seat.comp, seat.session.taskbar_mut()),
+        tairix_wm::Abandoned::default()
+    );
+}
+
+/// A press the bar holds is ended on the bar itself: the capsule's gesture
+/// is abandoned, so the release after the plate goes opens nothing.
+#[test]
+fn yielding_the_pointer_abandons_a_press_the_bar_holds() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell.present(&mut comp);
+    let capsule = capsule_point(&shell);
+    let _ = shell.handle(moved(capsule.x, capsule.y), &mut comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Ignored
+    );
+
+    shell.yield_pointer(&mut comp);
+    assert_eq!(shell.take_abandoned(), tairix_wm::Abandoned::default());
+    assert_eq!(
+        shell.handle(PRIMARY_RELEASE, &mut comp, QUICK_PRESS_NS),
+        ShellOutcome::Ignored,
+        "the gesture the plate took away opens nothing"
     );
 }
 
@@ -2426,7 +2470,7 @@ fn work_since(shell: &DesktopShell, before: SettleWork) -> (u32, u32, u32) {
     let now = shell.settle_work();
     (
         now.presents - before.presents,
-        now.active_frame_syncs - before.active_frame_syncs,
+        now.focus_syncs - before.focus_syncs,
         now.cursor_refreshes - before.cursor_refreshes,
     )
 }
@@ -3555,6 +3599,59 @@ fn the_active_frame_follows_the_focused_window() {
     assert_eq!(shell.router().focused(), Some(first));
     assert_eq!(activation(&comp, first), WindowActivationState::Active);
     assert_eq!(activation(&comp, second), WindowActivationState::Inactive);
+}
+
+/// The reported defect: every frame was made active and only the one last
+/// activated was ever put out, so an alert or a dialog opened without the
+/// keyboard — or behind a seat held elsewhere — wore the look of the window
+/// being worked in beside the window that was.
+#[test]
+fn a_window_opened_without_the_focus_wears_an_inactive_frame() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let a = open_app(&mut shell, &mut comp, Point::new(100, 100), "A");
+    let b = open_app(&mut shell, &mut comp, Point::new(900, 100), "B");
+    assert_eq!(shell.router().focused(), Some(b));
+
+    let waiting = shell
+        .open_alert_window(
+            &mut comp,
+            Some(a),
+            app_surface(),
+            "Waiting",
+            (0, false, false),
+        )
+        .expect("opens");
+    assert_eq!(activation(&comp, waiting), WindowActivationState::Inactive);
+    assert_eq!(activation(&comp, b), WindowActivationState::Active);
+
+    let behind = shell
+        .open_alert_window(&mut comp, Some(b), app_surface(), "Behind", (0, true, true))
+        .expect("opens");
+    assert_eq!(activation(&comp, behind), WindowActivationState::Inactive);
+    assert_eq!(activation(&comp, b), WindowActivationState::Active);
+}
+
+/// A focus change reaches the shadows too: the window that took the focus is
+/// owed a lift and the one that lost it a rest, eased from the next frame.
+#[test]
+fn moving_the_focus_eases_the_windows_shadows() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let _a = open_app(&mut shell, &mut comp, Point::new(100, 100), "A");
+    let _b = open_app(&mut shell, &mut comp, Point::new(900, 100), "B");
+    let settled = 10_000_000_000;
+    comp.step_elevations(0);
+    comp.step_elevations(settled);
+    assert_eq!(comp.next_elevation_frame_in(settled), None);
+
+    shell.handle(moved(150, 150), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        comp.next_elevation_frame_in(settled),
+        Some(0),
+        "the change of focus owes the shadows a step"
+    );
 }
 
 #[test]
@@ -4778,6 +4875,49 @@ fn a_wheel_turn_over_the_picker_scrolls_its_listing() {
         asked_path(picker.handle_click(click, &mut shell, &mut comp)),
         format!("/f{under:03}"),
         "the row at the top of the list is the one the wheel scrolled there"
+    );
+}
+
+/// A held increment button on the picker's bar steps again on the bar's own
+/// cadence when the serve loop's timed wake comes, and stops at the release.
+#[test]
+fn a_held_picker_bar_arrow_repeats_on_the_loops_timed_wake() {
+    use tairix_browse::render::scrollbar_bounds;
+    use tairix_browse::{WIN_HEIGHT, WIN_WIDTH};
+
+    let (mut shell, mut comp) = headless_desktop();
+    let theme = shell.session().active_theme().clone();
+    let viewport = Rect::new(
+        0,
+        0,
+        Scale::ONE.scale_length(WIN_WIDTH),
+        Scale::ONE.scale_length(WIN_HEIGHT),
+    );
+    let bar = scrollbar_bounds(Scale::ONE, &theme, viewport, crate::picker::PICKER_TOOLBAR)
+        .expect("the picker reserves a gutter");
+    let x = bar.left() + i32::try_from(bar.width / 2).expect("a narrow bar");
+    let top = i32::try_from(picker_rows_top(&theme)).expect("a small chrome height");
+    let first_row = Point::new(4, top);
+    let mut picker = SessionPicker::new(|| long_root(60));
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    let increment = Point::new(x, bar.bottom() - 1);
+    assert_eq!(picker.handle_click(increment, &mut shell, &mut comp), None);
+
+    let due = picker
+        .scroll_repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+    picker.scroll_repeat(due, &shell, &mut comp);
+    let release = InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    };
+    assert!(picker.handle_pointer(increment, &release, &shell, &mut comp));
+    assert_eq!(picker.scroll_repeat_deadline(due), None, "let go");
+    assert_eq!(
+        asked_path(picker.handle_click(first_row, &mut shell, &mut comp)),
+        "/f002",
+        "the press stepped once and the hold once more"
     );
 }
 
@@ -14219,6 +14359,11 @@ fn a_tool_window_is_framed_off_the_taskbar_and_leaves_the_keyboard_alone() {
         "off the taskbar"
     );
     assert_eq!(shell.router().focused(), Some(parent), "the keyboard stays");
+    assert_eq!(
+        activation(&comp, tool),
+        WindowActivationState::Active,
+        "a palette is lit while its family is in front"
+    );
     assert!(!shell.router().is_moving(), "no press to carry");
     assert_eq!(comp.family_front(parent), Some(parent));
 
@@ -14244,6 +14389,11 @@ fn a_tool_window_is_framed_off_the_taskbar_and_leaves_the_keyboard_alone() {
         "hidden with it"
     );
     assert_eq!(shell.router().focused(), None, "and the keyboard with it");
+    assert_eq!(
+        activation(&comp, tool),
+        WindowActivationState::Inactive,
+        "and dims once nothing of its family holds the focus"
+    );
     assert!(comp.set_visible(parent, true));
     assert!(
         comp.window(tool).is_some_and(tairix_wm::Window::is_visible),
@@ -14323,6 +14473,60 @@ fn a_tool_window_torn_out_under_a_held_press_follows_it_and_reports_its_moves() 
         None,
         "only a tool window"
     );
+}
+
+/// A tool window's move the seat takes away is over, let go over nothing:
+/// its owner clears any dock it marked and docks nothing.
+#[test]
+fn a_yielded_tool_window_move_is_owed_its_end_over_nothing() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) = open_parent_and_popup(&mut shell, &mut comp, &mut windows, (0, 0), (8, 8));
+    let client = comp.window_client_rect(parent).expect("decorated");
+    let _ = shell.handle(moved(client.left() + 30, client.top() + 40), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    let spec = tairix_window::ToolSpec {
+        transient: tairix_window::TransientSpec {
+            parent_window_id: 1,
+            shm_handle: 0,
+            event_endpoint: 0,
+            frame_count: 1,
+            surface: served_mode(80, 60),
+        },
+        offset_x: 400,
+        offset_y: 400,
+        carry: Some(40),
+        title: tairix_abi::window_ipc::WindowTitle::new("Tools").expect("a title"),
+    };
+    let tool = with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.tool_opened(3, &spec), Ok(()));
+        host.windows.wm_id(3).expect("live")
+    });
+    let _ = shell.handle(moved(client.left() + 200, client.top() + 150), &mut comp, 0);
+
+    shell.yield_pointer(&mut comp);
+    let abandoned = shell.take_abandoned();
+    assert_eq!(abandoned.moved, Some(tool));
+    assert_eq!(
+        tool_move_abandoned_event(tool, &windows),
+        Some(WindowEvent::ToolMoved {
+            window_id: 3,
+            over: ToolOver::Elsewhere,
+            ended: true,
+        })
+    );
+    assert_eq!(
+        tool_move_abandoned_event(parent, &windows),
+        None,
+        "only a tool window"
+    );
+    assert_eq!(
+        shell.take_abandoned(),
+        tairix_wm::Abandoned::default(),
+        "owed once"
+    );
+    assert!(!shell.router().is_moving());
 }
 
 #[test]
@@ -16063,7 +16267,7 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
     // The dismissing click: the popup goes and the terminal takes focus back.
     let popup = windows.wm_id(2).expect("popup live");
     assert!(shell.close_transient_window(&mut comp, popup, None));
-    assert!(comp.set_active_frame(parent, true));
+    comp.follow_focus(Some(parent));
     comp.composite();
     let closed = comp.frame_stats();
     assert_eq!(

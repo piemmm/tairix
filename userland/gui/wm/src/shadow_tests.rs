@@ -1,20 +1,27 @@
 //! The shadow kit held to its own definition: the silhouette, dropped by the
-//! reach, blurred by the kernel and evaluated directly.
+//! reach, blurred by the kernel and evaluated directly — at each level, and
+//! crossfaded between them.
 
 use alloc::vec::Vec;
 
-use super::{kernel_ramp, shadow_footprint, ShadowKit, ShadowRow, ONE};
+use super::{
+    kernel_ramp, mixed_pixel, shadow_footprint, Elevation, Level, LevelRow, Lift, ShadowKit,
+    ShadowRow, ONE,
+};
 use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Rect, Scale};
 use crate::surface::Surface;
 use crate::window::{Window, WindowId, WindowShape};
 use tairix_colour::Rgba;
-use tairix_theme::Theme;
+use tairix_theme::{Fade, Theme, Timeline};
 
 fn kit() -> ShadowKit {
     ShadowKit::new(Scale::ONE, &Theme::dark())
 }
+
+/// Both levels, lifted first.
+const LEVELS: [Elevation; 2] = [Elevation::LIFTED, Elevation::RESTING];
 
 /// The silhouette of a `corners`-shaped surface the size of `bounds`.
 fn shape_of(bounds: Rect, corners: Corners) -> Option<WindowShape> {
@@ -86,7 +93,7 @@ fn around(bounds: Rect, reach: u32) -> impl Iterator<Item = (i32, i32)> {
         .flat_map(move |y| ((left - reach - 2)..(right + reach + 2)).map(move |x| (x, y)))
 }
 
-fn weight_at(row: Option<&ShadowRow<'_>>, x: i32) -> u8 {
+fn weight_at(row: Option<&LevelRow<'_>>, x: i32) -> u8 {
     row.map_or(0, |row| row.weight(x))
 }
 
@@ -115,98 +122,177 @@ fn the_kernel_rises_to_one_through_a_symmetric_ramp() {
 
 #[test]
 fn a_shadow_is_its_silhouette_dropped_and_blurred() {
-    // The kit reaches every value through a separable product less corner
+    // A level reaches every value through a separable product less corner
     // tiles; the definition sums the silhouette itself. They agree to the
-    // rounding of the fixed point, at every point, for a square silhouette,
-    // the theme's own radius, a radius built on demand, and a part-opaque
-    // surface.
+    // rounding of the fixed point, at every point, at both levels, for a
+    // square silhouette, the theme's own radius, a radius built on demand,
+    // and a part-opaque surface.
     let mut kit = kit();
-    let reach = kit.reach();
-    assert!(reach > 0, "the theme casts a shadow");
     let bounds = Rect::new(20, 10, 26, 20);
-    for (corners, opacity) in [
-        (Corners::Square, 255),
-        (Corners::painted(6), 255),
-        (Corners::painted(9), 255),
-        (Corners::painted(9), 140),
-    ] {
-        let shape = shape_of(bounds, corners);
-        kit.ensure_tile(shape.map_or(0, WindowShape::corner_reach));
-        let mut worst = 0.0f64;
-        for (x, y) in around(bounds, reach) {
-            let row = kit.row(bounds, shape, opacity, y);
-            let drawn = weight_at(row.as_ref(), x);
-            let defined = defined_weight(reach, bounds, shape, opacity, (x, y));
-            worst = worst.max((f64::from(drawn) - defined).abs());
-            if defined == 0.0 {
-                assert_eq!(drawn, 0, "{corners:?} at ({x}, {y}) draws where none falls");
+    for elevation in LEVELS {
+        let level: &mut Level = kit.level_mut(elevation);
+        let reach = level.reach;
+        assert!(reach > 0, "the theme casts a shadow at {elevation:?}");
+        for (corners, opacity) in [
+            (Corners::Square, 255),
+            (Corners::painted(6), 255),
+            (Corners::painted(9), 255),
+            (Corners::painted(9), 140),
+        ] {
+            let shape = shape_of(bounds, corners);
+            level.ensure_tile(shape.map_or(0, WindowShape::corner_reach));
+            let mut worst = 0.0f64;
+            for (x, y) in around(bounds, reach) {
+                let row = level.row(bounds, shape, opacity, y);
+                let drawn = weight_at(row.as_ref(), x);
+                let defined = defined_weight(reach, bounds, shape, opacity, (x, y));
+                worst = worst.max((f64::from(drawn) - defined).abs());
+                if defined == 0.0 {
+                    assert_eq!(drawn, 0, "{corners:?} at ({x}, {y}) draws where none falls");
+                }
             }
+            assert!(
+                worst <= 1.5,
+                "{elevation:?}, {corners:?} at {opacity}: off by up to {worst}"
+            );
         }
-        assert!(
-            worst <= 1.5,
-            "{corners:?} at {opacity}: off by up to {worst}"
-        );
     }
 }
 
 #[test]
 fn a_blended_row_lays_exactly_what_each_pixel_samples() {
     // However a row is laid — a solid span beneath a window, a ramp read from
-    // the straight-edge profile across it, or a column evaluated one at a
-    // time near a corner — it is the per-pixel sample laid over what was
-    // there, bit for bit, for a tall window, a part-opaque one, and one too
-    // narrow for its ramps to see only their own edge.
+    // the straight-edge profile across it, a column evaluated one at a time
+    // near a corner, or a crossfade between the levels — it is the per-pixel
+    // sample laid over what was there, bit for bit, for a tall window, a
+    // part-opaque one, and one too narrow for its ramps to see only their own
+    // edge.
     let kit = kit();
     let reach = i32::try_from(kit.reach()).expect("a small reach");
     let under: Pixel = Color::rgb(0x70, 0x90, 0xb0).premultiply();
-    let mut straight = 0;
-    for (bounds, opacity) in [
-        (Rect::new(30, 12, 60, 80), 255),
-        (Rect::new(30, 12, 60, 80), 140),
-        (Rect::new(30, 12, 4, 80), 255),
-    ] {
-        let shape = shape_of(bounds, Corners::painted(6));
-        for y in bounds.top()..bounds.bottom() + 2 * reach {
-            let Some(row) = kit.row(bounds, shape, opacity, y) else {
-                continue;
-            };
-            straight += usize::from(row.straight_edge().is_some());
-            let first = bounds.left() - reach - 3;
-            let width = usize::try_from(bounds.width + 2 * kit.reach() + 6).expect("a width");
-            let mut blended: Vec<Pixel> = alloc::vec![under; width];
-            let dither = DitherRow::at(y.cast_unsigned());
-            let _ = row.blend_into(&mut blended, first, dither);
-            for (x, got) in (first..).zip(&blended) {
-                let bias = dither.bias(x.cast_unsigned());
-                let expected = row
-                    .sample(x, bias)
-                    .map_or(under, |shadow| shadow.over_biased(under, bias));
-                assert_eq!(*got, expected, "{bounds:?} at {opacity}: ({x}, {y})");
+    let (mut straight, mut mixed) = (0, 0);
+    for elevation in [Elevation::LIFTED, Elevation::RESTING, Elevation(140)] {
+        for (bounds, opacity) in [
+            (Rect::new(30, 12, 60, 80), 255),
+            (Rect::new(30, 12, 60, 80), 140),
+            (Rect::new(30, 12, 4, 80), 255),
+        ] {
+            let shape = shape_of(bounds, Corners::painted(6));
+            for y in bounds.top()..bounds.bottom() + 2 * reach {
+                let Some(row) = kit.row(bounds, shape, opacity, elevation, y) else {
+                    continue;
+                };
+                match &row {
+                    ShadowRow::One(level) => {
+                        straight += usize::from(level.straight_edge().is_some());
+                    }
+                    ShadowRow::Mixed { .. } => mixed += 1,
+                }
+                let first = bounds.left() - reach - 3;
+                let width = usize::try_from(bounds.width + 2 * kit.reach() + 6).expect("a width");
+                let mut blended: Vec<Pixel> = alloc::vec![under; width];
+                let dither = DitherRow::at(y.cast_unsigned());
+                let _ = row.blend_into(&mut blended, first, dither);
+                for (x, got) in (first..).zip(&blended) {
+                    let bias = dither.bias(x.cast_unsigned());
+                    let expected = row
+                        .sample(x, bias)
+                        .map_or(under, |shadow| shadow.over_biased(under, bias));
+                    assert_eq!(
+                        *got, expected,
+                        "{elevation:?}, {bounds:?} at {opacity}: ({x}, {y})"
+                    );
+                }
             }
         }
     }
     assert!(straight > 0, "no row took the straight-edge profile");
+    assert!(mixed > 0, "no row crossfaded");
+}
+
+/// At either end of an ease the crossfade is that level's own shadow, and in
+/// between it holds each in proportion: a level's share of the darkening is
+/// its share of the lift.
+#[test]
+fn a_shadow_between_levels_is_the_two_crossfaded() {
+    let kit = kit();
+    let bounds = Rect::new(30, 12, 60, 40);
+    let shape = shape_of(bounds, Corners::painted(6));
+    let y = bounds.bottom() + 2;
+    let lifted = kit.level(Elevation::LIFTED).row(bounds, shape, 255, y);
+    let resting = kit.level(Elevation::RESTING).row(bounds, shape, 255, y);
+    for x in bounds.left() - 8..bounds.right() + 8 {
+        let alone = |row: Option<&LevelRow<'_>>| {
+            row.and_then(|row| row.sample(x, 128))
+                .map_or(0, |pixel| pixel.a)
+        };
+        let (high, low) = (alone(lifted.as_ref()), alone(resting.as_ref()));
+        let at = |lift| mixed_pixel(lifted.as_ref(), resting.as_ref(), lift, x, 128).a;
+        assert_eq!(
+            at(u8::MAX),
+            high,
+            "at {x} the lifted end is the lifted shadow"
+        );
+        assert_eq!(at(0), low, "at {x} the resting end is the resting shadow");
+        let half = at(128);
+        assert!(
+            half >= high.min(low) && half <= high.max(low),
+            "at {x}: {half} between {low} and {high}"
+        );
+    }
+}
+
+#[test]
+fn a_resting_window_casts_a_lighter_shorter_shadow() {
+    let kit = kit();
+    let (lifted, resting) = (kit.level(Elevation::LIFTED), kit.level(Elevation::RESTING));
+    assert!(resting.reach < lifted.reach);
+    assert_eq!(
+        kit.reach(),
+        lifted.reach,
+        "the footprint is the further one's"
+    );
+    let bounds = Rect::new(30, 12, 60, 40);
+    let y = bounds.bottom() + 1;
+    let x = i32::midpoint(bounds.left(), bounds.right());
+    let darkness = |level: &Level| {
+        level
+            .row(bounds, None, 255, y)
+            .and_then(|row| row.sample(x, 128))
+            .map_or(0, |pixel| pixel.a)
+    };
+    assert!(darkness(resting) < darkness(lifted));
+    assert!(darkness(resting) > 0, "a resting window still casts one");
 }
 
 #[test]
 fn a_tile_for_a_radius_nothing_rounds_by_is_not_kept() {
     let mut kit = kit();
     kit.ensure_tile(9);
-    assert!(kit.tile(9).is_some());
+    for elevation in LEVELS {
+        assert!(kit.level(elevation).tile(9).is_some());
+    }
     kit.retain_tiles(|radius| radius == 11);
-    assert!(kit.tile(9).is_none(), "a radius out of use is dropped");
     let theme = Theme::dark();
-    for radius in [
-        theme.metrics().window_corner_radius,
-        theme.metrics().popup_corner_radius,
-    ] {
-        assert!(kit.tile(radius).is_some(), "the theme's own {radius} stays");
+    for elevation in LEVELS {
+        let level = kit.level(elevation);
+        assert!(level.tile(9).is_none(), "a radius out of use is dropped");
+        for radius in [
+            theme.metrics().window_corner_radius,
+            theme.metrics().popup_corner_radius,
+        ] {
+            assert!(
+                level.tile(radius).is_some(),
+                "the theme's own {radius} stays"
+            );
+        }
     }
 }
 
 #[test]
 fn a_theme_without_a_shadow_casts_nothing_anywhere() {
-    // Either token turns it off: no reach, or a colour that darkens nothing.
+    // Either token turns it off, at both levels: no reach, or a colour that
+    // darkens nothing.
     let base = Theme::dark();
     let with = |metrics: tairix_theme::Metrics, shadow: Rgba| {
         Theme::new(
@@ -215,6 +301,7 @@ fn a_theme_without_a_shadow_casts_nothing_anywhere() {
             base.appearance(),
             tairix_theme::Palette {
                 drop_shadow: shadow,
+                inactive_drop_shadow: shadow,
                 ..*base.palette()
             },
             metrics,
@@ -227,6 +314,7 @@ fn a_theme_without_a_shadow_casts_nothing_anywhere() {
     };
     let unreaching = tairix_theme::Metrics {
         drop_shadow_reach: 0,
+        inactive_drop_shadow_reach: 0,
         ..*base.metrics()
     };
     let clear = base.palette().drop_shadow.with_alpha(0);
@@ -238,6 +326,91 @@ fn a_theme_without_a_shadow_casts_nothing_anywhere() {
         let kit = ShadowKit::new(Scale::ONE, &theme);
         assert_eq!(kit.reach(), 0);
         assert_eq!(shadow_footprint(bounds, Scale::ONE, &theme), bounds);
-        assert!((0..60).all(|y| kit.row(bounds, None, 255, y).is_none()));
+        for elevation in [Elevation::LIFTED, Elevation::RESTING, Elevation(90)] {
+            assert!((0..60).all(|y| kit.row(bounds, None, 255, elevation, y).is_none()));
+        }
     }
+}
+
+/// The ease the duration of `ms` takes, stepped a frame at a time from `start`:
+/// the levels it drew, in order.
+fn eased(lift: &mut Lift, start: u64, ms: u16) -> Vec<u8> {
+    let mut drawn = Vec::new();
+    let mut now = start;
+    while let Some(wait) = lift.next_frame_in(now) {
+        now = now.saturating_add(wait.max(1));
+        lift.step(now, ms);
+        drawn.push(lift.drawn().0);
+        assert!(drawn.len() < 64, "an ease that never settles");
+    }
+    drawn
+}
+
+#[test]
+fn a_shadow_eases_to_its_new_level_and_then_asks_for_nothing() {
+    let mut lift = Lift::at(Elevation::LIFTED);
+    assert_eq!(
+        lift.next_frame_in(0),
+        None,
+        "a shadow at rest owes no frame"
+    );
+    lift.aim(Elevation::RESTING, false);
+    assert_eq!(
+        lift.drawn(),
+        Elevation::LIFTED,
+        "nothing moves until a step"
+    );
+    assert_eq!(
+        lift.next_frame_in(0),
+        Some(0),
+        "a change is owed a step at once"
+    );
+    let drawn = eased(&mut lift, 0, 120);
+    assert!(drawn.len() > 2, "the ease takes several frames: {drawn:?}");
+    assert!(drawn.windows(2).all(|pair| pair[0] >= pair[1]), "{drawn:?}");
+    assert_eq!(drawn.last().copied(), Some(0));
+    assert_eq!(lift.drawn(), Elevation::RESTING);
+
+    // Turned back part-way, it rises from where it is drawn.
+    lift.aim(Elevation::LIFTED, false);
+    lift.step(1_000_000_000, 120);
+    let from = lift.drawn().0;
+    lift.step(1_000_000_000 + 60 * 1_000_000, 120);
+    let midway = lift.drawn().0;
+    lift.aim(Elevation::RESTING, false);
+    lift.step(1_000_000_000 + 61 * 1_000_000, 120);
+    assert!(lift.drawn().0 <= midway && lift.drawn().0 > from);
+}
+
+#[test]
+fn reduced_motion_steps_a_shadow_straight_to_its_level() {
+    let mut lift = Lift::at(Elevation::LIFTED);
+    lift.aim(Elevation::RESTING, false);
+    assert!(lift.step(5, 0), "the level drawn moved");
+    assert_eq!(lift.drawn(), Elevation::RESTING);
+    assert_eq!(lift.next_frame_in(5), None, "and no frame or timer is owed");
+}
+
+#[test]
+fn a_shadow_nobody_can_see_takes_its_level_at_once() {
+    let mut lift = Lift::at(Elevation::RESTING);
+    lift.aim(Elevation::LIFTED, true);
+    assert_eq!(lift.drawn(), Elevation::LIFTED);
+    assert_eq!(lift.next_frame_in(0), None);
+}
+
+/// An ease is paced by the shared frame cadence and the timeline's own end,
+/// so it never asks for a frame sooner than one is worth drawing.
+#[test]
+fn an_ease_is_paced_by_the_frame_cadence() {
+    let mut lift = Lift::at(Elevation::LIFTED);
+    lift.aim(Elevation::RESTING, false);
+    lift.step(0, 120);
+    let wait = lift.next_frame_in(0).expect("easing");
+    assert!(wait > 0 && wait <= Timeline::FRAME_NS);
+    assert_eq!(
+        Fade::start(0, 120, 255, 0).next_frame_in(0),
+        Some(wait),
+        "the shared fade's cadence, not one of its own"
+    );
 }

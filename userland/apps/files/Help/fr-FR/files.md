@@ -72,6 +72,16 @@ déplacerait, et le dossier où un dépôt aboutirait est mis en évidence. Un
 fichier seul déposé sur l'emplacement d'une application dans la barre
 d'icônes y est ouvert.
 
+Le menu contextuel commence par *Affichage*. En dessous, un sous-menu nomme
+ce sur quoi le menu agit — *Fichier « notes.txt »*, un nom long raccourci en
+son milieu pour que son extension reste visible, ou *Sélection* quand
+plusieurs entrées sont sélectionnées — et contient *Ouvrir*, *Ouvrir avec…*,
+*Lire les informations…*, *Renommer*, *Couper*, *Copier* et *Supprimer* ;
+une ligne qui ne peut pas agir là est grisée et en donne la raison. Viennent
+ensuite *Nouveau*, puis *Tout sélectionner* et *Effacer la sélection*, et
+enfin *Coller*. Un clic droit sur un espace vide efface la sélection, si bien
+que le sous-menu de l'entrée est grisé.
+
 Le sous-menu *Nouveau* du menu contextuel crée un dossier, ou un document
 vide de chaque sorte qu'un éditeur installé sait écrire, et ouvre son nom
 pour le modifier.
@@ -84,8 +94,8 @@ place l'espace qui lui reste, son système de fichiers et l'état de son
 service. Un clic sur le titre d'une colonne trie la liste selon celle-ci, et
 un second clic inverse l'ordre.
 
-`Alt+Enter` ouvre une fenêtre *Propriétés* sur l'entrée sélectionnée, tout
-comme la ligne *Propriétés* du menu contextuel. C'est une fenêtre à part
+`Alt+Enter` ouvre la fenêtre d'*informations* de l'entrée sélectionnée, tout
+comme *Lire les informations…* dans son sous-menu du menu contextuel. C'est une fenêtre à part
 entière, si bien que plusieurs peuvent être ouvertes à la fois et que le
 listage reste utilisable pendant ce temps : elle montre ce qu'est l'entrée,
 sa taille, ses horodatages, la cible d'un alias, ses permissions et son

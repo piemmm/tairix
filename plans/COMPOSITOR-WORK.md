@@ -27,6 +27,7 @@ without exception.
 | K | A translucent client's plate takes that client's own ground | planned |
 | L | Drop shadows under floating surfaces, and bevelled window furniture | done |
 | M | The tool frame: a mini title bar — caption-face title, close alone, on `tool_title_bar_height` — for `plans/APPWIN.md` AW7 tool windows, its move reported to the owner | done |
+| N | The window in front stands above the rest, and every edge resizes: two shadow levels eased with the focus, all four edges and corners, drags out of maximization at the window's size, and gestures that always end | done |
 
 Input-transparent overlays (`set_input_transparent`) landed alongside these
 and are recorded below rather than as a stage of their own.
@@ -243,7 +244,7 @@ guarantees:
   `IconKind::AppBundle` glyph — a window always opens — and a second window of
   the same application is a cache hit per slot, not a second read and decode.
 - Activation follows the focused window through
-  `Compositor::set_active_frame`, which repaints the title and controls;
+  `Compositor::follow_focus`, which repaints the title and controls;
   attention requests are preserved rather than clobbered by a focus change.
   The rim itself does **not** track focus: every window wears the one quiet
   `frame` neutral at every activation, because the rim is the line the eye
@@ -416,11 +417,11 @@ complete. What it now guarantees:
   `WindowEvent::AlternateCloseRequested` (`EV_ALTERNATE_CLOSE_REQUESTED` 12)
   for the owning app only. It closes nothing. A session-owned window has no
   channel id, so the press is dropped rather than leaked.
-- **Exactly one active frame follows focus.** `DesktopShell::sync_active_frame`
-  reconciles the compositor's active-frame decoration with the window manager's
-  focused window on every focus change (click-to-activate, taskbar activation,
-  open, close, minimize). It is a no-op for an undecorated focus, so focusing
-  the picker still correctly deactivates the app window it drew focus from.
+- **Exactly one active frame follows focus.** `DesktopShell::follow_focus`
+  reconciles every window's activation and shadow height with the window
+  manager's focused window on every focus change (click-to-activate, taskbar
+  activation, open, close, minimize), so focusing the picker still correctly
+  deactivates the app window it drew focus from.
 - **The controls drive the lifecycle end to end.** A click on a real title-bar
   control routes through the input router to `InputResponse::WindowControl` and
   is mapped by the one shared `window_control_event` to Close→`CloseRequested`,
@@ -518,9 +519,9 @@ Two gaps that made resizable windows only nominally resizable are closed:
   band, and the side bands are explicitly bounded to start at its foot on both
   sides of the edge. The app still draws the pixels the inner half covers but
   does not receive presses on them, the accepted trade macOS, GNOME, and
-  Windows make. The outer half is reached through
-  `Compositor::resize_target`, consulted **only** where `window_at` finds
-  nothing, so a band never takes a press from a window drawn in front of it;
+  Windows make. The outer half is resolved by `Compositor::pointer_target` in
+  one pass down the stack, each window asked for its pixels and its band in
+  turn, so a band never takes a press from a window drawn in front of it;
   only the primary press and the cursor consult it, leaving the backdrop menu
   reachable wherever it was. The frame therefore draws no corner grip (there is
   no band to hold one), and a fixed-size window trades nothing and claims
@@ -764,6 +765,36 @@ the window manager's to draw and to move like any other window.
   at the carry point, so the press that tore the pane out goes on moving it.
 - **A transient family minimises together**: hiding an owner hides those of
   its transients that were showing, and showing it shows exactly those.
+
+### Stage N — The window in front stands above the rest, and every edge resizes
+
+- **Two shadow levels, eased with the focus.** The family holding the focus
+  stands lifted and every other decorated window rests, lighter
+  (`Palette::inactive_drop_shadow`) and shorter
+  (`Metrics::inactive_drop_shadow_reach`); every other floating surface stays
+  lifted. `ShadowKit` holds an exact `Level` for each and a window changing
+  height casts both, weighted by its `Lift`, eased over
+  `MotionInteraction::WindowActivate` (zero under reduce motion) and stepped
+  from the session's frame pacer (`step_elevations`, `next_elevation_frame_in`).
+  The footprint is the larger level's.
+- **The look follows the focus in one pass** (`Compositor::follow_focus`):
+  frame activation and elevation both derive from the router's focus, so a
+  window opened behind another never wears the active look.
+- **Every edge resizes.** `ResizeEdge` names all four edges and corners;
+  `GrabReach` straddles the top edge as the others, the title bar keeping every
+  point of its own band, and a dragged top edge rises no higher than the
+  screen's top.
+- **A drag out of maximization keeps the size.** A move or a resize goes
+  nowhere until it passes the shared drag slop (`tairix_input::DRAG_SLOP`); its
+  first step out of a maximized window un-maximizes it in place
+  (`unmaximize_in_place`, `InputResponse::Unmaximized`), and `Escape` reinstates
+  the exact placement a resize began from. A press that never travelled ends no
+  move.
+- **Every gesture ends.** While a press holds the pointer a secondary press
+  changes nothing, and a gesture the seat takes away ends where it stands
+  (`InputRouter::abandon_gesture` → `Abandoned`): its client is sent
+  `PointerAction::Cancelled`, a resize settles, and a tool window's move ends
+  over nothing.
 
 ## 2.x Input-transparent overlays (landed)
 

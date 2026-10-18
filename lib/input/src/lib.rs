@@ -54,7 +54,7 @@
 pub mod click;
 pub mod wheel;
 
-pub use click::{ClickKind, ClickRun, DoubleClickTracker};
+pub use click::{past_drag_slop, ClickKind, ClickRun, DoubleClickTracker, DRAG_SLOP};
 pub use tairix_abi::touch::PinchPhase;
 
 use tairix_geometry::Point;
@@ -278,6 +278,14 @@ pub enum InputEvent {
         /// The button that came up.
         button: PointerButton,
     },
+    /// The press in flight ended without a release: the desktop took the
+    /// pointer for a surface of its own — the lock, a prompt, a menu, a drag
+    /// it carries — and the button's release will reach that surface instead.
+    ///
+    /// Whatever the press began ends where it stands and completes nothing:
+    /// a button does not activate, a held step stops, a drag stays where it
+    /// was last left.
+    PointerCancelled,
     /// The scroll wheel turned at the current pointer position, by deltas in
     /// scroll units — [`SCROLL_UNITS_PER_DETENT`] to a detent, already
     /// accelerated by the seat. Positive `dx` scrolls toward the logical end,

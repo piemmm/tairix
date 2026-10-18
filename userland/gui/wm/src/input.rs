@@ -67,12 +67,12 @@
 
 use tairix_controls::{
     damage, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollOrientation,
-    TitleBarEvent, TrackHit, WindowControlKind, WHEEL_STEP,
+    TitleBarEvent, TrackHit, WindowControlKind, WindowSizeState, WHEEL_STEP,
 };
 
 use crate::geometry::{Point, Rect};
 use crate::viewport::FurnitureHit;
-use crate::window::{ResizeBounds, Window, WindowId};
+use crate::window::{Placement, ResizeBounds, Window, WindowId};
 use crate::{Compositor, PointerTarget};
 
 // The device-level pointer vocabulary the router consumes is shared with the
@@ -81,8 +81,8 @@ use crate::{Compositor, PointerTarget};
 // compositor re-exports it so callers keep referring to
 // `tairix_wm::{InputEvent, PointerButton}` (one definition).
 pub use tairix_input::{
-    ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton,
-    PointerFocus,
+    past_drag_slop, ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey,
+    PinchPhase, PointerButton, PointerFocus,
 };
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
@@ -149,10 +149,18 @@ pub enum InputResponse {
         /// The window's new top-left position.
         origin: Point,
     },
-    /// An active move-grab ended (primary released, or the grabbed
-    /// window vanished).
+    /// A move-grab that moved its window ended: its button came up, or the
+    /// window vanished. A press that never travelled past the drag slop was a
+    /// click on the move surface and ends no move.
     MoveEnded {
         /// The window whose move-grab ended.
+        window: WindowId,
+    },
+    /// A move-grab's first step took a maximized `window` out of maximization
+    /// where it stood, and moved it: its size is unchanged and its state is
+    /// now restored, which its owner is owed.
+    Unmaximized {
+        /// The window the drag un-maximized.
         window: WindowId,
     },
     /// A key event was delivered to the focused `window` for the client to
@@ -289,6 +297,22 @@ pub enum InputResponse {
     },
 }
 
+/// What ending a gesture early leaves its embedder to tell
+/// ([`InputRouter::abandon_gesture`]).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Abandoned {
+    /// The window whose client held the press, with where in its client the
+    /// pointer last was: its owner is owed word that the press is over.
+    pub client: Option<(WindowId, Point)>,
+    /// The window an interactive resize was dragging, which stays where the
+    /// drag left it: its owner is owed the size it settled at.
+    pub resized: Option<WindowId>,
+    /// The window a move was dragging, which stays where the drag left it: a
+    /// tool window's owner is owed word that the move is over, let go over
+    /// nothing.
+    pub moved: Option<WindowId>,
+}
+
 /// An in-flight interactive move: the grabbed window and the offset
 /// from the pointer to the window's top-left corner, held constant for
 /// the duration of the drag so the window tracks the pointer without
@@ -306,6 +330,13 @@ struct MoveGrab {
     /// gesture, so a stray click of the other button mid-drag cannot drop the
     /// window somewhere the user did not let go.
     button: PointerButton,
+    /// Where the press landed, on screen: the window stays put until the
+    /// pointer travels past the drag slop from here, so a click — the first
+    /// of a double-click above all — never moves it.
+    pressed_at: Point,
+    /// Whether the pointer has travelled past the slop, after which every
+    /// sample moves the window.
+    travelling: bool,
 }
 
 /// An in-flight scrollbar thumb drag: the window, which bar is being
@@ -328,8 +359,16 @@ struct ResizeGrab {
     window: WindowId,
     edge: ResizeEdge,
     grabber: ResizeGrabber,
-    start_outer: Rect,
+    /// The window as the press found it: the geometry each sample is taken
+    /// from, and what Escape puts back — a maximized window maximized again.
+    start: Placement,
     start_pointer: Point,
+    /// Whether the pointer has travelled past the drag slop, after which the
+    /// window follows it: a press that never does changes nothing.
+    travelling: bool,
+    /// Whether the window is still maximized: the first change of geometry
+    /// takes it out where it stands.
+    maximized: bool,
     /// The region the gesture is armed against — the frame's grab region, not
     /// its outer rectangle. A band straddles the outer edge, so a press that
     /// the frame's hit map accepted routinely lands outside the window, and
@@ -456,6 +495,16 @@ impl InputRouter {
         self.scroll_grab.is_some()
     }
 
+    /// Whether a press this router routed is still down and holds the
+    /// pointer: a move, resize, window-command, scrollbar or client grab.
+    const fn holds_pointer(&self) -> bool {
+        self.grab.is_some()
+            || self.resize_grab.is_some()
+            || self.control_grab.is_some()
+            || self.scroll_grab.is_some()
+            || self.client_grab.is_some()
+    }
+
     /// The frame edge an interactive window resize-grab is dragging, or `None`
     /// when no resize is in progress.
     ///
@@ -555,12 +604,33 @@ impl InputRouter {
 
     /// End the gesture in flight, because the embedder has taken the rest of
     /// it — a screen lock, a modal plate, a drag the desktop carries — so this
-    /// router will never see the release that would have ended it. The implicit
-    /// client grab and a move-grab both end, so no later motion is reported to
-    /// the window the press began in; nothing else moves.
-    pub fn abandon_gesture(&mut self) {
-        self.client_grab = None;
-        self.grab = None;
+    /// router will never see the release that would have ended it.
+    ///
+    /// Every grab ends where it stands: a moved or resized window stays where
+    /// it was dragged, a scrollbar thumb where it was left, and a pressed
+    /// window control is released without firing. What the embedder still
+    /// owes is answered: the client whose press is over, and the window a
+    /// resize settled.
+    pub fn abandon_gesture(&mut self, compositor: &mut Compositor) -> Abandoned {
+        let client = self.client_grab.take().and_then(|window| {
+            let rect = compositor.window_client_rect(window)?;
+            Some((window, client_local(self.pointer, rect)))
+        });
+        let resized = self.resize_grab.take().map(|grab| grab.window);
+        if let Some(window) = self.control_grab.take() {
+            compositor.frame_pointer(window, &InputEvent::PointerCancelled);
+        }
+        let moved = self
+            .grab
+            .take()
+            .filter(|grab| grab.travelling)
+            .map(|grab| grab.window);
+        self.scroll_grab = None;
+        Abandoned {
+            client,
+            resized,
+            moved,
+        }
     }
 
     /// The window whose *decorations* lie under `at`, or `None` when the
@@ -623,9 +693,11 @@ impl InputRouter {
             InputEvent::PointerReleased {
                 button: PointerButton::Secondary,
             } => self.release_secondary(),
-            InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => {
-                InputResponse::Ignored
-            }
+            // The seat never reports a cancel: it is what the embedder hands a
+            // client whose press it took, through `abandon_gesture`.
+            InputEvent::PointerPressed { .. }
+            | InputEvent::PointerReleased { .. }
+            | InputEvent::PointerCancelled => InputResponse::Ignored,
             InputEvent::KeyPressed { key, modifiers } => {
                 self.modifiers = modifiers;
                 self.deliver_key(key, modifiers, true, compositor)
@@ -658,15 +730,16 @@ impl InputRouter {
         pressed: bool,
         compositor: &mut Compositor,
     ) -> InputResponse {
-        // Escape cancels an in-flight resize, restoring the pre-drag geometry
-        // exactly — the shared grabber owns that cancel semantics.
+        // Escape cancels an in-flight resize, putting the window back exactly
+        // as the press found it — the shared grabber owns that cancel
+        // semantics.
         if pressed {
             if let Some(grab) = self.resize_grab.as_mut() {
                 if let Some(ResizeEvent::Cancel) = grab.gesture_key(key) {
                     let window = grab.window;
-                    let start_outer = grab.start_outer;
+                    let start = grab.start;
                     self.resize_grab = None;
-                    compositor.resize_window(window, start_outer);
+                    compositor.reinstate_placement(&start);
                     return InputResponse::ResizeEnded { window };
                 }
             }
@@ -739,6 +812,8 @@ impl InputRouter {
             ),
             drag: local_drag_surface(window, origin, compositor),
             button,
+            pressed_at: self.pointer,
+            travelling: false,
         });
         true
     }
@@ -767,11 +842,15 @@ impl InputRouter {
         };
         let drag = local_drag_surface(window, origin, compositor);
         self.client_grab = None;
+        // The press that tore the window out has already travelled: the
+        // carry is the middle of a drag, never the start of one.
         self.grab = Some(MoveGrab {
             window,
             offset,
             drag,
             button: PointerButton::Primary,
+            pressed_at: self.pointer,
+            travelling: true,
         });
         let placed = clamp_move_origin(
             Point::new(
@@ -785,14 +864,15 @@ impl InputRouter {
         true
     }
 
-    /// End a move-grab that `button` started, naming the window it moved.
+    /// End a move-grab that `button` started, naming the window it moved, or
+    /// none when the press never travelled and so moved nothing.
     ///
     /// A grab another button started is left running: the gesture belongs to
     /// the button still held down.
     fn end_move(&mut self, button: PointerButton) -> Option<WindowId> {
-        let window = self.grab.filter(|grab| grab.button == button)?.window;
+        let grab = self.grab.filter(|grab| grab.button == button)?;
         self.grab = None;
-        Some(window)
+        grab.travelling.then_some(grab.window)
     }
 
     /// Handle a primary-button press at the current pointer position.
@@ -996,8 +1076,12 @@ impl InputRouter {
     /// being brought over whatever is in front of it. Everything else about
     /// the drag — the clamp, the motion, the [`InputResponse::Moved`] ticks —
     /// is the primary drag's one path.
+    ///
+    /// While a gesture holds the pointer the press changes nothing: that
+    /// gesture's own button has not come up, and the client holding a press
+    /// would otherwise lose it without ever being told it ended.
     fn press_secondary(&mut self, compositor: &mut Compositor) -> InputResponse {
-        if self.grab.is_some() {
+        if self.holds_pointer() {
             return InputResponse::Ignored;
         }
         let Some(window) = compositor.window_at(self.pointer) else {
@@ -1289,8 +1373,8 @@ impl InputRouter {
         edge: ResizeEdge,
         compositor: &Compositor,
     ) -> InputResponse {
-        let (Some(start_outer), Some(grab_region)) = (
-            compositor.window(window).map(Window::bounds),
+        let (Some(found), Some(grab_region)) = (
+            compositor.window(window),
             compositor.window_grab_region(window),
         ) else {
             return InputResponse::FurniturePressed { window };
@@ -1299,8 +1383,10 @@ impl InputRouter {
             window,
             edge,
             grabber: ResizeGrabber::new(),
-            start_outer,
+            start: found.placement(),
             start_pointer: self.pointer,
+            travelling: false,
+            maximized: found.size_state() == WindowSizeState::Maximized,
             grab_region,
         };
         // Prime the grabber's pointer, then begin its gesture over the frame's
@@ -1322,14 +1408,16 @@ impl InputRouter {
             return InputResponse::Ignored;
         };
         let moved = InputEvent::PointerMoved { to };
-        if !matches!(grab.gesture(&moved), Some(ResizeEvent::Moved { .. })) {
-            return InputResponse::FurniturePressed {
-                window: grab.window,
-            };
-        }
         let window = grab.window;
+        if !matches!(grab.gesture(&moved), Some(ResizeEvent::Moved { .. })) {
+            return InputResponse::FurniturePressed { window };
+        }
+        grab.travelling |= past_drag_slop(grab.start_pointer, to, compositor.scale());
+        if !grab.travelling {
+            return InputResponse::FurniturePressed { window };
+        }
         match self.resized_outer(compositor) {
-            Some(outer) if compositor.resize_window(window, outer) => {
+            Some(outer) if self.apply_resize(outer, compositor) => {
                 InputResponse::Resized { window }
             }
             _ => {
@@ -1337,6 +1425,20 @@ impl InputRouter {
                 InputResponse::ResizeEnded { window }
             }
         }
+    }
+
+    /// Resize the window the in-flight resize drags to `outer`. A maximized
+    /// window leaves maximization where it stands first, so the drag works
+    /// from the geometry on screen and nothing snaps back once it ends.
+    fn apply_resize(&mut self, outer: Rect, compositor: &mut Compositor) -> bool {
+        let Some(grab) = self.resize_grab.as_mut() else {
+            return false;
+        };
+        if grab.maximized && outer != grab.start.outer() {
+            compositor.unmaximize_in_place(grab.window);
+            grab.maximized = false;
+        }
+        compositor.resize_window(grab.window, outer)
     }
 
     /// Hold an in-flight resize to the size range its window declares *now*,
@@ -1353,6 +1455,15 @@ impl InputRouter {
         let Some(window) = self.resizing() else {
             return InputResponse::Ignored;
         };
+        // A press that has not yet travelled has changed nothing; the
+        // release holds the window to whatever range is in force then.
+        if !self
+            .resize_grab
+            .as_ref()
+            .is_some_and(|grab| grab.travelling)
+        {
+            return InputResponse::Ignored;
+        }
         let Some(outer) = self.resized_outer(compositor) else {
             self.resize_grab = None;
             return InputResponse::ResizeEnded { window };
@@ -1360,7 +1471,7 @@ impl InputRouter {
         if compositor.window(window).map(Window::bounds) == Some(outer) {
             return InputResponse::Ignored;
         }
-        if compositor.resize_window(window, outer) {
+        if self.apply_resize(outer, compositor) {
             InputResponse::Resized { window }
         } else {
             self.resize_grab = None;
@@ -1374,7 +1485,17 @@ impl InputRouter {
     fn resized_outer(&self, compositor: &Compositor) -> Option<Rect> {
         let grab = self.resize_grab.as_ref()?;
         let bounds = compositor.window_resize_bounds(grab.window)?;
-        Some(compute_resized_outer(grab, self.pointer, bounds))
+        let pointer = if grab.travelling {
+            self.pointer
+        } else {
+            grab.start_pointer
+        };
+        Some(compute_resized_outer(
+            grab,
+            pointer,
+            bounds,
+            compositor.screen_rect(),
+        ))
     }
 
     /// Handle a primary-button release: end any active scrollbar thumb drag,
@@ -1432,10 +1553,23 @@ impl InputRouter {
 
     /// Apply pointer motion to an active move-grab, if any, keeping a
     /// grabbable patch of the window's move surface on screen.
+    ///
+    /// Nothing moves until the pointer travels past the drag slop. The first
+    /// step past it takes a maximized window out of maximization where it
+    /// stands, so it is dragged at the size it has.
     fn drag_to(&mut self, to: Point, compositor: &mut Compositor) -> InputResponse {
-        let Some(grab) = self.grab else {
+        let Some(grab) = self.grab.as_mut() else {
             return InputResponse::Ignored;
         };
+        let window = grab.window;
+        let mut unmaximized = false;
+        if !grab.travelling {
+            if !past_drag_slop(grab.pressed_at, to, compositor.scale()) {
+                return InputResponse::Ignored;
+            }
+            grab.travelling = true;
+            unmaximized = compositor.unmaximize_in_place(window).is_some();
+        }
         let origin = clamp_move_origin(
             Point::new(
                 to.x.saturating_sub(grab.offset.x),
@@ -1444,42 +1578,46 @@ impl InputRouter {
             grab.drag,
             compositor.screen_rect(),
         );
-        if compositor.move_window(grab.window, origin) {
-            InputResponse::Moved {
-                window: grab.window,
-                origin,
-            }
-        } else {
+        if !compositor.move_window(window, origin) {
             self.grab = None;
-            InputResponse::MoveEnded {
-                window: grab.window,
-            }
+            return InputResponse::MoveEnded { window };
+        }
+        if unmaximized {
+            InputResponse::Unmaximized { window }
+        } else {
+            InputResponse::Moved { window, origin }
         }
     }
 }
 
 /// The new outer rectangle a resize-grab produces when the pointer is at `to`:
-/// the grabbed edge(s) of the captured `start_outer` move by the pointer
+/// the grabbed edge(s) of the captured start rectangle move by the pointer
 /// delta, the un-grabbed edges stay put, and the resulting extent is held
 /// inside `bounds`, the window's resize range as it stands — no smaller than
 /// what its title bar needs to seat its commands with a drag surface between
 /// them or what its application declared it can lay out at, and no larger
-/// than a ceiling the application declared its content grows to. The top edge
-/// is never a resize edge (the title bar lives there), so it is fixed.
+/// than a ceiling the application declared its content grows to.
+///
+/// A dragged top edge rises no higher than `screen`'s top, or the window's
+/// own if that is higher still, so the title bar it carries stays where the
+/// pointer can reach it.
 ///
 /// The clamp is applied to the *extent* and the un-grabbed edge then anchors
 /// the result, so a drag on the left edge holds the right one still whether
 /// it is the floor or the ceiling that stops it.
-fn compute_resized_outer(grab: &ResizeGrab, to: Point, bounds: ResizeBounds) -> Rect {
-    let start = grab.start_outer;
+fn compute_resized_outer(grab: &ResizeGrab, to: Point, bounds: ResizeBounds, screen: Rect) -> Rect {
+    let start = grab.start.outer();
     let dx = to.x - grab.start_pointer.x;
     let dy = to.y - grab.start_pointer.y;
-    let (left_edge, right_edge, bottom_edge) = match grab.edge {
-        ResizeEdge::Left => (true, false, false),
-        ResizeEdge::Right => (false, true, false),
-        ResizeEdge::Bottom => (false, false, true),
-        ResizeEdge::BottomLeft => (true, false, true),
-        ResizeEdge::BottomRight => (false, true, true),
+    let (left_edge, right_edge, top_edge, bottom_edge) = match grab.edge {
+        ResizeEdge::Left => (true, false, false, false),
+        ResizeEdge::Right => (false, true, false, false),
+        ResizeEdge::Top => (false, false, true, false),
+        ResizeEdge::Bottom => (false, false, false, true),
+        ResizeEdge::TopLeft => (true, false, true, false),
+        ResizeEdge::TopRight => (false, true, true, false),
+        ResizeEdge::BottomLeft => (true, false, false, true),
+        ResizeEdge::BottomRight => (false, true, false, true),
     };
     // A drag past the opposite edge asks for a negative extent, which is no
     // size at all: the bounds' floor is what it becomes.
@@ -1491,7 +1629,10 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point, bounds: ResizeBounds) -> 
     } else {
         start.width
     };
-    let wanted_height = if bottom_edge {
+    let wanted_height = if top_edge {
+        let top = (start.top() + dy).max(screen.top().min(start.top()));
+        extent(start.bottom() - top)
+    } else if bottom_edge {
         extent(start.bottom() + dy - start.top())
     } else {
         start.height
@@ -1505,13 +1646,22 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point, bounds: ResizeBounds) -> 
     } else {
         start.width
     };
-    let height = if bottom_edge { held.1 } else { start.height };
+    let height = if top_edge || bottom_edge {
+        held.1
+    } else {
+        start.height
+    };
     let left = if left_edge {
         start.right() - i32::try_from(width).unwrap_or(i32::MAX)
     } else {
         start.left()
     };
-    Rect::new(left, start.top(), width, height)
+    let top = if top_edge {
+        start.bottom() - i32::try_from(height).unwrap_or(i32::MAX)
+    } else {
+        start.top()
+    };
+    Rect::new(left, top, width, height)
 }
 
 /// `window`'s title-bar drag surface in window-local coordinates, whose
@@ -1567,9 +1717,6 @@ fn clamp_move_origin(origin: Point, drag: Rect, screen: Rect) -> Point {
     )
 }
 
-/// Whether `point` over `window` falls on the client content rather than
-/// window furniture (the outer frame, title bar, or a root-viewport
-/// scrollbar). An undecorated window with no root viewport is all client.
 /// A wheel turn as the seat delivers it: a vertical-only turn made with Shift
 /// held scrolls sideways, as a mouse with no tilt wheel has no other way to.
 /// A turn already carrying a horizontal part is a two-axis device's own and is
@@ -1582,6 +1729,9 @@ const fn sideways_with_shift(dx: i32, dy: i32, modifiers: Modifiers) -> (i32, i3
     }
 }
 
+/// Whether `point` over `window` falls on the client content rather than
+/// window furniture (the outer frame, title bar, or a root-viewport
+/// scrollbar). An undecorated window with no root viewport is all client.
 fn over_client(window: WindowId, point: Point, compositor: &Compositor) -> bool {
     if let Some(part) = compositor.frame_hit(window, point) {
         if !matches!(part, FurniturePart::Client) {

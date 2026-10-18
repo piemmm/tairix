@@ -85,11 +85,14 @@ can never diverge in navigation semantics, listing policy, or look.
   same entry.
 - **Scrolling columns** (`column::ScrollColumn`): the one offset-plus-bar
   every scrolling surface here holds — the listing, the places rail, the
-  chooser, a Properties window — moved by the wheel (`wheel`) and by the bar's
+  chooser, an Info window — moved by the wheel (`wheel`) and by the bar's
   own pointer routing
   (`route`) through one definition. The offset is a request the surface's
   geometry clamps each time it is used, so a resize never leaves it past the
-  end.
+  end. A held end button or track steps again on the bar's own cadence: the
+  surface folds `repeat_deadline` into its wait and, when it falls due, steps
+  the column through `repeat` (`render::scroll_repeat` and its rail, chooser
+  and Info-window counterparts).
 - **Model** (`Browser` over the injected `DirectorySource` seam):
   transactional, fail-closed navigation — descend, climb to the parent,
   refresh, a selection cursor, and the shared sort applied to every
@@ -159,17 +162,20 @@ can never diverge in navigation semantics, listing policy, or look.
   the toolbar click and its keyboard accelerator run through, so they cannot
   diverge and the read-only picker can drive the same toolbar.
   `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
-  `ContextCommand` the right-click menu offers is actionable: Open / Rename /
-  Cut / Copy / Properties act on the selection (an empty directory offers
-  none), Open With… is offered only for a regular file (a directory descends
-  and a bundle launches itself, so neither has an application to choose), and
-  Paste needs only the app's held clipboard — threaded in, since the clipboard
+  `ContextCommand` the right-click menu offers is actionable: Open / Open
+  With… / Get Info… / Rename / Cut / Copy / Delete act on the selection and sit
+  on the submenu the selection's own row opens — `File ‘notes.txt’`, or
+  `Selection` for several items, disabled with its reason when nothing is
+  selected — Open With… is offered only for a regular file (a directory
+  descends and a bundle launches itself, so neither has an application to
+  choose), and Select All / Clear Selection / Paste act on the folder, Paste
+  needing only the app's held clipboard — threaded in, since the clipboard
   lives in the app, not the browser. Each command's `label()` and
   keyboard-`shortcut()` caption drive its declared row, and `CONTEXT_COMMANDS`
-  is the one top-to-bottom order the menu iterates. New ▸ is not a command:
-  it is a submenu above Properties, always open, offering Folder and then each
-  `BlankDocument` an installed application writes (`blank_documents`); its
-  rows answer `ContextChoice::NewFolder` and `ContextChoice::NewDocument`.
+  is the one order the rows are declared in. Display ▸ and New ▸ are not
+  commands: New ▸ always opens, offering Folder and then each `BlankDocument`
+  an installed application writes (`blank_documents`); its rows answer
+  `ContextChoice::NewFolder` and `ContextChoice::NewDocument`.
   `is_enabled` is **derived from** `reason`, so a row can never grey out with
   nothing to say — the reason is the text the seat shows as a tooltip when the
   pointer rests on the row, never a caption beside its label. **Nothing here draws a menu**: `context_menu(model, title, quick)`
@@ -575,8 +581,8 @@ can never diverge in navigation semantics, listing policy, or look.
   the one definition of which facts the General section states and how each
   reads, so the display order, each label, each value, and which facts a given
   node shows cannot drift apart.
-- **The Properties window.** The trusted picker shows no Properties. The file
-  manager's is a **window** of its own
+- **The Info window** (opened by Get Info…). The trusted picker shows none. The
+  file manager's is a **window** of its own
   (`render::draw_properties_window`, sized by `properties_window_extent`), so
   several nodes are inspected at once and the listing stays usable while they
   are: the client is the fields, the permission and ownership controls, and

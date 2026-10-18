@@ -397,6 +397,43 @@ impl Settings {
         }
     }
 
+    /// When the press the sheet's scrollbar holds steps next, or `None` when
+    /// nothing held would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.scroll.repeat_deadline(now_ns)
+    }
+
+    /// Step the press the sheet's scrollbar holds if its repeat is due at
+    /// `now_ns`, for the sheet laid out in `viewport`, reporting the body it
+    /// moved into `damage`. Answers whether anything moved.
+    pub fn repeat(
+        &mut self,
+        now_ns: u64,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        if !self.scroll.repeat_due(now_ns) {
+            return false;
+        }
+        let style = Style::new(scale, theme);
+        let Some(layout) = self.layout(viewport, style.scale, style.theme, style.font) else {
+            return false;
+        };
+        let Some(rect) = layout.scrollbar else {
+            return false;
+        };
+        let moved = self
+            .scroll
+            .repeat(now_ns, rect, style.scale, style.theme, damage)
+            .is_some();
+        if moved {
+            damage.add(layout.body.unwrap_or(Rect::EMPTY));
+        }
+        moved || !damage.is_empty()
+    }
+
     /// Where the pointer event actually goes: the tabs, the body's rows, the
     /// scrollbar, then the footer, in the order they are drawn in.
     fn route_pointer(
@@ -425,6 +462,20 @@ impl Settings {
 
         if let InputEvent::PointerScrolled { dx, dy } = *event {
             return self.wheel(dx, dy, &layout, style, damage);
+        }
+
+        // A press the bar holds is the bar's to its end, wherever the pointer
+        // has gone since.
+        if self.scroll.is_pressing() {
+            let rect = layout.scrollbar.unwrap_or(Rect::EMPTY);
+            if self
+                .scroll
+                .on_pointer(event, rect, style.scale, style.theme, damage)
+                .is_some()
+            {
+                damage.add(layout.body.unwrap_or(Rect::EMPTY));
+            }
+            return SheetOutcome::Changed;
         }
 
         if let Some(rect) = layout.tabs {

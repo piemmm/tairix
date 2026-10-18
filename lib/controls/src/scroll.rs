@@ -51,6 +51,54 @@ pub const REPEAT_DELAY_NS: u64 = 400_000_000;
 /// nanoseconds (see [`REPEAT_DELAY_NS`]).
 pub const REPEAT_INTERVAL_NS: u64 = 60_000_000;
 
+/// When a held stepping press steps next: the one cadence every
+/// press-and-hold control keeps for itself, so its owner folds one deadline
+/// in and asks it to step when that comes, and never keeps a timer of its own
+/// beside the control.
+///
+/// The control's press carries no clock, so a hold's first step is armed at
+/// the first deadline its owner asks for after the press — the same pass that
+/// handled it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct HoldRepeat {
+    due_ns: Option<u64>,
+}
+
+impl HoldRepeat {
+    /// When the next step of a press is due while `stepping` — the hold is
+    /// down and a step would move something — arming its first step
+    /// [`REPEAT_DELAY_NS`] after `now_ns`; `None`, and nothing armed, while
+    /// it is not.
+    pub(crate) fn deadline(&mut self, stepping: bool, now_ns: u64) -> Option<u64> {
+        if !stepping {
+            self.due_ns = None;
+            return None;
+        }
+        Some(
+            *self
+                .due_ns
+                .get_or_insert(now_ns.saturating_add(REPEAT_DELAY_NS)),
+        )
+    }
+
+    /// Whether a step is due at `now_ns`, the one after it then armed
+    /// [`REPEAT_INTERVAL_NS`] later.
+    pub(crate) fn fire(&mut self, now_ns: u64) -> bool {
+        match self.due_ns {
+            Some(due) if now_ns >= due => {
+                self.due_ns = Some(now_ns.saturating_add(REPEAT_INTERVAL_NS));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End the hold: nothing is armed until the next one.
+    pub(crate) fn release(&mut self) {
+        self.due_ns = None;
+    }
+}
+
 /// Which axis a scrolling control lays out along: a scrollbar, or a
 /// [`Toolbar`](crate::toolbar::Toolbar), whose tools scroll when they
 /// overflow it.

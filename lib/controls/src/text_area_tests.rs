@@ -509,3 +509,97 @@ fn a_boxs_validation_state_changes_what_it_draws() {
         "a refused value reads as refused"
     );
 }
+
+/// Ten lines, more than a four-row box shows.
+const TEN_LINES: &str = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten";
+
+/// Where on a box's bar its step-down arrow is: the bottom end button.
+fn bar_down_arrow(area: &TextArea, rows: u32) -> Point {
+    let (_, bar, _, _) =
+        debug_area_layout(area, bounds(area, rows), Scale::ONE, &theme()).expect("laid out");
+    let bar = bar.expect("a text longer than the box shows a bar");
+    Point::new(bar.left() + to_i32(bar.width) / 2, bar.bottom() - 2)
+}
+
+#[test]
+fn a_held_bar_arrow_repeats_on_its_cadence_and_its_release_stops_it() {
+    const ROWS: u32 = 4;
+    let mut long = area(TEN_LINES);
+    let at = bounds(&long, ROWS);
+    let arrow = bar_down_arrow(&long, ROWS);
+    press(&mut long, arrow, ROWS);
+    let first = long.scroll_offset();
+    assert!(first > 0, "the press steps once at once");
+
+    let now = 1_000;
+    let due = long
+        .repeat_deadline(now)
+        .expect("a held arrow arms a repeat");
+    assert_eq!(due, now + crate::scroll::REPEAT_DELAY_NS);
+    let mut damage = sink();
+    long.repeat(due - 1, at, Scale::ONE, &theme(), &mut damage);
+    assert_eq!(
+        long.scroll_offset(),
+        first,
+        "nothing steps before it is due"
+    );
+    long.repeat(due, at, Scale::ONE, &theme(), &mut damage);
+    assert!(long.scroll_offset() > first, "and a step when it is");
+    assert!(damage.rects().contains(&at), "the box repaints");
+
+    long.on_pointer(&RELEASE, at, Scale::ONE, &theme(), &mut sink());
+    assert_eq!(long.repeat_deadline(due), None, "let go, nothing repeats");
+}
+
+#[test]
+fn a_press_the_bar_holds_ends_even_once_the_box_has_no_room() {
+    const ROWS: u32 = 4;
+    let mut long = area(TEN_LINES);
+    let arrow = bar_down_arrow(&long, ROWS);
+    press(&mut long, arrow, ROWS);
+    assert!(long.repeat_deadline(0).is_some());
+
+    let no_room = Rect::new(0, 0, W, 0);
+    long.on_pointer(
+        &InputEvent::PointerCancelled,
+        no_room,
+        Scale::ONE,
+        &theme(),
+        &mut sink(),
+    );
+    assert_eq!(
+        long.repeat_deadline(0),
+        None,
+        "the press ended with the box"
+    );
+}
+
+#[test]
+fn a_bar_part_the_pointer_leaves_for_the_text_goes_out() {
+    const ROWS: u32 = 4;
+    let in_text = Point::new(4, 4);
+    let mut visited = area(TEN_LINES);
+    let at = bounds(&visited, ROWS);
+    for to in [bar_down_arrow(&visited, ROWS), in_text] {
+        visited.on_pointer(
+            &InputEvent::PointerMoved { to },
+            at,
+            Scale::ONE,
+            &theme(),
+            &mut sink(),
+        );
+    }
+    let mut direct = area(TEN_LINES);
+    direct.on_pointer(
+        &InputEvent::PointerMoved { to: in_text },
+        at,
+        Scale::ONE,
+        &theme(),
+        &mut sink(),
+    );
+    assert_eq!(
+        render(&visited, ROWS),
+        render(&direct, ROWS),
+        "the arrow the pointer passed over is still lit"
+    );
+}

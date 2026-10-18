@@ -144,9 +144,11 @@ rather than to its commands. The row control therefore has no way to carry
 help text at all — `MenuItem` has no reason field and measures none — and the
 text lives on `ChainRow::explained`, which nothing draws.
 
-`AppMenuItem::reason` still crosses the wire, unchanged: an application cannot
-declare a tooltip region on a plate the desktop owns, so the desktop takes the
-declared reason as the tip's content. The chain answers the row under the
+`AppMenuItem::reason` still crosses the wire, unchanged, and a submenu row
+(`AppMenuRow::Submenu`) carries one too, so a submenu that cannot open says why
+as a chooseable row does: an application cannot declare a tooltip region on a
+plate the desktop owns, so the desktop takes the declared reason as the tip's
+content. The chain answers the row under the
 pointer through `MenuChain::hovered_tip`, and it answers for the **deepest**
 plate only — an ancestor keeps its highlight to show the path travelled, not
 to say where the pointer is.
@@ -402,9 +404,11 @@ application's and the desktop never interprets one.
 - **The file manager** (`userland/apps/files`) — a secondary press on a listing
   opens its context menu, declared by `lib/browse::chrome::context_menu` over
   the same `ContextMenuModel` the trusted picker composes, so the two cannot
-  diverge. An inapplicable command is declared *disabled with its reason*
-  rather than left out, so the menu's shape does not move with the selection;
-  the reason is shown as a tip on dwell, never drawn on the row.
+  diverge. The verbs that act on the selection sit on a submenu named for it
+  (`File ‘notes.txt’`, or `Selection`), three plates deep under *Open With…*.
+  An inapplicable command is declared *disabled with its reason* rather than
+  left out, so the menu's shape does not move with the selection; the reason
+  is shown as a tip on dwell, never drawn on the row.
   See [the file manager](./apps.md).
 - **The Switchboard** (`userland/gui/switchboard`) — a secondary press on a
   Tasks row, or Enter on the row the keyboard is on, opens that task's menu,

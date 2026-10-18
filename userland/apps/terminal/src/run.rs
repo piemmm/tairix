@@ -87,7 +87,7 @@ mod program {
     use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
     use tairix_raster::Surface;
     use tairix_terminal::appbar::{self, BarCommand};
-    use tairix_terminal::effects::{EffectState, Effects, Phase};
+    use tairix_terminal::effects::{frame_due, EffectState, Effects, Phase, FRAME_INTERVAL_NS};
     use tairix_terminal::layout::{
         cell_font, fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
@@ -163,16 +163,6 @@ mod program {
     /// list that shifts, so a token names the same window for as long as
     /// that window lives and is never reused after it goes.
     const WINDOW_TOKEN_BASE: u64 = 16;
-
-    /// How long the program parks between frames of an animated screen
-    /// effect: fifty milliseconds, twenty frames a second.
-    ///
-    /// Slow enough that an idle terminal with the effects on costs a
-    /// twentieth of a repaint's work per second rather than a core, and fast
-    /// enough that a travelling wobble and an analogue noise floor read as
-    /// motion rather than as a stutter. The park is a one-shot deadline, so
-    /// a terminal with no animated effect never wakes at all.
-    const FRAME_INTERVAL_NS: u64 = 50_000_000;
 
     /// Reap a hosted shell if it has exited.
     ///
@@ -1167,29 +1157,62 @@ mod program {
         // next wait. The park carries a frame deadline only while some window
         // has an animated effect in force.
         let mut bell = Bell::new(set);
+        // When the next animation frame is due, while an effect is animated.
+        let mut next_frame_ns: Option<u64> = None;
         let code = 'serve: loop {
+            let now = tairix_rt::clock_get();
             let animated = publication
                 .live()
                 .effects
                 .is_animated(desktop.scale().percent());
-            let timeout = if animated {
-                FRAME_INTERVAL_NS
-            } else {
-                u64::MAX
-            };
+            next_frame_ns = frame_due(animated, next_frame_ns, now);
+            let held = windows
+                .iter_mut()
+                .filter_map(|open| open.overlay.as_mut()?.sheet.repeat_deadline(now))
+                .min();
+            let timeout = next_frame_ns
+                .into_iter()
+                .chain(held)
+                .min()
+                .map_or(u64::MAX, |due| due.saturating_sub(now));
             let woke = match app::park_for(set, timeout) {
                 Ok(Some(wake)) => wake,
                 Ok(None) => {
-                    // The frame deadline elapsed: advance every window's
-                    // animation and repaint. Nothing else changed.
+                    // A deadline elapsed: a held scrollbar press in a sheet,
+                    // the animation's next frame, or both.
+                    let now = tairix_rt::clock_get();
+                    let (theme, scale) = (themes.active(), desktop.scale());
                     for open in &mut windows {
-                        open.look.phase = open.look.phase.advance();
-                        if open.present(&mut client).is_err() {
+                        let Some(overlay) = open.overlay.as_mut() else {
+                            continue;
+                        };
+                        let viewport = overlay.viewport();
+                        let stepped = overlay.sheet.repeat(
+                            now,
+                            viewport,
+                            scale,
+                            theme,
+                            overlay.picture.sink(),
+                        );
+                        if stepped && present_overlay(overlay, theme, scale, &mut client).is_err() {
                             break 'serve app::fail(
                                 OWN_WORD,
                                 app::EXIT_CHANNEL_LOST,
-                                "present refused",
+                                "overlay present refused",
                             );
+                        }
+                    }
+                    if next_frame_ns.is_some_and(|due| now >= due) {
+                        next_frame_ns = Some(now.saturating_add(FRAME_INTERVAL_NS));
+                        for open in &mut windows {
+                            open.look.phase = open.look.phase.advance();
+                            if open.present(&mut client).is_err() {
+                                break 'serve app::fail(
+                                    OWN_WORD,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
+                            }
                         }
                     }
                     continue;

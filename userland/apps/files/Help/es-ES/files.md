@@ -69,6 +69,16 @@ y una flecha mientras movería, y la carpeta donde caería lo soltado aparece
 resaltada. Un solo archivo arrastrado a la ranura de una aplicación en la
 barra de iconos se abre allí.
 
+El menú contextual empieza por *Mostrar*. Debajo, un submenú nombra aquello
+sobre lo que actúa el menú — *Archivo «notes.txt»*, con un nombre largo
+acortado por el medio para que su extensión siga viéndose, o *Selección*
+cuando hay varios elementos seleccionados — y contiene *Abrir*, *Abrir con…*,
+*Obtener información…*, *Renombrar*, *Cortar*, *Copiar* y *Eliminar*; una
+fila que no puede actuar ahí aparece atenuada y dice por qué. Le siguen
+*Nuevo*, luego *Seleccionar todo* y *Borrar selección*, y por último *Pegar*.
+Un clic derecho en un espacio vacío borra la selección, así que el submenú
+del elemento aparece atenuado.
+
 El submenú *Nuevo* del menú contextual crea una carpeta, o un documento
 vacío de cada tipo que escribe un editor instalado, y abre su nombre para
 editarlo.
@@ -81,8 +91,8 @@ muestra en su lugar su espacio libre, su sistema de archivos y lo bien que
 funciona. Un clic en el título de una columna ordena la lista por ella, y un
 segundo clic invierte el orden.
 
-`Alt+Enter` abre una ventana de *Propiedades* del elemento seleccionado,
-igual que la fila *Propiedades* del menú contextual. Es una ventana propia,
+`Alt+Enter` abre la ventana de *información* del elemento seleccionado,
+igual que *Obtener información…* en su submenú del menú contextual. Es una ventana propia,
 así que pueden abrirse varias a la vez y el listado sigue usable mientras
 tanto: muestra qué es el elemento, su tamaño, sus marcas de tiempo, adónde
 apunta un alias, sus permisos y su propietario, y los atributos extendidos

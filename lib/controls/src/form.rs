@@ -23,11 +23,13 @@
 //!   reading rather than drawing a blank a reader would take for one.
 //! - **Give room away in the order the reader needs it**, which the family
 //!   does for you: slot, label, description. See [`FieldRow::render`].
-//! - **Place the choice popup yourself.** An expanded [`ComboBox`] draws above
-//!   every group, so a row cannot paint it — the group's later rows would
-//!   cover it. Read [`FieldGroup::popup_anchor`], place the list, hand it back
-//!   through [`FieldLayout::with_popup`], and paint it with
-//!   [`FieldGroup::render_popup`] once every group is drawn.
+//! - **Name the room a choice list may hang into, and paint it last.** An
+//!   expanded [`ComboBox`] draws above every group, so a row cannot paint it —
+//!   the group's later rows would cover it. Lay the group out with
+//!   [`FieldGroup::layout`] (or [`FieldGroup::place_popup`] over a column of
+//!   your own), route input with that same layout, and paint the list with
+//!   [`FieldGroup::render_popup`] once every group is drawn. The row reports
+//!   the plate its list opens into and the one it vacates.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -116,8 +118,9 @@ pub enum FieldAction {
         /// The zero-based index of the selected choice.
         index: usize,
     },
-    /// The [`ComboBox`] slot expanded or collapsed its list; the owner places
-    /// and paints the popup while it is open.
+    /// The [`ComboBox`] slot expanded or collapsed its list, having reported
+    /// the plate it opened into or vacated; the owner paints the list while
+    /// it is open.
     Choices {
         /// Whether the list is now expanded.
         expanded: bool,
@@ -162,10 +165,10 @@ pub struct FieldGroupAction {
 
 /// Where a form surface is drawn, resolved by its owner.
 ///
-/// The three facts a row or group needs beyond the theme travel together
-/// because they are resolved together and every entry point needs all of them:
-/// the surface's own rectangle, the shared slot column its controls line up
-/// in, and where an expanded choice list has been placed.
+/// The facts a row or group needs beyond the theme travel together because
+/// they are resolved together and every entry point needs all of them: the
+/// surface's own rectangle, the shared slot column its controls line up in,
+/// the room an expanded choice list may hang into, and where it hangs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct FieldLayout {
     /// The surface's own rectangle: a [`FieldGroup`]'s plate, or one
@@ -176,19 +179,23 @@ pub struct FieldLayout {
     /// [`FieldGroup::slot_column`]; a pane that wants every group's controls
     /// on one x resolves the widest across its groups and passes that.
     pub column: u32,
-    /// Where the owner has placed the choice list of an expanded
-    /// [`ComboBox`] slot, or [`Rect::EMPTY`] while none is open.
+    /// Where an expanded [`ComboBox`] slot's choice list is drawn, or
+    /// [`Rect::EMPTY`] while none is open.
     pub popup: Rect,
+    /// The surface a choice list must fit in: a list hangs past its row, so
+    /// only the owner can name it.
+    pub viewport: Rect,
 }
 
 impl FieldLayout {
-    /// A layout with no popup placed.
+    /// A layout with no popup placed, whose lists fit inside `bounds`.
     #[must_use]
     pub const fn new(bounds: Rect, column: u32) -> Self {
         Self {
             bounds,
             column,
             popup: Rect::EMPTY,
+            viewport: bounds,
         }
     }
 
@@ -199,26 +206,11 @@ impl FieldLayout {
         self
     }
 
-    /// Whether `action`, reported by a group laid out as this, can have moved
-    /// its choice list — opened, closed, or one already open — so the owner
-    /// lays it out again only then.
+    /// This layout with its choice lists fitting inside `viewport`.
     #[must_use]
-    pub const fn popup_may_move(self, action: &FieldAction) -> bool {
-        !self.popup.is_empty() || matches!(action, FieldAction::Choices { .. })
-    }
-
-    /// Report into `damage` where the choice list moved between this layout,
-    /// the one an event was routed with, and `after`, the owner's once it
-    /// was: the plate a list opened into, the one it vacated, or both.
-    ///
-    /// A list opens from a layout that had none placed, so the press that
-    /// opens it cannot name the plate it opens into: only the owner, placing
-    /// the list again, can.
-    pub fn report_popup_moved(self, after: Self, damage: &mut Region) {
-        if self.popup != after.popup {
-            damage.add(self.popup);
-            damage.add(after.popup);
-        }
+    pub const fn within(mut self, viewport: Rect) -> Self {
+        self.viewport = viewport;
+        self
     }
 }
 
@@ -1033,10 +1025,51 @@ impl FieldRow {
     }
 
     /// Whether the row's slot is showing an expanded choice list the owner
-    /// must place and paint.
+    /// must paint.
     #[must_use]
     pub fn popup_open(&self) -> bool {
         matches!(&self.control, FieldControl::Combo(combo) if combo.is_expanded())
+    }
+
+    /// Where the row's expanded choice list is drawn for `layout`: against
+    /// its slot, inside the layout's viewport, by the control's own rule.
+    fn popup_rect(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> Option<Rect> {
+        match &self.control {
+            FieldControl::Combo(combo) if combo.is_expanded() => {
+                let slot = self.slot_rect(layout, scale, theme)?;
+                Some(combo.popup_rect(slot, layout.viewport, scale, theme))
+            }
+            // Every other slot control draws wholly inside its own row.
+            FieldControl::Combo(_)
+            | FieldControl::Toggle(_)
+            | FieldControl::Checkbox(_)
+            | FieldControl::Flags(_)
+            | FieldControl::Slider(_)
+            | FieldControl::Text(_)
+            | FieldControl::Secret(_)
+            | FieldControl::Button(_)
+            | FieldControl::Reading(_)
+            | FieldControl::Unmeasured(_) => None,
+        }
+    }
+
+    /// `acted`, once the plate a list it opened draws into is reported: the
+    /// layout an opening event is routed with places no list, so the control
+    /// could report only its field.
+    fn reported(
+        &self,
+        acted: Option<FieldAction>,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldAction> {
+        if matches!(acted, Some(FieldAction::Choices { expanded: true })) {
+            if let Some(plate) = self.popup_rect(layout, scale, theme) {
+                damage.add(plate);
+            }
+        }
+        acted
     }
 
     /// Feed a pointer event, reporting what the slot's control asked for.
@@ -1046,7 +1079,8 @@ impl FieldRow {
     /// reaches the control in its slot while the pointer is over its drawn
     /// rectangle, on the motion that leaves it, while it is holding a press —
     /// so a drag that leaves the slot still reaches the slider it began on —
-    /// and throughout while its choice list is open.
+    /// and throughout while its choice list is open. A list it opens or closes
+    /// is reported whole, so its owner reports none of it.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1068,7 +1102,7 @@ impl FieldRow {
         if route.iter().all(Option::is_none) && !self.popup_open() {
             return None;
         }
-        match &mut self.control {
+        let acted = match &mut self.control {
             FieldControl::Toggle(c) => c
                 .on_pointer(event, rect, damage)
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
@@ -1092,7 +1126,8 @@ impl FieldRow {
                 .on_pointer(event, rect, damage)
                 .map(|_| FieldAction::Activated),
             FieldControl::Reading(_) | FieldControl::Unmeasured(_) => None,
-        }
+        };
+        self.reported(acted, layout, scale, theme, damage)
     }
 
     /// Feed a key press to the slot's control.
@@ -1100,6 +1135,7 @@ impl FieldRow {
     /// A row whose slot holds a reading, and a row whose control is disabled
     /// or denied, consume the key without acting: the pane's shape never
     /// shifts under the reader, and a refusal is stated rather than performed.
+    /// A list the key opens or closes is reported whole.
     pub fn on_key(
         &mut self,
         stroke: Keystroke,
@@ -1110,7 +1146,7 @@ impl FieldRow {
     ) -> Option<FieldAction> {
         let rect = self.control_rect(layout, scale, theme)?;
         let key = stroke.key;
-        match &mut self.control {
+        let acted = match &mut self.control {
             FieldControl::Toggle(c) => c
                 .on_key(key)
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
@@ -1128,7 +1164,8 @@ impl FieldRow {
             FieldControl::Secret(c) => c.on_key(stroke, rect, theme, damage).map(FieldAction::Text),
             FieldControl::Button(c) => c.on_key(key).map(|_| FieldAction::Activated),
             FieldControl::Reading(_) | FieldControl::Unmeasured(_) => None,
-        }
+        };
+        self.reported(acted, layout, scale, theme, damage)
     }
 
     /// When the slot's control next changes on its own: a masked entry's
@@ -1761,62 +1798,43 @@ impl FieldGroup {
             })
     }
 
-    /// The row whose slot is showing a choice list, and the slot rectangle the
-    /// owner should anchor it to.
+    /// `layout` with this group's expanded choice list, if any, placed
+    /// against its row's slot inside `layout.viewport` — for an owner lining
+    /// several groups' controls up on one column of its own.
     ///
-    /// The owner places the list against this rectangle — below it where the
-    /// window has room, above it where it does not — and hands the result back
-    /// through [`FieldLayout::with_popup`], because the list is drawn above
-    /// every group and only the owner knows the surface it has to fit in.
+    /// The row that opened the list placed it by the same rule to report it,
+    /// so the list is drawn exactly where it was reported.
     #[must_use]
-    pub fn popup_anchor(
-        &self,
-        layout: FieldLayout,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<(usize, Rect)> {
-        let index = self.rows.iter().position(FieldRow::popup_open)?;
-        let rect = self.row_rect(index, layout, scale, theme)?;
-        let slot =
-            self.rows
-                .get(index)?
-                .slot_rect(FieldLayout::new(rect, layout.column), scale, theme)?;
-        Some((index, slot))
+    pub fn place_popup(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> FieldLayout {
+        let placed = self
+            .rows
+            .iter()
+            .position(FieldRow::popup_open)
+            .and_then(|index| {
+                let rect = self.row_rect(index, layout, scale, theme)?;
+                self.rows.get(index)?.popup_rect(
+                    FieldLayout {
+                        bounds: rect,
+                        ..layout
+                    },
+                    scale,
+                    theme,
+                )
+            });
+        layout.with_popup(placed.unwrap_or(Rect::EMPTY))
     }
 
     /// The layout this group is drawn with in `bounds`, inside `viewport`:
-    /// the slot column its rows line up in, and an expanded slot's choice
-    /// list placed where it fits.
-    ///
-    /// The ready-made application of [`slot_column`](Self::slot_column),
-    /// [`popup_anchor`](Self::popup_anchor) and
-    /// [`FieldLayout::with_popup`]: an owner that lays its groups out
-    /// independently hands in the surface the list has to fit in and gets the
-    /// whole layout back, rather than each owner carrying the same three
-    /// calls. An owner that shares one column across several groups resolves
-    /// the widest itself and places the list through those pieces instead.
+    /// its own slot column, and an expanded slot's choice list placed where
+    /// it fits. Route input with the layout the group is painted with.
     #[must_use]
     pub fn layout(&self, bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> FieldLayout {
-        let layout = FieldLayout::new(bounds, self.slot_column(bounds.width, scale, theme));
-        let placed = self
-            .popup_anchor(layout, scale, theme)
-            .and_then(|(row, slot)| match self.rows.get(row)?.control() {
-                FieldControl::Combo(combo) => Some(combo.popup_rect(slot, viewport, scale, theme)),
-                // Every other slot control draws wholly inside its own row.
-                FieldControl::Toggle(_)
-                | FieldControl::Checkbox(_)
-                | FieldControl::Flags(_)
-                | FieldControl::Slider(_)
-                | FieldControl::Text(_)
-                | FieldControl::Secret(_)
-                | FieldControl::Button(_)
-                | FieldControl::Reading(_)
-                | FieldControl::Unmeasured(_) => None,
-            });
-        match placed {
-            Some(popup) => layout.with_popup(popup),
-            None => layout,
-        }
+        let column = self.slot_column(bounds.width, scale, theme);
+        self.place_popup(
+            FieldLayout::new(bounds, column).within(viewport),
+            scale,
+            theme,
+        )
     }
 
     /// Paint the group into `surface` for `layout`: its plate, its caption,
@@ -1884,7 +1902,10 @@ impl FieldGroup {
         for (row, rect) in self.rows.iter().zip(rects.iter()) {
             row.render(
                 surface,
-                FieldLayout::new(*rect, layout.column).with_popup(layout.popup),
+                FieldLayout {
+                    bounds: *rect,
+                    ..layout
+                },
                 scale,
                 theme,
             );
@@ -1989,7 +2010,10 @@ impl FieldGroup {
             let (Some(row), Some(rect)) = (self.rows.get_mut(index), rects.get(index)) else {
                 continue;
             };
-            let row_layout = FieldLayout::new(*rect, layout.column).with_popup(layout.popup);
+            let row_layout = FieldLayout {
+                bounds: *rect,
+                ..layout
+            };
             if let Some(action) = row.on_pointer(event, row_layout, scale, theme, damage) {
                 fired = Some(FieldGroupAction { row: index, action });
             }
@@ -2052,7 +2076,10 @@ impl FieldGroup {
         }
         let index = self.focus?;
         let rect = self.row_rect(index, layout, scale, theme)?;
-        let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
+        let row_layout = FieldLayout {
+            bounds: rect,
+            ..layout
+        };
         let row = self.rows.get_mut(index)?;
         row.on_key(stroke, row_layout, scale, theme, damage)
             .map(|action| FieldGroupAction { row: index, action })
@@ -2080,7 +2107,10 @@ impl FieldGroup {
         for (index, row) in self.rows.iter_mut().enumerate() {
             match rects.get(index) {
                 Some(&rect) => {
-                    let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
+                    let row_layout = FieldLayout {
+                        bounds: rect,
+                        ..layout
+                    };
                     row.advance(now_ns, row_layout, (scale, theme), damage);
                 }
                 // Drawn nowhere for want of room, but its clock still moves:

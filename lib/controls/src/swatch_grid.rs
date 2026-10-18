@@ -342,6 +342,10 @@ impl SwatchGrid {
                 *self.armed = over.map(|index| (index, mark));
                 None
             }
+            InputEvent::PointerCancelled => {
+                *self.armed = None;
+                None
+            }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => match (self.armed.take(), over) {

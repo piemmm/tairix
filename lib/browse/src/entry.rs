@@ -137,6 +137,18 @@ impl EntryKind {
         }
     }
 
+    /// What an item of this kind is called: `Folder`, `File`, `Application`
+    /// (a `<Name>.app` bundle), or `Alias` for a link, whatever it names.
+    #[must_use]
+    pub const fn noun(self) -> &'static str {
+        match self {
+            Self::Directory => "Folder",
+            Self::File => "File",
+            Self::Bundle => "Application",
+            Self::Link(_) => "Alias",
+        }
+    }
+
     /// `true` if the entry is a directory the browser can descend into,
     /// through a link if that is what it takes.
     ///

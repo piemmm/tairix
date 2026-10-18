@@ -2284,6 +2284,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
         label: AppMenuLabel::new("Display").expect("a valid label"),
         enabled: true,
         symbol: AppMenuSymbol::Display,
+        reason: AppMenuReason::EMPTY,
     })
     .expect("room for a submenu");
     menu.push_under(
@@ -2306,6 +2307,7 @@ fn fuzz_menu(mut menu: AppMenu) -> AppMenu {
             label: AppMenuLabel::new("Colour").expect("a valid label"),
             enabled: true,
             symbol: AppMenuSymbol::Colours,
+            reason: AppMenuReason::EMPTY,
         },
         0,
     )

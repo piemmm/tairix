@@ -562,19 +562,23 @@ mod program {
         }
 
         fn turn(host: &mut Host<Self>, now_ns: u64) -> bool {
+            step_held_bars(host, now_ns);
             let syntax = submit_syntax(host, now_ns);
             let code = submit_code(host);
             let data = submit_data(host);
             syntax || code || data
         }
 
-        /// When the soonest store check falls due.
+        /// When the soonest store check, or held scrollbar press, falls due.
         fn deadline(host: &mut Host<Self>, now_ns: u64) -> Option<u64> {
             host.windows
                 .iter_mut()
                 .filter(|window| !window.loading())
-                .filter_map(|window| window.view.check_due(now_ns))
-                .filter(|&due| due > now_ns)
+                .filter_map(|window| {
+                    let check = window.view.check_due(now_ns).filter(|&due| due > now_ns);
+                    let held = window.view.scroll_repeat_deadline(now_ns);
+                    check.into_iter().chain(held).min()
+                })
                 .min()
         }
 
@@ -659,6 +663,18 @@ mod program {
         );
         host.show(index, view, Some(load.handle));
         host.windows[index].extra.pending = unnamed;
+    }
+
+    /// Step each window's held scrollbar press whose repeat is due at
+    /// `now_ns`, owing the window the paint it moved.
+    fn step_held_bars(host: &mut Host<TextEdit>, now_ns: u64) {
+        let (theme, scale) = (host.themes.active(), host.desktop.scale());
+        for window in host.windows.iter_mut().filter(|window| !window.loading()) {
+            window
+                .view
+                .scroll_repeat(now_ns, &window.layout, scale, theme, &mut window.damage);
+            window.owe_reported();
+        }
     }
 
     /// Hand the syntax worker the next job any window wants, answering

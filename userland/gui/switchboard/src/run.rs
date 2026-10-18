@@ -728,6 +728,20 @@ mod program {
         reported
     }
 
+    /// Step a held bar press whose repeat is due at `now_ns`, laid out exactly
+    /// as a present would lay it out.
+    fn step_held(service: &mut Service, host: &RtHost, now_ns: u64) {
+        let Some(bounds) = host.bounds() else {
+            return;
+        };
+        let theme = host.themes.active();
+        let scale = host.desktop.scale();
+        let font = panel_font(theme, scale);
+        service
+            .panel_mut()
+            .repeat(now_ns, bounds, scale, theme, font);
+    }
+
     /// Feed one key to the composition, laid out exactly as a present would
     /// lay it out, so every control the key reaches reports the rectangle it
     /// is drawn in.
@@ -1497,6 +1511,7 @@ mod program {
             if let Some(code) = stop_code(cycled, pid) {
                 return code;
             }
+            step_held(&mut service, &host, tairix_rt::clock_get());
 
             // One present per wake, immediately before parking: whatever the
             // cycle above and the previous wake's drained events marked is
@@ -1505,7 +1520,12 @@ mod program {
             // continues straight back to the top of the loop.
             service.panel_mut().flush(&mut host);
 
-            let timeout = service.wait_timeout_ns(tairix_rt::clock_get());
+            let now = tairix_rt::clock_get();
+            let sample = service.wait_timeout_ns(now);
+            let timeout = service
+                .panel_mut()
+                .repeat_deadline(now)
+                .map_or(sample, |due| due.saturating_sub(now).min(sample));
             let mut token = 0u64;
             let wait_ret = tairix_rt::waitset_wait(set, timeout, &mut token);
             if wait_ret != 0 {

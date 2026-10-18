@@ -1569,3 +1569,49 @@ fn the_data_display_is_read_only_and_text_or_hex_leaves_it() {
         "a picture has no code to show"
     );
 }
+
+/// A held arrow on the window's vertical bar steps on the bar's own cadence,
+/// and the press stays the bar's wherever it is let go.
+#[test]
+fn a_held_bar_arrow_repeats_and_ends_wherever_it_is_let_go() {
+    let mut text = Vec::new();
+    for line in 0..500 {
+        text.extend_from_slice(alloc::format!("line {line}\n").as_bytes());
+    }
+    let mut harness = Harness::new(&text, Format::PlainText);
+    let bar = harness.layout.vertical_bar();
+    let down = Point::new(bar.center().x, bar.bottom() - 2);
+    harness.pointer(InputEvent::PointerMoved { to: down });
+    harness.pointer(InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    });
+    let pressed = harness.view.scroll().0.line;
+    assert!(pressed > 0, "the press steps once at once");
+
+    let registry = ThemeRegistry::with_builtins();
+    let due = harness
+        .view
+        .scroll_repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+    let mut moved = Region::new();
+    harness.view.scroll_repeat(
+        due,
+        &harness.layout,
+        Scale::ONE,
+        registry.active(),
+        &mut moved,
+    );
+    assert!(
+        harness.view.scroll().0.line > pressed,
+        "the hold stepped again"
+    );
+    assert!(touches(&moved, harness.layout.grid()), "and moved the text");
+
+    harness.pointer(InputEvent::PointerMoved {
+        to: harness.layout.grid().center(),
+    });
+    harness.pointer(InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    });
+    assert_eq!(harness.view.scroll_repeat_deadline(due), None, "let go");
+}

@@ -1607,3 +1607,48 @@ fn tabbing_onto_a_hidden_row_scrolls_it_into_view() {
     assert!(covers(&damage, body));
     assert!(covers(&damage, bar));
 }
+
+// --- A held scrollbar press ---------------------------------------------
+
+/// The sheet's bar keeps stepping while its arrow is held, on the bar's own
+/// cadence, and its press is its own to the end even when carried over the
+/// rows.
+#[test]
+fn a_held_bar_arrow_repeats_and_ends_over_the_rows() {
+    let theme = theme();
+    let mut sheet = sheet();
+    let bar = bands(&sheet, CLIENT)
+        .2
+        .expect("the scrollbar band is laid out");
+    let down = Point::new(centre(bar).x, bar.bottom() - 2);
+    sheet.on_pointer(&moved(down), CLIENT, SCALE, &theme, &mut damage::sink());
+    sheet.on_pointer(&PRESS, CLIENT, SCALE, &theme, &mut damage::sink());
+    let pressed = offset(&sheet, CLIENT);
+    assert!(pressed > 0, "the press steps once at once");
+
+    let due = sheet
+        .repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+    let mut moved_body = damage::sink();
+    assert!(!sheet.repeat(due - 1, CLIENT, SCALE, &theme, &mut moved_body));
+    assert!(sheet.repeat(due, CLIENT, SCALE, &theme, &mut moved_body));
+    assert!(offset(&sheet, CLIENT) > pressed, "the hold stepped again");
+    assert!(covers(&moved_body, body(&sheet, CLIENT)), "the rows moved");
+
+    let over_rows = centre(body(&sheet, CLIENT));
+    sheet.on_pointer(
+        &moved(over_rows),
+        CLIENT,
+        SCALE,
+        &theme,
+        &mut damage::sink(),
+    );
+    sheet.on_pointer(
+        &InputEvent::PointerCancelled,
+        CLIENT,
+        SCALE,
+        &theme,
+        &mut damage::sink(),
+    );
+    assert_eq!(sheet.repeat_deadline(due), None, "the press ended");
+}

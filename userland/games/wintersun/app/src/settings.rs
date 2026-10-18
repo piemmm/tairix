@@ -518,13 +518,6 @@ impl SettingsWindow {
                 let mode = *Mode::ALL.get(index)?;
                 Some(Request::Settle(Graphics::chosen(mode, self.shown.detail)))
             }
-            (QUALITY, FieldAction::Choices { .. }) => {
-                // The list is drawn outside its row, so the row cannot report
-                // it: the rectangle it covered and the one it now covers.
-                damage.add(before.groups[QUALITY].popup);
-                damage.add(self.place(scale, theme).groups[QUALITY].popup);
-                None
-            }
             (KNOBS, FieldAction::SetValue { permille }) => self
                 .turn(action.row, permille, before, scale, theme, damage)
                 .map(Request::Preview),

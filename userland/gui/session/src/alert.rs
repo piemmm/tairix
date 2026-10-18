@@ -115,6 +115,9 @@ pub struct AlertWindow {
     cascade: u32,
     /// When its buttons arm; `None` until the serve loop first sees it.
     armed_at: Option<u64>,
+    /// Whether the buttons had armed when the press in hand began: a click
+    /// begun before the alert could be read never answers it.
+    pressed_armed: bool,
     /// The window that held the keyboard when the alert took it.
     returns_to: Option<WindowId>,
     /// What input changed since the alert was last painted.
@@ -158,6 +161,7 @@ impl AlertWindow {
             fitted: (scale, compositor.screen_rect()),
             cascade,
             armed_at: None,
+            pressed_armed: false,
             returns_to: returns_to.filter(|_| took),
             owed: Region::new(),
         })
@@ -203,42 +207,66 @@ impl AlertWindow {
         self.armed_at.is_some_and(|at| now_ns >= at)
     }
 
-    /// A primary click at the window-local `local`: the index of the button
-    /// it chose, if it landed on one after the buttons armed.
-    pub fn click(
+    /// One pointer event at the window-local `local`: the index of the button
+    /// a click completed on, if the click began after the buttons armed. The
+    /// bar beside text that overflows takes the presses that land on it.
+    pub fn pointer(
         &mut self,
         local: Point,
+        event: &InputEvent,
         now_ns: u64,
         shell: &DesktopShell,
         compositor: &Compositor,
     ) -> Option<usize> {
-        if !self.armed(now_ns) {
-            return None;
-        }
         let bounds = self.bounds();
         let (scale, theme) = (compositor.scale(), shell.session().active_theme());
         let mut damage = damage::sink();
-        let mut chosen = None;
-        for event in [
-            InputEvent::PointerMoved { to: local },
+        if matches!(
+            event,
             InputEvent::PointerPressed {
-                button: PointerButton::Primary,
-            },
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            },
-        ] {
-            if let Some(AlertAction::Chosen { index }) =
-                self.alert
-                    .on_pointer(&event, bounds, scale, theme, &mut damage)
-            {
-                chosen = Some(index);
+                button: PointerButton::Primary
             }
+        ) {
+            self.pressed_armed = self.armed(now_ns);
         }
+        // Everything lands where the event says, whatever the last motion
+        // the alert saw.
+        if !matches!(event, InputEvent::PointerMoved { .. }) {
+            let _ = self.alert.on_pointer(
+                &InputEvent::PointerMoved { to: local },
+                bounds,
+                scale,
+                theme,
+                &mut damage,
+            );
+        }
+        let chosen = match self
+            .alert
+            .on_pointer(event, bounds, scale, theme, &mut damage)
+        {
+            Some(AlertAction::Chosen { index }) if self.pressed_armed => Some(index),
+            _ => None,
+        };
         if chosen.is_none() {
             self.owe(&damage);
         }
         chosen
+    }
+
+    /// When the press its bar holds steps next, or `None` when nothing held
+    /// would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.alert.repeat_deadline(now_ns)
+    }
+
+    /// Step the press its bar holds if its repeat is due at `now_ns`, owing
+    /// what moved.
+    pub fn repeat(&mut self, now_ns: u64, shell: &DesktopShell, compositor: &Compositor) {
+        let bounds = self.bounds();
+        let (scale, theme) = (compositor.scale(), shell.session().active_theme());
+        let mut damage = damage::sink();
+        self.alert.repeat(now_ns, bounds, scale, theme, &mut damage);
+        self.owe(&damage);
     }
 
     /// A wheel turn over the alert, which scrolls a detail that overflows.
@@ -592,12 +620,15 @@ impl Alerts {
         }
     }
 
-    /// A click on alert window `wm` at its window-local `local`, and the
-    /// answer it gave, the alert then taken down.
-    pub fn click(
+    /// One pointer event on alert window `wm` at its window-local `local`,
+    /// and the answer a click completing on a button gave, the alert then
+    /// taken down.
+    #[allow(clippy::too_many_arguments)] // The event, its place and time, and the seat it lands in.
+    pub fn pointer(
         &mut self,
         wm: WindowId,
         local: Point,
+        event: &InputEvent,
         now_ns: u64,
         holds: &mut Holds,
         shell: &mut DesktopShell,
@@ -606,8 +637,24 @@ impl Alerts {
         let index = self.position(wm)?;
         let chosen = self.up[index]
             .window
-            .click(local, now_ns, shell, compositor)?;
+            .pointer(local, event, now_ns, shell, compositor)?;
         self.answered(index, chosen, holds, shell, compositor)
+    }
+
+    /// When a press any alert's bar holds steps next, or `None` when nothing
+    /// held would move.
+    pub fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.up
+            .iter_mut()
+            .filter_map(|alert| alert.window.repeat_deadline(now_ns))
+            .min()
+    }
+
+    /// Step every alert bar's held press whose repeat is due at `now_ns`.
+    pub fn repeat(&mut self, now_ns: u64, shell: &DesktopShell, compositor: &Compositor) {
+        for alert in &mut self.up {
+            alert.window.repeat(now_ns, shell, compositor);
+        }
     }
 
     /// A key on focused alert window `wm`, and the answer it gave, the alert

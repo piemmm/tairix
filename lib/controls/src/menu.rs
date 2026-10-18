@@ -1358,6 +1358,10 @@ impl Menu {
                 }
                 None
             }
+            InputEvent::PointerCancelled => {
+                *self.armed = None;
+                None
+            }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
@@ -1865,10 +1869,18 @@ fn wire_row(
             label,
             enabled,
             symbol,
-        } => Some(ChainRow::submenu(
-            symbol,
-            MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
-        )),
+            reason,
+        } => {
+            let row = ChainRow::submenu(
+                symbol,
+                MenuItem::new(label).with_state(ControlState::default().with_enabled(enabled)),
+            );
+            Some(if reason.is_empty() {
+                row
+            } else {
+                row.explained(reason)
+            })
+        }
         // Without an attested identity there is nothing truthful to put in the
         // sheet, so the row is left out rather than drawn opening a blank one.
         AppMenuRowView::Info => {

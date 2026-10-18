@@ -430,6 +430,30 @@ impl WindowPicker {
         true
     }
 
+    /// When the press the grid's scrollbar holds steps next, or `None` when
+    /// nothing held would move.
+    pub(crate) fn repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.scroll.repeat_deadline(now_ns)
+    }
+
+    /// Step the press the grid's scrollbar holds if its repeat is due at
+    /// `now_ns`, answering whether the grid moved.
+    pub(crate) fn repeat(
+        &mut self,
+        now_ns: u64,
+        layout: &PickerLayout,
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) -> bool {
+        self.sync_scroll(layout);
+        let Some(bounds) = layout.scrollbar else {
+            return false;
+        };
+        self.scroll
+            .repeat(now_ns, bounds, scale, theme, damage)
+            .is_some()
+    }
+
     /// Whether `point` rests on the grid's scrollbar, so a press there
     /// belongs to it rather than to a cell.
     #[must_use]

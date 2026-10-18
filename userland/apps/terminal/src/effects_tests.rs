@@ -678,3 +678,22 @@ fn phase_advance_wraps_at_the_maximum_without_panicking() {
     let phase = Phase(u32::MAX);
     assert_eq!(phase.advance(), Phase(0));
 }
+
+/// A wake for anything else — shell output streaming in, a key — never
+/// pushes the next frame back: the deadline stands until it is met, so a
+/// busy terminal still animates.
+#[test]
+fn a_wake_before_the_frame_never_pushes_it_back() {
+    use super::{frame_due, FRAME_INTERVAL_NS};
+
+    let armed = frame_due(true, None, 1_000);
+    assert_eq!(armed, Some(1_000 + FRAME_INTERVAL_NS));
+    for early in [
+        1_001,
+        1_000 + FRAME_INTERVAL_NS / 2,
+        1_000 + FRAME_INTERVAL_NS - 1,
+    ] {
+        assert_eq!(frame_due(true, armed, early), armed, "woken at {early}");
+    }
+    assert_eq!(frame_due(false, armed, 2_000), None, "nothing animates");
+}

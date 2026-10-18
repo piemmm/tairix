@@ -17,38 +17,41 @@
 //!   ([`reason`](ContextMenuModel::reason)). [`context_menu`] turns that into
 //!   the row model the desktop's own menu service renders
 //!   (`plans/NEW-MENUS.md`), read back by [`context_choice_from_item`]; the
-//!   file manager draws no menu pixel. Only commands the file manager can
-//!   actually carry out today are modelled — Open
+//!   file manager draws no menu pixel. The root plate holds Display ▸, the
+//!   selection's own submenu (`File ‘notes.txt’ ▸`, or `Selection ▸`), New ▸
+//!   ([`prepare_entry`](crate::Browser::prepare_entry)), Select All, Clear
+//!   Selection and Paste ([`plan_paste`](crate::clipboard::plan_paste)); the
+//!   selection's submenu holds Open
 //!   ([`activate_selected`](crate::Browser::activate_selected)), Open With…
-//!   (the [`open_with`](crate::open_with) chooser over a regular file), Pin to
-//!   taskbar (the window channel's pin request over a bundle), Rename
+//!   (the [`open_with`](crate::open_with) chooser over a regular file), Get
+//!   Info… ([`Properties`](crate::properties::Properties)), Rename
 //!   ([`prepare_rename`](crate::Browser::prepare_rename)), Cut/Copy
-//!   ([`clipboard`](crate::Browser::clipboard)), Paste
-//!   ([`plan_paste`](crate::clipboard::plan_paste)), New ▸
-//!   ([`prepare_entry`](crate::Browser::prepare_entry)), Properties
-//!   ([`Properties`](crate::properties::Properties)), and Delete
+//!   ([`clipboard`](crate::Browser::clipboard)) and Delete
 //!   ([`plan_delete`](crate::Browser::plan_delete)).
 //!
 //! The model decides *what is offered*; it performs no navigation or I/O
 //! itself, so composing it grants nothing (the read-only picker builds the
 //! same model and simply never invokes a write action).
 
+use alloc::string::String;
+
 use tairix_abi::window_ipc::{
     AppMenu, AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
     AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut,
-    AppMenuSymbol,
+    AppMenuSymbol, APP_MENU_LABEL_MAX,
 };
 use tairix_abi::Errno;
 use tairix_icon::IconKind;
 
 use crate::browser::Browser;
-use crate::entry::{Entry, EntryKind};
+use crate::entry::{Entry, EntryKind, LinkTarget};
 use crate::error::BrowseError;
 use crate::layout::ViewMode;
 use crate::media::BlankDocument;
 use crate::open_with::{AppAssociation, OPEN_WITH_QUICK_MAX};
 use crate::sort::SortMode;
 use crate::source::DirectorySource;
+use crate::vfs::push_shown_name;
 
 /// A read-only file-manager toolbar command.
 ///
@@ -370,11 +373,14 @@ impl ManagerToolModel {
     }
 }
 
-/// A file-manager context-menu command: one chooseable row of the menu's
-/// root plate.
+/// A file-manager context-menu command: one chooseable row of the menu.
 ///
-/// New ▸ is not among them: it is a submenu, never chosen itself, and its rows
-/// answer as [`ContextChoice::NewFolder`] and [`ContextChoice::NewDocument`].
+/// The verbs that act on the selection sit on the plate its own row opens
+/// ([`acts_on_selection`](Self::acts_on_selection)); the rest act on the folder
+/// and sit on the root plate. Display ▸ and New ▸ are not among them: each is a
+/// submenu, never chosen itself, whose rows answer as
+/// [`ContextChoice::Display`], [`ContextChoice::NewFolder`] and
+/// [`ContextChoice::NewDocument`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ContextCommand {
     /// Activate the selected entry — descend, launch a bundle, or open a file
@@ -389,6 +395,9 @@ pub enum ContextCommand {
     /// Rename the selected entry in place
     /// ([`prepare_rename`](Browser::prepare_rename)).
     Rename,
+    /// Open the selected entry's Info window: what it is, its permissions and
+    /// its attributes ([`Properties`](crate::properties::Properties)).
+    GetInfo,
     /// Capture the selection onto a move clipboard
     /// ([`clipboard`](Browser::clipboard) with [`ClipboardOp::Cut`](crate::clipboard::ClipboardOp::Cut)).
     Cut,
@@ -402,9 +411,6 @@ pub enum ContextCommand {
     SelectAll,
     /// Drop the whole selection ([`clear_selection`](Browser::clear_selection)).
     ClearSelection,
-    /// Show the selected entry's properties
-    /// ([`Properties`](crate::properties::Properties)).
-    Properties,
     /// Delete the selected entry — the modal-confirmed recursive removal the
     /// app drives through [`plan_delete`](Browser::plan_delete) and the shared
     /// [`DeleteWalk`](crate::delete::DeleteWalk). Acts on the selection, so it
@@ -412,8 +418,8 @@ pub enum ContextCommand {
     Delete,
 }
 
-/// The complete set of context-menu commands, in their top-to-bottom menu
-/// order.
+/// The complete set of context-menu commands: the selection's plate top to
+/// bottom, then the root plate's after its submenus.
 ///
 /// The drawn menu iterates this so a new command is one entry here rather than
 /// a hand-maintained list duplicated per surface (mirrors
@@ -421,14 +427,14 @@ pub enum ContextCommand {
 pub const CONTEXT_COMMANDS: &[ContextCommand] = &[
     ContextCommand::Open,
     ContextCommand::OpenWith,
+    ContextCommand::GetInfo,
     ContextCommand::Rename,
     ContextCommand::Cut,
     ContextCommand::Copy,
-    ContextCommand::Paste,
+    ContextCommand::Delete,
     ContextCommand::SelectAll,
     ContextCommand::ClearSelection,
-    ContextCommand::Properties,
-    ContextCommand::Delete,
+    ContextCommand::Paste,
 ];
 
 impl ContextCommand {
@@ -440,13 +446,13 @@ impl ContextCommand {
         match self {
             Self::Open => "Open",
             Self::OpenWith => "Open With\u{2026}",
+            Self::GetInfo => "Get Info\u{2026}",
             Self::Rename => "Rename",
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
             Self::SelectAll => "Select All",
             Self::ClearSelection => "Clear Selection",
-            Self::Properties => "Properties",
             Self::Delete => "Delete",
         }
     }
@@ -461,26 +467,43 @@ impl ContextCommand {
             // Open With… binds no keyboard accelerator, so it advertises none;
             // the menu's own traversal is how a keyboard reaches it.
             Self::OpenWith => "",
+            Self::GetInfo => "Alt+Enter",
             Self::Rename => "F2",
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
             Self::Paste => "Ctrl+V",
             Self::SelectAll => "Ctrl+A",
             Self::ClearSelection => "Ctrl+Shift+A",
-            Self::Properties => "Alt+Enter",
             Self::Delete => "Delete",
         }
     }
 
-    /// Whether this command begins a new visual group, so the menu draws a
-    /// divider above it.
+    /// Whether this command acts on the selection, and so sits on the plate
+    /// the selection's own row opens rather than on the root plate.
+    #[must_use]
+    pub const fn acts_on_selection(self) -> bool {
+        matches!(
+            self,
+            Self::Open
+                | Self::OpenWith
+                | Self::GetInfo
+                | Self::Rename
+                | Self::Cut
+                | Self::Copy
+                | Self::Delete
+        )
+    }
+
+    /// Whether this command begins a new visual group on its plate, so the
+    /// menu draws a divider above it.
     ///
-    /// The three opening commands, then the editing verbs, then the selection
-    /// as a whole, then what the entry *is*, then the removal on its own.
+    /// On the selection's plate: the opening commands, then what the item
+    /// *is*, then the editing verbs, then the removal on its own. On the root
+    /// plate, after the submenus: the selection as a whole, then the paste.
     const fn opens_group(self) -> bool {
         matches!(
             self,
-            Self::Rename | Self::SelectAll | Self::Properties | Self::Delete
+            Self::GetInfo | Self::Rename | Self::Delete | Self::SelectAll | Self::Paste
         )
     }
 
@@ -496,13 +519,13 @@ impl ContextCommand {
         match self {
             Self::Open => AppMenuSymbol::Open,
             Self::OpenWith => AppMenuSymbol::OpenWith,
+            Self::GetInfo => AppMenuSymbol::Properties,
             Self::Rename => AppMenuSymbol::Rename,
             Self::Cut => AppMenuSymbol::Cut,
             Self::Copy => AppMenuSymbol::Copy,
             Self::Paste => AppMenuSymbol::Paste,
             Self::SelectAll => AppMenuSymbol::SelectAll,
             Self::ClearSelection => AppMenuSymbol::SelectNone,
-            Self::Properties => AppMenuSymbol::Properties,
             Self::Delete => AppMenuSymbol::Delete,
         }
     }
@@ -552,9 +575,6 @@ const FIRST_DISPLAY: usize = NEW_FOLDER + 1;
 /// The first New ▸ document's id.
 const FIRST_DOCUMENT: usize = FIRST_DISPLAY + ViewMode::ALL.len();
 
-/// The command New ▸ sits above, in a group of its own.
-const NEW_ABOVE: ContextCommand = ContextCommand::Properties;
-
 /// New ▸'s label, which also titles its plate.
 const NEW_LABEL: &str = "New";
 
@@ -566,6 +586,16 @@ const DISPLAY_LABEL: &str = "Display";
 
 /// Why the display in force cannot be chosen again.
 const REASON_CURRENT_DISPLAY: &str = "the window shows its items this way";
+
+/// The selection row's label while it names no one item.
+const SELECTION_LABEL: &str = "Selection";
+
+/// The quotes the selection row sets one item's name between.
+const NAME_QUOTES: (char, char) = ('\u{2018}', '\u{2019}');
+
+/// Why a verb that acts on the selection, or the plate holding them, cannot
+/// be used.
+const REASON_NO_SELECTION: &str = "nothing selected";
 
 impl ViewMode {
     /// The label Display ▸ offers this display under.
@@ -629,12 +659,13 @@ fn item_id(index: usize) -> Result<AppMenuItemId, Errno> {
 /// All three are things the *caller* already holds — the browser's selected
 /// name, and a bundle scan it keeps warm on a worker — so building the menu
 /// reads no file and a right-click waits on nothing. Any may be empty: the
-/// Rename row then opens only the in-place editor, the "Open With…" row
-/// carries no chevron and opens the chooser, and New ▸ offers only Folder.
+/// selection's row then says only what is selected, the Rename row opens only
+/// the in-place editor, the "Open With…" row carries no chevron and opens the
+/// chooser, and New ▸ offers only Folder.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ContextQuick<'a> {
-    /// The selected entry's current name, which the Rename row's field starts
-    /// out holding.
+    /// The selected entry's current name, which the selection's row names and
+    /// the Rename row's field starts out holding.
     pub name: &'a str,
     /// The applications that can open the selection, highest-ranked first
     /// ([`quick_applications`](crate::open_with::quick_applications)); a plate
@@ -645,26 +676,31 @@ pub struct ContextQuick<'a> {
     pub documents: &'a [BlankDocument],
 }
 
-/// Build the row model a secondary press asks the desktop to open: one row per
-/// [`CONTEXT_COMMANDS`] entry, in order, under the root `title`, the New ▸
-/// submenu above Properties, and the quick actions `quick` offers.
+/// Build the row model a secondary press asks the desktop to open, under the
+/// root `title`: Display ▸, then the selection's own submenu and New ▸, then
+/// Select All and Clear Selection, then Paste. The selection's submenu holds
+/// the verbs that act on it ([`ContextCommand::acts_on_selection`]) and is
+/// labelled with what it acts on — `File ‘notes.txt’`, the name shortened to
+/// fit with its extension kept, or `Selection` for several items.
 ///
 /// A command the `model` reports inactionable is declared **disabled with its
-/// reason** rather than left out, so the menu's shape does not move with the
-/// selection and a row says why it cannot be chosen. Removal declares the
-/// destructive emphasis.
+/// reason** rather than left out, so a plate's shape does not move with the
+/// selection and a row says why it cannot be chosen; with nothing selected the
+/// selection's submenu is itself disabled with its reason and holds nothing.
+/// Removal declares the destructive emphasis.
 ///
 /// The Rename row additionally carries a **quick-entry field** pre-filled with
 /// the selection's name, and the "Open With…" row a **submenu** of the
 /// compatible applications, each naming the bundle its icon comes from. Both
 /// are offered only where the row itself is actionable, so a field can never
-/// commit a rename the model says cannot happen (fail closed). New ▸ always
+/// commit a rename the model says cannot happen (fail closed); a name the field
+/// cannot hold leaves the row opening the in-place editor instead. New ▸ always
 /// opens, onto Folder and then `quick`'s documents: it acts on the directory,
 /// and whether the directory takes a new entry is the VFS's answer at create
-/// time. Command rows are pushed first and New ▸'s before the candidates, so
-/// neither a long candidate list nor the documents can crowd a command off the
-/// plate; a row the text budget cannot seat is left out, and a candidate whose
-/// path will not fit keeps its row and loses only its picture.
+/// time. Command rows are pushed before New ▸'s, the displays and the
+/// candidates, so neither a long candidate list nor the documents can crowd a
+/// command off the plate; a row the text budget cannot seat is left out, and a
+/// candidate whose path will not fit keeps its row and loses only its picture.
 ///
 /// The menu performs nothing — the caller dispatches the chosen row in its own
 /// capability-checked tail — so composing it grants no authority; the
@@ -674,72 +710,167 @@ pub struct ContextQuick<'a> {
 ///
 /// Any [`Errno`] the shared menu bounds refuse: a `title` that is not
 /// admissible display text, or rows that do not fit the format bounds. The
-/// commands are fixed, so a refusal past the title can only mean those bounds
-/// changed under this menu; the caller reports it and opens nothing rather
-/// than showing a menu it could not describe.
+/// commands are fixed and a name is shown in a form the bounds always admit,
+/// so a refusal past the title can only mean those bounds changed under this
+/// menu; the caller reports it and opens nothing rather than showing a menu it
+/// could not describe.
 pub fn context_menu(
     model: ContextMenuModel,
     title: &str,
     quick: ContextQuick<'_>,
 ) -> Result<AppMenu, Errno> {
     let mut menu = AppMenu::titled(AppMenuLabel::new(title)?);
+    let display_row = push_submenu(
+        &mut menu,
+        AppMenuLabel::new(DISPLAY_LABEL)?,
+        AppMenuSymbol::Display,
+        "",
+    )?;
+    menu.push(AppMenuRow::Separator)?;
+    let selected = model.selected > 0;
+    let selection_row = push_submenu(
+        &mut menu,
+        selection_label(model.chosen, quick.name)?,
+        selection_symbol(model.chosen),
+        if selected { "" } else { REASON_NO_SELECTION },
+    )?;
+    let new_row = push_submenu(
+        &mut menu,
+        AppMenuLabel::new(NEW_LABEL)?,
+        AppMenuSymbol::NewDocument,
+        "",
+    )?;
     let mut open_with_row = None;
-    let mut new_row = None;
-    let mut display_row = None;
     for (index, command) in CONTEXT_COMMANDS.iter().copied().enumerate() {
-        if command == NEW_ABOVE {
-            menu.push(AppMenuRow::Separator)?;
-            menu.push(AppMenuRow::Submenu {
-                label: AppMenuLabel::new(NEW_LABEL)?,
-                enabled: true,
-                symbol: AppMenuSymbol::NewDocument,
-            })?;
-            new_row = Some(menu.len() - 1);
-            menu.push(AppMenuRow::Submenu {
-                label: AppMenuLabel::new(DISPLAY_LABEL)?,
-                enabled: true,
-                symbol: AppMenuSymbol::Display,
-            })?;
-            display_row = Some(menu.len() - 1);
-        }
+        let plate = if command.acts_on_selection() {
+            // A plate that never opens holds nothing.
+            if !selected {
+                continue;
+            }
+            Some(selection_row)
+        } else {
+            None
+        };
         if command.opens_group() {
-            menu.push(AppMenuRow::Separator)?;
-        }
-        let mut item = AppMenuItem::new(
-            item_id(index)?,
-            AppMenuLabel::new(command.label())?,
-            command.symbol(),
-        )
-        .with_shortcut(AppMenuShortcut::new(command.shortcut())?);
-        if command.is_destructive() {
-            item = item.with_role(AppMenuRole::Destructive);
+            push_on(&mut menu, &AppMenuRow::Separator, plate)?;
         }
         let reason = model.reason(command);
         let enabled = reason.is_empty();
-        if !enabled {
-            item = item.disabled().with_reason(AppMenuReason::new(reason)?);
-        }
-        if command == ContextCommand::Rename && enabled && !quick.name.is_empty() {
-            item = item.with_entry(AppMenuEntry {
-                id: item_id(RENAME_COMMIT)?,
-                initial: AppMenuEntryText::new(quick.name)?,
-            });
-        }
-        menu.push(AppMenuRow::Item(item))?;
+        push_on(
+            &mut menu,
+            &AppMenuRow::Item(command_item(index, command, reason, quick.name)?),
+            plate,
+        )?;
         if command == ContextCommand::OpenWith && enabled && !quick.candidates.is_empty() {
             open_with_row = Some(menu.len() - 1);
         }
     }
-    if let Some(parent) = new_row {
-        push_new_rows(&mut menu, parent, quick.documents)?;
-    }
-    if let Some(parent) = display_row {
-        push_display_rows(&mut menu, parent, model.display)?;
-    }
+    push_new_rows(&mut menu, new_row, quick.documents)?;
+    push_display_rows(&mut menu, display_row, model.display)?;
     if let Some(parent) = open_with_row {
         push_candidates(&mut menu, parent, quick.candidates)?;
     }
     Ok(menu)
+}
+
+/// The row for `command`, numbered by its `index` in [`CONTEXT_COMMANDS`]:
+/// disabled with `reason` when there is one, and — for an actionable Rename —
+/// carrying a quick-entry field holding `name` when the field can hold it.
+///
+/// # Errors
+///
+/// Any [`Errno`] the shared bounds refuse for the command's own fixed text.
+fn command_item(
+    index: usize,
+    command: ContextCommand,
+    reason: &str,
+    name: &str,
+) -> Result<AppMenuItem, Errno> {
+    let mut item = AppMenuItem::new(
+        item_id(index)?,
+        AppMenuLabel::new(command.label())?,
+        command.symbol(),
+    )
+    .with_shortcut(AppMenuShortcut::new(command.shortcut())?);
+    if command.is_destructive() {
+        item = item.with_role(AppMenuRole::Destructive);
+    }
+    if !reason.is_empty() {
+        return Ok(item.disabled().with_reason(AppMenuReason::new(reason)?));
+    }
+    if command == ContextCommand::Rename {
+        if let Ok(initial) = AppMenuEntryText::new(name) {
+            if !initial.is_empty() {
+                item = item.with_entry(AppMenuEntry {
+                    id: item_id(RENAME_COMMIT)?,
+                    initial,
+                });
+            }
+        }
+    }
+    Ok(item)
+}
+
+/// Push `row` onto the root plate, or under the row at `parent`.
+fn push_on(menu: &mut AppMenu, row: &AppMenuRow, parent: Option<usize>) -> Result<(), Errno> {
+    match parent {
+        Some(parent) => menu.push_under(*row, parent),
+        None => menu.push(*row),
+    }
+}
+
+/// Push a submenu row onto the root plate, disabled with `reason` when there
+/// is one, answering its index for the rows it opens to name.
+fn push_submenu(
+    menu: &mut AppMenu,
+    label: AppMenuLabel,
+    symbol: AppMenuSymbol,
+    reason: &str,
+) -> Result<usize, Errno> {
+    menu.push(AppMenuRow::Submenu {
+        label,
+        enabled: reason.is_empty(),
+        symbol,
+        reason: AppMenuReason::new(reason)?,
+    })?;
+    Ok(menu.len() - 1)
+}
+
+/// The selection's row label: the one chosen item's kind and its name,
+/// shortened to the label bound with its extension kept — `File ‘notes.txt’`
+/// — or [`SELECTION_LABEL`] when no one item is chosen.
+///
+/// # Errors
+///
+/// None in practice: the name is spelled as a reader is shown it, which the
+/// bound always admits.
+fn selection_label(chosen: Option<EntryKind>, name: &str) -> Result<AppMenuLabel, Errno> {
+    let Some(kind) = chosen.filter(|_| !name.is_empty()) else {
+        return AppMenuLabel::new(SELECTION_LABEL);
+    };
+    let (opens, closes) = NAME_QUOTES;
+    let mut label = String::with_capacity(APP_MENU_LABEL_MAX);
+    label.push_str(kind.noun());
+    label.push(' ');
+    label.push(opens);
+    let budget = APP_MENU_LABEL_MAX
+        .saturating_sub(label.len())
+        .saturating_sub(closes.len_utf8());
+    push_shown_name(&mut label, name, budget);
+    label.push(closes);
+    AppMenuLabel::new(&label)
+}
+
+/// The function the selection's row shows: a folder for a folder, an
+/// application for an application, the item menu for anything else.
+const fn selection_symbol(chosen: Option<EntryKind>) -> AppMenuSymbol {
+    match chosen {
+        Some(EntryKind::Directory | EntryKind::Link(LinkTarget::Directory)) => {
+            AppMenuSymbol::Folder
+        }
+        Some(EntryKind::Bundle | EntryKind::Link(LinkTarget::Bundle)) => AppMenuSymbol::Application,
+        _ => AppMenuSymbol::File,
+    }
 }
 
 /// Push New ▸'s rows under the submenu row at `parent`: Folder, then one row
@@ -905,7 +1036,7 @@ impl ContextMenuModel {
     /// [`Cut`](ContextCommand::Cut), [`Copy`](ContextCommand::Copy) and
     /// [`Delete`](ContextCommand::Delete) act on every selected entry, so they
     /// need a selection. [`Open`](ContextCommand::Open),
-    /// [`Rename`](ContextCommand::Rename), [`Properties`](ContextCommand::Properties)
+    /// [`Rename`](ContextCommand::Rename), [`GetInfo`](ContextCommand::GetInfo)
     /// and the other single-entry verbs act on the one entry selected, so they
     /// need exactly one. [`Paste`](ContextCommand::Paste) targets the current
     /// directory and needs only a held clipboard, not a selection.
@@ -918,11 +1049,10 @@ impl ContextMenuModel {
     /// no way to claim it).
     #[must_use]
     pub fn reason(&self, command: ContextCommand) -> &'static str {
-        const NO_SELECTION: &str = "nothing selected";
         const DANGLING: &str = "the link leads nowhere";
         let single = || match (self.chosen, self.selected) {
             (Some(kind), _) => Ok(kind),
-            (None, 0) => Err(NO_SELECTION),
+            (None, 0) => Err(REASON_NO_SELECTION),
             (None, _) => Err("several items selected"),
         };
         match command {
@@ -933,10 +1063,10 @@ impl ContextMenuModel {
                 if self.selected > 0 {
                     ""
                 } else {
-                    NO_SELECTION
+                    REASON_NO_SELECTION
                 }
             }
-            ContextCommand::Open | ContextCommand::Rename | ContextCommand::Properties => {
+            ContextCommand::Open | ContextCommand::Rename | ContextCommand::GetInfo => {
                 single().map_or_else(|reason| reason, |_| "")
             }
             // Open With… offers a chooser of applications, which only a regular

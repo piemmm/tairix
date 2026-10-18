@@ -767,6 +767,16 @@ impl ColourPicker {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => self.release(event, &layout, style, damage),
+            // A drag the desktop took settles where it was left; nothing
+            // armed for a release completes.
+            InputEvent::PointerCancelled => match self.drag.take() {
+                Some(part) if is_dragged(part) => self.settle(),
+                Some(part @ (Part::Hex | Part::Number(_))) => {
+                    self.feed_field(part, event, &layout, style, damage);
+                    PickerOutcome::Taken
+                }
+                _ => PickerOutcome::Ignored,
+            },
             InputEvent::PointerScrolled { .. } => {
                 match layout.part_at(*self.pointer, &self.parts(), self.hsv.hue) {
                     Some(Part::Number(index)) => {

@@ -140,9 +140,10 @@ mod program {
         admitted_pid, adopt_unlocks, catalogued, chain_geometry, deliver_pending_open,
         desktop_info, drain_away, drain_locked, drop_is_noteworthy, encode_switchboard_reply,
         focus_reports, land_preview, launch_argv, load_pinboard as read_pinboard_store,
-        load_programs, maybe_send_seat_report, open_entry, open_tray, parse, publish_pinboard,
-        reap_launched, relay_power, resize_drag_event, resolve_launch, resolve_window_identities,
-        seat_held, serve_park_ns, serve_pinboard, serve_switchboard_request, size_state_name,
+        load_programs, maybe_send_seat_report, open_entry, open_tray, park_within, parse,
+        publish_pinboard, reap_launched, relay_power, resize_drag_event, resolve_launch,
+        resolve_window_identities, seat_held, serve_park_ns, serve_pinboard,
+        serve_switchboard_request, settled_size_event, size_state_name, tool_move_abandoned_event,
         tool_move_event, window_control_alternate_event, window_control_event, Acquisition,
         AidPolicy, Answer, AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader,
         ArtworkSandbox, AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery,
@@ -991,9 +992,10 @@ mod program {
 
     /// Step everything the session animates to `now_ns` when `pacer` has a
     /// frame due, so the frame presented next carries it: the desktop's
-    /// screen fade, the pointer aids, the locked screen's own surface, a
-    /// credential prompt's password marker, the screensaver, and the backdrop
-    /// dissolving into another. Between frames only the pointer aids take in
+    /// screen fade, the windows' shadows rising and resting as the focus
+    /// moves, the pointer aids, the locked screen's own surface, a credential
+    /// prompt's password marker, the screensaver, and the backdrop dissolving
+    /// into another. Between frames only the pointer aids take in
     /// where the pointer is. All of them are idle once nothing is in flight,
     /// which is what leaves an idle desktop's park indefinite; what each owes
     /// next is folded through [`FramePacer::step_deadline_ns`].
@@ -1013,6 +1015,7 @@ mod program {
             return;
         }
         fade.advance(now_ns, compositor);
+        compositor.step_elevations(now_ns);
         shell.advance_pointer_aids(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
         elevate.advance(now_ns, shell, compositor);
@@ -3459,6 +3462,12 @@ mod program {
                 park = frame_stats.park_deadline_ns(now_ns, park);
                 park = frames.park_deadline_ns(now_ns, park);
                 park = shell.taskbar_park_deadline_ns(now_ns, park);
+                let held = picker
+                    .scroll_repeat_deadline(now_ns)
+                    .into_iter()
+                    .chain(windows.alerts.repeat_deadline(now_ns))
+                    .min();
+                park = park_within(park, held.map(|due| due.saturating_sub(now_ns)));
                 park = shell.tooltip_park_deadline_ns(now_ns, park);
                 park = menu.park_deadline_ns(now_ns, park);
                 park = resolution.park_deadline_ns(now_ns, park);
@@ -3472,6 +3481,7 @@ mod program {
                 step = shell.backdrop_park_deadline_ns(now_ns, step);
                 step = shell.pointer_aids_park_deadline_ns(now_ns, step);
                 step = fade.park_deadline_ns(now_ns, step);
+                step = park_within(step, compositor.next_elevation_frame_in(now_ns));
                 step = clock.park_deadline_ns(now_ns, step);
                 step = lock.park_deadline_ns(now_ns, step);
                 step = elevate.park_deadline_ns(now_ns, step);
@@ -3513,8 +3523,11 @@ mod program {
                 let now_ns = tairix_rt::clock_get();
                 // The pointer resting still produces no events at all, so
                 // this is what opens a picker whose dwell has elapsed and
-                // takes down one whose grace has.
+                // takes down one whose grace has, and steps a scrollbar press
+                // the pointer holds still.
                 shell.tick_taskbar(&mut compositor, now_ns);
+                picker.scroll_repeat(now_ns, &shell, &mut compositor);
+                windows.alerts.repeat(now_ns, &shell, &compositor);
                 // Idleness produces no event, so this is where it is acted on.
                 while let Some(action) = idle.due(now_ns) {
                     match action {
@@ -4688,6 +4701,16 @@ mod program {
             // any window owner crossed into or out of the unresponsive set
             // while events were delivered, so both move on a real change
             // and neither is recomputed on a quiet wake.
+            deliver_abandoned(
+                &mut server,
+                &mut sink,
+                &mut shell,
+                &mut compositor,
+                &mut windows,
+                &mut picker,
+                &mut apps.service,
+                &mut menu,
+            );
             let vigil_changed = sink.take_changed();
             let mut unresponsive = 0;
             let mut owners = [0u64; SEAT_REPORT_OWNERS_MAX];
@@ -7994,9 +8017,12 @@ mod program {
                     if let Some(holder) = windows.holder_of(window) {
                         shell.focus_holder(compositor, holder);
                     } else if matches!(response, InputResponse::Activated { .. }) {
-                        answer = windows.alerts.click(
+                        answer = windows.alerts.pointer(
                             window,
                             local,
+                            &tairix_wm::InputEvent::PointerPressed {
+                                button: tairix_wm::PointerButton::Primary,
+                            },
                             tairix_rt::clock_get(),
                             &mut windows.holds,
                             shell,
@@ -8480,6 +8506,18 @@ mod program {
                     if picker.wm_id() == Some(window) {
                         let moved = tairix_wm::InputEvent::PointerMoved { to: local };
                         picker.handle_pointer(local, &moved, shell, compositor);
+                    } else if windows.alerts.owns(window) {
+                        // A motion answers nothing: it only lights, drags or
+                        // carries a held press.
+                        let _ = windows.alerts.pointer(
+                            window,
+                            local,
+                            &tairix_wm::InputEvent::PointerMoved { to: local },
+                            tairix_rt::clock_get(),
+                            &mut windows.holds,
+                            shell,
+                            compositor,
+                        );
                     } else if let (Some(id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
@@ -8508,11 +8546,35 @@ mod program {
                 // it so an in-content click or drag completes (a tab or combo
                 // selection, a released scrollbar thumb).
                 InputResponse::ClientPointerReleased { window, local } => {
+                    let released = tairix_wm::InputEvent::PointerReleased {
+                        button: tairix_wm::PointerButton::Primary,
+                    };
                     if picker.wm_id() == Some(window) {
-                        let released = tairix_wm::InputEvent::PointerReleased {
-                            button: tairix_wm::PointerButton::Primary,
-                        };
                         picker.handle_pointer(local, &released, shell, compositor);
+                    } else if windows.alerts.owns(window) {
+                        let answer = windows.alerts.pointer(
+                            window,
+                            local,
+                            &released,
+                            tairix_rt::clock_get(),
+                            &mut windows.holds,
+                            shell,
+                            compositor,
+                        );
+                        reconcile_focus(
+                            focused,
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                        );
+                        if let Some(answer) = answer {
+                            relay_alert_answer(answer, server, sink, shell, windows);
+                        }
                     } else if let (Some(id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
@@ -8536,6 +8598,23 @@ mod program {
                                 ),
                                 modifiers: pointer_modifiers(shell),
                             },
+                        );
+                    }
+                }
+                // A drag took a maximized window out of maximization at the
+                // size it had: its app is told the state it is in now.
+                InputResponse::Unmaximized { window } => {
+                    if let Some(event) = settled_size_event(window, compositor, windows) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &event,
                         );
                     }
                 }
@@ -11057,6 +11136,68 @@ mod program {
         tell_focus(
             told, now, server, sink, shell, compositor, windows, picker, apps, menu,
         );
+    }
+
+    /// Tell the clients the seat took the pointer from what they are owed:
+    /// the one whose press was taken, that the press is over, and one whose
+    /// window a resize was dragging, the size it settled at.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn deliver_abandoned<S: DirectorySource, F: FnMut() -> S>(
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        let abandoned = shell.take_abandoned();
+        if let Some((wm, at)) = abandoned.client {
+            if picker.wm_id() == Some(wm) {
+                picker.handle_pointer(
+                    at,
+                    &tairix_wm::InputEvent::PointerCancelled,
+                    shell,
+                    compositor,
+                );
+            } else if windows.alerts.owns(wm) {
+                // A cancel completes no click, so it answers nothing.
+                let _ = windows.alerts.pointer(
+                    wm,
+                    at,
+                    &tairix_wm::InputEvent::PointerCancelled,
+                    tairix_rt::clock_get(),
+                    &mut windows.holds,
+                    shell,
+                    compositor,
+                );
+            } else if let (Some(window_id), Ok(x), Ok(y)) =
+                (windows.ipc_id(wm), u32::try_from(at.x), u32::try_from(at.y))
+            {
+                let event = WindowEvent::Pointer {
+                    window_id,
+                    x,
+                    y,
+                    action: PointerAction::Cancelled,
+                    modifiers: pointer_modifiers(shell),
+                };
+                deliver(
+                    server, sink, shell, compositor, windows, picker, apps, menu, &event,
+                );
+            }
+        }
+        let settled = abandoned
+            .resized
+            .and_then(|wm| resize_drag_event(wm, true, shell, compositor, windows));
+        let left = abandoned
+            .moved
+            .and_then(|wm| tool_move_abandoned_event(wm, windows));
+        for event in [settled, left].into_iter().flatten() {
+            deliver(
+                server, sink, shell, compositor, windows, picker, apps, menu, &event,
+            );
+        }
     }
 
     /// Deliver a redraw request to the owning app of every window whose

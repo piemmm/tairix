@@ -424,4 +424,10 @@ impl OpenWithChooser {
     pub(crate) fn scroll_mut(&mut self) -> &mut ScrollColumn {
         &mut self.scroll
     }
+
+    /// When the list's held scrollbar press steps next, as a monotonic
+    /// instant, or `None` when nothing held would move.
+    pub fn scroll_repeat_deadline(&mut self, now_ns: u64) -> Option<u64> {
+        self.scroll.repeat_deadline(now_ns)
+    }
 }

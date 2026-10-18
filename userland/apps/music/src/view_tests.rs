@@ -536,3 +536,93 @@ fn a_saved_shuffle_and_repeat_are_what_a_new_playback_thread_is_told() {
         [Edit::Shuffle(None), Edit::Repeat(Repeat::Off)]
     );
 }
+
+#[test]
+fn a_held_list_arrow_steps_again_on_the_bars_cadence() {
+    let names: Vec<String> = (0..60).map(|n| alloc::format!("track{n}.flac")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut player, _, layout, registry) = player_with(&names);
+    let theme = registry.active();
+    let bar = layout.scrollbar();
+    let down = Point::new(centre(bar).x, bar.bottom() - 2);
+    for event in [
+        InputEvent::PointerMoved { to: down },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        player.input(&event, 0, &layout, Scale::ONE, theme, &mut damage::sink());
+    }
+    let pressed = player.scroll();
+    assert!(pressed > 0, "the press steps once at once");
+
+    let due = player
+        .scroll_repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+    let mut moved = damage::sink();
+    player.scroll_repeat(due - 1, &layout, Scale::ONE, theme, &mut moved);
+    assert_eq!(player.scroll(), pressed, "nothing before it is due");
+    player.scroll_repeat(due, &layout, Scale::ONE, theme, &mut moved);
+    assert!(player.scroll() > pressed, "and a step when it is");
+    assert!(moved.intersects(layout.rows()), "the rows it moved repaint");
+
+    player.input(
+        &InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+        0,
+        &layout,
+        Scale::ONE,
+        theme,
+        &mut damage::sink(),
+    );
+    assert_eq!(player.scroll_repeat_deadline(due), None);
+}
+
+/// The bar holds the list's offset and has already taken it when it answers,
+/// so every way of scrolling by it — a press, the wheel — repaints the rows it
+/// moved, not the bar alone.
+#[test]
+fn scrolling_by_the_bar_repaints_the_rows() {
+    let names: Vec<String> = (0..60).map(|n| alloc::format!("track{n}.flac")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut player, _, layout, registry) = player_with(&names);
+    let theme = registry.active();
+    let bar = layout.scrollbar();
+
+    let mut pressed = damage::sink();
+    for event in [
+        InputEvent::PointerMoved {
+            to: Point::new(centre(bar).x, bar.bottom() - 2),
+        },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        player.input(&event, 0, &layout, Scale::ONE, theme, &mut pressed);
+    }
+    assert!(player.scroll() > 0);
+    assert!(
+        pressed.intersects(layout.rows()),
+        "an arrow's step repaints the rows"
+    );
+
+    let mut wheeled = damage::sink();
+    let before = player.scroll();
+    player.input(
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT,
+        },
+        0,
+        &layout,
+        Scale::ONE,
+        theme,
+        &mut wheeled,
+    );
+    assert!(player.scroll() > before);
+    assert!(
+        wheeled.intersects(layout.rows()),
+        "a wheel turn repaints the rows"
+    );
+}

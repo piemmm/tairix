@@ -218,6 +218,12 @@ fn overflowing(document: ViewDocument) -> (View, Layout, ThemeRegistry) {
     (view, layout, registry)
 }
 
+/// Arm `view`'s deadlines at `now_ns` with the dressing a held control needs.
+fn arm(view: &mut View, layout: &Layout, now_ns: u64) {
+    let (registry, scale) = dressing();
+    view.arm_deadline(now_ns, layout, scale, registry.active());
+}
+
 /// Advance `view` to `now_ns` with the dressing a held control needs, and
 /// report whether anything drawn changed.
 fn tick(view: &mut View, layout: &Layout, now_ns: u64) -> bool {
@@ -676,10 +682,10 @@ fn playback_arms_exactly_one_deadline_and_a_pause_disarms_it() {
     assert!(outcome.changed);
     assert!(view.playing());
 
-    view.arm_deadline(1_000);
+    arm(&mut view, &layout, 1_000);
     let first = view.deadline_ns().expect("a deadline was armed");
     assert!(first > 1_000);
-    view.arm_deadline(2_000);
+    arm(&mut view, &layout, 2_000);
     assert_eq!(
         view.deadline_ns(),
         Some(first),
@@ -696,7 +702,7 @@ fn a_tick_before_the_deadline_does_nothing_and_one_after_it_steps_the_frame() {
     const PAGE: (u32, u32) = (400, 300);
     let (mut view, layout, _registry) = drawn(animation(4, 400, 300));
     let (_, _) = run(&mut view, &layout, Command::TogglePlayback);
-    view.arm_deadline(0);
+    arm(&mut view, &layout, 0);
     let deadline = view.deadline_ns().expect("armed");
     assert!(!tick(&mut view, &layout, deadline - 1), "not due yet");
     assert!(tick(&mut view, &layout, deadline), "due");
@@ -711,7 +717,7 @@ fn playback_wraps_at_the_last_frame() {
     let (mut view, layout, _registry) = drawn(animation(2, 400, 300));
     let (_, _) = run(&mut view, &layout, Command::TogglePlayback);
     for expected in [1, 0, 1] {
-        view.arm_deadline(0);
+        arm(&mut view, &layout, 0);
         let deadline = view.deadline_ns().expect("armed");
         assert!(tick(&mut view, &layout, deadline));
         assert!(serve(&mut view, &layout, PAGE));

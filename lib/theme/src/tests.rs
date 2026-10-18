@@ -965,6 +965,31 @@ fn a_floating_surface_casts_a_translucent_shadow_darker_than_the_desktop() {
     }
 }
 
+/// A window resting behind the family in front casts a lesser shadow of the
+/// same colour: lighter and shorter, so the window being worked in stands
+/// above it, and never beyond the lifted one's reach, which is the footprint
+/// every window's damage is bounded by.
+#[test]
+fn a_resting_window_casts_a_lighter_shorter_shadow_of_the_same_colour() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let (palette, metrics) = (theme.palette(), theme.metrics());
+        let (lifted, resting) = (palette.drop_shadow, palette.inactive_drop_shadow);
+        assert_eq!(
+            (resting.r, resting.g, resting.b),
+            (lifted.r, lifted.g, lifted.b),
+            "{}",
+            theme.name()
+        );
+        assert!(resting.a > 0 && resting.a < lifted.a, "{}", theme.name());
+        assert!(metrics.inactive_drop_shadow_reach > 0, "{}", theme.name());
+        assert!(
+            metrics.inactive_drop_shadow_reach < metrics.drop_shadow_reach,
+            "{}",
+            theme.name()
+        );
+    }
+}
+
 /// An icon's shadow stays within the inset a tile keeps around its picture,
 /// so it never paints outside the tile it belongs to.
 #[test]
@@ -1554,6 +1579,7 @@ fn sample_palette() -> Palette {
         bevel_light: Rgba::new(255, 255, 255, 40),
         bevel_shade: Rgba::new(0, 0, 0, 80),
         drop_shadow: Rgba::new(0, 0, 0, 120),
+        inactive_drop_shadow: Rgba::new(0, 0, 0, 72),
         window_close: Rgba::new(255, 64, 64, 128),
         window_minimize: Rgba::new(255, 200, 32, 128),
         window_maximize: Rgba::new(64, 200, 96, 128),
@@ -1571,6 +1597,7 @@ fn sample_metrics() -> Metrics {
         window_backdrop_blur: 10,
         popup_corner_radius: 4,
         drop_shadow_reach: 5,
+        inactive_drop_shadow_reach: 3,
         icon_shadow_reach: 2,
         border_thickness: 1,
         scrollbar_breadth: 12,

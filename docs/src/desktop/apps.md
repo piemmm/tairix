@@ -506,18 +506,19 @@ The drawn window chrome — the `lib/controls` toolbar
   left-to-right command order the chrome iterates.
 - `ContextMenuModel::for_browser(browser, has_clipboard)` snapshots which
   `ContextCommand` the right-click menu offers is actionable. **Open**,
-  **Rename**, **Cut**, **Copy**, **Properties**, and **Delete** act on the
-  selected entry, so they need a selection (an empty directory offers none).
-  **Open With…** is offered only for a regular file — a directory descends and
-  a bundle launches itself, so neither has an application to choose.
-  **Paste** targets the current directory and needs only a held clipboard,
-  not a selection; because the clipboard lives in the app rather than the
-  browser (`Browser::clipboard` *captures* a fresh one from the selection),
-  whether a paste is possible is the app's own state, threaded in as
-  `has_clipboard`. `is_enabled(command)` gives each drawn `MenuItem` its
-  enabled state (an inapplicable command renders *disabled*, never hidden),
-  and `CONTEXT_COMMANDS` is the one top-to-bottom order the drawn menu
-  iterates.
+  **Open With…**, **Get Info…**, **Rename**, **Cut**, **Copy** and **Delete**
+  act on the selection (`ContextCommand::acts_on_selection`), so they need one;
+  the single-entry verbs need exactly one. **Open With…** is offered only for a
+  regular file — a directory descends and a bundle launches itself, so neither
+  has an application to choose. **Select All**, **Clear Selection** and
+  **Paste** act on the folder. Paste needs only a held clipboard, not a
+  selection; because the clipboard lives in the app rather than the browser
+  (`Browser::clipboard` *captures* a fresh one from the selection), whether a
+  paste is possible is the app's own state, threaded in as `has_clipboard`.
+  `is_enabled(command)` gives each declared row its enabled state (an
+  inapplicable command renders *disabled*, never hidden), and
+  `CONTEXT_COMMANDS` is the one order the rows are declared in: the
+  selection's plate top to bottom, then the root plate's.
 
 The model decides *what is offered*; it performs
 no navigation or I/O itself, so composing it grants nothing (the read-only
@@ -525,19 +526,26 @@ picker builds the same model). Only commands the file manager can actually
 carry out today are modelled, so none is speculative surface (`AGENTS.md`
 §2.4): **Open With…** joined the set with its FM6b chooser verb (below), and
 **Delete** joined it with FM9-c's confirm-and-remove verb (its `begin_delete`
-action, below). **New ▸** is a submenu above Properties rather than a command:
-it always opens, onto **Folder** and then one row per document type an
+action, below). **Display ▸** and **New ▸** are submenus rather than commands.
+New ▸ always opens, onto **Folder** and then one row per document type an
 installed application writes and declares by name whose empty file is already
 a complete document (`blank_documents`; today *Text Document*). The read-only
 picker opens no write menu.
 
 **The context menu is the desktop's, and the file manager draws no menu
 pixel.** A secondary-button (right-click) press selects the item under the
-pointer — or clears the selection on empty space, so only the directory-scoped
-Paste is offered — and asks the desktop's one menu service to bring a chain up
-([menus](./menus.md)): `chrome::context_menu` declares one row per
-`CONTEXT_COMMANDS` entry carrying that command's `label()` and keyboard
-`shortcut()`, and the `Run` binary sends it as a `WindowRequest::OpenMenu`
+pointer — or clears the selection on empty space — and asks the desktop's one
+menu service to bring a chain up ([menus](./menus.md)). `chrome::context_menu`
+declares the root plate as *Display ▸*, then the selection's own submenu and
+*New ▸*, then *Select All* and *Clear Selection*, then *Paste*. The selection's
+submenu holds the verbs that act on it and is labelled with what it acts on:
+the one chosen item's kind and name — `File ‘notes.txt’`, `Folder ‘Docs’` —
+the name spelled as a reader is shown it (`vfs::push_shown_name`: a control
+character as U+FFFD, a name too long for the label cut in the middle with its
+extension kept), or `Selection` for several items. With nothing selected that
+submenu is declared disabled with its reason and holds no row. Every command
+row carries its `label()` and keyboard `shortcut()`, and the `Run` binary sends
+the menu as a `WindowRequest::OpenMenu`
 anchored at the window-local point the press was reported at — the only space
 the application can speak truthfully, since it is never told where its window
 sits. The desktop titles the plate (the application's own name), places it,
@@ -550,15 +558,17 @@ is the one rule, and `is_enabled` is derived from it, so a row can never grey
 out with nothing to say. The desktop shows that reason as a tooltip when the
 pointer rests on the row; it is never drawn beside the label, which is what
 made this plate as wide as "only a file opens with an application". Removal declares the destructive emphasis. A row's id
-is its command's position in `CONTEXT_COMMANDS`, so `context_command_from_item`
-reads a chosen row back through the exact inverse of numbering it.
+is its command's position in `CONTEXT_COMMANDS`, so `context_choice_from_item`
+reads a chosen row back through the exact inverse of numbering it. A name the
+Rename row's quick-entry field cannot hold leaves the row opening the in-place
+editor instead, so a hostile name never takes the whole menu away.
 
 The answer is exactly one `WindowEvent::MenuClosed` naming the open id the
 window minted, so an answer to a gesture already settled cannot run a stale
 command; the `Run` binary routes the chosen command through
 `dispatch_context_command` to the **exact same** app verbs the toolbar and
 keyboard already drive — Open (`activate`), Open With… (the chooser below),
-Rename, Cut, Copy, Paste, Properties, and Delete (the same alert-confirmed
+Get Info…, Rename, Cut, Copy, Paste, and Delete (the same alert-confirmed
 `begin_delete` the `Delete` key opens, below) — so the menu can never diverge
 from them (`AGENTS.md` §2.2) and adds no authority (every verb is the user's own
 §5.3-checked action). A refused open is an answer: it is stated on `stderr` and
@@ -809,7 +819,7 @@ the type — opens an `OpenWithChooser` in **its own popup window** above the
 manager's, sized to the candidates it actually holds (never a fixed eight rows'
 worth of empty plate).
 
-The popup opens with the same `render::Identity` band the Properties window
+The popup opens with the same `render::Identity` band the Info window
 does, naming and picturing the file being opened — so the question the chooser
 is asking is on the surface rather than in a title. Below it sits one `ListRow`
 per candidate in ranked order, each drawing **that application's own icon**
@@ -887,7 +897,7 @@ drift apart (`AGENTS.md` §2.2):
   as what it *names*, and a dangling one as the generic type.
   `media_for_entry(entry, parent)` is that same rule for a listed entry, whose
   parent directory is what answers the service-store question. A surface
-  describing *one* node — the Properties window's identity band — has only the
+  describing *one* node — the Info window's identity band — has only the
   name and kind, so it classifies through the same definition rather than
   growing a private copy.
 - `MediaType::icon` is the glyph the type draws. That mapping is deliberately
@@ -981,7 +991,7 @@ blank at the epoch so a stampless file is never given a fabricated date, §21);
 the type column is the content type's name (`MediaType::name`), which is also
 what the Kind order sorts files by. A drive's row states its free space (said
 to be free under a Size title), its filesystem and its health in the words its
-Properties window uses. In the **large icons** display each entry is a shared
+Info window uses. In the **large icons** display each entry is a shared
 `lib/controls` `IconTile` — its file-type icon over that same label, with no plate of its own, so a folder reads as a field
 of icons rather than a grid of boxes and only a hovered, selected, or focused
 entry paints anything behind its icon — wrapped into as many columns as fit the
@@ -1677,7 +1687,7 @@ deadline on the loop's park that is armed only while a step is due; there is no
 periodic timer. Release ends the band; `Escape` takes back what it selected.
 While it is live the listing is held, so a reported change waits for it.
 
-The verbs that act on one entry — Open, Rename, Properties, Open With… — act on
+The verbs that act on one entry — Open, Rename, Get Info…, Open With… — act on
 the **chosen** entry, `Browser::chosen_index`: the one entry selected, or none
 when nothing or several are, so the context menu states "several items
 selected" rather than picking one. Cut, copy and delete act on the whole set.
@@ -2128,7 +2138,7 @@ directory's `d`, and a link labelled "Alias to folder" still shows `l`. The mode
 performs the one capability-checked `fs_stat` under the user's own identity and
 hands the result here, so the trusted picker composes the same view.
 
-### The Properties window
+### The Info window
 
 The closed `render::Field` vocabulary is the one definition of *which* facts
 the General section states and how each reads — Kind, a link's stored target,
@@ -2137,10 +2147,11 @@ each label, each value, and which facts a given node shows can never drift
 apart. The alias row appears only for a node that stores a target and carries
 the spelling the link holds verbatim, which is what explains a broken one. The
 facts are a `lib/controls` `FactList` — muted label, right-aligned value,
-separated rows. The trusted picker shows no Properties: choosing a file needs
+separated rows. The trusted picker shows no Info window: choosing a file needs
 none.
 
-The **file manager's Properties is a window of its own**
+The **file manager's Info window is a window of its own**, titled with the
+node's name and `Info`
 (`render::draw_properties_window`, opened at `render::properties_window_extent`
 and resizable thereafter). Several are open at once, each pinned to its node by
 *path*, so the listing behind them may be reloaded or navigated away from
@@ -2176,8 +2187,8 @@ below an alias row down a line, so the same click meant different things on a
 link and on a plain file. Each section gets the whole body, which is what
 removes the crowding that made nine permission checkboxes sit a glyph apart.
 
-`files.app` opens one with **`Alt+Enter`** on the selection or the context
-menu's *Properties* row. The node is resolved from the listing that named it —
+`files.app` opens one with **`Alt+Enter`** on the selection or *Get Info…* on
+the context menu's item submenu. The node is resolved from the listing that named it —
 its path through the shared `Browser::chosen_target_path` spelling — and then
 **read off the event loop**: describing a node is one `fs_stat` plus one
 `fs_attr_get` per attribute key, which on a contended volume is a visible stall
@@ -2205,9 +2216,9 @@ On the **Attributes** section everything but the strip's arrows belongs to its
 list and editor. So no key reaches a control the selected section does not
 draw.
 
-### A drive's Properties
+### A drive's Info window
 
-Properties on an entry drawn as a drive opens a window whose strip leads with a
+Get Info… on an entry drawn as a drive opens a window whose strip leads with a
 **Drive** section (`render::PropertiesStrip::Drive`), opened on it; the node's
 own General, Permissions and Attributes follow, since a mount point is a
 directory with an owner and a mode too. The section is drawn from the pure
@@ -2466,7 +2477,7 @@ window ground the Settings and Switchboard windows use: the listing's ground
 lets the blurred desktop through, and it asks the compositor for that blur
 before its first frame and on every desktop change. What it lays over its
 own content — the rename field — and the windows it opens of its own — the
-"Open With…" chooser, a progress window, a Properties window — keep the opaque
+"Open With…" chooser, a progress window, an Info window — keep the opaque
 theme (`tairix_theme::Grounds`).
 
 Icon-only buttons size their glyph from the plate itself — the smaller plate

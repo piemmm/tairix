@@ -28,7 +28,7 @@ use tairix_controls::{wheel_steps, Fact, FactList, WHEEL_STEP};
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{badge, builtin_icon, BadgeHue, IconKind, PlateShape};
-use tairix_input::{InputEvent, Key, NamedKey, PinchPhase, PointerButton};
+use tairix_input::{past_drag_slop, InputEvent, Key, NamedKey, PinchPhase, PointerButton};
 use tairix_procinfo::{render_ip, render_mac};
 use tairix_raster::{Canvas, Color, ScanScratch, Surface, SUBPIXEL};
 use tairix_theme::motion::smoothstep;
@@ -47,9 +47,6 @@ use crate::viewport::Viewport;
 /// A node's plate radius, in logical pixels: every node is drawn this size
 /// whatever the zoom.
 pub const NODE_RADIUS: u32 = 18;
-/// How far a press may travel and still be a click rather than a drag, in
-/// logical pixels.
-const DRAG_SLOP: u32 = 4;
 /// The side of the square cells the placed plates and names are indexed
 /// by, in device pixels: about a name's width, so a claim looks in a few.
 const OCCUPANCY_CELL: u32 = 64;
@@ -508,6 +505,7 @@ impl MapView {
                 button: PointerButton::Secondary,
             } => return Reaction::Menu(self.context_menu(scale, now_ns)),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => false,
+            InputEvent::PointerCancelled => self.press.take().is_some(),
             InputEvent::PointerScrolled { dx, dy } => {
                 if self.ctrl {
                     self.wheel_zoom(dy)
@@ -543,10 +541,7 @@ impl MapView {
         let Some(press) = self.press.as_mut() else {
             return false;
         };
-        let slop = i64::from(scale.scale_length(DRAG_SLOP));
-        let travel_x = i64::from(to.x) - i64::from(press.origin.x);
-        let travel_y = i64::from(to.y) - i64::from(press.origin.y);
-        if !press.dragged && travel_x * travel_x + travel_y * travel_y <= slop * slop {
+        if !press.dragged && !past_drag_slop(press.origin, to, scale) {
             return false;
         }
         press.dragged = true;

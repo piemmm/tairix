@@ -142,16 +142,16 @@ pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) 
 
 /// The double arrow for the axis `edge` moves the window along.
 ///
-/// The two side edges share the horizontal arrow and the two corners take
-/// opposite diagonals, so the shape names the axis rather than the edge: this
-/// is the one place the frame's hit map is turned into a pointer shape.
+/// Opposite edges share an arrow and opposite corners share a diagonal, so
+/// the shape names the axis rather than the edge: this is the one place the
+/// frame's hit map is turned into a pointer shape.
 #[must_use]
 const fn resize_cursor(edge: ResizeEdge) -> CursorKind {
     match edge {
         ResizeEdge::Left | ResizeEdge::Right => CursorKind::ResizeHorizontal,
-        ResizeEdge::Bottom => CursorKind::ResizeVertical,
-        ResizeEdge::BottomLeft => CursorKind::ResizeDiagonalRising,
-        ResizeEdge::BottomRight => CursorKind::ResizeDiagonalFalling,
+        ResizeEdge::Top | ResizeEdge::Bottom => CursorKind::ResizeVertical,
+        ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorKind::ResizeDiagonalRising,
+        ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorKind::ResizeDiagonalFalling,
     }
 }
 

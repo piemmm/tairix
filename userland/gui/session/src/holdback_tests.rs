@@ -53,6 +53,26 @@ fn released(window_id: u64) -> WindowEvent {
     }
 }
 
+fn cancelled(window_id: u64) -> WindowEvent {
+    WindowEvent::Pointer {
+        window_id,
+        x: 1,
+        y: 1,
+        action: PointerAction::Cancelled,
+        modifiers: Modifiers::default(),
+    }
+}
+
+fn clicked_secondary(window_id: u64) -> WindowEvent {
+    WindowEvent::Pointer {
+        window_id,
+        x: 1,
+        y: 1,
+        action: PointerAction::Pressed(PointerButtonCode::Secondary),
+        modifiers: Modifiers::default(),
+    }
+}
+
 fn typed(window_id: u64) -> WindowEvent {
     WindowEvent::Key {
         window_id,
@@ -520,27 +540,57 @@ fn overflow_sheds_input_and_never_a_state_edge_or_a_conclusion() {
     );
 }
 
-/// Oldest-first is the safe direction for a button: the app can be left
-/// with a release it did not press, never a press it never released — the
-/// latch that would leave a widget dragging for ever.
+/// A held press goes with its end: the app learns of neither, rather than
+/// holding a press it is never told is over — the latch that would leave a
+/// widget dragging, or a scroll arrow repeating, for ever.
 #[test]
-fn a_press_is_shed_before_its_release() {
+fn a_press_is_shed_together_with_its_end() {
+    for end in [released(WINDOW), cancelled(WINDOW)] {
+        let mut held = HoldBack::new();
+        let _ = hold(&mut held, pressed(WINDOW));
+        let _ = hold(&mut held, end);
+        // One past the bound, so exactly one shed is needed.
+        for _ in 0..HOLD_BACK_CAPACITY - 1 {
+            let _ = hold(&mut held, typed(WINDOW));
+        }
+
+        let drained = drain_events(&mut held);
+        assert_eq!(drained.len(), HOLD_BACK_CAPACITY - 1);
+        assert!(!drained.contains(&pressed(WINDOW)), "the press went first");
+        assert!(!drained.contains(&end), "and its end with it");
+    }
+}
+
+/// The end of a press the app was already given is all that ends it, so it
+/// outlives any storm.
+#[test]
+fn the_end_of_a_press_already_delivered_is_never_shed() {
+    for end in [released(WINDOW), cancelled(WINDOW)] {
+        let mut held = HoldBack::new();
+        let _ = hold(&mut held, end);
+        for _ in 0..HOLD_BACK_CAPACITY * 2 {
+            let _ = hold(&mut held, typed(WINDOW));
+        }
+        assert_eq!(held.depth(MAILBOX, Some(WINDOW)), HOLD_BACK_CAPACITY);
+        assert_eq!(drain_events(&mut held).first(), Some(&end));
+    }
+}
+
+/// A secondary press is a click the window never holds: it is shed alone,
+/// and the end of the primary press the window does hold stays owed.
+#[test]
+fn a_click_is_shed_alone_and_never_takes_a_held_press_s_end() {
     let mut held = HoldBack::new();
-    let _ = hold(&mut held, pressed(WINDOW));
-    let _ = hold(&mut held, released(WINDOW));
-    // One past the bound, so exactly one event is shed.
+    let _ = hold(&mut held, clicked_secondary(WINDOW));
+    let _ = hold(&mut held, cancelled(WINDOW));
     for _ in 0..HOLD_BACK_CAPACITY - 1 {
         let _ = hold(&mut held, typed(WINDOW));
     }
 
     let drained = drain_events(&mut held);
     assert_eq!(drained.len(), HOLD_BACK_CAPACITY);
-    assert!(!drained.contains(&pressed(WINDOW)), "the press went first");
-    assert_eq!(
-        drained.first(),
-        Some(&released(WINDOW)),
-        "its release is still owed"
-    );
+    assert!(!drained.contains(&clicked_secondary(WINDOW)));
+    assert_eq!(drained.first(), Some(&cancelled(WINDOW)));
 }
 
 /// One window's overflow is its own: a sibling window's queue is a separate

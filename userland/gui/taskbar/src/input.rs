@@ -414,6 +414,10 @@ impl TaskbarInput {
         scale: Scale,
         now_ns: u64,
     ) -> TaskbarResponse {
+        if event == InputEvent::PointerCancelled {
+            self.cancel_press(taskbar, scale);
+            return TaskbarResponse::Ignored;
+        }
         self.now_ns = now_ns;
         if let InputEvent::PointerMoved { to } = event {
             // A delivered motion is an enter: the seat resolves which surface
@@ -523,13 +527,37 @@ impl TaskbarInput {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => self.release_primary(now_ns),
-            InputEvent::PointerMoved { .. }
+            // Taken by `cancel_press` before anything else is consulted.
+            InputEvent::PointerCancelled
+            | InputEvent::PointerMoved { .. }
             | InputEvent::PointerReleased { .. }
             | InputEvent::Pinch { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. }
             | InputEvent::ModifiersChanged { .. } => TaskbarResponse::Ignored,
         }
+    }
+
+    /// End the press the bar holds without a release reaching it: the
+    /// desktop took the pointer for a surface of its own. Nothing the press
+    /// began completes — the capsule's gesture fires nothing, and a popup's
+    /// held scrollbar or slider stops where it stands. The bar's clock stays
+    /// where the last real event left it, since a cancel carries no time.
+    pub fn cancel_press(&mut self, taskbar: &mut Taskbar, scale: Scale) {
+        self.capsule_press = None;
+        if taskbar.library().is_open() {
+            let _ = self.route_to_popup(InputEvent::PointerCancelled, taskbar, scale);
+        } else if taskbar.sound().is_open() {
+            let _ = self.route_to_sound(InputEvent::PointerCancelled, taskbar, scale);
+        }
+        let _ = taskbar.scroll_picker(&InputEvent::PointerCancelled, self.pointer, scale);
+    }
+
+    /// Step a press held on an open popup's scrollbar whose repeat is due at
+    /// `now_ns`, the picker's lit cell following the pointer
+    /// ([`Taskbar::scroll_repeat`]).
+    pub fn scroll_repeat(&self, taskbar: &mut Taskbar, now_ns: u64, scale: Scale) {
+        taskbar.scroll_repeat(now_ns, self.pointer, scale);
     }
 
     /// While a primary press on the Switchboard capsule is in progress,

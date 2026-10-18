@@ -519,3 +519,74 @@ fn a_row_too_wide_for_the_window_wraps_and_every_button_stays_inside() {
         "the text stands above every row"
     );
 }
+
+/// An alert whose text overflows a small screen's share, with its client.
+fn overflowing() -> (Alert, Rect) {
+    let theme = Theme::dark();
+    let lines = "line\n".repeat(200);
+    let spec = AlertSpec::new(AlertSeverity::Error, &long_headline(30), &lines, &[ok()])
+        .expect("a valid spec");
+    let alert = Alert::from_spec(&spec);
+    let bounds = client(alert.client_extent(FRAME, (640, 480), Scale::ONE, &theme));
+    (alert, bounds)
+}
+
+/// Where the overflowing alert's bar has its step-down arrow.
+fn bar_down_arrow(alert: &Alert, bounds: Rect) -> Point {
+    let theme = Theme::dark();
+    let layout = alert.layout(bounds, Scale::ONE, &theme);
+    let bar = Alert::scrollbar_rect(&layout, Scale::ONE, &theme);
+    Point::new(
+        bar.left() + i32::try_from(bar.width / 2).expect("narrow"),
+        bar.bottom() - 2,
+    )
+}
+
+/// The bar beside overflowing text is a live control: a press on its arrow
+/// steps the text, a hold repeats on the bar's own cadence, and the press
+/// chooses no button.
+#[test]
+fn a_held_arrow_on_the_alerts_bar_steps_and_repeats_and_chooses_nothing() {
+    let theme = Theme::dark();
+    let (mut alert, bounds) = overflowing();
+    let down = bar_down_arrow(&alert, bounds);
+    let mut damage = Region::new();
+    for event in [
+        InputEvent::PointerMoved { to: down },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        assert_eq!(
+            alert.on_pointer(&event, bounds, Scale::ONE, &theme, &mut damage),
+            None
+        );
+    }
+    assert_eq!(alert.scroll, 1, "the press steps a line at once");
+
+    let due = alert
+        .repeat_deadline(0)
+        .expect("a held arrow arms a repeat");
+    let mut moved = Region::new();
+    alert.repeat(due - 1, bounds, Scale::ONE, &theme, &mut moved);
+    assert_eq!(alert.scroll, 1, "nothing before it is due");
+    alert.repeat(due, bounds, Scale::ONE, &theme, &mut moved);
+    assert_eq!(alert.scroll, 2, "and a line when it is");
+    let layout = alert.layout(bounds, Scale::ONE, &theme);
+    assert!(moved.intersects(layout.text), "the text it moved repaints");
+
+    assert_eq!(
+        alert.on_pointer(
+            &InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage,
+        ),
+        None,
+        "letting go of the bar answers nothing"
+    );
+    assert_eq!(alert.repeat_deadline(due), None, "let go, nothing repeats");
+}

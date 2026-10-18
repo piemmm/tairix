@@ -66,6 +66,16 @@ de mais enquanto largar copiaria e uma seta enquanto moveria, e a pasta onde
 o largar iria parar fica realçada. Um único ficheiro arrastado para o lugar
 de uma aplicação na barra de ícones é aberto lá.
 
+O menu de contexto começa por *Visualização*. Por baixo, um submenu nomeia
+aquilo sobre que o menu atua — *Ficheiro «notes.txt»*, um nome longo
+encurtado ao meio para que a extensão continue visível, ou *Seleção* quando
+há vários itens selecionados — e contém *Abrir*, *Abrir com…*, *Obter
+informações…*, *Mudar o nome*, *Cortar*, *Copiar* e *Eliminar*; uma linha que
+ali não pode atuar fica a cinzento e diz porquê. Seguem-se *Novo*, depois
+*Selecionar tudo* e *Limpar seleção*, e por fim *Colar*. Um clique com o
+botão direito num espaço vazio limpa a seleção, pelo que o submenu do item
+fica a cinzento.
+
 O submenu *Novo* do menu de contexto cria uma pasta, ou um documento vazio
 de cada tipo que um editor instalado escreve, e abre o seu nome para edição.
 
@@ -77,8 +87,8 @@ disso, o espaço livre, o sistema de ficheiros e o estado do seu
 funcionamento. Um clique no título de uma coluna ordena a lista por ela, e
 um segundo clique inverte a ordem.
 
-`Alt+Enter` abre uma janela de *Propriedades* do item selecionado, tal como
-a linha *Propriedades* do menu de contexto. É uma janela própria, pelo que
+`Alt+Enter` abre a janela de *informações* do item selecionado, tal como
+*Obter informações…* no seu submenu do menu de contexto. É uma janela própria, pelo que
 podem estar várias abertas ao mesmo tempo e a listagem continua utilizável
 entretanto: mostra o que é o item, o seu tamanho, as suas marcas temporais,
 para onde aponta um alias, as suas permissões e o seu proprietário, e os

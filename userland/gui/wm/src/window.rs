@@ -12,9 +12,10 @@ use crate::chrome::WindowChrome;
 use crate::color::{div255, Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
-use crate::shadow::{spread, ShadowKit, ShadowRow};
+use crate::shadow::{spread, Elevation, Lift, ShadowKit, ShadowRow};
 use crate::surface::{self, blend_run, fill_run, Surface};
 use crate::viewport::RootViewport;
+use tairix_geometry::to_i32;
 
 /// An opaque, compositor-minted window identifier.
 ///
@@ -238,6 +239,9 @@ pub struct Window {
     /// no frame of its own: a menu plate, a popover, a tooltip. A decorated
     /// window casts by virtue of its frame, as it wears its rim by it.
     casts: bool,
+    /// How high a decorated window's shadow stands, easing as the family in
+    /// front changes.
+    lift: Lift,
 }
 
 /// What a transient is to the window it belongs to.
@@ -355,6 +359,7 @@ impl Window {
             min_client: (0, 0),
             max_client: (0, 0),
             casts: false,
+            lift: Lift::at(Elevation::LIFTED),
         }
     }
 
@@ -571,6 +576,77 @@ impl Window {
         let changed = self.casts != casts;
         self.casts = casts;
         changed
+    }
+
+    /// How high this window's shadow stands: a decorated window's follows the
+    /// family in front, and every other floating surface stands lifted.
+    fn elevation(&self) -> Elevation {
+        if self.is_decorated() {
+            self.lift.drawn()
+        } else {
+            Elevation::LIFTED
+        }
+    }
+
+    /// Send this window's shadow toward the lifted or the resting level:
+    /// eased, unless the window is hidden and nobody can watch it change.
+    pub(crate) fn aim_shadow(&mut self, lifted: bool) {
+        let elevation = if lifted {
+            Elevation::LIFTED
+        } else {
+            Elevation::RESTING
+        };
+        self.lift.aim(elevation, !self.participation.visible);
+    }
+
+    /// Advance this window's shadow to `now_ns` along an ease of
+    /// `duration_ms`, answering whether a shadow on screen changed.
+    pub(crate) fn step_shadow(&mut self, now_ns: u64, duration_ms: u16) -> bool {
+        self.lift.step(now_ns, duration_ms)
+            && self.participation.visible
+            && self.is_decorated()
+            && self.casts_shadow()
+    }
+
+    /// Nanoseconds until this window's shadow owes its next step, or `None`
+    /// while it stands still.
+    pub(crate) fn shadow_frame_in(&self, now_ns: u64) -> Option<u64> {
+        self.lift.next_frame_in(now_ns)
+    }
+
+    /// The parts of the screen a shadow of `reach` changes when this window's
+    /// own level changes: the strips beside and below it, and the corners its
+    /// silhouette rounds off, where the shadow shows inside its bounds.
+    pub(crate) fn shadow_strips(&self, reach: u32) -> [Rect; 7] {
+        let bounds = self.bounds();
+        let corner = self.shape().map_or(0, WindowShape::corner_reach);
+        let (corner_i, reach_i) = (to_i32(corner), to_i32(reach));
+        let deep = bounds.height.saturating_add(reach.saturating_mul(2));
+        let (right, bottom) = (bounds.right(), bounds.bottom());
+        [
+            Rect::new(
+                bounds.left().saturating_sub(reach_i),
+                bounds.top(),
+                reach,
+                deep,
+            ),
+            Rect::new(right, bounds.top(), reach, deep),
+            Rect::new(bounds.left(), bottom, bounds.width, reach.saturating_mul(2)),
+            Rect::new(bounds.left(), bounds.top(), corner, corner),
+            Rect::new(right.saturating_sub(corner_i), bounds.top(), corner, corner),
+            Rect::new(
+                bounds.left(),
+                bottom.saturating_sub(corner_i),
+                corner,
+                corner,
+            ),
+            Rect::new(
+                right.saturating_sub(corner_i),
+                bottom.saturating_sub(corner_i),
+                corner,
+                corner,
+            ),
+        ]
     }
 
     /// Everything this window can change on screen: its bounds, grown by the
@@ -928,7 +1004,13 @@ impl Window {
         if !self.participation.visible || !self.casts_shadow() {
             return None;
         }
-        kit.row(self.bounds(), self.shape(), self.opacity, y)
+        kit.row(
+            self.bounds(),
+            self.shape(),
+            self.opacity,
+            self.elevation(),
+            y,
+        )
     }
 
     /// This window's decoration spans for outer-local row `ly` (`0` at the
@@ -1471,12 +1553,54 @@ impl Window {
         if target == WindowSizeState::Restored {
             self.restore_outer = None;
         }
+        self.show_size_state(target);
+        Some((target, self.client_rect()))
+    }
+
+    /// Take a maximized window out of maximization where it stands: restored
+    /// at the rectangle it has now, holding nothing to restore to. Answers
+    /// whether it was maximized.
+    ///
+    /// What a move or resize of a maximized window does first, so the gesture
+    /// works from the geometry on screen and nothing snaps back when it ends.
+    pub(crate) fn unmaximize_in_place(&mut self) -> bool {
+        if self.size_state != WindowSizeState::Maximized {
+            return false;
+        }
+        self.size_state = WindowSizeState::Restored;
+        self.restore_outer = None;
+        self.show_size_state(WindowSizeState::Restored);
+        true
+    }
+
+    /// Put this window back exactly as `placement` recorded it — its size
+    /// state, the rectangle it holds to restore to, and its outer rectangle —
+    /// answering whether it is there. What cancelling a gesture does.
+    pub(crate) fn reinstate(&mut self, placement: &Placement, scale: Scale, theme: &Theme) -> bool {
+        if placement.id != self.id() {
+            return false;
+        }
+        let was = (self.size_state, self.restore_outer);
+        self.size_state = placement.state;
+        self.restore_outer = placement.restore;
+        self.refresh_band(scale, theme);
+        if self.bounds() != placement.outer && !self.resize_to_outer(placement.outer, scale, theme)
+        {
+            (self.size_state, self.restore_outer) = was;
+            self.refresh_band(scale, theme);
+            return false;
+        }
+        self.show_size_state(placement.state);
+        true
+    }
+
+    /// Have the frame's size toggle offer the action that leaves `state`.
+    fn show_size_state(&mut self, state: WindowSizeState) {
         if let Some(frame) = self.frame.as_mut() {
             let mut furniture = frame.furniture();
-            furniture.size = target;
+            furniture.size = state;
             frame.set_furniture(furniture);
         }
-        Some((target, self.client_rect()))
     }
 
     /// Fit this window to a screen that changed size: a fullscreen window
@@ -1829,6 +1953,11 @@ impl Placement {
     #[must_use]
     pub const fn id(&self) -> WindowId {
         self.id
+    }
+
+    /// The outer rectangle the window had.
+    pub(crate) const fn outer(&self) -> Rect {
+        self.outer
     }
 
     /// Whether a window placed as `self` still rests as `since` left it: in
