@@ -3000,9 +3000,10 @@ impl Form {
         damage.add(place.bounds);
     }
 
-    /// Put the keyboard cursor on the item under the layout `point` — a row,
-    /// or a picture choice — the groups laid out as `layouts`, reporting the
-    /// rings it moves between. A point over no item leaves it where it is.
+    /// Carry the keyboard cursor to the group holding an item under the
+    /// layout `point`, the groups laid out as `layouts`, clearing every other
+    /// group's ring; the group the press reaches gives it to the item itself.
+    /// A point over no item leaves it where it is.
     fn take_cursor_at(
         &mut self,
         point: Point,
@@ -3010,19 +3011,20 @@ impl Form {
         place: FormPlace<'_>,
         damage: &mut Region,
     ) {
-        let Some((taken, item)) = layouts.iter().find_map(|&(index, layout)| {
+        let Some(taken) = layouts.iter().find_map(|&(index, layout)| {
             let group = self.groups.get(index)?;
-            Some((
-                index,
-                group.row_at(layout, place.scale, place.theme, point)?,
-            ))
+            group
+                .row_at(layout, place.scale, place.theme, point)
+                .map(|_| index)
         }) else {
             return;
         };
         for &(index, layout) in layouts {
+            if index == taken {
+                continue;
+            }
             if let Some(group) = self.groups.get_mut(index) {
-                let wanted = (index == taken).then_some(item);
-                group.set_focus(wanted, layout, place.scale, place.theme, damage);
+                group.set_focus(None, layout, place.scale, place.theme, damage);
             }
         }
         self.focus = taken;

@@ -580,11 +580,14 @@ impl SettingsWindow {
             self.move_focus(Focus::Strip, placed, scale, theme, damage);
             return;
         }
+        // The group the press reaches gives the keyboard to the row itself.
         for group in 0..self.groups.len() {
             let layout = placed.groups[group];
-            if let Some(row) = self.groups[group].row_at(layout, scale, theme, pointer) {
+            if self.groups[group]
+                .row_at(layout, scale, theme, pointer)
+                .is_some()
+            {
                 self.move_focus(Focus::Group(group), placed, scale, theme, damage);
-                self.groups[group].set_focus(Some(row), layout, scale, theme, damage);
                 return;
             }
         }

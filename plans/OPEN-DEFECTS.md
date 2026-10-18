@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 394 open, 773 closed, 1167 total.
+**closed**, and a partial fix stays **open**. 394 open, 774 closed, 1168 total.
 
 ### Open (394)
 
@@ -424,7 +424,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1158 | foreground ownership names one process, so a pipeline's terminal goes only to its leader: `^C`/`^Z` reach the leader alone, and an earlier member reading the terminal (`cat \| grep x`) is refused `NotForeground` for the job's whole life | medium; noticed fixing D1155; escalated: the fix is a job-level owner — a set of processes, the process-group analogue — which the ownership, the read gate and the signal delivery all take, and which the shell hands each job. `kernel/core/src/foreground.rs`, `userland/shell/elsh/src/run.rs` (`launch`) |
 | D1160 | a foreground job's death opens its terminal instead of returning it to its granter: the exit path and the read gate clear the slot to unowned, so until the shell takes it back a background job reading the same terminal takes the keystrokes typed in between; and an owner re-granting itself the terminal replaces its granter, so a nested shell's death leaves the outer one unable to take the terminal back until a read heals the slot | medium; noticed fixing D1155; escalated rather than absorbed, because it changes the open-on-death behaviour `plans/DISPLAY.md` D5 states: a dead owner should hand the terminal back to a live granter, and an owner re-granting itself should keep its granter. `kernel/core/src/foreground.rs` (`clear_dead`, `grant`) |
 
-### Closed (773)
+### Closed (774)
 
 | ID | Subject |
 |---|---|
@@ -1201,6 +1201,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1171 | a file whose name held a control character made the file manager's context menu refuse to open, and a long or control-bearing name made its Properties window refuse its title; the name is spelled as a reader is shown it and shortened in the middle with its extension kept, and a name the Rename field cannot hold drops only the field; `a_name_the_rename_field_cannot_hold_still_opens_the_menu`, `a_shortened_name_keeps_its_extension` |
 | D1172 | the terminal restarted its animation frame interval on every wake, so streaming shell output starved an animated effect of frames; the next frame is an absolute deadline a wake never pushes back (`effects::frame_due`); `a_wake_before_the_frame_never_pushes_it_back` |
 | D1173 | the network map's Probe Settings chooser drew its opened list but never reported it, so the frame presented showed only the posture overlapping its field: the opening press is routed with a layout that placed no list, and reporting the plate was left to each owner, which netmap's pane did not do; `FieldLayout` now carries the viewport a list may hang into, the row that opens or closes a list reports the plate it opens into or vacates, and `FieldGroup::place_popup` places it by the same rule for an owner's own column, retiring `FieldLayout::report_popup_moved` and its copies in Settings, Paint's dialogs, the widget gallery and WinterSun's settings; `opening_the_chooser_reports_every_posture_it_draws`, `a_row_reports_the_list_it_opens_and_the_plate_it_vacates`, `a_list_is_placed_against_its_slot_in_a_column_the_owner_chose` |
+| D1174 | a press on a form row gave it the keyboard only where its owner moved the cursor itself, which Paint's dialogs and the widget gallery's Forms tab did not: a field clicked was not the field typed into, and a list opened on a row the cursor was not on took none of its keys — Down moved the cursor, Enter accepted the whole dialog with the old value and Escape turned it down; a primary press now gives the group's cursor to the row it lands on and an open list takes every key wherever the cursor stands (`FieldGroup::on_pointer`, `FieldGroup::on_key`), retiring the within-group copies in Settings and WinterSun's settings, and the widget gallery no longer refocuses the item already holding the keyboard, which put its cursor back on the first row unreported; `a_primary_press_gives_the_keyboard_to_the_row_it_lands_on`, `an_open_list_takes_every_key_wherever_the_cursor_stands`, `a_pressed_row_takes_the_keyboard`, `a_press_within_the_focused_form_moves_its_cursor_and_reports_it` |
 
 ## Scope
 

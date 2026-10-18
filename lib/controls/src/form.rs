@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use tairix_collections::SmallVec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, NamedKey};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
@@ -1957,10 +1957,10 @@ impl FieldGroup {
     ///
     /// One hit test decides where the pointer is; the event then reaches only
     /// the item it left, the item it entered, and any item holding a press —
-    /// a row, or the picture choice beneath them. A row with an open choice
-    /// list is the only one that sees the stream while the list is up: the
-    /// list hangs over what is beneath it, so a press on it must never reach
-    /// it.
+    /// a row, or the picture choice beneath them. A primary press gives the
+    /// keyboard to the item it lands on. A row with an open choice list is the
+    /// only one that sees the stream while the list is up: the list hangs over
+    /// what is beneath it, so a press on it must never reach it.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1987,6 +1987,15 @@ impl FieldGroup {
                         .filter(|rect| rect.contains(*self.pointer))
                         .map(|_| choice)
                 });
+            if let (
+                Some(item),
+                InputEvent::PointerPressed {
+                    button: PointerButton::Primary,
+                },
+            ) = (over, event)
+            {
+                self.set_focus(Some(item), layout, scale, theme, damage);
+            }
             let route = route_pointer(&mut self.hovered, *self.armed, over);
             *self.armed = grab_after(*self.armed, event, over);
             route
@@ -2025,7 +2034,8 @@ impl FieldGroup {
     /// clamping at the first and last rather than wrapping (a group is a fixed
     /// set of settings, not a cycling ring), Home/End jump to the ends unless
     /// the focused row is editing text, and every other key goes to the
-    /// focused row's control.
+    /// focused row's control. While a choice list is open every key is its
+    /// row's.
     ///
     /// Down from the last row reaches the picture choice, whose own cursor
     /// then takes the arrows until it has nowhere further to go: Up from its
@@ -2044,26 +2054,30 @@ impl FieldGroup {
         if self.is_empty() {
             return None;
         }
+        // An open choice list is modal: every key is its row's until the list
+        // resolves, wherever the keyboard cursor stands.
+        if let Some(open) = self.rows.iter().position(FieldRow::popup_open) {
+            return self.row_key(open, stroke, layout, scale, theme, damage);
+        }
         let key = stroke.key;
         if self.focus == Some(self.rows.len()) {
             return self.picture_key(key, layout, scale, theme, damage);
         }
         let last = self.len() - 1;
-        let focused = self.focus.and_then(|i| self.rows.get(i));
-        // An open choice list is modal: every key is the list's until it
-        // resolves. A text slot keeps only the keys its editor means — Home and
-        // End move a caret along a line, and are no reason to leave a masked
-        // entry mid-secret — so Up and Down always move the cursor and can
-        // never trap it in a field.
-        let listing = focused.is_some_and(FieldRow::popup_open);
-        let editing = focused.is_some_and(|row| {
-            matches!(
-                row.control(),
-                FieldControl::Text(_) | FieldControl::Secret(_)
-            )
-        });
+        // A text slot keeps only the keys its editor means — Home and End move
+        // a caret along a line, and are no reason to leave a masked entry
+        // mid-secret — so Up and Down always move the cursor and can never trap
+        // it in a field.
+        let editing = self
+            .focus
+            .and_then(|i| self.rows.get(i))
+            .is_some_and(|row| {
+                matches!(
+                    row.control(),
+                    FieldControl::Text(_) | FieldControl::Secret(_)
+                )
+            });
         let moved = match key {
-            _ if listing => None,
             Key::Named(NamedKey::Down) => Some(self.focus.map_or(0, |i| (i + 1).min(last))),
             Key::Named(NamedKey::Up) => Some(self.focus.map_or(0, |i| i.saturating_sub(1))),
             Key::Named(NamedKey::Home) if !editing => Some(0),
@@ -2075,14 +2089,32 @@ impl FieldGroup {
             return None;
         }
         let index = self.focus?;
+        self.row_key(index, stroke, layout, scale, theme, damage)
+    }
+
+    /// Feed `stroke` to row `index`'s control.
+    fn row_key(
+        &mut self,
+        index: usize,
+        stroke: Keystroke,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldGroupAction> {
         let rect = self.row_rect(index, layout, scale, theme)?;
-        let row_layout = FieldLayout {
-            bounds: rect,
-            ..layout
-        };
         let row = self.rows.get_mut(index)?;
-        row.on_key(stroke, row_layout, scale, theme, damage)
-            .map(|action| FieldGroupAction { row: index, action })
+        row.on_key(
+            stroke,
+            FieldLayout {
+                bounds: rect,
+                ..layout
+            },
+            scale,
+            theme,
+            damage,
+        )
+        .map(|action| FieldGroupAction { row: index, action })
     }
 
     /// When a row's control next changes on its own, the soonest of them.

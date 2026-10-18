@@ -610,7 +610,9 @@ impl Gallery {
         };
         if is_primary_press(event) {
             self.pressed = Some(part);
-            if matches!(part, Part::Item(_) | Part::Bar) {
+            // Refocusing the item that holds the keyboard would put its own
+            // cursor back where focus first lands, unreported.
+            if matches!(part, Part::Item(_) | Part::Bar) && part != self.focus {
                 self.set_focus(part, &frame, scale, theme, damage);
             }
         }

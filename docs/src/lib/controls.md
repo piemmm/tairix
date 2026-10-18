@@ -190,7 +190,7 @@ row is not, so only the control in its slot lights under the pointer — a
 `FieldGroup::plate_radius` are the group's plate alone, for a surface that
 must read as the same object as the groups beside it.
 
-Four rules are the family's own, and each is what stops a settings pane lying
+Five rules are the family's own, and each is what stops a settings pane lying
 about the machine:
 
 - **A row's disposition is the setting's.** `FieldRow::set_state` shares the
@@ -221,6 +221,11 @@ about the machine:
   (`FieldLayout::within`). Input is routed with the layout the group is
   painted with, so the row that opens or closes a list reports the plate it
   opens into or vacates, placed by the same rule: no owner reports a list.
+- **The keyboard follows the press.** A primary press gives the group's
+  keyboard cursor to the row or picture choice it lands on, so the field
+  pressed is the field typed into, and an open list takes every key until it
+  resolves, wherever the cursor stands; an owner of several groups carries the
+  cursor between them.
 
 A group may also carry a **badge** on its caption's own line
 (`FieldGroup::with_badge`): the `StatusPill` naming the state of the thing the

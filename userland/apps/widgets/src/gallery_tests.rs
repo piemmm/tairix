@@ -1202,3 +1202,48 @@ fn a_cancelled_press_lets_the_gallery_follow_the_pointer_again() {
         "nothing is held after the cancel"
     );
 }
+
+/// A press within the Forms item already holding the keyboard moves its
+/// group's cursor to the row pressed and reports the ring it leaves, rather
+/// than the gallery first putting the cursor back on the first row unseen.
+#[test]
+fn a_press_within_the_focused_form_moves_its_cursor_and_reports_it() {
+    let mut prover = Prover::new();
+    prover.gallery = select_tab(prover.gallery, GalleryTab::Forms);
+    prover.shown = painted(&prover.gallery, &prover.theme);
+    let group = |gallery: &Gallery| match &gallery.current_panel()[0].widget {
+        DemoWidget::FieldGroup(group) => group.clone(),
+        _ => panic!("the Forms tab shows a field group"),
+    };
+    let slot_centre = |gallery: &Gallery, theme: &Theme, row: usize| {
+        let rect = gallery
+            .widget_rect_for_test(0, window(), Scale::ONE, theme)
+            .expect("the group is laid out");
+        let group = group(gallery);
+        let layout = group.layout(rect, window(), Scale::ONE, theme);
+        let bounds = group
+            .row_rect(row, layout, Scale::ONE, theme)
+            .expect("the row is drawn");
+        let slot = group.rows()[row]
+            .slot_rect(
+                tairix_controls::FieldLayout { bounds, ..layout },
+                Scale::ONE,
+                theme,
+            )
+            .expect("its control");
+        Point::new(
+            slot.left() + i32::try_from(slot.width / 2).unwrap_or(0),
+            slot.top() + i32::try_from(slot.height / 2).unwrap_or(0),
+        )
+    };
+    let mute = slot_centre(&prover.gallery, &prover.theme, 4);
+    prover.prove_click("the mute checkbox", mute);
+    assert_eq!(group(&prover.gallery).focus(), Some(4));
+    let host = slot_centre(&prover.gallery, &prover.theme, 5);
+    prover.prove_click("the host name field", host);
+    assert_eq!(
+        group(&prover.gallery).focus(),
+        Some(5),
+        "the press moved the cursor"
+    );
+}

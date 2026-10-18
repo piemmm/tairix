@@ -2069,9 +2069,10 @@ a `FieldGroup` is the captioned plate its rows sit on.
   its own copy of the gaps. A column taller than its pane scrolls by pixels
   (§11.28), a plate its edge crosses drawn cut.
 - **An open choice list is modal.** It hangs over the rows and plates beneath
-  it, so while it is up only the row holding it sees the pointer, a press on it
-  never reaches what it covers, and it is painted above the rest of the window
-  it shares — a footer band or a scrollbar included.
+  it, so while it is up only the row holding it sees the pointer and every key,
+  wherever the keyboard cursor stands, a press on it never reaches what it
+  covers, and it is painted above the rest of the window it shares — a footer
+  band or a scrollbar included.
 - **A group draws one plate, not a plate per row** (§10's plate seating), and
   its caption and footnote begin exactly where a row's label does, so the three
   read as one column rather than three indents. The footnote is where a setting
@@ -2103,8 +2104,9 @@ a `FieldGroup` is the captioned plate its rows sit on.
   rows and stop at the ends, because a group is a fixed set of settings rather
   than a cycling ring and the surface above it carries the cursor *between*
   groups. Home and End jump to the ends unless the focused row is editing text,
-  where they move a caret; an open choice list is modal and every key is the
-  list's until it resolves.
+  where they move a caret. A primary press gives the keyboard to the row or
+  picture choice it lands on, so the field pressed is the field typed into;
+  the surface above carries it between groups.
 - **A height too short for every row omits the ones it cannot draw whole**, and
   a row that was not drawn cannot be pressed — one layout serves the paint, the
   hit test and the focus reporting.

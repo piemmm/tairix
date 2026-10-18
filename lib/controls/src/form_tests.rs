@@ -2464,3 +2464,178 @@ fn a_footnoted_plate_as_tall_as_it_measures_draws_every_row_at_every_width() {
         );
     }
 }
+
+/// The centre of row `row`'s slot in `group` laid out as `layout`.
+fn slot_centre(group: &FieldGroup, row: usize, layout: FieldLayout, theme: &Theme) -> Point {
+    let rect = group
+        .row_rect(row, layout, Scale::ONE, theme)
+        .expect("a row rect");
+    let slot = group.rows()[row]
+        .slot_rect(
+            FieldLayout {
+                bounds: rect,
+                ..layout
+            },
+            Scale::ONE,
+            theme,
+        )
+        .expect("a slot");
+    Point::new(
+        slot.left() + to_i32(slot.width) / 2,
+        slot.top() + to_i32(slot.height) / 2,
+    )
+}
+
+/// Move to `at` and click there with `button`, answering what the group
+/// reported.
+fn click_group(
+    group: &mut FieldGroup,
+    layout: FieldLayout,
+    theme: &Theme,
+    (at, button): (Point, PointerButton),
+) -> Option<FieldGroupAction> {
+    let mut damage = sink();
+    let mut acted = None;
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed { button },
+        InputEvent::PointerReleased { button },
+    ] {
+        acted = group
+            .on_pointer(&event, layout, Scale::ONE, theme, &mut damage)
+            .or(acted);
+    }
+    acted
+}
+
+/// A group of a toggle, a text field and a choice list, the keyboard on the
+/// toggle.
+fn mixed_group() -> FieldGroup {
+    let mut group = FieldGroup::new(
+        "GENERAL",
+        vec![
+            toggle_row("Reduce motion", false),
+            FieldRow::new("Name", FieldControl::Text(TextField::new())),
+            FieldRow::new(
+                "Login",
+                FieldControl::Combo(ComboBox::new(choices(&["Text", "Graphical", "None"]))),
+            ),
+        ],
+    );
+    group.adopt_focus(Some(0));
+    group
+}
+
+/// A primary press gives the keyboard to the row it lands on, so the field
+/// pressed is the one typed into; a secondary press, and a press while a list
+/// is open, leave the cursor where it stands.
+#[test]
+fn a_primary_press_gives_the_keyboard_to_the_row_it_lands_on() {
+    let theme = Theme::dark();
+    let mut group = mixed_group();
+    let layout = group.layout(
+        Rect::new(0, 0, W, 240),
+        Rect::new(0, 0, W, 480),
+        Scale::ONE,
+        &theme,
+    );
+
+    let name = slot_centre(&group, 1, layout, &theme);
+    click_group(&mut group, layout, &theme, (name, PointerButton::Primary));
+    assert_eq!(
+        group.focus(),
+        Some(1),
+        "the field pressed holds the keyboard"
+    );
+    let mut damage = sink();
+    group.on_key(
+        keystroke(Key::Char('x')),
+        layout,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    let FieldControl::Text(field) = group.rows()[1].control() else {
+        panic!("row 1 holds a text field");
+    };
+    assert_eq!(field.text(), "x", "the typing reaches the field pressed");
+
+    let login = slot_centre(&group, 2, layout, &theme);
+    click_group(
+        &mut group,
+        layout,
+        &theme,
+        (login, PointerButton::Secondary),
+    );
+    assert_eq!(group.focus(), Some(1), "a secondary press moves nothing");
+
+    click_group(&mut group, layout, &theme, (login, PointerButton::Primary));
+    assert_eq!(group.focus(), Some(2));
+    assert!(group.rows()[2].popup_open());
+    let open = group.layout(
+        Rect::new(0, 0, W, 240),
+        Rect::new(0, 0, W, 480),
+        Scale::ONE,
+        &theme,
+    );
+    let toggle = slot_centre(&group, 0, open, &theme);
+    click_group(&mut group, open, &theme, (toggle, PointerButton::Primary));
+    assert_eq!(
+        group.focus(),
+        Some(2),
+        "a press that closes a list moves nothing"
+    );
+    let FieldControl::Toggle(toggle) = group.rows()[0].control() else {
+        panic!("row 0 holds a toggle");
+    };
+    assert!(!toggle.is_on(), "nor reaches what the list hung over");
+}
+
+/// An open list takes every key until it resolves, wherever the keyboard
+/// cursor stands: Down and Enter pick a choice rather than moving the cursor
+/// and acting on another row, and Escape closes the list.
+#[test]
+fn an_open_list_takes_every_key_wherever_the_cursor_stands() {
+    let theme = Theme::dark();
+    let mut group = mixed_group();
+    let bounds = Rect::new(0, 0, W, 240);
+    let viewport = Rect::new(0, 0, W, 480);
+    let layout = group.layout(bounds, viewport, Scale::ONE, &theme);
+    let login = slot_centre(&group, 2, layout, &theme);
+    click_group(&mut group, layout, &theme, (login, PointerButton::Primary));
+    // An owner carrying its cursor elsewhere does not take the keys from it.
+    group.adopt_focus(Some(0));
+    let open = group.layout(bounds, viewport, Scale::ONE, &theme);
+    let mut damage = sink();
+    let keyed = |group: &mut FieldGroup, key: NamedKey, damage: &mut Region| {
+        group.on_key(keystroke(Key::Named(key)), open, Scale::ONE, &theme, damage)
+    };
+    assert_eq!(keyed(&mut group, NamedKey::Down, &mut damage), None);
+    assert_eq!(
+        group.focus(),
+        Some(0),
+        "Down moved the list, not the cursor"
+    );
+    assert_eq!(
+        keyed(&mut group, NamedKey::Enter, &mut damage),
+        Some(FieldGroupAction {
+            row: 2,
+            action: FieldAction::Selected { index: 1 },
+        })
+    );
+    let FieldControl::Toggle(toggle) = group.rows()[0].control() else {
+        panic!("row 0 holds a toggle");
+    };
+    assert!(!toggle.is_on(), "Enter was the list's");
+
+    click_group(&mut group, layout, &theme, (login, PointerButton::Primary));
+    group.adopt_focus(Some(0));
+    assert_eq!(
+        keyed(&mut group, NamedKey::Escape, &mut damage),
+        Some(FieldGroupAction {
+            row: 2,
+            action: FieldAction::Choices { expanded: false },
+        })
+    );
+    assert!(!group.rows()[2].popup_open());
+}

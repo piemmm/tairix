@@ -1,3 +1,4 @@
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -392,4 +393,88 @@ fn an_opened_list_stays_within_the_sheet_and_is_reported() {
         tairix_controls::testkit::covers(&damage, popup),
         "{popup:?} drawn but not reported"
     );
+}
+
+/// Click the centre of row `row`'s control in `form`.
+fn click_row(form: &mut Form, row: usize) {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let layout = form.group_layout(AT, Scale::ONE, theme).expect("laid out");
+    let rect = form
+        .group
+        .row_rect(row, layout, Scale::ONE, theme)
+        .expect("the row");
+    let slot = form.group.rows()[row]
+        .slot_rect(
+            tairix_controls::FieldLayout {
+                bounds: rect,
+                ..layout
+            },
+            Scale::ONE,
+            theme,
+        )
+        .expect("its control");
+    let centre = Point::new(
+        slot.left() + i32::try_from(slot.width / 2).expect("narrow"),
+        slot.top() + i32::try_from(slot.height / 2).expect("short"),
+    );
+    let mut damage = Region::new();
+    for event in [
+        InputEvent::PointerMoved { to: centre },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        form.on_pointer(&event, AT, Scale::ONE, theme, &mut damage);
+    }
+}
+
+/// A pressed row takes the keyboard: a list opened on a row the cursor was
+/// not on picks with Down and Enter instead of moving the cursor and
+/// accepting the form, Escape closes it instead of turning the form down, and
+/// a field pressed is the one typed into.
+#[test]
+fn a_pressed_row_takes_the_keyboard() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut damage = Region::new();
+    let mut form = Form::new_page((640, 480));
+    let colours = |form: &Form| match form.group.rows()[2].control() {
+        tairix_controls::FieldControl::Combo(combo) => (combo.selected(), combo.is_expanded()),
+        _ => panic!("row 2 is the colours list"),
+    };
+    assert_eq!(colours(&form), (Some(0), false));
+
+    click_row(&mut form, 2);
+    assert_eq!(colours(&form), (Some(0), true), "the press opened the list");
+    let mut press = |form: &mut Form, named: NamedKey| {
+        form.on_key(key(named), AT, Scale::ONE, theme, &mut damage)
+    };
+    assert_eq!(press(&mut form, NamedKey::Down), None);
+    assert_eq!(
+        press(&mut form, NamedKey::Enter),
+        None,
+        "Enter picks, not accepts"
+    );
+    assert_eq!(colours(&form), (Some(1), false), "the colour Down reached");
+
+    click_row(&mut form, 2);
+    assert_eq!(
+        press(&mut form, NamedKey::Escape),
+        None,
+        "Escape closes the list"
+    );
+    assert_eq!(colours(&form), (Some(1), false));
+
+    click_row(&mut form, 1);
+    typed(&mut form, "0");
+    let text = |form: &Form, row: usize| match form.group.rows()[row].control() {
+        tairix_controls::FieldControl::Text(field) => String::from(field.text()),
+        _ => panic!("row {row} is a size field"),
+    };
+    assert_eq!(text(&form, 0), "640", "the width was not typed into");
+    assert_eq!(text(&form, 1), "4800", "the height pressed took the typing");
 }
