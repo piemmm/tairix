@@ -180,32 +180,23 @@ pub fn screenful_ui_budget(fb_bytes: usize) -> CacheBudget {
 }
 
 /// Build a desktop-session cache of pixels the session cannot rebuild
-/// without leaving its own address space — a decoded on-disk icon
-/// (a capability-gated read plus a parser-sandbox round trip), a glyph
-/// fetched over the font endpoint.
+/// without leaving its own address space — a decoded on-disk icon (a
+/// capability-gated read plus a parser-sandbox round trip each) — held to
+/// [`working_set_ui_budget`].
 ///
-/// Declared exactly like [`disposable_ui_cache`] and ceilinged at one
-/// screenful like [`screenful_ui_cache`], for that constructor's reason: no
-/// more of these pixels can be visible at once than fill the output they are
-/// drawn on. A grid of icons is the demanding case and it is nowhere near the
-/// cursor fraction — a 480×480 file-manager window draws some 117 KiB of icon
-/// where a sixteenth of its frame is 57 KiB — so that fraction cannot hold
-/// what one frame draws, and the cache evicts entries the very next paint
-/// asks for again.
-///
-/// It differs from [`screenful_ui_cache`] in what mild and moderate pressure
-/// may take: those two leave a quarter of the ceiling — what one frame draws —
-/// alone ([`CacheBudget::with_working_set_floor`]) rather than the whole of it,
-/// because rebuilding one of these costs a capability-gated read and a sandbox
-/// round trip per icon, or a round trip per glyph — the resources a machine
-/// short of memory has least of. Everything above that share is scroll-back and
-/// off-screen speculation and goes at the first tightening; severe and critical
-/// take it down to the shared irreducible reserve like every other UI cache.
+/// Declared exactly like [`disposable_ui_cache`]. What differs is what it
+/// keeps, and for how long: rebuilding one of these costs a read and a sandbox
+/// round trip, the resources a machine short of memory has least of, so
+/// everything decoded stays — a folder browsed and left, the scroll-back of a
+/// long one — while memory allows. Below the ceiling only least-recent use
+/// takes an entry, mild and moderate pressure take nothing, and severe and
+/// critical take it down to the shared irreducible reserve like every other UI
+/// cache.
 #[must_use]
 pub fn working_set_ui_cache<K, V, E, S>(
     label: &'static str,
     seat: u64,
-    fb_bytes: usize,
+    (fb_bytes, memory_bytes): (usize, usize),
     entry_metadata_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
@@ -221,7 +212,7 @@ where
         label,
         seat,
         entry_metadata_bytes,
-        working_set_ui_budget(fb_bytes),
+        working_set_ui_budget(fb_bytes, memory_bytes),
         pressure,
         sink,
         hasher,
@@ -229,13 +220,28 @@ where
 }
 
 /// The budget [`working_set_ui_cache`] holds its cache to on an output of
-/// `fb_bytes`.
+/// `fb_bytes` in a machine of `memory_bytes`: the machine's standard share of
+/// its memory ([`CacheBudget::from_backing`]), never below one screenful —
+/// which is what a machine that cannot report its memory, `0`, leaves — and
+/// all of it the working set mild and moderate pressure leave alone.
 #[must_use]
-pub fn working_set_ui_budget(fb_bytes: usize) -> CacheBudget {
-    let budget = CacheBudget::from_ceiling(fb_bytes);
-    budget
-        .with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR)
+pub fn working_set_ui_budget(fb_bytes: usize, memory_bytes: usize) -> CacheBudget {
+    let ceiling = machine_share(fb_bytes, memory_bytes);
+    CacheBudget::from_ceiling(ceiling)
+        .with_working_set_floor(ceiling)
         .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
+}
+
+/// The ceiling of a cache worth keeping beyond what one output shows: the
+/// standard share of a machine of `memory_bytes`, never below one screenful of
+/// `fb_bytes`.
+const fn machine_share(fb_bytes: usize, memory_bytes: usize) -> usize {
+    let share = CacheBudget::from_backing(memory_bytes).hard();
+    if share > fb_bytes {
+        share
+    } else {
+        fb_bytes
+    }
 }
 
 /// Build a desktop-session cache of pixels every surface in a stack of
@@ -289,7 +295,7 @@ where
 /// `fb_bytes` in a machine of `memory_bytes`.
 #[must_use]
 pub fn stacked_ui_budget(fb_bytes: usize, memory_bytes: usize) -> CacheBudget {
-    let ceiling = fb_bytes.max(CacheBudget::from_backing(memory_bytes).hard());
+    let ceiling = machine_share(fb_bytes, memory_bytes);
     CacheBudget::from_ceiling(ceiling)
         .with_working_set_floor(fb_bytes)
         .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
@@ -321,17 +327,6 @@ where
         hasher,
     )
 }
-
-/// The share of [`working_set_ui_cache`]'s one-screenful ceiling that mild and
-/// moderate pressure may not take: what one frame actually draws, rather than
-/// everything the ceiling allows.
-///
-/// Measured on the demanding case, a file manager's icon grid: its default
-/// 480×480 window draws sixteen 42-pixel tiles, 117 KiB of icon against a
-/// 900 KiB frame — an eighth of it. A quarter is that with headroom for the
-/// glyph masks drawn beside undecoded tiles, and still leaves three quarters of
-/// the ceiling reclaimable at the first tightening.
-const WORKING_SET_DIVISOR: usize = 4;
 
 #[cfg(test)]
 mod tests {
@@ -439,12 +434,11 @@ mod tests {
         assert!(glyphs.charged_bytes() <= CacheBudget::from_backing(fb_bytes).hard());
     }
 
-    /// The working-set ceiling holds what one frame draws. Icons are drawn
-    /// *on* the output, so their pixels cannot outrun its own — but a
-    /// sixteenth of it cannot hold them, and a cache that evicts an icon the
-    /// next paint asks for again either draws the wrong picture or decodes it
-    /// afresh every frame, at a capability-gated read and a sandbox round trip
-    /// each.
+    /// The working-set ceiling never falls below what one frame draws, even
+    /// on a machine that cannot report its memory: a sixteenth of the output
+    /// cannot hold them, and a cache that evicts an icon the next paint asks
+    /// for again either draws the wrong picture or decodes it afresh every
+    /// frame, at a capability-gated read and a sandbox round trip each.
     #[test]
     fn the_working_set_ceiling_holds_a_frame_of_icons_the_glyph_fraction_cannot() {
         let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
@@ -460,7 +454,7 @@ mod tests {
         let mut icons: ReclaimCache<u32, Glyph, u64, BuildFastHash> = working_set_ui_cache(
             "test.icons",
             1,
-            fb_bytes,
+            (fb_bytes, 0),
             32,
             gauge,
             sink,
@@ -496,51 +490,85 @@ mod tests {
         );
     }
 
-    /// Mild pressure hands back the scroll-back and off-screen speculation but
-    /// not what a frame draws. Keeping the whole screenful there would pin a
-    /// figure the session is not drawing on precisely the machine that is
-    /// tightening; giving all of it back would put every icon on screen through
-    /// a read and a sandbox round trip on the next repaint.
+    /// What was decoded is kept beyond what one screen shows, up to the
+    /// machine's share of its memory: browsing back to a folder left a while
+    /// ago draws its icons without a read or a round trip.
     #[test]
-    fn mild_pressure_takes_the_speculation_and_leaves_a_frame_of_icons() {
+    fn the_working_set_ceiling_is_the_machine_s_share_not_one_screen() {
         let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
         gauge.report(PressureBand::Normal);
         let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
-        // A 1080p output, where a quarter of the ceiling is well clear of the
-        // shared reserve and so is the figure actually under test.
-        let fb_bytes = 1920 * 1080 * 4;
-        let floor = fb_bytes / super::WORKING_SET_DIVISOR;
-        assert!(floor > UI_CACHE_RESERVE_BYTES, "the reserve would dominate");
-        let icon = 42 * 42 * 4;
+        let share = CacheBudget::from_backing(MACHINE).hard();
+        assert!(
+            share > 4 * SCREEN,
+            "the fixture's share is not past a screenful"
+        );
+        assert_eq!(working_set_ui_budget(SCREEN, MACHINE).hard(), share);
+        assert_eq!(working_set_ui_budget(SCREEN, 0).hard(), SCREEN);
 
+        let icon = 64 * 64 * 4;
+        let held = u32::try_from(4 * SCREEN / icon).expect("four screenfuls of icons");
         let mut icons: ReclaimCache<u32, Glyph, u64, BuildFastHash> = working_set_ui_cache(
-            "test.icons.mild",
+            "test.icons.share",
             1,
-            fb_bytes,
+            (SCREEN, MACHINE),
             32,
             gauge,
             sink,
             BuildFastHash::new(),
         );
-        for key in 0..u32::try_from(fb_bytes / icon).expect("a screenful of icons") {
+        for key in 0..held {
             let _ = icons.get_or_build(&1, key, || {
                 Some(Glyph {
                     bytes: vec![0x44; icon],
                 })
             });
         }
-        assert!(
-            icons.charged_bytes() > floor,
-            "the fixture never filled past the floor it is testing"
+        assert_eq!(
+            icons.len(),
+            held as usize,
+            "an icon was evicted below the share"
         );
+    }
 
-        gauge.report(PressureBand::Mild);
-        assert!(icons.enforce_pressure() > 0, "the speculation must go");
-        assert!(icons.charged_bytes() <= floor);
-        assert!(
-            icons.len() * icon >= fb_bytes / 8,
-            "mild pressure took what a frame draws, not just the speculation"
+    /// Mild and moderate pressure take no decoded icon at all; only severe and
+    /// critical do, and then down to the shared reserve. Re-deriving one costs
+    /// a read and a sandbox round trip, the resources a tightening machine has
+    /// least of, so giving icons back early costs more than it frees.
+    #[test]
+    fn only_severe_pressure_takes_a_decoded_icon() {
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+        let icon = 64 * 64 * 4;
+        let mut icons: ReclaimCache<u32, Glyph, u64, BuildFastHash> = working_set_ui_cache(
+            "test.icons.bands",
+            1,
+            (SCREEN, MACHINE),
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
         );
+        let held = u32::try_from(2 * SCREEN / icon).expect("two screenfuls of icons");
+        for key in 0..held {
+            let _ = icons.get_or_build(&1, key, || {
+                Some(Glyph {
+                    bytes: vec![0x44; icon],
+                })
+            });
+        }
+        assert!(icons.charged_bytes() > UI_CACHE_RESERVE_BYTES);
+
+        for band in [PressureBand::Mild, PressureBand::Moderate] {
+            gauge.report(band);
+            assert_eq!(icons.enforce_pressure(), 0, "{band:?} took a decoded icon");
+            assert_eq!(icons.len(), held as usize, "{band:?}");
+        }
+        gauge.report(PressureBand::Severe);
+        assert!(icons.enforce_pressure() > 0, "severe pressure took nothing");
+        assert!(icons.charged_bytes() <= UI_CACHE_RESERVE_BYTES);
+        assert!(!icons.is_empty(), "severe pressure took the reserve");
     }
 
     #[test]
@@ -585,7 +613,7 @@ mod tests {
                 working_set_ui_cache(
                     "test.icons",
                     1,
-                    fb_bytes,
+                    (fb_bytes, 0),
                     32,
                     gauge,
                     sink,
@@ -703,9 +731,17 @@ mod tests {
             ),
             (
                 |fb, gauge, sink| {
-                    working_set_ui_cache("t", 1, fb, 32, gauge, sink, BuildFastHash::new())
+                    working_set_ui_cache(
+                        "t",
+                        1,
+                        (fb, MACHINE),
+                        32,
+                        gauge,
+                        sink,
+                        BuildFastHash::new(),
+                    )
                 },
-                working_set_ui_budget,
+                |fb| working_set_ui_budget(fb, MACHINE),
             ),
             (
                 |fb, gauge, sink| {

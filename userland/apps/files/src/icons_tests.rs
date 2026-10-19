@@ -30,8 +30,8 @@ use super::IconPipeline;
 /// The seat the caches under test are charged to.
 const TEST_SEAT: u64 = 1;
 
-/// A 1080p 32-bit frame: the pipeline derives its budget from the window it
-/// draws on, so the ceiling exercised here is the real derivation.
+/// A 1080p 32-bit screen with no memory figure, so the budget is the
+/// screenful the shared policy never goes below.
 const TEST_FRAME_BYTES: usize = 1920 * 1080 * 4;
 
 /// The tile side every test resolves at.
@@ -63,7 +63,7 @@ fn cache() -> ArtworkCache {
     artwork_cache(
         "files.test-artwork",
         TEST_SEAT,
-        TEST_FRAME_BYTES,
+        (TEST_FRAME_BYTES, 0),
         &NORMAL_PRESSURE,
         &TEST_SINK,
     )
@@ -145,7 +145,7 @@ fn cacheless() -> ArtworkCache {
     artwork_cache(
         "files.test-artwork-cacheless",
         TEST_SEAT,
-        FRAME_TOO_SMALL_FOR_ONE_ICON,
+        (FRAME_TOO_SMALL_FOR_ONE_ICON, 0),
         &NORMAL_PRESSURE,
         &TEST_SINK,
     )
@@ -495,15 +495,16 @@ mod grid {
         AppInfoHeader, Errno, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
         BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
     };
-    use tairix_browse::render::scroll_wheel;
+    use tairix_browse::render::{entry_rect, manager_art, scroll_wheel};
     use tairix_browse::{
-        render_into, Browser, DirectorySource, Entry, EntryKind, Listing, ManagerChrome,
-        ManagerToolModel, ToolbarBand, ViewMode, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+        render_into, Browser, DirectorySource, Entry, EntryChange, EntryKind, Listing,
+        ManagerChrome, ManagerToolModel, ToolbarBand, ViewMode, MANAGER_TOOLS, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_geometry::{Rect, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkRasteriser, ArtworkReader, IconArtwork,
-        IconArtworkSource, IconPicture, IconRequest,
+        IconArtworkSource, IconPicture, IconRequest, Landed,
     };
     use tairix_log::DiscardSink;
     use tairix_raster::Surface;
@@ -519,6 +520,12 @@ mod grid {
 
     /// The bundle icon every fixture bundle names in its own manifest.
     const ICON: &str = "icon.png";
+
+    /// The QEMU desktop's 1024×768 output.
+    const SCREEN_BYTES: usize = 1024 * 768 * 4;
+
+    /// The QEMU desktop's 256 MiB machine.
+    const MACHINE_BYTES: usize = 256 << 20;
 
     /// Held at normal for its whole life, so tests running in parallel cannot
     /// perturb one another's band.
@@ -666,19 +673,24 @@ mod grid {
 
     impl Window {
         /// A grid window of the app's own default client size, its artwork
-        /// budget derived from that window's frame exactly as the app derives
-        /// it.
+        /// budgeted as the app budgets it: the share of the machine's memory,
+        /// never below one screenful.
         fn open() -> Self {
             PRESSURE.report(PressureBand::Normal);
             let (w, h) = (WIN_WIDTH, WIN_HEIGHT);
-            let frame_bytes = (w as usize) * 4 * (h as usize);
             let mut browser = Browser::open_root(Bundles).expect("the fixture root lists");
             browser.set_view_mode(ViewMode::LargeIcons);
             let calls = Rc::new(Calls::default());
             let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
             Self {
                 pipeline: IconPipeline::new(
-                    artwork_cache("files.test-grid", 1, frame_bytes, &PRESSURE, &SINK),
+                    artwork_cache(
+                        "files.test-grid",
+                        1,
+                        (SCREEN_BYTES, MACHINE_BYTES),
+                        &PRESSURE,
+                        &SINK,
+                    ),
                     Box::new(Deferring(Rc::clone(&desk))),
                 ),
                 desk,
@@ -703,28 +715,13 @@ mod grid {
 
         /// Paint the whole window, reporting what each tile drew.
         fn paint(&mut self) -> (usize, usize) {
-            let drawn = Drawn::default();
-            let chrome = ManagerChrome {
-                tools: MANAGER_TOOLS,
-                tool_model: ManagerToolModel::none(),
-                sidebar: None,
-                toolbar: ToolbarBand::Hidden,
-                renaming: None,
-            };
-            let mut tally = Tally {
-                source: self.pipeline.source(),
-                drawn: &drawn,
-            };
-            render_into(
-                &mut self.surface,
+            draw(
+                &mut self.pipeline,
                 &self.browser,
-                Scale::ONE,
+                &mut self.surface,
                 &self.theme,
                 self.viewport,
-                &chrome,
-                &mut tally,
-            );
-            (drawn.artwork.get(), drawn.glyph.get())
+            )
         }
 
         /// Run every decode the last paint recorded, as the reader does before
@@ -772,6 +769,139 @@ mod grid {
             }
             panic!("the grid never settled");
         }
+    }
+
+    /// The chrome the grid windows under test draw: none, so every picture is
+    /// a tile's.
+    const GRID_ONLY: ManagerChrome<'static> = ManagerChrome {
+        tools: MANAGER_TOOLS,
+        tool_model: ManagerToolModel::none(),
+        sidebar: None,
+        toolbar: ToolbarBand::Hidden,
+        renaming: None,
+    };
+
+    /// Paint `browser` whole into `surface` through `pipeline`, reporting
+    /// what each tile drew.
+    fn draw(
+        pipeline: &mut IconPipeline,
+        browser: &Browser<Bundles>,
+        surface: &mut Surface,
+        theme: &Theme,
+        viewport: Rect,
+    ) -> (usize, usize) {
+        let drawn = Drawn::default();
+        let mut tally = Tally {
+            source: pipeline.source(),
+            drawn: &drawn,
+        };
+        render_into(
+            surface,
+            browser,
+            Scale::ONE,
+            theme,
+            viewport,
+            &GRID_ONLY,
+            &mut tally,
+        );
+        (drawn.artwork.get(), drawn.glyph.get())
+    }
+
+    /// The slots of `browser` a landing marks for repaint, as the loop marks
+    /// them.
+    fn marked(
+        pipeline: &mut IconPipeline,
+        browser: &Browser<Bundles>,
+        theme: &Theme,
+        viewport: Rect,
+        landed: &Landed,
+    ) -> Vec<Rect> {
+        let mut moved = Vec::new();
+        manager_art(
+            browser,
+            (Scale::ONE, theme),
+            viewport,
+            &GRID_ONLY,
+            &mut |art| {
+                if pipeline.moved_by(landed, art) {
+                    moved.push(art.at);
+                }
+            },
+        );
+        moved
+    }
+
+    /// The reported defect: copying applications into a folder repainted
+    /// every window whole each time one's icon landed — every tile of the
+    /// folder they came from included. A landing marks the tiles drawn
+    /// through what landed and nothing else: the new application's, in the
+    /// window that shows it.
+    #[test]
+    fn a_landing_marks_only_the_tile_it_pictures_in_any_window() {
+        let mut win = Window::open();
+        let (tiles, glyphs) = win.settle();
+        assert!(tiles > 0 && glyphs == 0, "the source window never settled");
+        let mut dest = Browser::open_root(Bundles).expect("the fixture root lists");
+        dest.set_view_mode(ViewMode::LargeIcons);
+        let mut dest_surface =
+            Surface::new(win.viewport.width, win.viewport.height).expect("a window-sized surface");
+        let theme = Theme::dark();
+        assert_eq!(
+            draw(
+                &mut win.pipeline,
+                &dest,
+                &mut dest_surface,
+                &theme,
+                win.viewport
+            ),
+            (tiles, 0)
+        );
+        // The loop takes every batch it is woken for; these were the settle's.
+        let _ = win.desk.borrow_mut().take_landed();
+
+        // The copy lands an application where the destination shows it.
+        assert!(dest
+            .apply_changes(vec![EntryChange::Upsert(Entry::new(
+                "aaa.app",
+                EntryKind::Bundle,
+                0,
+                Time64::UNIX_EPOCH,
+            ))])
+            .is_ok_and(|moved| moved.is_some()));
+        let index = dest
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == "aaa.app")
+            .expect("listed");
+        let _ = draw(
+            &mut win.pipeline,
+            &dest,
+            &mut dest_surface,
+            &theme,
+            win.viewport,
+        );
+        assert_eq!(win.drain(), 1, "the new tile asked for one decode");
+
+        let landed = win.desk.borrow_mut().take_landed();
+        let (browser, viewport) = (&win.browser, win.viewport);
+        assert!(
+            marked(&mut win.pipeline, browser, &theme, viewport, &landed).is_empty(),
+            "the folder copied from repainted for a tile it does not show"
+        );
+        let tile = entry_rect(
+            &dest,
+            Scale::ONE,
+            &theme,
+            viewport,
+            ToolbarBand::Hidden,
+            index,
+        )
+        .expect("the new tile shows");
+        assert_eq!(
+            marked(&mut win.pipeline, &dest, &theme, viewport, &landed),
+            vec![tile],
+            "the destination repainted more than the tile that landed"
+        );
     }
 
     /// The reported defect: after the decodes had landed and a frame had drawn

@@ -57,6 +57,7 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI31 | The context menu names what it acts on: Display ▸, then the selection's own submenu holding the item verbs, New ▸, Select All, Clear Selection and Paste; Properties is Get Info… | done |
 | FI32 | A shift-double-click leaves what it opened elsewhere deselected, and an activation the engine refuses is stated over the window | done |
 | FI33 | A path naming a file is shown selected in the folder holding it, in a window already showing that folder where there is one | done |
+| FI34 | An icon landing repaints only the tiles drawn through it, in the windows that show them; a copied tree is pictured once it is whole; every window shares one cache that keeps what it decoded | done |
 
 ## FI1 — item names one point smaller
 
@@ -780,6 +781,31 @@ it without a listing; one whose listing lacks the file yet selects it when one
 shows it (`Browser::follow`), and brings it into view at the present after its
 fit. The desktop's reveal of a document ([session](../docs/src/desktop/session.md))
 is the first sender, and the command line takes the same path.
+
+## FI34 — a landing repaints what it pictures
+
+The desk names the decodes a batch answered (`tairix_icon::Landed`), and each
+window marks only the slots drawn through them: `render::manager_art`,
+`properties_art` and `chooser_art` walk every picture a window draws, deriving
+each request, side and rectangle through the helper its paint uses, so a
+landing repaints exactly where the paint drew. An application copied into one
+window repaints its own tile there, and no other window repaints. Every other
+picture a window shows is reported as still shown
+(`ArtworkCache::still_shown`), starting nothing, so the thumbnail sweep after
+the pass withdraws only what no window shows and an evicted picture already on
+screen is never decoded again in a loop.
+
+A copy creates a bundle before it writes the manifest and icon inside, so a
+decode run meanwhile would picture or refuse the half-written bundle and the
+answer would stand. While a paste writes an item, the job holds every decode
+pictured from inside it (`Job::sync_hold`, `ArtworkDesk::hold_under`), on every
+way out — completion, refusal, cancel, the window closing — releasing it, and
+what was asked for meanwhile lands then and is decoded from the finished tree.
+A listed bundle is keyed by its listing's stamp (`IconRequest::listed_bundle`),
+so one replaced or changed where its folder sees it is a new picture. Nothing
+invalidates the cache: below its ceiling — the machine's share of its memory,
+never below a screenful, shared by every window — only least-recent use takes
+an entry, and only severe and critical pressure shrink it.
 
 ## Sequencing
 

@@ -3086,7 +3086,8 @@ mod program {
     }
 
     /// The window's icon cache, budgeted from the `frame_bytes` of the
-    /// window it draws into, and registered with the process's cache report.
+    /// window it draws into and the machine's memory, and registered with the
+    /// process's cache report.
     fn icon_cache(frame_bytes: usize) -> ArtworkCache {
         // The reclaim bookkeeping's audit sink. The shared constructor takes
         // a `'static` borrow, and the runtime sink owns nothing.
@@ -3094,7 +3095,10 @@ mod program {
         let cache = artwork_cache(
             "settings.icon-artwork",
             SEAT_PRIMARY,
-            frame_bytes,
+            (
+                frame_bytes,
+                tairix_procinfo::memory_total_for_budget(&IpcTransport),
+            ),
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );

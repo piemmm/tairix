@@ -2511,10 +2511,16 @@ mod program {
         // a desktop that waited for its wait-set member would draw the whole
         // bring-up with no cached cursor, glyph, or icon artwork.
         let _ = tairix_procinfo::pressure::refresh();
+        // The machine's memory bounds what one client may map here, what a
+        // ray-traced scene may hold, and how much decoded artwork and stacked
+        // frosted glass is retained.
+        let memory_read = tairix_procinfo::memory_total_bytes(&IpcTransport).ok();
+        let memory_total = memory_read.unwrap_or(0);
+        let memory_bytes = usize::try_from(memory_total).unwrap_or(usize::MAX);
         let mut shell = DesktopShell::new(
             bar_config(Rect::new(0, 0, mode.width_px, mode.height_px)),
             SEAT_PRIMARY,
-            frame_len,
+            (frame_len, memory_bytes),
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
@@ -2534,13 +2540,6 @@ mod program {
         // They are this process's memory like the shell's three caches, so
         // they join them in the report before the compositor takes them: a
         // ledger is a shared handle to the figures, not the cache itself.
-        //
-        // The machine's memory bounds what one client may map here, what a
-        // ray-traced scene may hold, and how much stacked frosted glass is
-        // retained.
-        let memory_read = tairix_procinfo::memory_total_bytes(&IpcTransport).ok();
-        let memory_total = memory_read.unwrap_or(0);
-        let memory_bytes = usize::try_from(memory_total).unwrap_or(usize::MAX);
         let chrome = chrome_cache(
             SEAT_PRIMARY,
             frame_len,
@@ -5946,9 +5945,12 @@ mod program {
             self.desk.lock().decline(key, side);
         }
 
-        /// The band moved: offer the refused decodes again.
+        /// The band moved: offer the refused decodes again, waking the loop to
+        /// repaint what was drawn without them.
         fn retry_declined(&self) {
-            self.desk.lock().retry_declined();
+            if self.desk.lock().retry_declined() {
+                self.wake.nudge();
+            }
         }
 
         /// Ask the decoder to leave.

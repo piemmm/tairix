@@ -391,7 +391,10 @@ fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
         8,
     );
     let _ = desk.collect(
-        &ArtworkKey::Bundle(String::from("/System/Applications/E.app")),
+        &ArtworkKey::Bundle {
+            dir: String::from("/System/Applications/E.app"),
+            stamp: None,
+        },
         8,
     );
     assert!(desk.next_job().is_some());
@@ -684,4 +687,181 @@ fn the_thumbnails_waiting_are_bounded() {
         queued += 1;
     }
     assert_eq!(queued, MAX_WANTED_THUMBNAILS);
+}
+
+/// What a surface that repainted only part of itself says about the rest keeps
+/// a waiting thumbnail through the next sweep, and starts nothing for a
+/// picture the desk does not hold.
+#[test]
+fn keeping_spares_a_thumbnail_from_the_sweep_and_records_nothing_new() {
+    let mut desk = ArtworkDesk::new();
+    let shown = thumbnail("shown.png");
+    desk.want(&shown, 64);
+    desk.sweep_thumbnails();
+    desk.keep(&shown, 64);
+    desk.sweep_thumbnails();
+    assert_eq!(
+        desk.next_thumbnail().map(|job| job.key),
+        Some(shown),
+        "a thumbnail a surface still shows was withdrawn"
+    );
+
+    desk.keep(&thumbnail("evicted.png"), 64);
+    desk.keep(&asset("/evicted.png"), 32);
+    assert!(
+        !desk.has_work(),
+        "keeping a picture the desk holds nothing for queued its decode"
+    );
+}
+
+/// A decode the band refused to keep is named as landed once the band moves,
+/// so the item drawn without it asks again: nothing else would, since what it
+/// shows is already on screen.
+#[test]
+fn retrying_the_declined_names_them_as_landed() {
+    let mut desk = ArtworkDesk::new();
+    assert!(!desk.retry_declined(), "nothing was declined");
+    desk.decline(&asset("/a.png"), 8);
+    assert!(desk.retry_declined());
+    assert!(desk.take_landed().resolves(request("/a.png"), 8));
+    assert!(
+        !desk.retry_declined(),
+        "a retried decline was retried again"
+    );
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
+    assert!(
+        desk.has_work(),
+        "the retried decode was not asked for again"
+    );
+}
+
+/// A listed bundle's own icon at version `stamp`.
+fn listed(dir: &str, stamp: u64) -> ArtworkKey {
+    ArtworkKey::Bundle {
+        dir: String::from(dir),
+        stamp: Some(crate::DocumentStamp {
+            size: stamp,
+            modified: tairix_abi::time::Time64::UNIX_EPOCH,
+            id: tairix_abi::fs::FileId {
+                volume: [1; 16],
+                node: 7,
+            },
+            content_gen: stamp,
+        }),
+    }
+}
+
+/// The copy defect: a bundle read while the copy is still filling it would
+/// picture, or refuse, the half-written bundle, and that answer would stand.
+/// While its tree is held nothing under it is run — and nothing is recorded,
+/// so however much of it is shown the hold costs one path.
+#[test]
+fn nothing_under_a_held_tree_is_run_or_recorded() {
+    let mut desk = ArtworkDesk::new();
+    desk.hold_under("/Storage/B/One.app");
+    for stamp in 1..=64 {
+        assert!(is_pending(
+            &desk.collect(&listed("/Storage/B/One.app", stamp), 32)
+        ));
+    }
+    desk.want(&asset("/Storage/B/One.app/Resources/icon.png"), 32);
+    assert!(!desk.has_work(), "a decode under a held tree was queued");
+    assert!(desk.next_job().is_none());
+    assert!(
+        desk.slots.is_empty(),
+        "a held tree recorded what was asked under it"
+    );
+
+    desk.want(&asset("/Storage/B/One.apps/icon.png"), 32);
+    assert_eq!(
+        desk.next_job(),
+        Some(job("/Storage/B/One.apps/icon.png", 32)),
+        "a sibling whose name begins the same way was held"
+    );
+}
+
+/// Releasing the tree names it, so every item drawn from inside it repaints at
+/// whatever side; each is produced when it asks again, so a version the
+/// listing has since replaced costs nothing.
+#[test]
+fn releasing_a_tree_names_it_for_every_item_drawn_from_inside() {
+    let mut desk = ArtworkDesk::new();
+    desk.hold_under("/Storage/B/One.app");
+    let current = listed("/Storage/B/One.app", 2);
+    let _ = desk.collect(&current, 32);
+
+    assert!(desk.release_under("/Storage/B/One.app"));
+    let landed = desk.take_landed();
+    let inside = IconRequest::bundle(crate::IconKind::AppBundle, "/Storage/B/One.app");
+    for side in [16, 32, 96] {
+        assert!(landed.resolves(inside, side), "side {side}");
+    }
+    assert!(!landed.resolves(
+        IconRequest::bundle(crate::IconKind::AppBundle, "/Storage/B/Two.app"),
+        32
+    ));
+    assert!(
+        !desk.has_work(),
+        "a released decode ran before it was asked for"
+    );
+
+    assert!(is_pending(&desk.collect(&current, 32)));
+    assert_eq!(
+        desk.next_job(),
+        Some(ArtworkJob {
+            key: current,
+            side: 32
+        })
+    );
+    assert!(desk.take_landed().is_empty(), "the tree was named twice");
+    assert!(!desk.release_under("/Storage/B/One.app"), "released twice");
+}
+
+/// A tree inside another held tree is still held by the outer one once it is
+/// released itself.
+#[test]
+fn a_tree_inside_a_held_tree_stays_held_until_both_are_released() {
+    let mut desk = ArtworkDesk::new();
+    desk.hold_under("/Storage/B/Apps");
+    desk.hold_under("/Storage/B/Apps/One.app");
+    let inner = listed("/Storage/B/Apps/One.app", 1);
+
+    assert!(desk.release_under("/Storage/B/Apps/One.app"));
+    let _ = desk.take_landed();
+    let _ = desk.collect(&inner, 32);
+    assert!(!desk.has_work(), "the outer tree's hold was lost");
+
+    assert!(desk.release_under("/Storage/B/Apps"));
+    let _ = desk.collect(&inner, 32);
+    assert!(desk.has_work());
+}
+
+/// A tree never held releases nothing, and a stopping desk holds nothing and
+/// reports no release.
+#[test]
+fn a_tree_never_held_releases_nothing_and_a_stop_drops_every_hold() {
+    let mut desk = ArtworkDesk::new();
+    assert!(!desk.release_under("/Storage/B/One.app"));
+    desk.hold_under("/Storage/B/One.app");
+    assert!(desk.release_under("/Storage/B/One.app"));
+    desk.hold_under("/Storage/B/One.app");
+    desk.stop();
+    assert!(
+        desk.take_landed().is_empty(),
+        "a stop kept a release to report"
+    );
+    assert!(!desk.release_under("/Storage/B/One.app"));
+}
+
+/// The root holds everything named by a path.
+#[test]
+fn holding_the_root_holds_every_path() {
+    let mut desk = ArtworkDesk::new();
+    desk.hold_under("/");
+    let _ = desk.collect(&asset("/System/Graphics/Icons/file.png"), 32);
+    assert!(!desk.has_work());
+    assert!(desk.release_under("/"));
+    assert!(desk
+        .take_landed()
+        .resolves(request("/System/Graphics/Icons/file.png"), 32));
 }

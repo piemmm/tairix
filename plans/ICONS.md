@@ -106,20 +106,22 @@ Each item's section below records what it guarantees or what remains.
 - **Decoded once means once, not once per band.** The cache is the *working
   set* of the surfaces drawing from it, not speculation around one: re-deriving
   an entry costs a capability-gated read plus a sandbox round trip. So mild and
-  moderate memory pressure take the scroll-back speculation but leave what one
-  frame draws (`tairix_reclaim::working_set_ui_cache`, `plans/SMARTRAM.md`
-  section 6.4); severe and critical take it down to the shared reserve, and the
-  glyph tier is then the honest answer. A refusal the cache cannot avoid is reported to the resolver
-  (`ArtworkResolver::declined`) and not re-offered until the band moves, so
-  giving the pixels up is never a storm of reads that cannot be kept.
-- **The ceiling is one screenful, because that bounds what a frame can draw.**
-  Icons are drawn on the output, so no more of them can be visible at once than
-  fill it. A *fraction* of one frame cannot hold them — a 480×480 file-manager
-  window draws some 117 KiB of icon where a sixteenth of its frame is 57 KiB —
-  and a cache that evicts an entry the next paint asks for again either shows a
-  wrong picture or pays the read and the round trip per icon per frame. Only a
-  quarter of that ceiling is the pressure-proof working set, though: the rest is
-  scroll-back nothing is drawing, and it goes at the first tightening.
+  moderate memory pressure take none of it (`tairix_reclaim::working_set_ui_cache`,
+  `plans/SMARTRAM.md` section 6.4); severe and critical take it down to the
+  shared reserve, and the glyph tier is then the honest answer. A refusal the
+  cache cannot avoid is reported to the resolver (`ArtworkResolver::declined`)
+  and not re-offered until the band moves, so giving the pixels up is never a
+  storm of reads that cannot be kept; when the band moves, the items drawn
+  without it are repainted to ask again.
+- **Nothing invalidates a decoded icon.** The ceiling is the machine's share of
+  its memory, never below one screenful, and below it only least-recent use
+  takes an entry, so a folder browsed and left is drawn again without a read.
+  A screenful is the floor because a *fraction* of one frame cannot hold what it
+  draws — a 480×480 file-manager window draws some 117 KiB of icon where a
+  sixteenth of its frame is 57 KiB. A changed source is a new key instead: a
+  listed bundle is keyed by the version its listing reports, as a picture file
+  is, and a tree a copy is still writing is held (`ArtworkDesk::hold_under`), so
+  no answer is ever read from a half-written bundle.
 - **Rendered exactly, at the size it is drawn.** A vector asset is rasterised
   straight onto the requested `side`×`side` surface — never at a nominal size
   and rescaled — and every pixel takes the *exact* fraction of its own area
@@ -394,9 +396,9 @@ their glyphs are still resolved on every paint:
 
 The Switchboard now holds one (`userland/gui/switchboard/src/run.rs`), built
 through the shared `artwork_cache` constructor with its own label, the primary
-seat, its window's frame bytes, `tairix_rt::pressure::gauge()` and the crate's
-own log sink, trimmed on the memory-pressure wake like every other cache on the
-desktop. That closes the per-frame rasterisation for this surface: the glyph
+seat, its window's frame bytes, the machine's memory,
+`tairix_rt::pressure::gauge()` and the crate's own log sink, trimmed on the
+memory-pressure wake like every other cache on the desktop. That closes the per-frame rasterisation for this surface: the glyph
 tier is resolved *in this process* and retained like any other entry, so the
 20–38 µs of coverage work is paid once per (kind, side) rather than per icon
 per frame.

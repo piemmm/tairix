@@ -1407,3 +1407,57 @@ fn a_pointer_event_over_a_tool_box_allocates_nothing() {
     });
     assert_eq!(metering.allocations, 0, "{metering:?}");
 }
+
+/// Records every picture a paint asks for, answering none, so a test can set
+/// what the strip drew beside what its walk reports.
+#[derive(Default)]
+struct Asked(Vec<(alloc::string::String, u32)>);
+
+impl tairix_icon::IconArtwork for Asked {
+    fn artwork(
+        &mut self,
+        request: tairix_icon::IconRequest<'_>,
+        side: u32,
+    ) -> Option<tairix_icon::IconPicture<'_>> {
+        self.0.push((alloc::format!("{request:?}"), side));
+        None
+    }
+}
+
+/// An owner told which decodes have landed walks the tools instead of painting
+/// them, so the walk must name exactly the pictures the paint asks for — in a
+/// strip too short for every tool too — each where its tool is seated.
+#[test]
+fn the_icon_walk_names_exactly_what_the_paint_asks_for() {
+    let toolbar = Toolbar::new()
+        .with_icon(IconButton::new(IconKind::Bell, ControlRole::Neutral), 0)
+        .with_icon(IconButton::new(IconKind::Refresh, ControlRole::Neutral), 0)
+        .with_split(
+            SplitButton::new(ButtonContent::Icon(IconKind::Bell), ControlRole::Neutral),
+            1,
+        )
+        .with_icon(IconButton::new(IconKind::Folder, ControlRole::Neutral), 1);
+    let theme = Theme::dark();
+    for bounds in [bar(), Rect::new(0, 0, CH * 5, H)] {
+        let mut painted = Asked::default();
+        let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+        toolbar.render(&mut surface, bounds, Scale::ONE, &theme, &mut painted);
+
+        let mut walked = Vec::new();
+        toolbar.visit_icons(bounds, Scale::ONE, &theme, |request, side, at| {
+            assert_eq!(
+                at.intersection(&bounds),
+                at,
+                "a tool's seat lies outside the strip"
+            );
+            walked.push((alloc::format!("{request:?}"), side));
+        });
+        assert!(!walked.is_empty(), "no tool was seated in {bounds:?}");
+        assert_eq!(walked, painted.0, "in {bounds:?}");
+        assert_eq!(
+            walked.len() == 3,
+            bounds == bar(),
+            "only the full strip seats every icon tool"
+        );
+    }
+}

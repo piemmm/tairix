@@ -458,9 +458,12 @@ band may take them:
   ordering above says.
 - **Rebuilt off-process** — a decoded on-disk icon (a capability-gated read
   *plus* a parser-sandbox round trip) and a glyph on the *client* side of the
-  font endpoint (an IPC round trip). These declare a working-set floor
-  (`CacheBudget::with_working_set_floor`) that mild and moderate leave alone;
-  severe and critical take only the speculation above the reserve below.
+  font endpoint (an IPC round trip). These declare their whole budget a
+  working-set floor (`CacheBudget::with_working_set_floor`) that mild and
+  moderate leave alone; severe and critical take everything above the reserve
+  below. Nothing invalidates a decoded icon: its ceiling is the machine's share
+  of its memory, never below a screenful, and below it only least-recent use
+  takes an entry.
 
 **And under both, an irreducible reserve no band takes.** Every rasterised-UI
 cache — cursors, notification glyphs, window furniture, frosted backdrops,

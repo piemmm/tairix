@@ -3276,7 +3276,7 @@ fn test_artwork_cache() -> ArtworkCache {
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
     let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
-    artwork_cache("browse.test-artwork", 1, 1920 * 1080 * 4, gauge, sink)
+    artwork_cache("browse.test-artwork", 1, (1920 * 1080 * 4, 0), gauge, sink)
 }
 
 /// Render `browser` into `vp` through the artwork lookup `artwork`.

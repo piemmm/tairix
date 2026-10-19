@@ -1131,8 +1131,9 @@ fn icon_of(entry: &Entry, media: MediaType) -> IconKind {
 ///
 /// The request names the entry's own picture where it has one: an
 /// application bundle's own icon, an occupied folder's picture of what it
-/// holds, a picture file's own content. Each falls back to the icon's class
-/// picture where it will not serve. `scratch` is a buffer the caller reuses
+/// holds, a picture file's own content — a bundle and a picture file each at
+/// the version the listing saw. Each falls back to the icon's class picture
+/// where it will not serve. `scratch` is a buffer the caller reuses
 /// across the entries of one frame, so a grid spells its paths without
 /// allocating one per tile.
 ///
@@ -1167,9 +1168,13 @@ pub fn entry_icon<'a>(
     scratch.clear();
     scratch.push_str(dir);
     crate::vfs::push_child(scratch, entry.name());
-    let request = match thumbnail {
-        Some(reading) => IconRequest::thumbnail(kind, scratch, entry.stamp(), reading),
-        None => IconRequest::bundle(kind, scratch),
+    let request = match (thumbnail, entry.kind()) {
+        (Some(reading), _) => IconRequest::thumbnail(kind, scratch, entry.stamp(), reading),
+        // A link to a bundle carries its own stamp, not its target's.
+        (None, EntryKind::Bundle) if !entry.id().is_none() => {
+            IconRequest::listed_bundle(kind, scratch, entry.stamp())
+        }
+        (None, _) => IconRequest::bundle(kind, scratch),
     };
     (kind, request)
 }

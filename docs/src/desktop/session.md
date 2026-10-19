@@ -308,9 +308,10 @@ the built-in glyph for that frame.
   is budgeted, so it can be asked to hold more than it will; without a rule, a
   decode it refused to retain would be asked for again by the very repaint the
   landing drove. The cache reports the refusal and the desk holds that key until
-  the pressure band moves. An answer the cache *took* is simply forgotten by the
-  desk, so an icon it later evicts is decoded again rather than drawing its
-  glyph for ever.
+  the pressure band moves, when it is named as landed and the loop woken, so
+  the item drawn without it asks again. An answer the cache *took* is simply
+  forgotten by the desk, so an icon it later evicts is decoded again rather than
+  drawing its glyph for ever.
 - **A landing is adopted per item, never per surface.** The desk answers a
   `Landed` naming which decodes came back, and each surface repaints the items
   that batch moved: the bar's application strip and the launcher popup's rows

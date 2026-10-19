@@ -1423,7 +1423,10 @@ mod program {
         let covers = working_set_ui_cache(
             "music.covers",
             SEAT_PRIMARY,
-            frame_bytes,
+            (
+                frame_bytes,
+                tairix_procinfo::memory_total_for_budget(&tairix_procinfo::IpcTransport),
+            ),
             ART_ENTRY_METADATA_BYTES,
             tairix_rt::pressure::gauge(),
             &LOG_SINK,

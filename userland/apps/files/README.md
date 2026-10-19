@@ -271,21 +271,27 @@ that misses records the decode on the shared deferred-decode desk
 thread drives) and draws its built-in glyph; the app's reader thread decodes
 it in the sandbox and wakes the loop once its batch drains — so a folder of
 picture-bearing bundles neither freezes the first frame nor stalls a scroll,
-and a key or a click waits on no decode. The repaint is one whole-window pass
-per batch rather than one per icon, because a present is a round trip through
-the compositor and far dearer than the decode that produced a single tile. A
-picture file's own content is decoded last of all, after the icons and the
-folder cues, and shown as it lands. The paint side is `src/icons.rs`,
+and a key or a click waits on no decode. Each window then repaints only the
+slots drawn through what landed: an application copied into one window
+repaints its own tile, and no other window repaints. While a paste writes an
+item, nothing pictured from inside it is decoded, so a half-copied bundle is
+never pictured or refused; once the item is whole its tile asks again. A
+listed bundle is keyed by its listing's stamp, so a replaced one is decoded
+afresh. A picture file's own content is decoded last of all, after the icons
+and the folder cues, and shown as it lands. The paint side is `src/icons.rs`,
 host-tested there.
 
-The cache is built through the one shared
-`tairix_icon::artwork_cache` constructor with the app's real seat, frame
-size, live pressure gauge, and audit sink, so its budget is the shared
-desktop policy rather than numbers picked here. The app parks on a
+Every window shares one cache, built through the shared
+`tairix_icon::artwork_cache` constructor with the app's real seat, the
+screen's frame size, the machine's memory, live pressure gauge, and audit
+sink, so its budget is the shared desktop policy rather than numbers picked
+here: what it decoded stays, up to the machine's share of its memory and never
+less than a screenful, until least-recent use takes it. The app parks on a
 `MemoryPressure` wait-set member (it reads the band once before the first
 present, because the member reports only *changes* and the process gauge
 starts at the fail-closed unknown band) and trims the cache at each
-pressure wake — no timer, no poll. Dropping the pipeline tears the cache
+pressure wake — severe and critical take it to the shared reserve, milder
+bands nothing — no timer, no poll. Dropping the pipeline tears the cache
 down, overwriting the artwork first, so the pixels go back on a window
 close and a fail-loud exit alike.
 

@@ -387,9 +387,10 @@ impl DesktopShell {
     /// session drives; every rasterised-asset cache derives its budget
     /// from it, so a 4K desktop is allowed proportionately more cached
     /// pixels than a small panel and none carries a hand-picked
-    /// ceiling. `seat` owns those bytes in the reclaim ledger, `pressure`
-    /// is the gauge the kernel reports the memory-pressure band into, and
-    /// `sink` receives the caches' audit records.
+    /// ceiling. `memory_bytes` is the machine's memory, a share of which the
+    /// decoded artwork may keep. `seat` owns those bytes in the reclaim ledger,
+    /// `pressure` is the gauge the kernel reports the memory-pressure band
+    /// into, and `sink` receives the caches' audit records.
     ///
     /// The shipped icon artwork starts unreachable — every icon draws its
     /// built-in glyph — until the embedder installs the seams that can read
@@ -398,14 +399,14 @@ impl DesktopShell {
     pub fn new(
         config: TaskbarConfig,
         seat: u64,
-        output_bytes: usize,
+        (output_bytes, memory_bytes): (usize, usize),
         pressure: &'static (dyn PressureGauge + 'static),
         sink: &'static (dyn Sink + Sync),
     ) -> Self {
         let artwork = artwork_cache(
             "session.desktop-artwork",
             seat,
-            output_bytes,
+            (output_bytes, memory_bytes),
             pressure,
             sink,
         );

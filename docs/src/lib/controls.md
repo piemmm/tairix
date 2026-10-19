@@ -548,6 +548,9 @@ it, or frame the content that does:
   scroll its strip floors its window on `Toolbar::natural_length`; one that
   may, on `Toolbar::min_length`; and it sizes the band across the strip from
   `Toolbar::breadth`, since a tool broader than its band is not seated.
+  `Toolbar::visit_icons` names each icon tool's picture as `render` asks for
+  it, with the seat it draws in, so an owner told which icon decodes have
+  landed repaints the tools drawing through them rather than the strip.
 - `ActionRail` is a column of labelled `Button` commands anchored beside
   content, where a vertical `Toolbar` is a column of icon tools, so plate,
   role, disabled, and denied

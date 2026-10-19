@@ -85,6 +85,20 @@ fn outcome(redrew: bool) -> ToolbarOutcome {
     }
 }
 
+/// What the icon tool `button` seated at `rect` asks the artwork lookup for:
+/// its glyph's kind, at the side it draws it.
+fn icon_art(
+    button: &IconButton,
+    rect: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> (IconRequest<'static>, u32) {
+    (
+        IconRequest::kind(button.icon()),
+        button.icon_side(rect, scale, theme),
+    )
+}
+
 /// Which way an overflow affordance scrolls the strip.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Overflow {
@@ -663,16 +677,11 @@ impl Toolbar {
             }
         }
 
-        for (entry, rect) in self
-            .entries
-            .iter()
-            .zip(strip.seats.iter())
-            .filter_map(|(entry, seat)| seat.map(|rect| (entry, rect)))
-        {
+        for (entry, rect) in self.seated(&strip) {
             match &entry.tool {
                 Tool::Icon(b) => {
-                    let side = b.icon_side(rect, scale, theme);
-                    let picture = artwork.artwork(IconRequest::kind(b.icon()), side);
+                    let (request, side) = icon_art(b, rect, scale, theme);
+                    let picture = artwork.artwork(request, side);
                     b.render(surface, rect, scale, theme, picture);
                 }
                 Tool::Split(b) => b.render(surface, rect, scale, theme),
@@ -694,6 +703,35 @@ impl Toolbar {
                 paint_chevron(surface, rect, dir, chevron);
             }
         }
+    }
+
+    /// Visit each icon tool's picture as [`render`](Self::render) asks for it
+    /// within `bounds`: the request, the side, and the seat the tool draws in.
+    ///
+    /// What an owner told which decodes have landed walks, so it repaints the
+    /// tools drawing through them rather than the strip.
+    pub fn visit_icons(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        mut visit: impl FnMut(IconRequest<'static>, u32, Rect),
+    ) {
+        let strip = self.strip(bounds, scale, theme);
+        for (entry, rect) in self.seated(&strip) {
+            if let Tool::Icon(button) = &entry.tool {
+                let (request, side) = icon_art(button, rect, scale, theme);
+                visit(request, side, rect);
+            }
+        }
+    }
+
+    /// Each tool `strip` seats, with its seat.
+    fn seated<'a>(&'a self, strip: &'a Strip) -> impl Iterator<Item = (&'a Entry, Rect)> {
+        self.entries
+            .iter()
+            .zip(strip.seats.iter())
+            .filter_map(|(entry, seat)| seat.map(|rect| (entry, rect)))
     }
 
     /// Paint the persistent active-tool accent seam on `rect`: along its

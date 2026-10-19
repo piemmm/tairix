@@ -1261,11 +1261,15 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   bundles does not block on a sandbox round trip per tile, a scroll step does
   not block on the newly revealed row, and a key or a click waits on nothing.
   The reader nudges the loop once its artwork queue drains rather than after
-  each icon, so the repaint is one whole-window pass per batch and the tiles
-  appear together — a present is a round trip through the compositor and
-  dearer than the decode that produced a single tile. A fresh round opens on
-  every delivered event, which is what stops a decode the cache evicted from
-  being answered "not yet" for ever. The lock carries only the desk: the cache
+  each icon, and the desk names what landed: each window repaints only the
+  slots drawn through it, found by `render::manager_art`, which walks the
+  rail, the toolbar and the listing exactly as the paint draws them. An
+  application copied into one window repaints its own tile there and no other
+  window repaints at all. Every other picture a window shows is reported as
+  still shown, starting nothing, so the thumbnail sweep after the pass
+  withdraws only what no window shows. A fresh round opens on every delivered
+  event, which is what stops a decode the cache evicted from being answered
+  "not yet" for ever. The lock carries only the desk: the cache
   stays on the paint side, because a picture is handed out as a borrow into it.
   The paint side is `userland/apps/files/src/icons.rs`, host-tested there —
   including the assertion that a paint performs no read and no sandbox call at
@@ -1273,6 +1277,16 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   Where the kernel grants no reader thread the read and the round trip happen
   in the paint instead, exactly as they used to: slower under load, never
   wrong, and stated once.
+- **A copy is pictured once it is whole.** A copy creates a bundle before it
+  writes the manifest and icon inside, so a decode run meanwhile would picture
+  or refuse the half-written bundle and that answer would stand. While a paste
+  writes an item the desk produces nothing pictured from inside it
+  (`ArtworkDesk::hold_under`), so its tile draws the built-in glyph; once the
+  item is copied whole, what was asked for meanwhile lands and is decoded from
+  the finished tree. A listed bundle is keyed by the stamp its listing reports
+  (`IconRequest::listed_bundle`), so one replaced, or changed where its folder
+  sees it, is decoded afresh and the old answer ages out of the cache. Nothing
+  invalidates it.
 - **A picture file is drawn as its own content.** A file whose type the shared
   raster decoders read asks for its thumbnail ahead of its class artwork
   (`IconRequest::thumbnail`, keyed by the path and the `DocumentStamp` its
@@ -1298,16 +1312,21 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   holds the grid tile's side, the side of the run's first thumbnail. A store the
   service refuses is said once on stderr and the app decodes as before; a
   second instance shares the blob, which its self-checking slots survive.
-- **The memory is governed and given back.** The cache is built through the one
-  shared `tairix_icon::artwork_cache` constructor with the app's real seat,
-  frame size, live pressure gauge, and audit sink, so it is classified and
-  budgeted by the same reclaimable-memory policy the session's caches obey — no
-  hand-picked numbers. The app adds the memory-pressure system notice to the
-  wait-set it already parks on: it reads the band once before the first present
-  (the member reports only *changes*, and the process gauge starts at the
-  fail-closed unknown band, which admits nothing) and, on each pressure wake,
-  re-reads the band and trims the cache at the wake itself. There is no
-  timer and no poll. Dropping the pipeline tears the cache down, overwriting the
+- **The memory is governed and given back.** Every window draws through one
+  cache, built through the shared `tairix_icon::artwork_cache` constructor with
+  the app's real seat, the screen's frame size, the machine's memory, the live
+  pressure gauge, and the audit sink, so it is classified and budgeted by the
+  same reclaimable-memory policy the session's caches obey — no hand-picked
+  numbers. It keeps what it decoded up to the machine's share of its memory,
+  never less than a screenful, and only least-recent use takes an entry below
+  that; it is held to the new screen when the display changes. The app adds the
+  memory-pressure system notice to the wait-set it already parks on: it reads
+  the band once before the first present (the member reports only *changes*,
+  and the process gauge starts at the fail-closed unknown band, which admits
+  nothing) and, on each pressure wake, re-reads the band and trims the cache at
+  the wake itself — mild and moderate take nothing, severe and critical down to
+  the shared reserve — and offers again the decodes the old band refused, the
+  windows that drew without them repainting. There is no timer and no poll. Dropping the pipeline tears the cache down, overwriting the
   artwork first, so the pixels are released on every way out of the app — a
   window close and a fail-loud exit alike.
 - **No new capability.** Hosting the sandbox worker is an ordinary restricted

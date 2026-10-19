@@ -71,6 +71,8 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 # The bounded, pressure-aware cache the album art is held in.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The machine's memory, a share of which the decoded album art may keep.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 # The fast hasher the art cache is keyed through, and the seed a shuffle and
 # a decoder's page cache are drawn from.
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }

@@ -107,7 +107,11 @@ over a resolution-independent design grid, so the same glyph is
   `lib/reclaim`) retains each decode — success or refusal — keyed by what was
   resolved and the pixel side, returning a **borrow** so a grid draws many
   icons a frame without copying; a bad, absent, oversize, or wrong-shaped
-  asset yields a cached `None` (`AGENTS.md` §2.9). `IconArtworkSource` hands a
+  asset yields a cached `None` (`AGENTS.md` §2.9). Nothing invalidates an
+  entry: the budget is the machine's share of its memory, never below a
+  screenful, and below it only least-recent use takes one; a listed bundle is
+  keyed by its listing's stamp (`IconRequest::listed_bundle`), so a changed
+  one is a new key. `IconArtworkSource` hands a
   renderer a plain `IconArtwork` lookup, and `NoArtwork` is the all-glyph
   lookup a headless build or a test uses. A retained `Artwork` may carry the
   rectangle its picture was fitted to (a thumbnail's, `Fitted`), which a draw
@@ -138,7 +142,10 @@ over a resolution-independent design grid, so the same glyph is
   the cache owns it, so a later miss is a genuine one and is produced again.
   A decode the cache *refused* is held as declined instead, which is what stops
   a landing chasing its own tail; `retry_declined` re-offers it on the pressure
-  band's own wake.
+  band's own wake and names it as landed. `hold_under` produces, and records,
+  nothing asked for under a tree still being written, and `release_under`
+  names the tree as landed once it is whole; `keep` marks a picture a partly
+  repainted surface still shows, for the sweep.
 - `folder` — `FolderSample`, what a folder holds as its picture draws it: up to
   three `SampleCard`s, each a member's kind or a member photo as its
   `Thumbnail` (one past `FolderSample::MAX_CARD_BYTES` is its kind), shared

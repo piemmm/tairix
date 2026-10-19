@@ -808,8 +808,15 @@ uses (`plans/FIX-DESKTOP.md` DESK-8/DESK-12). A tile that misses records the
 decode and draws its built-in glyph; the reader takes the job, reads and
 decodes it with nothing held (in its **own** sandbox child, so no sandbox
 handle crosses a thread), delivers, and nudges the loop once its artwork queue
-drains — one whole-window pass per batch, because a present is a compositor
-round trip and far dearer than the decode that produced one tile. The lock
+drains. The desk names what landed, and each window repaints only the slots
+drawn through it (`render::manager_art` walks every picture a window draws, as
+the paint draws it), reporting the rest as still shown so the thumbnail sweep
+keeps what any window shows. While a paste writes an item the desk holds every
+decode pictured from inside it, so a half-copied bundle is never pictured or
+refused; a listed bundle is keyed by its listing's stamp, so a replaced one is
+decoded afresh, and nothing invalidates the cache. Every window shares the one
+cache, its ceiling the machine's share of its memory, never below a screenful.
+The lock
 carries only the desk: the cache stays on the paint side, since a picture is
 handed out as a borrow into it and a borrow cannot outlive a guard. An answer
 the cache took is forgotten by the desk, so an icon it later evicts is decoded

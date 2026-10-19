@@ -14067,7 +14067,7 @@ fn datetime_elevate_aim_points() -> Result<(tairix_geometry::Point, tairix_geome
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(width, height),
         SEAT_PRIMARY,
-        0,
+        (0, 0),
         &NO_PRESSURE_FEED,
         &DISCARD_SINK,
     );
@@ -15856,7 +15856,7 @@ fn reconstructed_shell(fixtures: &[&str]) -> Result<tairix_desktop_session::Desk
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(width, height),
         SEAT_PRIMARY,
-        0,
+        (0, 0),
         &NO_PRESSURE_FEED,
         &DISCARD_SINK,
     );
@@ -17481,7 +17481,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(width, height),
         SEAT_PRIMARY,
-        0,
+        (0, 0),
         &NO_PRESSURE_FEED,
         &DISCARD_SINK,
     );

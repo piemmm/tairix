@@ -202,8 +202,9 @@ straight-alpha RGBA8 with checked arithmetic (never a panic), and builds the
 `Surface`; a zero side, an unreadable path, an over-long asset, a refused
 decode, or a wrong-length reply all yield a cached `None`. Lookups return a
 **borrow** into the cache, never a clone, so a grid drawing many icons a frame
-reads each surface in place. `artwork_cache(label, seat, fb_bytes, pressure,
-sink)` builds the cache identically for both consumers, and
+reads each surface in place. `artwork_cache(label, seat, (fb_bytes,
+memory_bytes), pressure, sink)` builds the cache identically for every consumer,
+and
 `IconArtworkSource` binds a cache to its resolver so a renderer receives a
 plain `IconArtwork` lookup that knows nothing about I/O. `NoArtwork` is the
 all-built-in lookup a headless build or a test uses — it never resolves any
@@ -227,7 +228,13 @@ built fallibly, so a heap that refuses its text falls the draw a tier.
 A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon
 (or names one that will not decode) remembers that refusal too rather than
-re-reading it every frame. A kind's shipped masters are keyed by the kind
+re-reading it every frame. A bundle drawn from a directory listing is also
+keyed by the version the listing named (`IconRequest::listed_bundle`, the
+directory's `DocumentStamp`), as a picture file's thumbnail is: a bundle
+replaced at its path, or changed where its folder sees it, is a new key, and the
+old answer ages out of the cache by least-recent use. Nothing invalidates an
+entry. A bundle found in a program store has no listing and is named with no
+version (`IconRequest::bundle`). A kind's shipped masters are keyed by the kind
 (`ArtworkKey::Raster`, `ArtworkKey::Vector`), not by a formatted path.
 
 A lookup compares the slot it wants in a borrowed form taken from the request,
@@ -236,26 +243,28 @@ key the resolver is handed and the slot is retained under.
 
 ## What pressure may take, and what it may not
 
-The cache is built through `tairix_reclaim::working_set_ui_cache`, so a quarter
-of its budget is declared the owner's live **working set** — what one frame
-draws — and its first `UI_CACHE_RESERVE_BYTES` are declared **irreducible**:
-mild and moderate memory pressure take the scroll-back and off-screen
-speculation above the working set but not the working set itself, and severe
-and critical take everything above the reserve. Re-deriving an entry here is not local work the
-session can repeat at will — it is a capability-gated read plus a
-parser-sandbox round trip — so giving it back at the first tightening frees a
-figure the machine barely notices and immediately costs both again, per icon,
-on the next repaint (`plans/SMARTRAM.md` section 6.4).
+The cache is built through `tairix_reclaim::working_set_ui_cache`, so its whole
+budget is declared the owner's live **working set** and its first
+`UI_CACHE_RESERVE_BYTES` **irreducible**: mild and moderate memory pressure
+take none of it, and severe and critical take everything above the reserve.
+Re-deriving an entry here is not local work the owner can repeat at will — it
+is a capability-gated read plus a parser-sandbox round trip — so giving it back
+before memory is genuinely short frees a figure the machine barely notices and
+immediately costs both again, per icon, on the next repaint
+(`plans/SMARTRAM.md` section 6.4).
 
-The ceiling is **one screenful**, not a fraction of one. Icons are drawn on the
-output, so no more of them can be visible at once than fill it — and a grid of
-them is nowhere near a fraction of it: a 480×480 file-manager window draws some
-117 KiB of icon where a sixteenth of its frame is 57 KiB. A cache that cannot
-hold what one frame draws evicts an entry the very next paint asks for again,
-which is either a wrong picture on screen or a read and a round trip per icon
-per frame. On an output whose frame is a mebibyte or less the whole budget sits
-inside the reserve and no band takes a decoded icon at all; above that, severe
-and critical take what is held above the reserve.
+The ceiling is the machine's standard share of its memory
+(`CacheBudget::from_backing`), never below **one screenful** — what a machine
+that cannot report its memory keeps. What was decoded therefore stays: a folder
+left and browsed back to, the scroll-back of a long one, the icons of every
+window a file manager has open. Below the ceiling only least-recent use takes
+an entry. The screenful floor is what one frame can draw: a grid of icons is
+nowhere near a fraction of it — a 480×480 file-manager window draws some 117 KiB
+of icon where a sixteenth of its frame is 57 KiB — and a cache that cannot hold
+what one frame draws evicts an entry the very next paint asks for again, which
+is either a wrong picture on screen or a read and a round trip per icon per
+frame. A display that changes size re-holds the cache to it
+(`ArtworkCache::rescale`) against the same memory figure.
 
 An entry is charged its key's heap bytes beside its pixels
 (`ArtworkKey::heap_bytes`) — a folder key names its members' paths, a program
@@ -336,6 +345,23 @@ a draw needs* and *producing it*:
   refusal lands like a picture, because the item that asked now draws the tier
   below. Without the names, every surface drawing any artwork has to repaint
   whole for a batch that moved one slot.
+- **A surface repainted in part says what else it shows.** Withdrawing the
+  thumbnails no surface asks about (`ArtworkDesk::sweep_thumbnails`) needs an
+  ask from every surface, and a pass that repainted only the items a landing
+  moved asked about only those. `ArtworkCache::still_shown(resolver, request,
+  side)` names the rest — the tiers `prefetch` would — and the desk marks what it
+  already holds as asked (`ArtworkDesk::keep`) but queues nothing: a picture the
+  cache evicted is already on screen, and asking for it again would let a
+  working set larger than the budget decode itself in a loop.
+- **Nothing is read from a tree still being written.** A copy creates a bundle
+  before it writes the manifest and icon inside, so a decode run meanwhile
+  would picture or refuse the half-written bundle, and that answer would stand.
+  `ArtworkDesk::hold_under(tree)` produces nothing asked for at or under
+  `tree` — an asset, a bundle, a picture file, named by its path — and records
+  none of it, so it draws the tier below and holding a tree costs one path
+  however much of it is shown; `release_under(tree)` names the tree in the next
+  `Landed`, and each item drawn from inside it asks again against the finished
+  tree.
 
 The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
 Two embedders drive it over the same rules, and both do it the same way: each
@@ -363,7 +389,9 @@ landing drove would ask, the answer would be refused again, and every icon on
 screen would be read and decoded every frame, precisely when the machine is
 short of the memory that would have held them. The cache says so
 (`ArtworkResolver::declined`) and the key is held as declined until
-`ArtworkDesk::retry_declined` re-offers it on the pressure band's own wake.
+`ArtworkDesk::retry_declined` re-offers it on the pressure band's own wake,
+naming it in the next `Landed`: what an item draws without it is already on
+screen, so nothing else would make that item ask again.
 
 A pending tier **stops** the walk rather than falling through, because whether
 a later tier is reached at all depends on what this one turns out to be. A

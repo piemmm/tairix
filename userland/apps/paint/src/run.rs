@@ -803,8 +803,8 @@ mod program {
         }
     }
 
-    /// The toolbar's glyph cache, budgeted from a window's frame and
-    /// registered with the process's cache report.
+    /// The toolbar's glyph cache, budgeted from a window's frame and the
+    /// machine's memory, and registered with the process's cache report.
     fn icon_cache(desktop: &Desktop) -> ArtworkCache {
         // The reclaim bookkeeping's audit sink: the shared constructor takes
         // a `'static` borrow, and the runtime sink owns nothing.
@@ -814,7 +814,10 @@ mod program {
         let cache = artwork_cache(
             "paint.icon-artwork",
             SEAT_PRIMARY,
-            frame,
+            (
+                frame,
+                tairix_procinfo::memory_total_for_budget(&tairix_procinfo::IpcTransport),
+            ),
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );

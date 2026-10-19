@@ -16,13 +16,14 @@
 //! sandbox round trip happen with nothing held.
 //!
 //! The cache and the resolver are injected — only the running program knows the
-//! window's frame size, the live pressure gauge, the audit sink, the capability
+//! screen's frame size, the live pressure gauge, the audit sink, the capability
 //! the read runs under, and whether the kernel granted a thread to defer to —
 //! so every rule below is a host test.
 
 use alloc::boxed::Box;
 
-use tairix_icon::{ArtworkCache, ArtworkResolver, IconArtworkSource};
+use tairix_browse::render::ShownArt;
+use tairix_icon::{ArtworkCache, ArtworkResolver, IconArtworkSource, Landed};
 
 /// The decode cache and the resolver its misses are produced through.
 pub struct IconPipeline {
@@ -53,6 +54,25 @@ impl IconPipeline {
     /// answering the bytes released.
     pub fn trim(&mut self) -> usize {
         self.cache.trim()
+    }
+
+    /// Hold the cache to what an output of `fb_bytes` allows, the output
+    /// having changed size.
+    pub fn rescale(&mut self, fb_bytes: usize) {
+        self.cache.rescale(fb_bytes);
+    }
+
+    /// Whether `art` draws through a decode `landed` answered, so its slot
+    /// repaints; one that does not is still shown though the pass will not
+    /// repaint it, and the resolver hears so, so a sweep keeps what it waits
+    /// on.
+    pub fn moved_by(&mut self, landed: &Landed, art: ShownArt<'_>) -> bool {
+        let moved = landed.resolves(art.request, art.side);
+        if !moved {
+            self.cache
+                .still_shown(self.resolver.as_mut(), art.request, art.side);
+        }
+        moved
     }
 }
 

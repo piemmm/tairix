@@ -136,6 +136,14 @@ pub fn memory_total_bytes(transport: &dyn Transport) -> Result<u64, CallError> {
         .map_err(|_| CallError::Service(Errno::BadMagic))
 }
 
+/// [`memory_total_bytes`] as the figure a budget is scaled from: zero where it
+/// could not be read, which a share of it sizes to nothing, and saturated where
+/// it does not fit an address.
+#[must_use]
+pub fn memory_total_for_budget(transport: &dyn Transport) -> usize {
+    memory_total_bytes(transport).map_or(0, |total| usize::try_from(total).unwrap_or(usize::MAX))
+}
+
 /// Read the machine's boot-time configuration store
 /// ([`SysinfoQueryId::SYSTEM_CONFIG`]), parsed through the store's own
 /// engine.
@@ -450,8 +458,9 @@ pub fn for_each_net_bond_member(
 mod tests {
     use super::{
         for_each_cache_ledger, for_each_cpu_load, for_each_desktop_frame_report, for_each_irq,
-        for_each_reclaim_class, memory_pressure, memory_total_bytes, ramzip_stats, system_config,
-        WalkStep, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE, RECLAIM_PAGE,
+        for_each_reclaim_class, memory_pressure, memory_total_bytes, memory_total_for_budget,
+        ramzip_stats, system_config, WalkStep, CACHE_LEDGER_PAGE, CPU_LOAD_PAGE, IRQ_PAGE,
+        RECLAIM_PAGE,
     };
     use crate::list::ListError;
     use crate::request::CallError;
@@ -828,6 +837,19 @@ mod tests {
         // nothing when the machine's size is unknown.
         let eighth_of_ram = total / 8;
         assert_eq!(eighth_of_ram, 0);
+    }
+
+    /// The budget figure is the total where it is read, and zero where it is
+    /// refused: never a guess at a machine the service did not describe.
+    #[test]
+    fn the_budget_figure_is_the_total_or_nothing() {
+        let mut fixture = Fixture::new();
+        assert_eq!(memory_total_for_budget(&fixture), 1 << 30);
+        fixture.deny = Some(SysinfoQueryId::MEMORY_TOTAL);
+        assert_eq!(memory_total_for_budget(&fixture), 0);
+        fixture.deny = None;
+        fixture.malformed = Some(SysinfoQueryId::MEMORY_TOTAL);
+        assert_eq!(memory_total_for_budget(&fixture), 0);
     }
 
     #[test]

@@ -101,7 +101,7 @@ fn cache() -> ArtworkCache {
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
     let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
-    artwork_cache("test.icon-artwork", 1, 1920 * 1080 * 4, gauge, sink)
+    artwork_cache("test.icon-artwork", 1, (1920 * 1080 * 4, 0), gauge, sink)
 }
 
 #[test]
@@ -900,6 +900,7 @@ struct Deferring {
     ready: BTreeMap<(ArtworkKey, u32), Option<Surface>>,
     asked: Vec<(ArtworkKey, u32)>,
     warmed: Vec<(ArtworkKey, u32)>,
+    shown: Vec<(ArtworkKey, u32)>,
 }
 
 impl Deferring {
@@ -908,6 +909,7 @@ impl Deferring {
             ready: BTreeMap::new(),
             asked: Vec::new(),
             warmed: Vec::new(),
+            shown: Vec::new(),
         }
     }
 
@@ -929,6 +931,10 @@ impl ArtworkResolver for Deferring {
 
     fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
         self.warmed.push((key.clone(), side));
+    }
+
+    fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
+        self.shown.push((key.clone(), side));
     }
 }
 
@@ -1192,7 +1198,7 @@ fn cache_at_on(band: PressureBand, fb_bytes: usize) -> (&'static ReportedPressur
     let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
     (
         gauge,
-        artwork_cache("test.icon-artwork", 1, fb_bytes, gauge, sink),
+        artwork_cache("test.icon-artwork", 1, (fb_bytes, 0), gauge, sink),
     )
 }
 
@@ -1424,7 +1430,7 @@ fn a_shadow_never_pushes_its_own_picture_out_of_the_cache() {
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
     let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
-    let mut c = artwork_cache("test.icon-artwork", 1, 4096, gauge, sink);
+    let mut c = artwork_cache("test.icon-artwork", 1, (4096, 0), gauge, sink);
     let mut reader = CountingReader::new();
     let mut ras = SquareRasteriser;
     let request = IconRequest::kind(IconKind::Refresh);
@@ -1557,4 +1563,154 @@ fn a_retained_icon_is_drawn_again_without_allocating() {
     draw(&mut c, &mut reader, own);
     let ((), metering) = tairix_fuzzseed::meter::metered(|| draw(&mut c, &mut reader, own));
     assert_eq!(metering.allocations, 0, "{metering:?}");
+}
+
+/// What a surface says about a picture it shows but did not repaint names the
+/// tier a warm-up would, and asks for, resolves and retains nothing: a cache
+/// too small for what is on screen must not start re-decoding what the screen
+/// already shows.
+#[test]
+fn still_shown_names_the_unheld_tier_and_starts_nothing() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let own = ArtworkKey::Asset("/System/Applications/One.app/Resources/icon.png".to_string());
+    let request = IconRequest::asset(
+        IconKind::AppBundle,
+        "/System/Applications/One.app/Resources/icon.png",
+    );
+
+    c.still_shown(&mut deferring, request, 8);
+    assert_eq!(deferring.shown, vec![(own.clone(), 8)]);
+    assert!(deferring.warmed.is_empty(), "still_shown warmed a decode");
+    assert!(deferring.asked.is_empty(), "still_shown resolved a decode");
+    assert_eq!(c.charged_bytes(), 0);
+
+    deferring.land(&own, 8, Some(square(8)));
+    assert!(c.artwork(&mut deferring, request, 8).is_some());
+    deferring.shown.clear();
+    c.still_shown(&mut deferring, request, 8);
+    assert!(
+        deferring.shown.is_empty(),
+        "a picture the cache serves was named as waiting"
+    );
+}
+
+/// A thumbnail being produced draws the tier beneath it, so both are what the
+/// surface still shows.
+#[test]
+fn still_shown_names_a_pending_thumbnail_and_the_tier_beneath_it() {
+    let c = cache();
+    let mut deferring = Deferring::new();
+    let stamp = crate::DocumentStamp {
+        size: 1,
+        modified: tairix_abi::time::Time64::UNIX_EPOCH,
+        id: tairix_abi::fs::FileId {
+            volume: [1; 16],
+            node: 1,
+        },
+        content_gen: 1,
+    };
+    let request = IconRequest::thumbnail(
+        IconKind::ImagePng,
+        "/Users/ann/Home/a.png",
+        stamp,
+        crate::Reading::Signature,
+    );
+
+    c.still_shown(&mut deferring, request, 8);
+    let named: Vec<bool> = deferring
+        .shown
+        .iter()
+        .map(|(key, _)| key.is_thumbnail_class())
+        .collect();
+    assert_eq!(
+        named,
+        vec![true, false],
+        "the thumbnail, then its class picture"
+    );
+}
+
+/// The version a listing named at `n`.
+fn listed_stamp(n: u64) -> crate::DocumentStamp {
+    crate::DocumentStamp {
+        size: n,
+        modified: tairix_abi::time::Time64::UNIX_EPOCH,
+        id: tairix_abi::fs::FileId {
+            volume: [2; 16],
+            node: n,
+        },
+        content_gen: n,
+    }
+}
+
+/// A bundle replaced or changed where its folder sees it is a different
+/// picture: what was drawn for the old version is never served for the new
+/// one, and nothing is let go of to make that so — the old answer stays until
+/// least-recent use takes it. A bundle found in a program store, named with no
+/// version, is a picture of its own.
+#[test]
+fn a_listed_bundle_at_a_new_version_is_a_new_picture() {
+    let mut c = cache();
+    let mut deferring = Deferring::new();
+    let dir = "/Storage/B/One.app";
+    let old = IconRequest::listed_bundle(IconKind::AppBundle, dir, listed_stamp(1));
+    let new = IconRequest::listed_bundle(IconKind::AppBundle, dir, listed_stamp(2));
+    let old_key = ArtworkKey::Bundle {
+        dir: dir.to_string(),
+        stamp: Some(listed_stamp(1)),
+    };
+    deferring.land(&old_key, 8, Some(square(8)));
+    assert!(matches!(c.artwork(&mut deferring, old, 8), Some(p) if !p.is_mask()));
+    let held = c.charged_bytes();
+
+    deferring.asked.clear();
+    assert!(
+        matches!(c.artwork(&mut deferring, new, 8), Some(p) if p.is_mask()),
+        "the old version's picture was served for the new one"
+    );
+    assert_eq!(
+        deferring.asked.first().map(|(key, _)| key.clone()),
+        Some(ArtworkKey::Bundle {
+            dir: dir.to_string(),
+            stamp: Some(listed_stamp(2)),
+        })
+    );
+    assert!(c.charged_bytes() >= held, "the old answer was let go of");
+
+    deferring.asked.clear();
+    let stored = IconRequest::bundle(IconKind::AppBundle, dir);
+    let _ = c.artwork(&mut deferring, stored, 8);
+    assert_eq!(
+        deferring.asked.first().map(|(key, _)| key.clone()),
+        Some(ArtworkKey::Bundle {
+            dir: dir.to_string(),
+            stamp: None,
+        })
+    );
+}
+
+/// While a copy is writing a bundle, its tile draws the built-in picture and
+/// nothing is read from it; once the copy is done the tile asks again and the
+/// finished bundle is what is decoded.
+#[test]
+fn a_held_bundle_draws_its_glyph_until_released_then_decodes_once() {
+    let mut c = cache();
+    let mut desk = crate::ArtworkDesk::new();
+    let dir = "/Storage/B/One.app";
+    let request = IconRequest::listed_bundle(IconKind::AppBundle, dir, listed_stamp(1));
+    desk.hold_under(dir);
+    for _ in 0..3 {
+        assert!(matches!(c.artwork(&mut desk, request, 8), Some(p) if p.is_mask()));
+    }
+    assert!(!desk.has_work(), "a held bundle was queued for a decode");
+
+    assert!(desk.release_under(dir));
+    assert!(desk.take_landed().resolves(request, 8));
+    assert!(matches!(c.artwork(&mut desk, request, 8), Some(p) if p.is_mask()));
+    let job = desk
+        .next_job()
+        .expect("the released bundle was not asked for");
+    assert!(desk.next_job().is_none(), "the bundle was queued twice");
+    assert!(desk.deliver(&job, Some(Artwork::new(square(8)))).kept());
+    assert!(matches!(c.artwork(&mut desk, request, 8), Some(p) if !p.is_mask()));
 }

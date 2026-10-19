@@ -271,6 +271,14 @@ pub trait ArtworkResolver {
     /// The default does nothing, which is right for a resolver that produces
     /// on the calling thread: it holds no queue to hold back.
     fn declined(&mut self, _key: &ArtworkKey, _side: u32) {}
+
+    /// A surface still shows the picture `key` at `side` is for, though it did
+    /// not draw it this pass: a resolver that withdraws work nobody asked
+    /// about keeps this, and starts nothing for it.
+    ///
+    /// The default does nothing, which is right for a resolver that holds no
+    /// queue.
+    fn still_shown(&mut self, _key: &ArtworkKey, _side: u32) {}
 }
 
 /// The resolver that reads and decodes on the calling thread.
@@ -316,7 +324,13 @@ pub(crate) enum OwnIcon<'a> {
     /// A `<Name>.app` directory whose signed manifest names the asset. The
     /// artwork layer reads and validates the manifest itself, so a draw site
     /// holding only a directory entry needs no manifest knowledge of its own.
-    Bundle(&'a str),
+    Bundle {
+        /// The bundle directory's absolute path.
+        dir: &'a str,
+        /// The version of the directory the listing named, where the request
+        /// came from one.
+        stamp: Option<DocumentStamp>,
+    },
     /// The bundle of the program of this *name*, resolved through the
     /// program-store order, with the asking session's own home root so its
     /// user's stores are searched last.
@@ -372,11 +386,29 @@ impl<'a> IconRequest<'a> {
     /// A picture for the application bundle at `dir` (a `<Name>.app`
     /// directory), falling back to `kind` when the bundle declares no icon or
     /// its icon will not serve.
+    ///
+    /// For a bundle found in a program store; one drawn from a directory
+    /// listing is [`listed_bundle`](Self::listed_bundle).
     #[must_use]
     pub const fn bundle(kind: IconKind, dir: &'a str) -> Self {
         Self {
             kind,
-            own: Some(OwnIcon::Bundle(dir)),
+            own: Some(OwnIcon::Bundle { dir, stamp: None }),
+        }
+    }
+
+    /// [`bundle`](Self::bundle), for a bundle a directory listing names at
+    /// the version `stamp`: a bundle replaced, or changed where its folder
+    /// sees it, is a different picture, and the one drawn before ages out
+    /// rather than being served for it.
+    #[must_use]
+    pub const fn listed_bundle(kind: IconKind, dir: &'a str, stamp: DocumentStamp) -> Self {
+        Self {
+            kind,
+            own: Some(OwnIcon::Bundle {
+                dir,
+                stamp: Some(stamp),
+            }),
         }
     }
 
@@ -482,11 +514,17 @@ impl<'a> Tier<'a> {
         self.view() == key.view()
     }
 
+    /// Whether this candidate is read from a file at or under `tree`
+    /// ([`ArtworkKey::is_named_under`]).
+    pub(crate) fn named_under(self, tree: &str) -> bool {
+        self.view().is_named_under(tree)
+    }
+
     /// The artwork this candidate names, borrowed from the request.
     fn view(self) -> ArtView<'a> {
         match self {
             Self::Own(OwnIcon::Asset(path)) => ArtView::Asset(path),
-            Self::Own(OwnIcon::Bundle(dir)) => ArtView::Bundle(dir),
+            Self::Own(OwnIcon::Bundle { dir, stamp }) => ArtView::Bundle { dir, stamp },
             Self::Own(OwnIcon::Program { name, home }) => ArtView::Program { name, home },
             Self::Own(OwnIcon::Folder(sample)) => ArtView::Folder(sample.drawn()),
             Self::FolderKinds(sample) => ArtView::Folder(sample.drawn_as_kinds()),
@@ -632,45 +670,52 @@ pub const ARTWORK_ENTRY_METADATA_BYTES: usize = 256;
 /// Build the reclaimable cache an [`ArtworkCache`] wraps, classified and
 /// budgeted by the one shared desktop policy — the *working-set* one, because
 /// re-deriving an entry here means a capability-gated read and a
-/// parser-sandbox round trip, so pressure short of severe leaves it alone
+/// parser-sandbox round trip, so it keeps what it decoded while memory allows
+/// and pressure short of severe takes none of it
 /// (`tairix_reclaim::working_set_ui_cache`).
 ///
 /// `label` names the cache in audit records, `seat` is the owning seat,
-/// `fb_bytes` is the output's frame size (so the artwork a consumer may retain
-/// scales with the display it draws on rather than a fixed ceiling), and
-/// `pressure` / `sink` are the process's live memory-pressure gauge and audit
-/// sink. Both the desktop session and the file manager call this so they build
-/// the cache identically rather than each inventing budget and metadata
-/// numbers.
+/// `fb_bytes` is the output's frame size and `memory_bytes` the machine's
+/// memory, whose share the cache may grow to (`0` where the machine cannot
+/// report it, which leaves one screenful), and `pressure` / `sink` are the
+/// process's live memory-pressure gauge and audit sink. Every program that
+/// draws icons calls this, so they build the cache identically rather than
+/// each inventing budget and metadata numbers.
 #[must_use]
 pub fn artwork_cache(
     label: &'static str,
     seat: u64,
-    fb_bytes: usize,
+    (fb_bytes, memory_bytes): (usize, usize),
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
 ) -> ArtworkCache {
     // The keys name assets inside this session's own user's stores, so a
     // grind that crowded one bucket would only slow the grinder's own
     // desktop: the fast unkeyed hash, named here rather than defaulted.
-    ArtworkCache::new(working_set_ui_cache(
-        label,
-        seat,
-        fb_bytes,
-        ARTWORK_ENTRY_METADATA_BYTES,
-        pressure,
-        sink,
-        BuildFastHash::new(),
-    ))
+    ArtworkCache::new(
+        working_set_ui_cache(
+            label,
+            seat,
+            (fb_bytes, memory_bytes),
+            ARTWORK_ENTRY_METADATA_BYTES,
+            pressure,
+            sink,
+            BuildFastHash::new(),
+        ),
+        memory_bytes,
+    )
 }
 
 /// What one retained decode is keyed by.
 ///
 /// A bundle is keyed by its *directory*, not by the asset its manifest names,
 /// so the manifest read is paid once per bundle and a bundle that declares no
-/// icon (or names one that will not decode) remembers that refusal too. A
-/// directory and an asset file can never spell the same path, but keeping the
-/// two apart in the key type says so rather than relying on it.
+/// icon (or names one that will not decode) remembers that refusal too — and,
+/// drawn from a listing, by the version the listing named, so nothing ever
+/// needs invalidating: a bundle replaced or changed is a new key, and its old
+/// answer ages out. A directory and an asset file can never spell the same
+/// path, but keeping the two apart in the key type says so rather than relying
+/// on it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtworkKey {
     /// An asset file read directly: an icon path the caller had already
@@ -681,8 +726,14 @@ pub enum ArtworkKey {
     Raster(IconKind),
     /// A kind's shipped vector master, [`icon_vector_path`].
     Vector(IconKind),
-    /// An application-bundle directory, resolved through its own manifest.
-    Bundle(String),
+    /// An application-bundle directory, resolved through its own manifest, at
+    /// the version a listing named it at where it came from one.
+    Bundle {
+        /// The bundle directory's absolute path.
+        dir: String,
+        /// The version of the directory the listing named.
+        stamp: Option<DocumentStamp>,
+    },
     /// A program *name* and the asking session's home root, resolved to the
     /// first bundle of that name in the program-store order and then through
     /// that bundle's own manifest.
@@ -735,7 +786,7 @@ impl ArtworkKey {
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
         match self {
-            Self::Asset(path) | Self::Bundle(path) => path.capacity(),
+            Self::Asset(path) | Self::Bundle { dir: path, .. } => path.capacity(),
             Self::Program { name, home } => {
                 name.capacity() + home.as_ref().map_or(0, String::capacity)
             }
@@ -745,13 +796,21 @@ impl ArtworkKey {
         }
     }
 
+    /// Whether this is read from a file at or under `tree`: an asset file, a
+    /// bundle's manifest and icon, a picture file's content. A kind's shipped
+    /// master, a folder's cards and a program found by name are not named by
+    /// a path a writer could be filling.
+    pub(crate) fn is_named_under(&self, tree: &str) -> bool {
+        self.view().is_named_under(tree)
+    }
+
     /// This key borrowed, as a lookup compares it.
     fn view(&self) -> ArtView<'_> {
         match self {
             Self::Asset(path) => ArtView::Asset(path),
             Self::Raster(kind) => ArtView::Raster(*kind),
             Self::Vector(kind) => ArtView::Vector(*kind),
-            Self::Bundle(dir) => ArtView::Bundle(dir),
+            Self::Bundle { dir, stamp } => ArtView::Bundle { dir, stamp: *stamp },
             Self::Program { name, home } => ArtView::Program {
                 name,
                 home: home.as_deref(),
@@ -774,7 +833,10 @@ enum ArtView<'a> {
     Asset(&'a str),
     Raster(IconKind),
     Vector(IconKind),
-    Bundle(&'a str),
+    Bundle {
+        dir: &'a str,
+        stamp: Option<DocumentStamp>,
+    },
     Program {
         name: &'a str,
         home: Option<&'a str>,
@@ -797,7 +859,10 @@ impl ArtView<'_> {
             Self::Asset(path) => ArtworkKey::Asset(fallible::concatenated(&[path])?),
             Self::Raster(kind) => ArtworkKey::Raster(kind),
             Self::Vector(kind) => ArtworkKey::Vector(kind),
-            Self::Bundle(dir) => ArtworkKey::Bundle(fallible::concatenated(&[dir])?),
+            Self::Bundle { dir, stamp } => ArtworkKey::Bundle {
+                dir: fallible::concatenated(&[dir])?,
+                stamp,
+            },
             Self::Program { name, home } => ArtworkKey::Program {
                 name: fallible::concatenated(&[name])?,
                 home: match home {
@@ -825,6 +890,17 @@ impl ArtView<'_> {
             Self::Folder(drawn) => drawn.has_pictures(),
             _ => false,
         }
+    }
+
+    /// [`ArtworkKey::is_named_under`], borrowed.
+    fn is_named_under(self, tree: &str) -> bool {
+        let (Self::Asset(path) | Self::Bundle { dir: path, .. } | Self::Thumbnail { path, .. }) =
+            self
+        else {
+            return false;
+        };
+        path.strip_prefix(tree)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || tree.ends_with('/'))
     }
 }
 
@@ -960,30 +1036,43 @@ pub enum ArtworkOutcome {
 /// side.
 ///
 /// One decode outcome per `(key, side)`: a scale change alters the side and so
-/// misses, re-rasterising at the new geometry. Nothing invalidates the whole
-/// cache at once — shipped artwork changes at install time, not while an icon
-/// is on screen — so the generation is the unit value; what bounds this cache
-/// is its budget, and what ends it is the owner's teardown.
+/// misses, re-rasterising at the new geometry. Nothing invalidates it, whole or
+/// in part — shipped artwork changes at install time, not while an icon is on
+/// screen — so the generation is the unit value: least-recent use takes an
+/// entry once the budget is full, severe and critical pressure take what is
+/// above the reserve, and the owner's teardown ends it.
 ///
 /// The keys are paths, some of them bundle-supplied, so an unbounded map here
 /// would let a crafted or merely crowded store grow a session without limit;
 /// the budget forecloses that.
 pub struct ArtworkCache {
     entries: ReclaimCache<SlotKey, CachedArtwork, (), BuildFastHash>,
+    /// The machine's memory the budget is a share of, which an output's
+    /// change of size does not move.
+    memory_bytes: usize,
 }
 
 impl ArtworkCache {
     /// Hold the cache to what an output of `fb_bytes` allows, the output
     /// having changed size: the budget [`artwork_cache`] builds it under.
     pub fn rescale(&mut self, fb_bytes: usize) {
-        let _ = self.entries.rebudget(working_set_ui_budget(fb_bytes));
+        let _ = self
+            .entries
+            .rebudget(working_set_ui_budget(fb_bytes, self.memory_bytes));
     }
 
-    /// An empty cache over a ready-built reclaimable cache, which
-    /// [`artwork_cache`] assembles from what only the owning process knows.
+    /// An empty cache over a ready-built reclaimable cache budgeted against
+    /// `memory_bytes`, which [`artwork_cache`] assembles from what only the
+    /// owning process knows.
     #[must_use]
-    const fn new(entries: ReclaimCache<SlotKey, CachedArtwork, (), BuildFastHash>) -> Self {
-        Self { entries }
+    const fn new(
+        entries: ReclaimCache<SlotKey, CachedArtwork, (), BuildFastHash>,
+        memory_bytes: usize,
+    ) -> Self {
+        Self {
+            entries,
+            memory_bytes,
+        }
     }
 
     /// Release every retained decode, overwriting the artwork first.
@@ -1262,6 +1351,33 @@ impl ArtworkCache {
         request: IconRequest<'_>,
         side: u32,
     ) {
+        self.each_unheld(request, side, |key| resolver.prefetch(key, side));
+    }
+
+    /// Tell `resolver` that a surface still shows `request` at `side`, though
+    /// the pass just drawn did not repaint it, naming the tiers
+    /// [`prefetch`](Self::prefetch) would and starting nothing.
+    ///
+    /// What a surface asks about everything it shows before its resolver
+    /// withdraws the work no one asked for, after a pass that repainted only
+    /// part of it.
+    pub fn still_shown(
+        &self,
+        resolver: &mut dyn ArtworkResolver,
+        request: IconRequest<'_>,
+        side: u32,
+    ) {
+        self.each_unheld(request, side, |key| resolver.still_shown(key, side));
+    }
+
+    /// Hand `ask` each tier of `request` at `side` that this cache holds no
+    /// answer for and that resolution would reach.
+    ///
+    /// Resolution stops at the first tier that serves, and a later one is only
+    /// reached if that one refuses, so this names the first unheld tier —
+    /// and past it the next too while it is thumbnail-class, whose tier below
+    /// is drawn until it lands.
+    fn each_unheld(&self, request: IconRequest<'_>, side: u32, mut ask: impl FnMut(&ArtworkKey)) {
         for tier in request.tiers() {
             let slot = SlotView {
                 art: tier.view(),
@@ -1273,22 +1389,15 @@ impl ArtworkCache {
                 .peek(&(), &slot as &dyn SlotLookup)
                 .map(CachedArtwork::artwork)
             {
-                // This tier will serve, so no later one is reached.
                 Some(Some(_)) => return,
-                // A retained refusal: the next tier is the one that matters.
                 Some(None) => {}
-                // A thumbnail-class tier draws the tier below until it lands,
-                // so that one is wanted too.
-                None if slot.art.is_thumbnail_class() => {
-                    if let Some(key) = slot.art.to_key() {
-                        resolver.prefetch(&key, side);
-                    }
-                }
                 None => {
                     if let Some(key) = slot.art.to_key() {
-                        resolver.prefetch(&key, side);
+                        ask(&key);
                     }
-                    return;
+                    if !slot.art.is_thumbnail_class() {
+                        return;
+                    }
                 }
             }
         }
@@ -1390,7 +1499,7 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
 ) -> Option<Artwork> {
     match key {
         ArtworkKey::Asset(path) => render_icon(reader, rasteriser, path, side).map(Artwork::new),
-        ArtworkKey::Bundle(dir) => {
+        ArtworkKey::Bundle { dir, .. } => {
             let path = bundle_icon_path(reader, dir)?;
             render_icon(reader, rasteriser, &path, side).map(Artwork::new)
         }

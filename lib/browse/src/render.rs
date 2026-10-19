@@ -70,7 +70,7 @@ use crate::layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, View
 use crate::media::{
     entry_icon, icon_for_entry, media_for_entry, media_for_name, Ending, MediaType,
 };
-use crate::open_with::OpenWithChooser;
+use crate::open_with::{OpenWithCandidate, OpenWithChooser};
 use crate::places::{self, Place, Places, VolumeFacts};
 use crate::progress::ProgressModel;
 use crate::properties::{Attributes, Properties};
@@ -80,6 +80,10 @@ use crate::trash::DeleteDisposition;
 use tairix_abi::fs::FileKind;
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
 use tairix_util::utf8::shown;
+
+#[path = "render_shown.rs"]
+mod shown_art;
+pub use shown_art::{chooser_art, manager_art, properties_art, ShownArt};
 
 /// Padding between a panel's edge and its label text, in logical pixels.
 const LABEL_PADDING: u32 = 4;
@@ -702,10 +706,9 @@ fn draw_sidebar(
             else {
                 continue;
             };
-            let row = place_row(place, places, index, selected);
-            let side = row.icon_side(bounds, scale, theme);
-            let art = artwork.artwork(IconRequest::kind(place.icon()), side);
-            row.render(surface, bounds, scale, theme, art);
+            let (request, side) = place_art(place, bounds, scale, theme);
+            let art = artwork.artwork(request, side);
+            place_row(place, places, index, selected).render(surface, bounds, scale, theme, art);
         }
     });
     if let Some(bar) = view.bar_rect() {
@@ -718,6 +721,26 @@ fn draw_sidebar(
             theme,
         );
     }
+}
+
+/// What a rail row laid out at `bounds` asks the artwork lookup for: its
+/// place's kind, at the side the row draws it.
+fn place_art(
+    place: &Place,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> (IconRequest<'static>, u32) {
+    (
+        IconRequest::kind(place.icon()),
+        list_row_side(bounds, scale, theme),
+    )
+}
+
+/// The side a [`ListRow`] at `bounds` draws its icon at, which the row derives
+/// from its height and text line alone.
+fn list_row_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+    ListRow::new(String::new()).icon_side(bounds, scale, theme)
 }
 
 /// Build the shared [`ListRow`] for one rail row, carrying every state the
@@ -793,12 +816,11 @@ fn draw_list<S: DirectorySource>(
             if withheld(surface, bounds) {
                 continue;
             }
-            let kind = icon_for_entry(entry, parent);
+            let (kind, side) = row_art(entry, parent, bounds, scale, theme);
             let mut row = entry_row((entry, parent), columns, browser.is_selected(index), kind);
             if browser.drop_mark() == Some(index) {
                 row.set_state(row.state().with_pointer(PointerState::DragTarget));
             }
-            let side = row.icon_side(bounds, scale, theme);
             let art = artwork.artwork(IconRequest::kind(kind), side);
             row.render(surface, bounds, scale, theme, &COLUMNS, art);
         }
@@ -853,7 +875,14 @@ fn draw_grid<S: DirectorySource>(
             if withheld(surface, bounds) {
                 continue;
             }
-            let (kind, request) = entry_icon(&dir, parent, entry, &mut scratch);
+            let (kind, request, side) = tile_art(
+                tiles,
+                (&dir, parent),
+                entry,
+                bounds,
+                (scale, theme),
+                &mut scratch,
+            );
             let mut state = ControlState::idle();
             if browser.is_selected(index) {
                 state.selection = SelectionState::Selected;
@@ -865,7 +894,6 @@ fn draw_grid<S: DirectorySource>(
             if chrome.renaming == Some(index) {
                 tile = tile.with_name_withheld();
             }
-            let side = tiles.layout().icon_side(bounds, scale, theme);
             let art = match tiles {
                 Tiles::Large => artwork.shadowed(request, side, shadow),
                 Tiles::Small => artwork.artwork(request, side),
@@ -873,6 +901,25 @@ fn draw_grid<S: DirectorySource>(
             tile.render(surface, bounds, scale, theme, art);
         }
     });
+}
+
+/// What the grid tile for `entry` laid out at `bounds` asks the artwork lookup
+/// for: the entry's kind and request ([`entry_icon`]), and the side its picture
+/// is drawn at.
+fn tile_art<'a>(
+    tiles: Tiles,
+    (dir, parent): (&str, &[String]),
+    entry: &'a Entry,
+    bounds: Rect,
+    (scale, theme): (Scale, &Theme),
+    scratch: &'a mut String,
+) -> (IconKind, IconRequest<'a>, u32) {
+    let (kind, request) = entry_icon(dir, parent, entry, scratch);
+    (
+        kind,
+        request,
+        tiles.layout().icon_side(bounds, scale, theme),
+    )
 }
 
 /// Draw the vertical [`ScrollBar`] in the reserved right-edge gutter, spanning
@@ -1057,9 +1104,30 @@ fn entry_row(
         TableCell::new(second),
         TableCell::new(third),
     ];
-    let mut row = TableRow::new(cells).with_text_role(TextRole::ItemLabel);
+    let mut row = TableRow::new(cells).with_text_role(ROW_TEXT);
     row.set_selected(selected);
     row
+}
+
+/// The text a list row is set in.
+const ROW_TEXT: TextRole = TextRole::ItemLabel;
+
+/// What the list row for `entry` laid out at `bounds` asks the artwork lookup
+/// for: the entry's kind, at the side the row draws it. A row asks by class
+/// alone ([`draw_list`]).
+fn row_art(
+    entry: &Entry,
+    parent: &[String],
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> (IconKind, u32) {
+    // A row derives the side from its height and text alone, so an empty one
+    // set in the same text answers for every row.
+    let side = TableRow::new(Vec::new())
+        .with_text_role(ROW_TEXT)
+        .icon_side(bounds, scale, theme);
+    (icon_for_entry(entry, parent), side)
 }
 
 /// What a drive's row states in the three columns after its name: its free
@@ -2356,21 +2424,14 @@ fn draw_identity(
 ) {
     let palette = theme.palette();
     let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
-    let side = scale
-        .scale_length(IDENTITY_ART)
-        .min(bounds.height.saturating_sub(pad.min(bounds.height)))
-        .max(1);
-    let art_x = bounds.left().saturating_add(to_i32(pad));
-    let art_y = bounds
-        .top()
-        .saturating_add(to_i32(bounds.height.saturating_sub(side) / 2));
-    let picture = artwork.artwork(identity.art, side);
+    let slot = identity_slot(bounds, scale);
+    let picture = artwork.artwork(identity.art, slot.width);
     paint_icon_slot(
         surface,
         (
-            u32::try_from(art_x).unwrap_or(0),
-            u32::try_from(art_y).unwrap_or(0),
-            side,
+            u32::try_from(slot.left()).unwrap_or(0),
+            u32::try_from(slot.top()).unwrap_or(0),
+            slot.width,
         ),
         identity.art.icon_kind(),
         palette.on_surface.into(),
@@ -2380,8 +2441,9 @@ fn draw_identity(
 
     let title = BitmapFont::for_role(theme.fonts(), TextRole::ItemTitle, scale);
     let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let text_x = art_x
-        .saturating_add(to_i32(side))
+    let text_x = slot
+        .left()
+        .saturating_add(to_i32(slot.width))
         .saturating_add(to_i32(scale.scale_length(theme.metrics().control_gap)));
     let budget = u32::try_from(
         bounds
@@ -2425,6 +2487,24 @@ fn draw_identity(
         rule,
         palette.border.into(),
     );
+}
+
+/// The square an identity band across `bounds` draws its artwork in, inset
+/// from its leading edge and centred down it.
+fn identity_slot(bounds: Rect, scale: Scale) -> Rect {
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    let side = scale
+        .scale_length(IDENTITY_ART)
+        .min(bounds.height.saturating_sub(pad.min(bounds.height)))
+        .max(1);
+    Rect::new(
+        bounds.left().saturating_add(to_i32(pad)),
+        bounds
+            .top()
+            .saturating_add(to_i32(bounds.height.saturating_sub(side) / 2)),
+        side,
+        side,
+    )
 }
 
 /// Which of the two owning ids the inline ownership control edits.
@@ -4980,17 +5060,7 @@ pub fn draw_open_with_chooser(
     if let Some(band) = open_with_identity_rect(viewport, scale, theme) {
         draw_identity(
             surface,
-            Identity {
-                name: chooser.display_name(),
-                detail: OPEN_WITH_PROMPT,
-                // Fail closed to the generic type when the name carries no
-                // recognised extension, exactly as a listed entry does.
-                art: IconRequest::kind(
-                    media_for_name(chooser.display_name())
-                        .unwrap_or(MediaType::ApplicationOctetStream)
-                        .icon(),
-                ),
-            },
+            chooser_identity(chooser),
             scale,
             theme,
             band,
@@ -5013,11 +5083,8 @@ pub fn draw_open_with_chooser(
                 row = row.with_trailing(OPEN_WITH_DEFAULT_MARK);
             }
             row.set_selected(index == chooser.selected());
-            let side = row.icon_side(bounds, scale, theme);
-            let art = artwork.artwork(
-                IconRequest::bundle(IconKind::AppBundle, candidate.bundle_path()),
-                side,
-            );
+            let (request, side) = candidate_art(candidate, bounds, scale, theme);
+            let art = artwork.artwork(request, side);
             row.render(surface, bounds, scale, theme, art);
         }
     });
@@ -5037,6 +5104,36 @@ pub fn draw_open_with_chooser(
             build_open_with_action(*action, label, chooser).render(surface, *rect, scale, theme);
         }
     }
+}
+
+/// The chooser's identity band: the file's name, the prompt, and the picture
+/// of its type.
+fn chooser_identity(chooser: &OpenWithChooser) -> Identity<'_> {
+    Identity {
+        name: chooser.display_name(),
+        detail: OPEN_WITH_PROMPT,
+        // Fail closed to the generic type when the name carries no recognised
+        // extension, exactly as a listed entry does.
+        art: IconRequest::kind(
+            media_for_name(chooser.display_name())
+                .unwrap_or(MediaType::ApplicationOctetStream)
+                .icon(),
+        ),
+    }
+}
+
+/// What a candidate's row laid out at `bounds` asks the artwork lookup for: its
+/// application's own icon, at the side the row draws it.
+fn candidate_art<'a>(
+    candidate: &'a OpenWithCandidate,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> (IconRequest<'a>, u32) {
+    (
+        IconRequest::bundle(IconKind::AppBundle, candidate.bundle_path()),
+        list_row_side(bounds, scale, theme),
+    )
 }
 
 /// What the chooser's identity band says beneath the file's name.

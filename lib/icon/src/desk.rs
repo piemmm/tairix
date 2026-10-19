@@ -33,8 +33,11 @@
 //! pressure band that refused it.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
+use tairix_util::fallible;
 
 use crate::artwork::{ArtworkKey, ArtworkResolver, IconRequest, Resolved};
 use crate::picture::Artwork;
@@ -124,9 +127,13 @@ impl Delivered {
 ///
 /// A refusal lands like any other answer: the decode was run, so an item that
 /// resolves through it is offered the tier below rather than left as it was.
+/// So does a tree whose writing ended ([`ArtworkDesk::release_under`]): what
+/// was drawn from inside it while it was held draws the tier below, and asks
+/// again now.
 #[derive(Debug)]
 pub struct Landed {
     jobs: BTreeSet<ArtworkJob>,
+    released: Vec<String>,
 }
 
 impl Landed {
@@ -134,10 +141,11 @@ impl Landed {
     /// frame.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.jobs.is_empty()
+        self.jobs.is_empty() && self.released.is_empty()
     }
 
-    /// Whether `request` at `side` draws through one of these decodes.
+    /// Whether `request` at `side` draws through one of these decodes, or
+    /// from inside a released tree.
     ///
     /// **Every** tier is asked, not just the one that answers today: a
     /// request whose own icon is still being produced draws its class
@@ -151,6 +159,7 @@ impl Landed {
             self.jobs
                 .iter()
                 .any(|job| job.side == side && tier.names(&job.key))
+                || self.released.iter().any(|tree| tier.named_under(tree))
         })
     }
 }
@@ -177,6 +186,11 @@ pub struct ArtworkDesk {
     /// from `landed`, which the loop itself consumes: this is the producer's
     /// debt, and it survives a delivery made while more work was queued.
     wake_owed: bool,
+    /// The trees still being written, under which nothing is produced.
+    held: Vec<String>,
+    /// The trees released since the embedder last asked, drained with
+    /// `landed`.
+    released: Vec<String>,
     /// Set once the embedder is tearing down, so a parked producer leaves
     /// instead of looking for work and no further decode is recorded.
     stopping: bool,
@@ -192,6 +206,8 @@ impl ArtworkDesk {
             thumbnails: VecDeque::new(),
             landed: BTreeSet::new(),
             wake_owed: false,
+            held: Vec::new(),
+            released: Vec::new(),
             stopping: false,
         }
     }
@@ -234,8 +250,13 @@ impl ArtworkDesk {
         }
     }
 
-    /// Record `job` as wanted, behind the others of its kind.
+    /// Record `job` as wanted, behind the others of its kind — unless what it
+    /// pictures is still being written, when nothing is recorded: its release
+    /// is what makes the item ask again.
     fn enqueue(&mut self, job: ArtworkJob) {
+        if self.held.iter().any(|tree| job.key.is_named_under(tree)) {
+            return;
+        }
         if is_thumbnail(&job) {
             if self.thumbnails.len() >= MAX_WANTED_THUMBNAILS {
                 self.withdraw_oldest_thumbnail();
@@ -321,6 +342,25 @@ impl ArtworkDesk {
         match self.slots.get_mut(&job) {
             Some(slot) => slot.asked = true,
             None => self.enqueue(job),
+        }
+    }
+
+    /// Note that a surface still shows what `key` at `side` is for, so the
+    /// next [`sweep`](Self::sweep_thumbnails) keeps it — recording nothing
+    /// this desk does not already hold.
+    ///
+    /// What a surface that repainted only part of itself asks about the rest
+    /// before a sweep. [`want`](Self::want) would serve that too, but it also
+    /// queues a decode for a picture the cache has since evicted, though the
+    /// surface already shows it; asking for every shown picture that way lets
+    /// a working set larger than the cache's budget decode itself in a loop.
+    pub fn keep(&mut self, key: &ArtworkKey, side: u32) {
+        let job = ArtworkJob {
+            key: key.clone(),
+            side,
+        };
+        if let Some(slot) = self.slots.get_mut(&job) {
+            slot.asked = true;
         }
     }
 
@@ -411,6 +451,7 @@ impl ArtworkDesk {
     pub fn take_landed(&mut self) -> Landed {
         Landed {
             jobs: core::mem::take(&mut self.landed),
+            released: core::mem::take(&mut self.released),
         }
     }
 
@@ -453,10 +494,55 @@ impl ArtworkDesk {
     }
 
     /// Offer every declined key again, because the pressure band moved and the
-    /// answer may now be retainable.
-    pub fn retry_declined(&mut self) {
-        self.slots
-            .retain(|_, slot| !matches!(slot.state, State::Declined));
+    /// answer may now be retainable, answering whether there was one.
+    ///
+    /// Each is named in the next [`Landed`] as though it had come back: an item
+    /// drawing the tier below for want of it is repainted, and asks again —
+    /// nothing else would, since what it shows is already on screen.
+    pub fn retry_declined(&mut self) -> bool {
+        let landed = &mut self.landed;
+        let mut retried = false;
+        self.slots.retain(|job, slot| {
+            if !matches!(slot.state, State::Declined) {
+                return true;
+            }
+            landed.insert(job.clone());
+            retried = true;
+            false
+        });
+        retried
+    }
+
+    /// Produce nothing pictured from at or under `tree` until
+    /// [`release_under`](Self::release_under): it is being written — a copy
+    /// filling a bundle — so an answer read now could picture the half-written
+    /// state, and a refusal read now would be retained as the answer.
+    ///
+    /// What is asked for meanwhile records nothing and draws the tier below, so
+    /// however much of a tree is shown while it is written, holding it costs
+    /// one path. Called before the first write, so no ask precedes it. A tree
+    /// the heap refuses to record is not held, which costs only a decode of the
+    /// unfinished state.
+    pub fn hold_under(&mut self, tree: &str) {
+        if self.stopping {
+            return;
+        }
+        if let Some(tree) = fallible::concatenated(&[tree]) {
+            self.held.push(tree);
+        }
+    }
+
+    /// `tree` has been written: it is named in the next [`Landed`], so each
+    /// item drawn from inside it while it was held asks again and the decode
+    /// reads the finished tree. Answers whether it was held, so the embedder
+    /// wakes its loop.
+    pub fn release_under(&mut self, tree: &str) -> bool {
+        let Some(at) = self.held.iter().position(|held| held == tree) else {
+            return false;
+        };
+        let tree = self.held.swap_remove(at);
+        self.released.push(tree);
+        true
     }
 
     /// Stop handing out work, so a parked producer leaves its loop.
@@ -470,6 +556,8 @@ impl ArtworkDesk {
         // and the batch it would have shown — dies with the answers.
         self.wake_owed = false;
         self.landed.clear();
+        self.held.clear();
+        self.released.clear();
         for slot in self.slots.values_mut() {
             if let State::Done(Some(artwork)) = &mut slot.state {
                 artwork.wipe();
@@ -516,6 +604,10 @@ impl ArtworkResolver for ArtworkDesk {
 
     fn declined(&mut self, key: &ArtworkKey, side: u32) {
         self.decline(key, side);
+    }
+
+    fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
+        self.keep(key, side);
     }
 }
 

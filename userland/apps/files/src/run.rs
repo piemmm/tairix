@@ -137,16 +137,16 @@ mod program {
     use tairix_browse::document;
     use tairix_browse::marquee::{self, report_band};
     use tairix_browse::render::{
-        delete_alert, draw_open_with_chooser, draw_progress_window, draw_properties_window,
-        draw_rename_field, drop_folder_at, manager_tool_at, open_with_action_at, open_with_reveal,
-        open_with_row_at, open_with_scroll_pointer, open_with_scroll_repeat,
-        open_with_scroll_wheel, progress_bar_rect, progress_state, progress_window_extent,
-        properties_drive_damage, properties_reveal, properties_scroll_pointer,
-        properties_scroll_repeat, properties_scroll_wheel, render_into, scroll_pointer,
-        scroll_repeat, scroll_wheel, sidebar_scroll_repeat, AttrAction, Frame, Identity,
-        OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls, PropertiesFrame,
-        PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView, SectionsShown,
-        DELETE_CONFIRM_INDEX,
+        chooser_art, delete_alert, draw_open_with_chooser, draw_progress_window,
+        draw_properties_window, draw_rename_field, drop_folder_at, manager_art, manager_tool_at,
+        open_with_action_at, open_with_reveal, open_with_row_at, open_with_scroll_pointer,
+        open_with_scroll_repeat, open_with_scroll_wheel, progress_bar_rect, progress_state,
+        progress_window_extent, properties_art, properties_drive_damage, properties_reveal,
+        properties_scroll_pointer, properties_scroll_repeat, properties_scroll_wheel, render_into,
+        scroll_pointer, scroll_repeat, scroll_wheel, sidebar_scroll_repeat, AttrAction, Frame,
+        Identity, OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls,
+        PropertiesFrame, PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView,
+        SectionsShown, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_manifest, blank_documents, browser_floor,
@@ -171,7 +171,7 @@ mod program {
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
-        ArtworkReader, ArtworkResolver, IconKind, IconRequest, InlineArtwork, Resolved,
+        ArtworkReader, ArtworkResolver, IconKind, IconRequest, InlineArtwork, Landed, Resolved,
         ThumbnailStore, MAX_ARTWORK_BYTES,
     };
     use tairix_input::{ClickKind, DoubleClickTracker, Key, Modifiers, NamedKey, PointerButton};
@@ -1584,16 +1584,18 @@ mod program {
         resized
     }
 
-    /// Carry every window over to a desktop change: a browser window asks for
-    /// its blur again and re-reads its floor and opening height at the new
-    /// density, and each window — and any chooser over one — owes the whole of
-    /// itself in the new theme.
+    /// Carry every window over to a desktop change: the artwork cache is held
+    /// to the screen as it now is, a browser window asks for its blur again and
+    /// re-reads its floor and opening height at the new density, and each
+    /// window — and any chooser over one — owes the whole of itself in the new
+    /// theme.
     fn owe_desktop(
         windows: &mut [OpenWindow],
         client: &mut WindowClient<app::RtWindowTransport>,
-        desktop: &Desktop,
+        (desktop, icons): (&Desktop, &RefCell<IconPipeline>),
         grounds: Grounds<'_>,
     ) {
+        icons.borrow_mut().rescale(screen_bytes(desktop));
         let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT).1;
         let floor_width = win_floor_width(desktop.scale(), grounds.window);
         for win in windows {
@@ -1660,11 +1662,13 @@ mod program {
 
     /// Operation `id` stops with the window showing it: it never runs if it
     /// waits, stops at its next unit if it runs, and one carried out on this
-    /// loop ends here, the file it was writing removed.
+    /// loop ends here, the file it was writing removed and the decodes held
+    /// for what it was writing let run.
     fn stop_operation(id: u64, operation: &mut Operation, reads: &Reads) {
         reads.forget_operation(id);
         if let Some(job) = operation.here.as_mut() {
             job.abandon();
+            job.release_hold(&mut reads.work.lock().artwork);
         }
     }
 
@@ -4430,23 +4434,26 @@ mod program {
             self.work.lock().artwork.decline(key, side);
         }
 
-        /// The band moved: offer the refused decodes again.
-        fn retry_declined_artwork(&self) {
-            self.work.lock().artwork.retry_declined();
+        /// The band moved: offer the refused decodes again, answering whether
+        /// there was one, for the windows drawn without it to ask again.
+        fn retry_declined_artwork(&self) -> bool {
+            self.work.lock().artwork.retry_declined()
         }
 
-        /// Whether a decode has landed since this was last asked.
-        ///
-        /// The loop repaints on a `true`, so a wake that delivered nothing new
-        /// costs no frame. A batch's tiles are spread over every open window's
-        /// grid, so which decodes landed buys the loop nothing and the desk's
-        /// answer is narrowed to the question it asks.
-        fn take_artwork_landed(&self) -> bool {
-            !self.work.lock().artwork.take_landed().is_empty()
+        /// Note that a window still shows what `key` at `side` is for, so the
+        /// next sweep keeps it, starting nothing.
+        fn keep_artwork(&self, key: &ArtworkKey, side: u32) {
+            self.work.lock().artwork.keep(key, side);
         }
 
-        /// Withdraw the thumbnails no window asked for in the pass just drawn
-        /// over every window.
+        /// Which decodes have landed since this was last asked: each window
+        /// repaints the pictures drawn through them and no others.
+        fn take_artwork_landed(&self) -> Landed {
+            self.work.lock().artwork.take_landed()
+        }
+
+        /// Withdraw the thumbnails no window asked about in the pass just
+        /// drawn.
         fn sweep_thumbnails(&self) {
             self.work.lock().artwork.sweep_thumbnails();
         }
@@ -4708,8 +4715,9 @@ mod program {
                     let step = job.step();
                     let (owed, cancelled) = {
                         let mut work = self.work.lock();
+                        let released = job.sync_hold(&mut work.artwork);
                         (
-                            work.operations.report(job.reading(), &job.current),
+                            work.operations.report(job.reading(), &job.current) | released,
                             work.operations.cancelled(),
                         )
                     };
@@ -4727,8 +4735,12 @@ mod program {
                     }
                 };
                 // Its files close before its answer lands.
-                drop(job);
-                let owed = self.work.lock().operations.finish(ending);
+                let owed = {
+                    let mut work = self.work.lock();
+                    let released = job.release_hold(&mut work.artwork);
+                    drop(job);
+                    work.operations.finish(ending) | released
+                };
                 if owed {
                     self.wake.nudge();
                 }
@@ -4840,6 +4852,10 @@ mod program {
 
         fn declined(&mut self, key: &ArtworkKey, side: u32) {
             self.0.decline_artwork(key, side);
+        }
+
+        fn still_shown(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.keep_artwork(key, side);
         }
     }
 
@@ -5032,11 +5048,23 @@ mod program {
         out
     }
 
-    /// Build the grid's pipeline for a window whose frame is `frame_bytes`
-    /// long, so the artwork it may retain scales with the surface it draws on.
+    /// One frame of the output every window draws on: the least the artwork
+    /// cache they all share may grow to. Zero for a screen whose frame no
+    /// address could hold.
+    fn screen_bytes(desktop: &Desktop) -> usize {
+        app::region_bytes(
+            &app::mode_for(desktop.screen_width_px(), desktop.screen_height_px()),
+            app::FRAME_COUNT,
+        )
+        .unwrap_or(0)
+    }
+
+    /// Build the pipeline every window draws through, its cache free to grow
+    /// to the share of `memory_bytes` and never held below `screen_bytes`
+    /// ([`screen_bytes`]), since every window's icons share it.
     ///
     /// The cache is built through the one shared constructor with this app's
-    /// real seat, frame size, pressure gauge, and audit sink, so it is
+    /// real seat, output size, pressure gauge, and audit sink, so it is
     /// classified and budgeted by the same desktop policy the session's caches
     /// obey rather than by numbers picked here.
     ///
@@ -5045,7 +5073,7 @@ mod program {
     /// the kernel granted none, so the read and the sandbox round trip happen
     /// in the paint, exactly as they used to.
     fn open_icons(
-        frame_bytes: usize,
+        (screen_bytes, memory_bytes): (usize, usize),
         reads: &alloc::sync::Arc<Reads>,
         deferred: bool,
     ) -> IconPipeline {
@@ -5056,7 +5084,7 @@ mod program {
         let cache = artwork_cache(
             "files.icon-artwork",
             SEAT_PRIMARY,
-            frame_bytes,
+            (screen_bytes, memory_bytes),
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
@@ -5170,13 +5198,16 @@ mod program {
                 // The machine's band moved: give back whatever the new band
                 // says the decoded artwork may no longer keep, here at the
                 // wake rather than at the next user input. A decode the old
-                // band refused to keep is offered again, since the band that
-                // refused it has changed. The glyph cache this window drew
-                // through gives back the same way.
+                // band refused to keep is offered again, and the loop runs to
+                // repaint what was drawn without it. The glyph cache this
+                // window drew through gives back the same way.
                 Wake::PressureChanged => {
                     self.icons.borrow_mut().trim();
-                    self.reads.retry_declined_artwork();
+                    let retried = self.reads.retry_declined_artwork();
                     tairix_font::trim_glyph_cache();
+                    if retried {
+                        return Ok(Parked::Interrupted);
+                    }
                 }
                 // A volume was attached, re-backed, or removed. The rail is
                 // re-read off the loop: what is mounted comes from the System
@@ -5330,6 +5361,9 @@ mod program {
         walk: Walk,
         /// The item in hand, by its name.
         current: String,
+        /// The tree the artwork desk was last told this job is writing
+        /// ([`sync_hold`](Self::sync_hold)).
+        held: Option<String>,
     }
 
     impl Job {
@@ -5354,6 +5388,7 @@ mod program {
                 total: Some(Tally { items, bytes: 0 }),
                 walk: Walk::Trash(TrashRun::new(moves)),
                 current: String::new(),
+                held: None,
             }
         }
 
@@ -5369,6 +5404,7 @@ mod program {
                 total: None,
                 walk,
                 current: String::new(),
+                held: None,
             }
         }
 
@@ -5388,6 +5424,40 @@ mod program {
                     removing: self.walk.removing(),
                 },
             }
+        }
+
+        /// Hold off `desk`'s decodes of whatever this job is now writing, and
+        /// release the tree it has finished, answering whether the release
+        /// named anything for the windows to repaint.
+        ///
+        /// A copy writes a bundle's manifest and icon after the bundle itself
+        /// appears, so a decode run meanwhile would picture, or refuse, the
+        /// half-written bundle — and that answer would stand.
+        fn sync_hold(&mut self, desk: &mut ArtworkDesk) -> bool {
+            let writing = match &self.walk {
+                Walk::Paste(paste) => paste.writing.as_deref(),
+                Walk::Delete(_) | Walk::Trash(_) => None,
+            };
+            if self.held.as_deref() == writing {
+                return false;
+            }
+            let released = self
+                .held
+                .take()
+                .is_some_and(|tree| desk.release_under(&tree));
+            if let Some(tree) = writing {
+                desk.hold_under(tree);
+                self.held = Some(String::from(tree));
+            }
+            released
+        }
+
+        /// The job has ended: release whatever it still held, answering
+        /// whether that named anything for the windows to repaint.
+        fn release_hold(&mut self, desk: &mut ArtworkDesk) -> bool {
+            self.held
+                .take()
+                .is_some_and(|tree| desk.release_under(&tree))
         }
     }
 
@@ -5802,6 +5872,101 @@ mod program {
         browser.resolve_occupancy(range)
     }
 
+    /// The manager chrome a browser window draws its listing within: what the
+    /// paint lays out, and what a landing walks.
+    fn manager_chrome<'a, S: DirectorySource>(
+        browser: &Browser<S>,
+        places: &'a Places,
+        chrome: Chrome,
+        overlays: &Overlays,
+    ) -> ManagerChrome<'a> {
+        ManagerChrome {
+            tools: MANAGER_TOOLS,
+            tool_model: manager_tool_model(browser),
+            sidebar: chrome.rail(places),
+            toolbar: chrome.toolbar,
+            renaming: overlays.rename.field().and(browser.chosen_index()),
+        }
+    }
+
+    /// Mark, in every window, the pictures drawn through a decode `landed`
+    /// answered, and tell the pipeline of every other picture each window
+    /// shows, so the sweep after the pass withdraws only what no window shows.
+    /// Answers whether any window owes a frame.
+    ///
+    /// A decode changes only the slots drawing through it, so a batch that
+    /// pictures nothing a window shows costs that window nothing.
+    fn adopt_artwork(
+        windows: &mut [OpenWindow],
+        icons: &RefCell<IconPipeline>,
+        grounds: Grounds<'_>,
+        scale: Scale,
+        landed: &Landed,
+    ) -> bool {
+        let mut pipeline = icons.borrow_mut();
+        let mut owed = false;
+        for win in windows {
+            let mode = *win.pane.mode();
+            let window = Rect::new(0, 0, mode.width_px, mode.height_px);
+            let mut damage = Region::new();
+            match &mut win.kind {
+                WindowKind::Browser(state) => {
+                    let chrome = manager_chrome(
+                        &state.browser,
+                        &state.places,
+                        state.chrome,
+                        &state.overlays,
+                    );
+                    manager_art(
+                        &state.browser,
+                        (scale, grounds.window),
+                        window,
+                        &chrome,
+                        &mut |art| {
+                            if pipeline.moved_by(landed, art) {
+                                damage.add(art.at);
+                            }
+                        },
+                    );
+                    if let Some(overlay) = state.overlays.open_with.as_mut() {
+                        let shown = *overlay.pane.mode();
+                        let viewport = Rect::new(0, 0, shown.width_px, shown.height_px);
+                        let mut moved = false;
+                        chooser_art(
+                            &overlay.chooser,
+                            (scale, grounds.popups),
+                            viewport,
+                            &mut |art| {
+                                moved |= pipeline.moved_by(landed, art);
+                            },
+                        );
+                        // The popup is presented whole.
+                        overlay.owed |= moved;
+                        owed |= moved;
+                    }
+                }
+                WindowKind::Properties(props) => {
+                    properties_art(
+                        &props.controls().identity,
+                        (scale, grounds.popups),
+                        window,
+                        &mut |art| {
+                            if pipeline.moved_by(landed, art) {
+                                damage.add(art.at);
+                            }
+                        },
+                    );
+                }
+                WindowKind::Progress(_) => {}
+            }
+            if !damage.is_empty() {
+                owe(win, Repaint::Reported, &damage);
+                owed = true;
+            }
+        }
+        owed
+    }
+
     /// Render the browser into the window's retained surface, once under each
     /// of `target.parts`, and present those rectangles.
     ///
@@ -5839,11 +6004,6 @@ mod program {
         let rename = overlays.rename.field();
         let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
-        // The rail owns the window's leading edge, so every overlay drawn over
-        // the view is placed within what is left — the one shared inset the
-        // pointer hit-tests resolve through, so a dialog is never centred over
-        // the rail it does not belong to.
-        let rail = chrome.rail(places);
         let toolbar = chrome.toolbar;
         let canvas = Canvas {
             theme,
@@ -5851,6 +6011,8 @@ mod program {
             scale,
             chrome,
         };
+        // The rail owns the window's leading edge, so an overlay is placed in
+        // what is left: the inset the pointer hit-tests resolve through.
         let viewport = canvas.viewport(places);
         resolve_visible_occupancy(browser, places, canvas);
         let browser = &*browser;
@@ -5871,13 +6033,7 @@ mod program {
         // the render alone; the parked event source holds it only to trim.
         let parts = target.parts;
         let surface = &mut *target.surface;
-        let drawn = ManagerChrome {
-            tools: MANAGER_TOOLS,
-            tool_model: manager_tool_model(browser),
-            sidebar: rail,
-            toolbar,
-            renaming: rename.and(browser.chosen_index()),
-        };
+        let drawn = manager_chrome(browser, places, chrome, overlays);
         let band = match overlays.sweep.as_ref() {
             Some(Sweep::Live(band)) => {
                 let frame = Frame {
@@ -7247,6 +7403,17 @@ mod program {
             if ending == Some(Ending::Cancelled) {
                 job.abandon();
             }
+            // The paint runs on this thread too, so nothing was asked for
+            // during the slice: syncing the hold after it still precedes every
+            // ask of what the slice began writing.
+            {
+                let mut work = reads.work.lock();
+                if ending.is_some() {
+                    job.release_hold(&mut work.artwork);
+                } else {
+                    job.sync_hold(&mut work.artwork);
+                }
+            }
             let reading = job.reading();
             let counted = operation.differs(&reading, &job.current);
             operation.observe(reading, &job.current, tairix_rt::clock_get());
@@ -7608,6 +7775,9 @@ mod program {
         /// never sized to a file's length, so a copy of any size stays bounded.
         /// Taken on the first file copied, by the thread doing the copy.
         buf: alloc::vec::Vec<u8>,
+        /// Where the item being copied is landing, spelled, until it is copied
+        /// whole ([`Job::sync_hold`]).
+        writing: Option<String>,
     }
 
     /// The stage of the item a [`Paste`] is currently carrying out.
@@ -7770,6 +7940,7 @@ mod program {
                 bytes: 0,
                 leaf: String::new(),
                 buf: alloc::vec::Vec::new(),
+                writing: None,
             }
         }
 
@@ -7925,6 +8096,7 @@ mod program {
             kind: CopyKind,
             then_delete: Option<(alloc::vec::Vec<String>, bool)>,
         ) -> StepOutcome {
+            self.writing = spell_path(&dest).ok();
             match CopyWalk::from_items(alloc::vec![(source, dest, kind)]) {
                 Some(walk) => {
                     self.stage = PasteStage::Copying {
@@ -7968,6 +8140,7 @@ mod program {
                 // The tree is fully copied. A cross-volume move now removes the
                 // source through the shared delete walk; a plain copy is done
                 // with this item.
+                self.writing = None;
                 if let Some((source, is_directory)) = then_delete {
                     let Some(plan) = DeletePlan::new(alloc::vec![(source, is_directory)]) else {
                         return StepOutcome::Failed("a moved source could not be removed");
@@ -10907,15 +11080,15 @@ mod program {
             return app::fail(APP_NAME, app::EXIT_NO_EVENTS, "mount-change wake refused");
         }
 
-        let icons = {
-            let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-            let nominal = app::mode_for(w, h);
-            RefCell::new(open_icons(
-                (nominal.stride_bytes as usize) * (nominal.height_px as usize),
-                &reads,
-                reader.is_some(),
-            ))
-        };
+        // The machine's memory bounds what decoded artwork may be kept: one
+        // query at bring-up, and a machine that cannot answer keeps a
+        // screenful.
+        let memory_bytes = tairix_procinfo::memory_total_for_budget(&IpcTransport);
+        let icons = RefCell::new(open_icons(
+            (screen_bytes(&desktop), memory_bytes),
+            &reads,
+            reader.is_some(),
+        ));
 
         // --- The windows, each opened once its first listing lands. An
         // ordinary file manager was started to show a location, so a first
@@ -11013,7 +11186,7 @@ mod program {
                 // change is adopted once and every window owes it whole.
                 if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
                     let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
-                    owe_desktop(&mut windows, &mut client, &desktop, grounds);
+                    owe_desktop(&mut windows, &mut client, (&desktop, &icons), grounds);
                 }
                 if let Some(code) = route_event(
                     &mut windows,
@@ -11041,7 +11214,7 @@ mod program {
             let mut moved = false;
             if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
                 let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
-                owe_desktop(&mut windows, &mut client, &desktop, grounds);
+                owe_desktop(&mut windows, &mut client, (&desktop, &icons), grounds);
                 moved = true;
             }
             moved |= serve_due(&mut windows, &reads, themes.active(), desktop.scale());
@@ -11258,15 +11431,17 @@ mod program {
                 reads.sweep_probes();
             }
             // The reader nudges on its drained queue, so what landed is a
-            // whole batch: one whole-window pass for it rather than one per
-            // icon, a present being a compositor round trip and far dearer
-            // than one tile's decode.
-            let artwork_landed = reads.take_artwork_landed();
-            if artwork_landed {
-                for win in &mut windows {
-                    win.owed.owe_whole();
-                }
-                moved = true;
+            // whole batch, and each window repaints only the pictures it moved.
+            let landed = reads.take_artwork_landed();
+            let arted = !landed.is_empty();
+            if arted {
+                moved |= adopt_artwork(
+                    &mut windows,
+                    &icons,
+                    themes.grounds(MANAGER_WINDOW_GROUND),
+                    desktop.scale(),
+                    &landed,
+                );
             }
 
             raise_alerts(&mut windows, &mut client, event_endpoint, &mut alerts_full);
@@ -11280,9 +11455,9 @@ mod program {
             {
                 return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
             }
-            // Every window was just drawn whole, so a thumbnail none of them
-            // asked for is no longer on screen.
-            if artwork_landed {
+            // Every window asked after each picture it shows, drawn this pass
+            // or not, so a thumbnail none of them asked for is off screen.
+            if arted {
                 reads.sweep_thumbnails();
             }
             if moved || !drained {

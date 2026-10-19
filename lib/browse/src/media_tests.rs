@@ -794,3 +794,36 @@ fn a_volume_root_is_pictured_as_its_drive() {
         IconKind::FolderFilled
     );
 }
+
+/// A listed bundle asks for its own icon at the version its listing reports,
+/// so one replaced or changed where its folder sees it is decoded afresh
+/// rather than served its predecessor's picture. A link carries its own
+/// stamp, not its target's, and a listing that named no file gives nothing to
+/// key on, so each asks for the bundle at no version.
+#[test]
+fn a_listed_bundle_asks_for_its_icon_at_the_version_listed() {
+    const APPS: &str = "/Storage/B/Apps";
+    let mut scratch = String::new();
+    let written = Time64::from_secs(1_700_000_000);
+    let path = alloc::format!("{APPS}/One.app");
+
+    let bundle = Entry::new("One.app", EntryKind::Bundle, 4096, written).with_id(LISTED);
+    let (kind, request) = entry_icon(APPS, &components(APPS), &bundle, &mut scratch);
+    assert_eq!(
+        request,
+        IconRequest::listed_bundle(kind, &path, bundle.stamp())
+    );
+
+    let link =
+        Entry::new("One.app", EntryKind::Link(LinkTarget::Bundle), 16, written).with_id(LISTED);
+    let unnamed = Entry::new("One.app", EntryKind::Bundle, 4096, written);
+    for entry in [link, unnamed] {
+        let (kind, request) = entry_icon(APPS, &components(APPS), &entry, &mut scratch);
+        assert_eq!(
+            request,
+            IconRequest::bundle(kind, &path),
+            "{:?}",
+            entry.kind()
+        );
+    }
+}

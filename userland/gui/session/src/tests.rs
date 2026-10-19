@@ -357,7 +357,13 @@ pub(crate) fn shell_audited(
     audit: &'static (dyn Sink + Sync),
 ) -> DesktopShell {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    DesktopShell::new(config, TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, audit)
+    DesktopShell::new(
+        config,
+        TEST_SEAT,
+        (TEST_FRAME_BYTES, 0),
+        &NORMAL_PRESSURE,
+        audit,
+    )
 }
 
 /// A shell and a compositor for `config`, both governed by `pressure`
@@ -368,7 +374,13 @@ pub(crate) fn desktop_over(
     display: DisplayMode,
     pressure: &'static ReportedPressure,
 ) -> (DesktopShell, Compositor) {
-    let shell = DesktopShell::new(config, TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK);
+    let shell = DesktopShell::new(
+        config,
+        TEST_SEAT,
+        (TEST_FRAME_BYTES, 0),
+        pressure,
+        &TEST_SINK,
+    );
     let compositor = Compositor::new(
         display,
         shell.session().active_theme().clone(),
@@ -396,7 +408,7 @@ fn desktop_caches() -> Vec<Option<CacheLedger>> {
         artwork_cache(
             "session.desktop-artwork",
             TEST_SEAT,
-            TEST_FRAME_BYTES,
+            (TEST_FRAME_BYTES, 0),
             &NORMAL_PRESSURE,
             &TEST_SINK,
         )
@@ -7967,7 +7979,7 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(640, 480),
         TEST_SEAT,
-        TEST_FRAME_BYTES,
+        (TEST_FRAME_BYTES, 0),
         &NORMAL_PRESSURE,
         &REFUSALS,
     );
@@ -11656,7 +11668,7 @@ fn test_artwork_cache(gauge: &'static ReportedPressure, output_bytes: usize) -> 
     artwork_cache(
         "session.test-artwork",
         TEST_SEAT,
-        output_bytes,
+        (output_bytes, 0),
         gauge,
         &TEST_SINK,
     )

@@ -271,16 +271,16 @@ mod program {
         /// (the window's not yet armed in `set`) and whose session identity
         /// is not yet known.
         ///
-        /// `output_bytes` is one frame of the output this panel draws on; the
-        /// artwork cache derives its budget from it, so a 4K desktop is
-        /// allowed proportionately more retained pixels than a small panel and
-        /// none carries a hand-picked ceiling.
+        /// `output_bytes` is one frame of the output this panel draws on and
+        /// `memory_bytes` the machine's memory: the artwork cache may grow to a
+        /// share of the memory and never holds less than the frame, so none
+        /// carries a hand-picked ceiling.
         fn new(
             set: u64,
             event_endpoint: u64,
             command_endpoint: u64,
             (desktop, themes): (Desktop, ThemeRegistry),
-            output_bytes: usize,
+            (output_bytes, memory_bytes): (usize, usize),
             reads: alloc::sync::Arc<Reads>,
             window: AppWindow,
         ) -> Self {
@@ -290,7 +290,7 @@ mod program {
             let artwork = artwork_cache(
                 "switchboard.icon-artwork",
                 SEAT_PRIMARY,
-                output_bytes,
+                (output_bytes, memory_bytes),
                 tairix_rt::pressure::gauge(),
                 &LOG_SINK,
             );
@@ -1226,9 +1226,12 @@ mod program {
             self.desk.lock().decline(key, side);
         }
 
-        /// The band moved: offer the refused decodes again.
+        /// The band moved: offer the refused decodes again, waking the loop to
+        /// repaint what was drawn without them.
         fn retry_declined(&self) {
-            self.desk.lock().retry_declined();
+            if self.desk.lock().retry_declined() {
+                self.wake.nudge();
+            }
         }
 
         /// Whether a decode has landed since this was last asked, so a wake
@@ -1495,7 +1498,10 @@ mod program {
             events,
             commands,
             (desktop, themes),
-            output_bytes,
+            (
+                output_bytes,
+                tairix_procinfo::memory_total_for_budget(&transport),
+            ),
             alloc::sync::Arc::clone(&reads),
             shell,
         );

@@ -87,6 +87,8 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 # The sandbox's worker-role side: `serve_stdio`, `worker_role` and the
 # launcher that re-enters this binary as its capability-empty decoder.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# The machine's memory, a share of which the decoded toolbar icons may keep.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 
 [dev-dependencies]
 # The engine's host tests measure and draw text, so they use the shared solid
