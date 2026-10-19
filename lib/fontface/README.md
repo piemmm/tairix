@@ -7,6 +7,13 @@ codepoint resolution (`FontFamily`) that both the atlas generator and the
 runtime font build on, and the pixel-exact `lineart` geometry for the
 characters that exist to tile rather than to be read.
 
+## Coverage, before the face
+
+`Coverage::read` answers which characters a face maps from its table directory
+and `cmap` alone, through positioned reads the caller supplies, decoding that
+table exactly as `Face::parse` does. The font service reads a face whole only
+once its coverage says it maps the scalar asked for.
+
 ## Variable fonts
 
 The engine instances OpenType **variable** fonts. `Face::parse_instance`

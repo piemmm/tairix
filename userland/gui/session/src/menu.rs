@@ -811,6 +811,18 @@ impl MenuChain {
         true
     }
 
+    /// Size the open chain's plates and information panel to their content
+    /// again and place them, a plate the user dragged keeping its place: text
+    /// they were measured with provisionally has landed. Answers whether a
+    /// chain is up to present.
+    pub fn refit(&mut self, geom: &ChainGeometry<'_>) -> bool {
+        let Some(chain) = self.open.as_mut() else {
+            return false;
+        };
+        chain.refit(geom);
+        true
+    }
+
     /// End the chain if the ground has moved under it: the seat's output
     /// resized, or its scale or theme switched. Returns whether it did.
     ///
@@ -1017,6 +1029,34 @@ impl OpenChain {
     fn closing(&mut self, outcome: ChainOutcome) -> ChainAction {
         self.outcome = Some(outcome);
         ChainAction::Closed
+    }
+
+    /// Measure every plate and the information panel again, re-place what is
+    /// not pinned, and owe every surface whole.
+    fn refit(&mut self, geom: &ChainGeometry<'_>) {
+        for plate in self.plates.iter_mut().filter(|plate| plate.pinned) {
+            let (width, height) = plate_extent(plate, geom);
+            plate.rect = Rect::new(plate.rect.left(), plate.rect.top(), width, height);
+        }
+        if let Some(panel) = self.info.as_mut() {
+            let (width, height) = panel.sheet.measured_size(geom.scale, geom.theme);
+            panel.rect = Rect::new(
+                panel.rect.left(),
+                panel.rect.top(),
+                width.max(1),
+                height.max(1),
+            );
+        }
+        self.replace_geometry(geom);
+        for plate in &mut self.plates {
+            plate.repaint = Repaint::Whole;
+        }
+        if let Some(panel) = self.info.as_mut() {
+            panel.repaint = Repaint::Whole;
+        }
+        if let Some(entry) = self.entry.as_mut() {
+            entry.repaint = Repaint::Whole;
+        }
     }
 
     /// Re-derive every unpinned plate's placement, and whatever hangs off the

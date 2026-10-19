@@ -63,7 +63,9 @@ each opening its own submenu. The window has no menu bar.
 The status line shows the caret's line and column, what the checker found,
 and, as fields that open a menu when clicked: the format, text or hex, the
 line endings, and the indentation. Closing a window or quitting with changes
-not saved asks first.
+not saved asks first. Closing a window with the secondary (right) button on
+its close button also shows its file in the file manager, in the folder that
+holds it.
 
 * `Ctrl+N` — a new window
 * `Ctrl+O` — open a file

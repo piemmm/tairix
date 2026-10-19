@@ -48,8 +48,8 @@ mod program {
     };
     use tairix_abi::time::{Time64, WallTimeState, NANOS_PER_SEC};
     use tairix_abi::window_ipc::{
-        AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBarClick,
-        DialogModality, WindowEvent, WindowSizing,
+        AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, DialogModality,
+        WindowEvent, WindowSizing,
     };
     use tairix_abi::zone::ZoneName;
     use tairix_abi::Errno;
@@ -1037,16 +1037,6 @@ mod program {
         day: 1,
     };
 
-    /// Declare the icon-bar presence: the session's information row and
-    /// *Quit*, the primary click raising the window. A refused declaration is
-    /// stated and the dialog carries on without a slot of its own.
-    fn declare_app_bar(client: &mut Client, endpoint: u64) {
-        let declared = tairix_window::info_and_quit(endpoint, AppBarClick::Raise);
-        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            app::report(APP_NAME, format_args!("{refused}"));
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up, then one drain-then-paint loop whose steps share the windows and the worker.
@@ -1063,7 +1053,6 @@ mod program {
             Ok(binding) => binding,
             Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
-        declare_app_bar(&mut client, binding.endpoint());
 
         let desk = match Desk::queued(work, (), tairix_rt::sync::WorkerWake::create(), QUEUE) {
             Ok(desk) => Arc::new(desk),
@@ -1210,30 +1199,18 @@ mod program {
                     }
                 };
                 let (theme, scale) = Dialog::theme_scale(&themes, &desktop);
-                match event {
-                    WindowEvent::AlertClosed { alert_id, outcome } => {
-                        dialog.answered(alert_id, outcome, &mut client, &desk, (theme, scale));
-                    }
-                    WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
-                        dialog.close(&mut client);
-                        break 'serve 0;
-                    }
-                    _ => {
-                        let id = event.window_id();
-                        if id.is_some() && id == dialog.chooser.as_ref().map(|c| c.pane.id()) {
-                            dialog.chooser_event(
-                                &event,
-                                &mut client,
-                                &desk,
-                                (&desktop, theme, scale),
-                            );
-                        } else if id == Some(dialog.main.id())
-                            && dialog.main_event(&event, &mut client, &desk, (theme, scale))
-                        {
-                            dialog.close(&mut client);
-                            break 'serve 0;
-                        }
-                    }
+                if let WindowEvent::AlertClosed { alert_id, outcome } = event {
+                    dialog.answered(alert_id, outcome, &mut client, &desk, (theme, scale));
+                    continue;
+                }
+                let id = event.window_id();
+                if id.is_some() && id == dialog.chooser.as_ref().map(|c| c.pane.id()) {
+                    dialog.chooser_event(&event, &mut client, &desk, (&desktop, theme, scale));
+                } else if id == Some(dialog.main.id())
+                    && dialog.main_event(&event, &mut client, &desk, (theme, scale))
+                {
+                    dialog.close(&mut client);
+                    break 'serve 0;
                 }
             }
 

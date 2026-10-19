@@ -27,6 +27,12 @@ path = "src/run.rs"
 # expressed in must build for the host too. The bare-metal section below adds
 # only what the *program* needs on top.
 [dependencies]
+# The one rule for showing a name so nothing in it can hide
+# (`tairix_util::utf8::shown`), and the shared latest-wins job desk
+# (`tairix_util::defer`) the deferred bundle scan hands its work to the reader
+# thread through, so walking three program stores never happens on the loop
+# that owes the window a frame.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The frozen `Errno`, the input/display vocabulary, and the window-channel
 # wire types the binary speaks.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
@@ -101,10 +107,6 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0", features = ["rt"
 # The app-data client: the thumbnail store is a blob of this application's own
 # bulk store, reached only through the app-data service.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
-# The shared latest-wins job desk (`tairix_util::defer`) the deferred bundle
-# scan hands its work to the reader thread through, so walking three program
-# stores never happens on the loop that owes the window a frame.
-tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one extended-attribute key grammar: a Properties window validates a
 # typed `key = value` line through it, so a malformed key is refused here
 # rather than travelling to the kernel to be refused there.

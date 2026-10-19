@@ -74,7 +74,9 @@ Die Statuszeile zeigt Zeile und Spalte der Einfügemarke, was die Prüfung
 gefunden hat, und als Felder, die beim Anklicken ein Menü öffnen: das
 Format, Text oder Hex, die Zeilenenden und die Einrückung. Wer ein Fenster
 schließt oder beendet, ohne Änderungen gesichert zu haben, wird vorher
-gefragt.
+gefragt. Wird ein Fenster mit der sekundären (rechten) Maustaste über
+seine Schließen-Schaltfläche geschlossen, zeigt die Dateiverwaltung
+außerdem seine Datei in dem Ordner, der sie enthält.
 
 * `Ctrl+N` — ein neues Fenster
 * `Ctrl+O` — eine Datei öffnen

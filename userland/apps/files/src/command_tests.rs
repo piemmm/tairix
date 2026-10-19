@@ -198,7 +198,7 @@ fn the_reserved_short_help_switches_win_wherever_they_appear() {
     }
     // The banner names the operand and the switches, so a usage refusal tells
     // the caller the whole grammar.
-    assert!(USAGE.contains("[directory]"));
+    assert!(USAGE.contains("[path]"));
     assert!(USAGE.contains(tairix_window::DESKTOP_ROLE_SWITCH));
     assert!(USAGE.contains("-h"));
 }
@@ -388,5 +388,54 @@ fn a_step_states_its_hop_and_the_window_states_the_whole_move() {
         ladder.moved().as_deref(),
         Some("could not list /Storage/Backup (its device was removed); opening /Users/ada instead"),
         "why the asked place was refused, not the last hop"
+    );
+}
+
+/// A file named where a folder was expected is shown in the folder holding it,
+/// selected, and that is no move to state; the folder is tried once, and only
+/// in place of the file itself.
+#[test]
+fn a_file_asked_for_is_shown_selected_in_its_own_folder() {
+    let home = place(&["Users", "ada"]);
+    let folder = place(&["Users", "ada", "Home"]);
+    let note = place(&["Users", "ada", "Home", "notes.txt"]);
+    let mut ladder = Ladder::new(Some(note), Some(&home));
+    assert!(
+        !ladder.show_instead(BrowseError::Source(Errno::PermissionDenied)),
+        "a refusal is no file"
+    );
+    assert!(ladder.show_instead(BrowseError::Source(Errno::NotADirectory)));
+    assert_eq!(ladder.place(), Some(folder.as_slice()));
+    assert_eq!(ladder.shows_in(&folder), Some("notes.txt"));
+    assert_eq!(
+        ladder.moved(),
+        None,
+        "showing a file in its folder is no move"
+    );
+    assert!(
+        !ladder.show_instead(BrowseError::Source(Errno::NotADirectory)),
+        "the folder itself is never taken for a file"
+    );
+    assert_eq!(
+        ladder.step("you may not read it").as_deref(),
+        Some("could not list /Users/ada/Home (you may not read it); opening /Users/ada instead"),
+        "the folder already on the ladder is not tried twice"
+    );
+    assert_eq!(
+        ladder.shows_in(&home),
+        None,
+        "the file is not in the fallback"
+    );
+    assert_eq!(
+        ladder.moved().as_deref(),
+        Some("could not list /Users/ada/Home (you may not read it); opening /Users/ada instead"),
+        "the move names the folder the file was to be shown in"
+    );
+
+    let mut fallen = Ladder::new(Some(place(&["Storage", "Backup"])), Some(&home));
+    assert!(fallen.step("its device was removed").is_some());
+    assert!(
+        !fallen.show_instead(BrowseError::Source(Errno::NotADirectory)),
+        "a fallback place is never taken for a file"
     );
 }

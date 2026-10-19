@@ -27,8 +27,10 @@ use crate::GlyphCache;
 ///
 /// A face's bytes are read once, on first use, and retained for the
 /// service's life; a session that never touches a family's script never pays
-/// for its face. A host test hands back bytes it already holds
-/// ([`Preloaded`]); the freestanding service re-opens the exact stored path.
+/// for its face. Before that, what the face covers is read from its table
+/// directory and `cmap` alone, through [`read_at`](Self::read_at). A host test
+/// hands back bytes it already holds ([`Preloaded`]); the freestanding service
+/// reads the handle it opened at discovery.
 pub trait FaceLoad<'a> {
     /// Obtain the face's bytes, reading them if this is the first call.
     ///
@@ -36,6 +38,31 @@ pub trait FaceLoad<'a> {
     ///
     /// Any [`Errno`] the underlying read raises.
     fn load(&mut self) -> Result<&'a [u8], Errno>;
+
+    /// The face's length in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the underlying query raises.
+    fn size(&mut self) -> Result<u64, Errno>;
+
+    /// Fill `buf` from `offset` into the face without reading the rest of
+    /// it, answering how many bytes were filled: fewer only where the face
+    /// ends.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the underlying read raises.
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
+}
+
+/// Fill `buf` from `offset` into `bytes`, answering how many bytes were
+/// filled: fewer only where `bytes` ends.
+fn read_held(bytes: &[u8], offset: u64, buf: &mut [u8]) -> usize {
+    let start = usize::try_from(offset).map_or(bytes.len(), |at| at.min(bytes.len()));
+    let filled = buf.len().min(bytes.len() - start);
+    buf[..filled].copy_from_slice(&bytes[start..start + filled]);
+    filled
 }
 
 /// A [`FaceLoad`] over bytes the caller already holds: the host-test loader.
@@ -44,6 +71,131 @@ pub struct Preloaded<'a>(pub &'a [u8]);
 impl<'a> FaceLoad<'a> for Preloaded<'a> {
     fn load(&mut self) -> Result<&'a [u8], Errno> {
         Ok(self.0)
+    }
+
+    fn size(&mut self) -> Result<u64, Errno> {
+        u64::try_from(self.0.len()).map_err(|_| Errno::LengthOutOfRange)
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        Ok(read_held(self.0, offset, buf))
+    }
+}
+
+/// An open file in the font store.
+pub trait StoreFile {
+    /// The file's length in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the underlying query raises.
+    fn size(&self) -> Result<u64, Errno>;
+
+    /// Read into `buf` from `offset`, answering how many bytes were read:
+    /// none only where the file ends.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the underlying read raises.
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
+}
+
+/// Fill `buf` from `offset` into `file`, answering how many bytes were
+/// filled: fewer only where the file ends.
+///
+/// # Errors
+///
+/// Any [`Errno`] a read raises.
+pub fn fill_at(file: &impl StoreFile, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let at = u64::try_from(done)
+            .ok()
+            .and_then(|done| offset.checked_add(done))
+            .ok_or(Errno::LengthOutOfRange)?;
+        let read = file.read_at(at, &mut buf[done..])?;
+        if read == 0 {
+            break;
+        }
+        done += read;
+    }
+    Ok(done)
+}
+
+/// The whole of `file`.
+///
+/// The buffer is reserved fallibly, so a file larger than the heap can hold
+/// refuses the read rather than aborting the service; the family is then
+/// skipped or the glyph refused, and the rest of the store still serves.
+///
+/// # Errors
+///
+/// Any [`Errno`] the size query or a read raises, and
+/// [`Errno::OutOfMemory`] when the buffer cannot be had.
+pub fn read_whole(file: &impl StoreFile) -> Result<Vec<u8>, Errno> {
+    let size = usize::try_from(file.size()?).map_err(|_| Errno::LengthOutOfRange)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| Errno::OutOfMemory)?;
+    bytes.resize(size, 0);
+    let done = fill_at(file, 0, &mut bytes)?;
+    bytes.truncate(done);
+    Ok(bytes)
+}
+
+/// A face read through the handle discovery opened: positioned reads until it
+/// is read whole, once, on first use — never re-opened, never read early.
+///
+/// The bytes are leaked and retained for the service's life. The leak is
+/// bounded by the store's own size (each declared face read at most once), not
+/// by anything a caller can grow.
+pub struct HandleFace<F> {
+    /// The open handle, until a whole read succeeds; `None` when it could not
+    /// be opened, which every read then reports.
+    file: Option<F>,
+    /// The face's bytes, once read.
+    bytes: Option<&'static [u8]>,
+}
+
+impl<F> HandleFace<F> {
+    /// A face to be read through `file`, or one that could not be opened.
+    pub const fn new(file: Option<F>) -> Self {
+        Self { file, bytes: None }
+    }
+
+    /// The open handle.
+    fn file(&self) -> Result<&F, Errno> {
+        self.file.as_ref().ok_or(Errno::NotFound)
+    }
+}
+
+impl<F: StoreFile> FaceLoad<'static> for HandleFace<F> {
+    fn load(&mut self) -> Result<&'static [u8], Errno> {
+        if let Some(bytes) = self.bytes {
+            return Ok(bytes);
+        }
+        // The handle is kept until a read succeeds, so a failed one is tried
+        // again rather than losing the face for the service's life.
+        let bytes = read_whole(self.file()?)?;
+        self.file = None;
+        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        self.bytes = Some(leaked);
+        Ok(leaked)
+    }
+
+    fn size(&mut self) -> Result<u64, Errno> {
+        match self.bytes {
+            Some(bytes) => u64::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange),
+            None => self.file()?.size(),
+        }
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        match self.bytes {
+            Some(bytes) => Ok(read_held(bytes, offset, buf)),
+            None => fill_at(self.file()?, offset, buf),
+        }
     }
 }
 
@@ -157,12 +309,14 @@ pub(crate) mod fixtures {
     //! tests, so both are exercised against the same small, fast, and
     //! deterministic store rather than each inventing its own.
 
+    use alloc::rc::Rc;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
+    use core::cell::Cell;
 
     use tairix_abi::Errno;
 
-    use super::{Box, FaceLoad, FontStore, Preloaded};
+    use super::{read_held, Box, FaceLoad, FontStore, Preloaded};
 
     /// One family directory the fixture store holds: its manifest text and
     /// its named faces' bytes.
@@ -193,8 +347,14 @@ pub(crate) mod fixtures {
         }
 
         fn face_loader(&mut self, dir: &str, face: &str) -> Box<dyn FaceLoad<'a> + 'a> {
-            let bytes = self
-                .dirs
+            Box::new(Preloaded(self.face_bytes(dir, face)))
+        }
+    }
+
+    impl<'a> MemoryStore<'a> {
+        /// The bytes of face file `face` in family directory `dir`, or none.
+        fn face_bytes(&self, dir: &str, face: &str) -> &'a [u8] {
+            self.dirs
                 .iter()
                 .find(|&&(name, _)| name == dir)
                 .and_then(|(_, family)| {
@@ -204,8 +364,94 @@ pub(crate) mod fixtures {
                         .find(|&&(name, _)| name == face)
                         .map(|&(_, bytes)| bytes)
                 })
-                .unwrap_or(&[]);
-            Box::new(Preloaded(bytes))
+                .unwrap_or(&[])
+        }
+    }
+
+    /// What a [`Tallied`] face has been asked for.
+    #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct Tally {
+        /// Whole reads.
+        pub(crate) loads: usize,
+        /// Bytes read by position.
+        pub(crate) read: usize,
+        /// Positioned reads still to refuse, as a read that fails would.
+        pub(crate) refusing: usize,
+    }
+
+    /// A face over held bytes that tallies what it is asked for.
+    struct Tallied<'a> {
+        bytes: &'a [u8],
+        tally: Rc<Cell<Tally>>,
+    }
+
+    impl<'a> FaceLoad<'a> for Tallied<'a> {
+        fn load(&mut self) -> Result<&'a [u8], Errno> {
+            let mut tally = self.tally.get();
+            tally.loads += 1;
+            self.tally.set(tally);
+            Ok(self.bytes)
+        }
+
+        fn size(&mut self) -> Result<u64, Errno> {
+            u64::try_from(self.bytes.len()).map_err(|_| Errno::LengthOutOfRange)
+        }
+
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            let mut tally = self.tally.get();
+            if tally.refusing > 0 {
+                tally.refusing -= 1;
+                self.tally.set(tally);
+                return Err(Errno::MediumError);
+            }
+            let filled = read_held(self.bytes, offset, buf);
+            tally.read += filled;
+            self.tally.set(tally);
+            Ok(filled)
+        }
+    }
+
+    /// A [`MemoryStore`] whose faces tally what they are asked for, by face
+    /// file name.
+    pub(crate) struct TalliedStore<'a> {
+        pub(crate) store: MemoryStore<'a>,
+        pub(crate) tallies: Vec<(String, Rc<Cell<Tally>>)>,
+    }
+
+    impl TalliedStore<'_> {
+        /// What the face file `face` has been asked for.
+        pub(crate) fn tally(&self, face: &str) -> Tally {
+            self.tallies
+                .iter()
+                .find(|(name, _)| name == face)
+                .map(|(_, tally)| tally.get())
+                .unwrap_or_default()
+        }
+
+        /// Refuse the face file `face`'s next `reads` positioned reads.
+        pub(crate) fn refuse(&self, face: &str, reads: usize) {
+            if let Some((_, tally)) = self.tallies.iter().find(|(name, _)| name == face) {
+                let mut held = tally.get();
+                held.refusing = reads;
+                tally.set(held);
+            }
+        }
+    }
+
+    impl<'a> FontStore<'a> for TalliedStore<'a> {
+        fn family_dirs(&mut self) -> Result<Vec<String>, Errno> {
+            self.store.family_dirs()
+        }
+
+        fn read_manifest(&mut self, dir: &str) -> Option<String> {
+            self.store.read_manifest(dir)
+        }
+
+        fn face_loader(&mut self, dir: &str, face: &str) -> Box<dyn FaceLoad<'a> + 'a> {
+            let bytes = self.store.face_bytes(dir, face);
+            let tally = Rc::new(Cell::new(Tally::default()));
+            self.tallies.push((face.to_string(), Rc::clone(&tally)));
+            Box::new(Tallied { bytes, tally })
         }
     }
 }
@@ -219,8 +465,8 @@ mod tests {
     use tairix_log::DiscardSink;
     use tairix_reclaim::{PressureBand, ReportedPressure};
 
-    use super::discover;
     use super::fixtures::{MemoryFamily, MemoryStore};
+    use super::{discover, fill_at, read_whole, FaceLoad, HandleFace, StoreFile};
     use crate::service::glyph_cache;
 
     /// A machine with plenty of RAM, so a test that is not about the bound
@@ -359,5 +605,80 @@ mod tests {
         assert_eq!(list.entries()[0].kind, FamilyKind::Monospace);
         // Inconsolata EX's `hhea` is 939 up and 198 down on a 1024-unit em.
         assert_eq!(list.entries()[0].line_box(), 1110);
+    }
+
+    /// A store file of `bytes` that hands out at most three bytes a read, and
+    /// can be made to refuse every read, counting what it was asked.
+    struct Trickle {
+        bytes: &'static [u8],
+        refusing: bool,
+        reads: alloc::rc::Rc<core::cell::Cell<usize>>,
+    }
+
+    impl Trickle {
+        fn new(bytes: &'static [u8], refusing: bool) -> Self {
+            Self {
+                bytes,
+                refusing,
+                reads: alloc::rc::Rc::default(),
+            }
+        }
+    }
+
+    impl StoreFile for Trickle {
+        fn size(&self) -> Result<u64, tairix_abi::Errno> {
+            Ok(u64::try_from(self.bytes.len()).expect("small"))
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, tairix_abi::Errno> {
+            self.reads.set(self.reads.get() + 1);
+            if self.refusing {
+                return Err(tairix_abi::Errno::MediumError);
+            }
+            let start = usize::try_from(offset)
+                .expect("small")
+                .min(self.bytes.len());
+            let filled = buf.len().min(3).min(self.bytes.len() - start);
+            buf[..filled].copy_from_slice(&self.bytes[start..start + filled]);
+            Ok(filled)
+        }
+    }
+
+    #[test]
+    fn a_positioned_read_is_filled_across_short_reads_and_stops_where_the_file_ends() {
+        let file = Trickle::new(b"0123456789", false);
+        let mut buf = [0u8; 8];
+        assert_eq!(fill_at(&file, 1, &mut buf), Ok(8));
+        assert_eq!(&buf, b"12345678");
+        assert_eq!(fill_at(&file, 6, &mut buf), Ok(4));
+        assert_eq!(&buf[..4], b"6789");
+        assert_eq!(read_whole(&file).as_deref(), Ok(&b"0123456789"[..]));
+
+        let mut face = HandleFace::new(Some(Trickle::new(b"0123456789", false)));
+        assert_eq!(face.size(), Ok(10));
+        let mut three = [0u8; 3];
+        assert_eq!(face.read_at(2, &mut three), Ok(3));
+        assert_eq!(&three, b"234");
+        let mut unopened = HandleFace::<Trickle>::new(None);
+        assert_eq!(unopened.load(), Err(tairix_abi::Errno::NotFound));
+        assert_eq!(unopened.size(), Err(tairix_abi::Errno::NotFound));
+    }
+
+    /// A failed whole read keeps the handle, so the face is not lost until the
+    /// service restarts.
+    #[test]
+    fn a_failed_whole_read_keeps_the_handle_for_the_next_try() {
+        let file = Trickle::new(b"0123456789", true);
+        let reads = alloc::rc::Rc::clone(&file.reads);
+        let mut face = HandleFace::new(Some(file));
+        assert_eq!(face.load(), Err(tairix_abi::Errno::MediumError));
+        let first = reads.get();
+        assert!(first > 0);
+        assert_eq!(
+            face.load(),
+            Err(tairix_abi::Errno::MediumError),
+            "the handle is still there to read"
+        );
+        assert!(reads.get() > first, "and is read again");
     }
 }

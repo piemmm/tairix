@@ -203,6 +203,15 @@ so a window that fell back from a folder it could not list to one already
 shown raises that window instead, stating why there. A refused activation
 still shows the folder, in a new window.
 
+A path that names a file rather than a folder — from the command line, or the
+desktop showing where a document lives
+([session](session.md#showing-where-a-document-lives)) — is shown in the folder
+holding it, the file selected and brought into view (`Ladder::show_instead`),
+and that is no move to state. A window already listing the folder with the file
+in it is brought forward and selects it there without listing anything; one
+whose listing does not show the file yet selects it once a listing does
+(`Browser::follow`).
+
 ## An overlay is a popup surface, never pixels in the app's own window
 
 A menu, a settings sheet, a tooltip, or any other transient overlay drawn
@@ -700,7 +709,7 @@ press is comes from the app's own pure, host-tested `gesture` module:
 | gesture | what it does |
 |---|---|
 | double-click / `Enter` | activate: descend, run a bundle, or open a file |
-| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
+| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it; a shift-double-click leaves what it opened deselected |
 | right-click | ask the desktop for the context menu on the item |
 
 There is no right-*double*-click. The menu the first press opens is the
@@ -725,10 +734,18 @@ The modifier a shift-double-click carries reaches the app on the pointer event
 itself (`WindowEvent::Pointer`'s `modifiers`, stamped by the seat): a modifier
 key reaches no surface as a key, so an app could not otherwise know one is
 held. `Shift+Enter` is the same intent from the keyboard, resolved through the
-one `gesture::bundle_intent` spelling so the two cannot diverge.
+one `gesture::bundle_intent` spelling so the two cannot diverge. A
+shift-double-click that opens something elsewhere then clears the selection,
+so nothing it opened is left highlighted; one that lists the item's contents
+replaces the listing anyway, and `Shift+Enter` keeps the selection the keyboard
+moves from. The pair's first press may have selected more than the item, so
+the repaint covers the marks that changed since before the second press,
+whatever the pair did.
 
-On any activation,
-a `Descended` reveals the selection and repaints, and a
+On any activation, a refusal — a link that names nothing, a folder that cannot
+be listed — is stated in an alert over the window, the listing as it was;
+nothing being chosen is no refusal. A `Descended` reveals the selection and
+repaints, and a
 `LaunchBundle { path }` **launches the bundle** — its own `Launcher` spawns the
 bundle's own `Run` (`<path>/Run`) through the ordinary signed app-load gate
 (`CAP_PROC_SPAWN`, added to the manifest in the stage that first uses it),
@@ -1751,9 +1768,9 @@ disagree (`AGENTS.md` §2.2, §26.6). It holds its exact position between steps,
 the app may cancel or be preempted and resume without repeating or skipping work
 (`AGENTS.md` §2.23); a deeper tree is `CopyWalkError::TooDeep` and driving it
 against the wrong step is `CopyWalkError::OutOfStep`, both leaving the walk
-unchanged. `CopyWalk::copied` is the honest rising count a progress indicator
-shows; the total is unknown until the reads reveal it, so nothing fabricates a
-percentage. The engine does no I/O; the app performs every syscall under the
+unchanged. `CopyWalk::copied` is the walk's own count of what it has copied,
+which the progress window shows against the whole a preparing pass counted. The
+engine does no I/O; the app performs every syscall under the
 launching user's own identity, so the read-only picker never runs a walk.
 
 ### The delete model
@@ -1801,8 +1818,8 @@ resume without repeating or skipping work — no unbounded buffer and no spin
 (`AGENTS.md` §2.23). Driving it against the wrong step (an `expand` on a leaf,
 or a `complete_removal` on a directory not yet listed) is
 `DeleteError::OutOfStep` and leaves the walk unchanged. `DeleteWalk::removed` is
-the honest rising count a progress indicator shows; the total is unknown until
-the reads reveal it, so nothing fabricates a percentage. This is the browser
+the walk's own count of what it has removed, which the progress window shows
+against the whole a preparing pass counted (`Survey`). This is the browser
 engine's own component-path traversal, deliberately distinct from `rm`'s
 coreutils removal engine (which recurses natively over its own raw-path removal
 seam with prompt/force/verbose semantics) — two consumers with two data models,
@@ -1847,10 +1864,16 @@ in the order they were asked (`operations::OperationDesk`, a host-tested desk
 holding a fixed number waiting and keyed by each operation's progress window):
 two copies over one disk finish no sooner side by side, so one that touches a
 tree an earlier one is still working in waits behind it, and its window says
-it waits. The worker posts its count after each unit and checks for a cancel
-between units; the loop parks as usual, wakes on the worker's answer, and shows
-a new count at most once a desktop frame, holding the next until then rather
-than waking per unit (`AGENTS.md` §2.23, §28). An answer reaches only the
+it waits. Before a delete or a paste begins, the worker **counts its whole**
+(`lib/browse::Survey`): one look at a source or one directory listing a unit,
+totalling every item and the bytes of every file a copy streams, so the bar is
+a share of a counted whole and reaches the end as the work does; a tree it
+cannot count in full leaves the window stating what is done and no share. The
+worker posts its reading — what is done, the whole, and the item in hand — after
+each unit and checks for a cancel between units; the loop parks as usual, wakes
+on the worker's answer, and shows a new reading at most once a desktop frame,
+holding the next until then rather than waking per unit (`AGENTS.md` §2.23,
+§28). An answer reaches only the
 operation it belongs to: closing a folder window closes its progress windows
 and cancels their operations, and their answers are dropped. A
 machine that refuses the thread carries an operation out on the loop to its
@@ -1858,12 +1881,19 @@ end — slower and not cancellable, never wrong. A single `Job` carries a
 `DeleteWalk` (a delete), a `TrashRun` (a move to Trash) or a `Paste` state
 machine (a copy/move), so all three run through one path (`AGENTS.md` §2.2). The
 progress window shows the shared `lib/browse::progress` model (`ProgressModel`
-— the operation kind, the honest rising `DeleteWalk::removed` / paste-node
-count, whether it waits for those before it, and a *latched* cancel) drawn
+— the operation, what it acts on and where to, what is done of what whole, the
+item in hand, a smoothed rate, whether it waits, and a *latched* cancel) drawn
 across its client by `render::draw_progress_window` at
-`render::progress_window_extent`: an indeterminate `Progress` "working" trace
-(no fabricated percentage, since the total is unknown until the reads reveal
-it, `AGENTS.md` §2.24) and a Cancel `Button`. Its band names the operation
+`render::progress_window_extent`: the headline ("Copying “Photos” to
+“Backup”"), the item in hand, the window's own `Progress` bar — busy while it
+prepares, a share of the whole once counted, still while it waits — and the
+figures ("12.3 MiB of 45.6 MiB · 2.1 MiB/s · about 15 seconds left", the rate
+and time left once its readings have held for two seconds; "Removing the
+originals…" while a move across volumes removes what it carried, which the
+bar, measuring what is carried, does not count) beside a Cancel `Button`. A
+completed operation's window stays until its bar has filled and been seen,
+then closes, while its folder is read again at once. The bar moves on the window's clock only while the window is on show,
+and each frame of it repaints the bar alone. Its band names the operation
 after the application's attested name. `render::progress_cancel_at` mirrors the
 button geometry so a click resolves to exactly the drawn Cancel (fail closed
 off it, `AGENTS.md` §2.2, §5.4); what each event to the window asks of its
@@ -2792,7 +2822,9 @@ menu](taskbar.md#the-clocks-menu) rather than from the program library — its
 manifest carries no `library` key, because it is useful only to somebody who
 can authenticate an account that may change these settings — and it ends when
 its window closes, so the authority it was started with is never left
-resident.
+resident. It has no icon-bar slot (`icon-bar = false`): choosing *Set Date &
+Time…* while the dialog is open raises it rather than asking for an account
+again.
 
 **It is *given* the authority; it never assumes it.** Stepping the clock and
 setting the clock chip need `CAP_TIME_SET`; turning network time on or off and

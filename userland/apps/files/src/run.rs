@@ -140,12 +140,13 @@ mod program {
         delete_alert, draw_open_with_chooser, draw_progress_window, draw_properties_window,
         draw_rename_field, drop_folder_at, manager_tool_at, open_with_action_at, open_with_reveal,
         open_with_row_at, open_with_scroll_pointer, open_with_scroll_repeat,
-        open_with_scroll_wheel, progress_window_extent, properties_drive_damage, properties_reveal,
-        properties_scroll_pointer, properties_scroll_repeat, properties_scroll_wheel, render_into,
-        scroll_pointer, scroll_repeat, scroll_wheel, sidebar_scroll_repeat, AttrAction, Frame,
-        Identity, OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls,
-        PropertiesFrame, PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView,
-        SectionsShown, DELETE_CONFIRM_INDEX,
+        open_with_scroll_wheel, progress_bar_rect, progress_state, progress_window_extent,
+        properties_drive_damage, properties_reveal, properties_scroll_pointer,
+        properties_scroll_repeat, properties_scroll_wheel, render_into, scroll_pointer,
+        scroll_repeat, scroll_wheel, sidebar_scroll_repeat, AttrAction, Frame, Identity,
+        OpenWithAction, OwnerField, PermsCursor, PermsPanel, PropertiesControls, PropertiesFrame,
+        PropertiesStrip, PropertiesTab, PropertiesTarget, PropertiesView, SectionsShown,
+        DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_manifest, blank_documents, browser_floor,
@@ -154,18 +155,19 @@ mod program {
         trash_dir, trash_strategy, validate_new_name, win_floor_width, Activation, AppAssociation,
         Attribute, Attributes, BlankDocument, Browser, BundleIntent, Clipboard, ClipboardOp,
         ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
-        CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
+        CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteTarget, DeleteWalk,
         DirectorySource, Drive, DriveChange, DriveSample, Entry, EntryKind, Listing, ListingDesk,
         ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, Marquee, NewEntry,
         OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, PendingEntry,
         PendingRename, Places, Probe, Probes, ProgressModel, ProgressOp, Properties, RenameError,
-        RowList, RtLinkReader, ScrollColumn, Took, ToolbarBand, ToolbarCommand, TrashError,
-        TrashStrategy, Volume, VolumeId, WatchUpdate, WatchedDirectory, Watches,
-        MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND,
+        RowList, RtLinkReader, ScrollColumn, Subject, Survey, SurveyStep, Tally, Took, ToolbarBand,
+        ToolbarCommand, TrashError, TrashStrategy, Volume, VolumeId, WatchUpdate, WatchedDirectory,
+        Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND,
         WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::text::{Keystroke, TextAction, TextField};
+    use tairix_controls::value::Progress;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
@@ -179,7 +181,7 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
-    use tairix_theme::{Grounds, Theme, ThemeRegistry, Timeline};
+    use tairix_theme::{Grounds, MotionTheme, Theme, ThemeRegistry, Timeline};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::notices::Raised;
     use tairix_window::{
@@ -201,13 +203,14 @@ mod program {
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
-    use crate::notice::{next_alert, NextAlert, NoticeSource, Notices};
+    use crate::notice::{self, next_alert, NextAlert, NoticeSource, Notices};
     use crate::operation::{
-        change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
-        item_refusal, mode_flip_allowed, move_refusal, progress_control, progress_due,
-        read_refusal, remove_refusal, trash_read_refusal, ProgressControl,
+        change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
+        empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal,
+        progress_control, progress_due, read_refusal, remove_refusal, trash_read_refusal, BarPace,
+        ProgressControl,
     };
-    use crate::operations::{run_slice, Ending, Finished, OperationDesk, Refusal, Standing, Step};
+    use crate::operations::{run_slice, Ending, Finished, OperationDesk, Reading, Refusal, Step};
     use crate::rename::RenameEdit;
     use crate::sidebar::{self, press_point};
 
@@ -428,6 +431,9 @@ mod program {
         /// The directory shown has gone from its path: a reload that cannot
         /// list it climbs to its parent rather than showing what was there.
         lost: bool,
+        /// A file was asked to be shown in this window: its entry is brought
+        /// into view at the next present, once the listing has it.
+        reveal_chosen: bool,
     }
 
     /// What a browser window's height was last fitted to: the window never
@@ -754,6 +760,17 @@ mod program {
                 WindowKind::Browser(win) => lists(&win.browser, location),
                 WindowKind::Properties(_) | WindowKind::Progress(_) => false,
             }
+        }
+
+        /// Whether this window lists `folder`, with a file named `name` in it.
+        fn lists_file(&self, folder: &[String], name: &str) -> bool {
+            let WindowKind::Browser(win) = &self.kind else {
+                return false;
+            };
+            win.browser.components() == folder
+                && win.browser.entries().iter().any(|entry| {
+                    entry.name() == name && entry.kind().resolved() == Some(EntryKind::File)
+                })
         }
     }
 
@@ -1187,6 +1204,7 @@ mod program {
         if fit_to_listing(win, client, grounds, scale) || win.pane.content_released() {
             win.owed.owe_whole();
         }
+        bring_chosen_into_view(win, grounds, scale);
         let whole = win.owed.is_whole();
         let mode = *win.pane.mode();
         let Some(parts) = win.owed.take(&mode) else {
@@ -1247,11 +1265,26 @@ mod program {
     ) -> Result<(), Errno> {
         let mode = *target.pane.mode();
         let client = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let progress = &win.operation.progress;
+        let (progress, trace) = (&win.operation.progress, &win.operation.trace);
+        let bar = progress_bar_rect(client, scale, theme);
+        // A frame of the bar's own motion lays out and draws nothing else.
+        let bar_only = target.parts.rects().iter().all(|part| {
+            let part = Rect::new(
+                i32::try_from(part.x).unwrap_or(i32::MAX),
+                i32::try_from(part.y).unwrap_or(i32::MAX),
+                part.width_px,
+                part.height_px,
+            );
+            part.intersection(&bar) == part
+        });
         let surface = &mut *target.surface;
         for part in target.parts.rects() {
             surface.with_clip(part.x, part.y, part.width_px, part.height_px, |surface| {
-                draw_progress_window(surface, progress, scale, theme, client);
+                if bar_only {
+                    trace.render(surface, bar, scale, theme);
+                } else {
+                    draw_progress_window(surface, (progress, trace), scale, theme, client);
+                }
             });
         }
         target
@@ -1398,11 +1431,15 @@ mod program {
         landed: PendingWindow,
     ) -> Result<OpenWindow, i32> {
         let PendingWindow {
-            browser,
+            mut browser,
             listing,
             ladder,
             ..
         } = landed;
+        let shows = ladder.shows_in(browser.components()).map(String::from);
+        if let Some(name) = &shows {
+            browser.follow(name);
+        }
         let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let ((w, h), sizing) = manager_opening(&browser, opening, desktop.scale(), grounds.window);
         let mode = app::mode_for(w, h);
@@ -1453,6 +1490,7 @@ mod program {
                     restored: true,
                 },
                 lost: false,
+                reveal_chosen: shows.is_some(),
             })),
         };
         if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
@@ -1561,6 +1599,10 @@ mod program {
         for win in windows {
             let id = win.pane.id();
             win.owed.owe_whole();
+            if matches!(win.kind, WindowKind::Progress(_)) {
+                let (width, height) = progress_window_extent(desktop.scale(), grounds.popups);
+                resize_window(win, client, width, height);
+            }
             if let Some(state) = win.browser() {
                 state.fit.opening = opening;
                 state.fit.floor_width = floor_width;
@@ -1670,6 +1712,39 @@ mod program {
                 Self::EmptyTrash(_) => NOT_EMPTIED,
             }
         }
+    }
+
+    /// Bring the entry a file shown in `win` chose into view, against the size
+    /// the window was just fitted to. One whose listing does not have it yet
+    /// waits for one that does.
+    fn bring_chosen_into_view(win: &mut OpenWindow, grounds: Grounds<'_>, scale: Scale) {
+        let mode = *win.pane.mode();
+        let Some(state) = win.browser() else {
+            return;
+        };
+        if !state.reveal_chosen || state.browser.focus_pending().is_some() {
+            return;
+        }
+        state.reveal_chosen = false;
+        let frame = frame_of(state, &mode, grounds.window, scale);
+        tairix_browse::render::reveal_selection(
+            &mut state.browser,
+            frame.scale,
+            frame.theme,
+            frame.viewport,
+            frame.toolbar,
+        );
+        win.owed.owe_whole();
+    }
+
+    /// Select the entry `name` alone in `win`'s listing, to be brought into
+    /// view at its next present.
+    fn reveal_entry(win: &mut OpenWindow, name: &str) {
+        if let Some(state) = win.browser() {
+            state.browser.follow(name);
+            state.reveal_chosen = true;
+        }
+        win.owed.owe_whole();
     }
 
     /// A browser window's frame geometry, as its listing is drawn.
@@ -1868,8 +1943,16 @@ mod program {
     enum Moved {
         /// It ended so.
         Ended(Finished),
-        /// It has done more, or begun, to show now.
-        Shown(Standing),
+        /// It has done more, or begun, to show now: copied out of the desk,
+        /// which is let go before it is shown.
+        Shown {
+            reading: Reading,
+            current: String,
+            cancelling: bool,
+            waiting: bool,
+        },
+        /// It completed, and its full bar has been on show long enough.
+        Closed,
     }
 
     /// Hand each newly asked operation to the operations worker, and fold
@@ -1883,6 +1966,7 @@ mod program {
         windows: &mut alloc::vec::Vec<OpenWindow>,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
+        motion: MotionTheme,
     ) {
         let now = tairix_rt::clock_get();
         let mut asked = false;
@@ -1900,6 +1984,12 @@ mod program {
                     continue;
                 };
                 let operation = &mut progress.operation;
+                if let Some(closing) = operation.closing_ns {
+                    if now >= closing {
+                        moved.push((id, Moved::Closed));
+                    }
+                    continue;
+                }
                 if let Some(job) = operation.job.take() {
                     match desk.submit(id, job) {
                         Ok(()) => asked = true,
@@ -1907,7 +1997,7 @@ mod program {
                         Err((_, Refusal::Busy | Refusal::Full)) => moved.push((
                             id,
                             Moved::Ended(Finished {
-                                done: 0,
+                                done: Tally::default(),
                                 ending: Ending::Stopped(String::from(
                                     "too many operations are already waiting; try again once one finishes",
                                 )),
@@ -1925,7 +2015,7 @@ mod program {
                 };
                 let progress = &operation.progress;
                 let shown = progress.is_cancel_requested();
-                if standing.done == progress.done()
+                if !operation.differs(&standing.reading, standing.current)
                     && standing.waiting == progress.is_waiting()
                     && (shown || !standing.cancelling)
                 {
@@ -1934,7 +2024,15 @@ mod program {
                     continue;
                 }
                 if progress_due(now, operation.shown_ns) {
-                    moved.push((id, Moved::Shown(standing)));
+                    moved.push((
+                        id,
+                        Moved::Shown {
+                            reading: standing.reading,
+                            current: String::from(standing.current),
+                            cancelling: standing.cancelling,
+                            waiting: standing.waiting,
+                        },
+                    ));
                 } else {
                     operation.due_ns = Some(operation.shown_ns.saturating_add(Timeline::FRAME_NS));
                 }
@@ -1950,26 +2048,46 @@ mod program {
             reads.operation_signal.notify_one();
         }
         for (id, change) in moved {
-            let Some(index) = windows.iter().position(|win| win.pane.id() == id) else {
-                continue;
-            };
-            match change {
-                Moved::Ended(finished) => end_operation(windows, index, client, reads, finished),
-                Moved::Shown(standing) => {
-                    let win = &mut windows[index];
-                    let Some(progress) = win.progress() else {
-                        continue;
-                    };
-                    let operation = &mut progress.operation;
-                    operation.progress.set_done(standing.done);
-                    operation.progress.set_waiting(standing.waiting);
-                    if standing.cancelling {
-                        operation.progress.request_cancel();
-                    }
-                    operation.shown_ns = now;
-                    operation.due_ns = Some(now.saturating_add(Timeline::FRAME_NS));
-                    win.owed.owe_whole();
+            if let Some(index) = windows.iter().position(|win| win.pane.id() == id) {
+                apply_moved(windows, index, client, reads, change, (now, motion));
+            }
+        }
+    }
+
+    /// Act at `now_ns` on what the operation of the progress window at `index`
+    /// came to.
+    fn apply_moved(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+        change: Moved,
+        (now_ns, motion): (u64, MotionTheme),
+    ) {
+        match change {
+            Moved::Ended(finished) => {
+                finish_operation(windows, index, client, reads, finished, (now_ns, motion));
+            }
+            Moved::Closed => close_window(windows, index, client, reads),
+            Moved::Shown {
+                reading,
+                current,
+                cancelling,
+                waiting,
+            } => {
+                let win = &mut windows[index];
+                let Some(progress) = win.progress() else {
+                    return;
+                };
+                let operation = &mut progress.operation;
+                operation.progress.set_waiting(waiting);
+                operation.observe(reading, &current, now_ns);
+                if cancelling {
+                    operation.progress.request_cancel();
                 }
+                operation.shown_ns = now_ns;
+                operation.due_ns = Some(now_ns.saturating_add(Timeline::FRAME_NS));
+                win.owed.owe_whole();
             }
         }
     }
@@ -1991,8 +2109,46 @@ mod program {
         };
         let (owner, stopped) = (progress.owner, progress.operation.progress.stopped_title());
         close_window(windows, index, client, reads);
+        reread_owner(windows, owner, stopped, finished.ending);
+    }
+
+    /// End the operation the progress window at `index` shows, on its answer
+    /// at `now_ns`. One that completed in a window on show keeps the window
+    /// until its bar has been seen full; its folder is read again at once
+    /// either way.
+    fn finish_operation(
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        index: usize,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        reads: &Reads,
+        finished: Finished,
+        (now_ns, motion): (u64, MotionTheme),
+    ) {
+        let Some(progress) = windows.get_mut(index).and_then(OpenWindow::progress) else {
+            return;
+        };
+        if !matches!(finished.ending, Ending::Completed) || !progress.operation.bar.on_show() {
+            end_operation(windows, index, client, reads, finished);
+            return;
+        }
+        let (owner, stopped) = (progress.owner, progress.operation.progress.stopped_title());
+        let whole = Reading {
+            done: finished.done,
+            total: Some(finished.done),
+            ..Reading::default()
+        };
+        progress.operation.observe(whole, "", now_ns);
+        progress.operation.closing_ns = Some(completion_closes_at(now_ns, motion));
+        windows[index].owed.owe_whole();
+        reread_owner(windows, owner, stopped, finished.ending);
+    }
+
+    /// Read the folder window `owner` again once an operation it started has
+    /// ended, so a partial run shows what actually remains, and state a
+    /// refusal that stopped it there and on `stderr` for the record.
+    fn reread_owner(windows: &mut [OpenWindow], owner: u64, stopped: &str, ending: Ending) {
         let Some(win) = windows.iter_mut().find(|win| win.pane.id() == owner) else {
-            if let Ending::Stopped(reason) = &finished.ending {
+            if let Ending::Stopped(reason) = &ending {
                 report_error(reason);
             }
             return;
@@ -2005,7 +2161,7 @@ mod program {
                 state.listing_refused(err);
             }
         }
-        if let Ending::Stopped(reason) = finished.ending {
+        if let Ending::Stopped(reason) = ending {
             report_error(&reason);
             state
                 .overlays
@@ -2132,10 +2288,24 @@ mod program {
                         &mut damage,
                     ))
                 }
-                // A count is shown as it is adopted, never on a timer here.
-                WindowKind::Progress(_) => Repaint::Nothing,
+                // A reading is shown as it is adopted; what moves on the clock
+                // is the bar, drawn alone when its frame falls due.
+                WindowKind::Progress(progress) => {
+                    let operation = &mut progress.operation;
+                    if operation.bar.due(now) {
+                        operation.trace.set_clock(now, theme.motion());
+                        operation.bar.drawn(now, operation.trace.next_frame_in());
+                        let client = Rect::new(0, 0, mode.width_px, mode.height_px);
+                        damage.add(progress_bar_rect(client, scale, theme));
+                        Repaint::Reported
+                    } else {
+                        Repaint::Nothing
+                    }
+                }
             };
-            moved |= repaint != Repaint::Nothing;
+            // The bar's next frame is its own deadline, so drawing one never
+            // keeps the loop turning.
+            moved |= repaint != Repaint::Nothing && !matches!(win.kind, WindowKind::Progress(_));
             owe(win, repaint, &damage);
         }
         moved
@@ -2163,9 +2333,13 @@ mod program {
             return;
         };
         match progress_control(client_rect, scale, theme, event) {
+            // Done already: there is nothing left to cancel, so it closes.
+            ProgressControl::Cancel if progress.operation.closing_ns.is_some() => {
+                close_window(windows, index, client, reads);
+            }
             ProgressControl::Cancel if progress.operation.job.is_some() => {
                 let cancelled = Finished {
-                    done: 0,
+                    done: Tally::default(),
                     ending: Ending::Cancelled,
                 };
                 end_operation(windows, index, client, reads, cancelled);
@@ -2331,6 +2505,9 @@ mod program {
                 grounds.popups,
                 event,
             );
+        }
+        if let Some(progress) = windows[index].progress() {
+            progress.operation.bar.observe(event);
         }
 
         if let WindowEvent::Resized {
@@ -2941,7 +3118,7 @@ mod program {
     /// how many folders a user may look at, so reaching it is stated rather
     /// than silently ignored.
     fn open_more(
-        windows: &[OpenWindow],
+        windows: &mut [OpenWindow],
         opening: &Opening,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &alloc::sync::Arc<Reads>,
@@ -2953,6 +3130,8 @@ mod program {
                 if raise_showing(client, open.pane.id()) {
                     return;
                 }
+            } else if show_in_its_folder(windows, client, wanted) {
+                return;
             } else if opening
                 .borrow()
                 .iter()
@@ -2971,6 +3150,30 @@ mod program {
         if let Some(asked) = open_browser(reads, ladder) {
             opening.borrow_mut().push(asked);
         }
+    }
+
+    /// Show the file `path` names selected in a window already listing the
+    /// folder holding it — what listing `path` would come to — bringing that
+    /// window forward. Answers whether one did; a refused raise is stated,
+    /// and the file is selected all the same.
+    fn show_in_its_folder(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        path: &[String],
+    ) -> bool {
+        let Some((name, folder)) = path.split_last() else {
+            return false;
+        };
+        let Some(win) = windows.iter_mut().find(|win| win.lists_file(folder, name)) else {
+            return false;
+        };
+        reveal_entry(win, name);
+        if let Err(err) = client.activate_window(win.pane.id()) {
+            report_error(&alloc::format!(
+                "the window showing that file could not be brought forward ({err:?})"
+            ));
+        }
+        true
     }
 
     /// Bring forward the window `id`, which already shows a folder asked for,
@@ -3008,7 +3211,7 @@ mod program {
     /// descriptor is authority it has no use for. It is stated and skipped
     /// rather than silently dropped.
     fn drain_open_targets(
-        windows: &[OpenWindow],
+        windows: &mut [OpenWindow],
         opening: &Opening,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &alloc::sync::Arc<Reads>,
@@ -3102,8 +3305,8 @@ mod program {
         /// State that the item `name` could not be opened, because of
         /// `reason`.
         fn not_opened(&mut self, name: &str, reason: &str) {
-            let headline = alloc::format!("\u{201c}{name}\u{201d} could not be opened");
-            self.notices.refuse(NoticeSource::Open, &headline, reason);
+            self.notices
+                .refuse(NoticeSource::Open, &notice::not_opened(name), reason);
         }
 
         /// Launch the application bundle whose directory is `bundle_path` (the
@@ -4506,7 +4709,7 @@ mod program {
                     let (owed, cancelled) = {
                         let mut work = self.work.lock();
                         (
-                            work.operations.report(job.done()),
+                            work.operations.report(job.reading(), &job.current),
                             work.operations.cancelled(),
                         )
                     };
@@ -5058,30 +5261,138 @@ mod program {
         /// The job carried out on this loop, a slice a turn, when no worker
         /// takes it.
         here: Option<Job>,
-        /// The count done and a latched cancel, as its window shows them.
+        /// What is done of what whole and a latched cancel, as its window
+        /// shows them.
         progress: ProgressModel,
-        /// When its window last showed a new count, so it moves once a frame.
+        /// The window's bar, clocked while it moves.
+        trace: Progress,
+        /// When its window last showed a new reading, so it moves once a frame.
         shown_ns: u64,
-        /// A count landed too soon after the last to show yet: its window is
+        /// A reading landed too soon after the last to show yet: its window is
         /// drawn again at this instant.
         due_ns: Option<u64>,
+        /// When its bar is next drawn, and whether its window is on show.
+        bar: BarPace,
+        /// Once it has completed, when its window, its bar full, closes.
+        closing_ns: Option<u64>,
     }
 
     impl Operation {
-        fn new(job: Job, op: ProgressOp) -> Self {
+        fn new(job: Job, progress: ProgressModel) -> Self {
+            let mut trace = Progress::new().uncaptioned();
+            trace.set_state(progress_state(&progress));
             Self {
                 job: Some(job),
                 here: None,
-                progress: ProgressModel::new(op),
+                progress,
+                trace,
                 shown_ns: 0,
                 due_ns: None,
+                bar: BarPace::new(),
+                closing_ns: None,
+            }
+        }
+
+        /// Show `reading`, working on `current`, at `now_ns`.
+        fn observe(&mut self, reading: Reading, current: &str, now_ns: u64) {
+            self.progress.observe(reading, current, now_ns);
+            let shown = self.trace.state();
+            self.trace.set_state(progress_state(&self.progress));
+            if self.trace.state() != shown {
+                self.bar.restated();
+            }
+        }
+
+        /// When its window is next due: a reading held for the next frame, the
+        /// bar's own next frame, or its close once it has completed.
+        fn due(&self) -> Option<u64> {
+            [self.due_ns, self.bar.deadline(), self.closing_ns]
+                .into_iter()
+                .flatten()
+                .min()
+        }
+
+        /// Whether `reading` and `current` say anything its window does not
+        /// already show.
+        fn differs(&self, reading: &Reading, current: &str) -> bool {
+            self.progress.reading() != *reading || self.progress.current() != current
+        }
+    }
+
+    /// A long file operation: the trees it counts first, where it cannot
+    /// know its whole up front, and the walk that carries it out one bounded
+    /// unit at a time ([`Job::step`]).
+    struct Job {
+        /// The count under way before the walk begins.
+        survey: Option<Survey>,
+        /// The whole, once counted; `None` where it could not be.
+        total: Option<Tally>,
+        walk: Walk,
+        /// The item in hand, by its name.
+        current: String,
+    }
+
+    impl Job {
+        /// A removal of `plan`'s targets and everything beneath them, counted
+        /// first.
+        fn delete(plan: &DeletePlan) -> Self {
+            let roots = plan
+                .targets()
+                .iter()
+                .map(|target| (target.path().to_vec(), target.is_directory(), 0));
+            Self::counted(
+                Survey::new(roots),
+                Walk::Delete(DeleteWalk::from_plan(plan)),
+            )
+        }
+
+        /// A move of `moves` to Trash: one rename each, so the whole is known.
+        fn trash(moves: TrashMoves) -> Self {
+            let items = u64::try_from(moves.len()).unwrap_or(u64::MAX);
+            Self {
+                survey: None,
+                total: Some(Tally { items, bytes: 0 }),
+                walk: Walk::Trash(TrashRun::new(moves)),
+                current: String::new(),
+            }
+        }
+
+        /// A paste of its items, whose kinds and sizes the count reads first.
+        fn paste(paste: Paste) -> Self {
+            let roots = paste.items.iter().map(|item| item.source().to_vec());
+            Self::counted(Survey::of(roots), Walk::Paste(Box::new(paste)))
+        }
+
+        fn counted(survey: Survey, walk: Walk) -> Self {
+            Self {
+                survey: Some(survey),
+                total: None,
+                walk,
+                current: String::new(),
+            }
+        }
+
+        /// What the walk says of itself: what is counted while it prepares,
+        /// what is done of the whole once it works.
+        fn reading(&self) -> Reading {
+            match &self.survey {
+                Some(survey) => Reading {
+                    done: survey.found(),
+                    preparing: true,
+                    ..Reading::default()
+                },
+                None => Reading {
+                    done: self.walk.done(),
+                    total: self.total,
+                    preparing: false,
+                    removing: self.walk.removing(),
+                },
             }
         }
     }
 
-    /// The long file operation an [`Operation`] carries out, one bounded unit
-    /// at a time ([`Job::step`]).
-    enum Job {
+    /// The walk a [`Job`] carries out.
+    enum Walk {
         /// A recursive removal, driven by a single [`DeleteWalk`]. The
         /// cross-volume-move source cleanup inside a [`Paste`] reuses the same
         /// walk definition, so a delete and a move's cleanup can never diverge.
@@ -5884,14 +6195,17 @@ mod program {
         if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
             whole(ask_properties(browser, acts.properties))
         } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-            let changed = activate(
-                browser,
-                acts.launcher,
-                acts.menu.client,
+            let frame = Frame {
                 scale,
                 theme,
                 viewport,
                 toolbar,
+            };
+            let changed = activate(
+                browser,
+                overlays,
+                acts,
+                frame,
                 bundle_intent(modifiers.shift),
             );
             (whole_if(changed), false)
@@ -6416,57 +6730,56 @@ mod program {
         )
     }
 
-    /// Activate the selected entry — the one dispatch-by-kind decision `Enter`
-    /// drives, over the shared [`Browser::activate_selected`] so the file
-    /// manager and the trusted picker act on the same [`Activation`]. The
-    /// engine decides *what* the target is; the launch stays here, in the app's
-    /// own capability-checked tail under the user's identity. `intent` says
-    /// what the gesture meant for a bundle (run it, or list what is inside it)
-    /// and `handoff` whether the window's job ends with a successful launch or
-    /// open.
+    /// Activate the chosen entry through the shared dispatch-by-kind
+    /// [`Browser::activate_selected`], answering whether the listing changed.
     ///
-    /// * [`Activation::Descended`] — the engine descended into a directory (its
-    ///   own transactional, fail-closed navigation); the selection is revealed
-    ///   and the view repainted, exactly as a rail-click navigation is.
-    /// * [`Activation::LaunchBundle`] — the entry is a `<Name>.app` bundle,
-    ///   launched through the ordinary signed app-load gate ([`Launcher`]),
-    ///   asynchronously so the event loop never blocks behind the load.
-    ///   Launching changes nothing on screen, so nothing repaints.
-    /// * [`Activation::OpenFile`] — the entry is a data file, opened in its
-    ///   associated viewer ([`Launcher::open_file`]): the file manager opens
-    ///   it read-only and hands it to the resolved viewer on `STDIN` (the
-    ///   inherited-document hand-off), asynchronously so the event loop never
-    ///   blocks. A file no installed application claims leaves the listing
-    ///   unchanged and states the refusal fail-loud, never a fabricated open.
-    ///
-    /// A refused activation (an unreadable directory the engine could not
-    /// descend into) leaves the browser where it was and repaints nothing
-    /// (fail closed).
-    #[allow(clippy::too_many_arguments)] // The selection's context and the intent.
+    /// A directory the engine descended into reveals its selection; a bundle
+    /// is launched and a file opened in its application ([`Launcher`]), both
+    /// asynchronously, so the loop never waits on a load. A refusal is stated
+    /// over the window, the listing as it was. `intent` says what the gesture
+    /// meant for a bundle.
     fn activate<S: DirectorySource>(
         browser: &mut Browser<S>,
-        launcher: &RefCell<Launcher>,
-        client: &mut WindowClient<app::RtWindowTransport>,
-        scale: Scale,
-        theme: &Theme,
-        viewport: Rect,
-        toolbar: ToolbarBand,
+        overlays: &mut Overlays,
+        acts: &mut Acts<'_>,
+        frame: Frame<'_>,
         intent: BundleIntent,
     ) -> bool {
         match browser.activate_selected(intent) {
             Ok(Activation::Descended) => {
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
+                tairix_browse::render::reveal_selection(
+                    browser,
+                    frame.scale,
+                    frame.theme,
+                    frame.viewport,
+                    frame.toolbar,
+                );
                 true
             }
             Ok(Activation::LaunchBundle { path }) => {
-                launcher.borrow_mut().launch(client, &path);
+                acts.launcher.borrow_mut().launch(acts.menu.client, &path);
                 false
             }
             Ok(Activation::OpenFile { path }) => {
-                launcher.borrow_mut().open_file(client, &path);
+                acts.launcher
+                    .borrow_mut()
+                    .open_file(acts.menu.client, &path);
                 false
             }
-            Err(_) => false,
+            // Nothing was chosen, so nothing was refused.
+            Err(tairix_browse::BrowseError::NoSuchEntry) => false,
+            Err(err) => {
+                let name = browser.chosen_name().unwrap_or_default();
+                let reason = command::listing_refusal(err);
+                report_error(&alloc::format!(
+                    "{} could not be opened: {reason}",
+                    tairix_util::utf8::shown(name)
+                ));
+                overlays
+                    .notices
+                    .refuse(NoticeSource::Open, &notice::not_opened(name), reason);
+                false
+            }
         }
     }
 
@@ -6543,7 +6856,7 @@ mod program {
         let mut taken: alloc::vec::Vec<String> = read_children(&trash)
             .ok()?
             .into_iter()
-            .map(|(name, _kind)| name)
+            .map(|(name, _, _)| name)
             .collect();
         let mut moves = alloc::vec::Vec::with_capacity(plan.len());
         for target in plan.targets() {
@@ -6747,43 +7060,159 @@ mod program {
             );
             return;
         }
+        let subject = subject_of(confirm.plan.targets().iter().map(DeleteTarget::path));
         overlays.starting = Some(match confirm.trash_moves {
-            Some(moves) => Operation::new(Job::Trash(TrashRun::new(moves)), ProgressOp::Trash),
+            Some(moves) => Operation::new(
+                Job::trash(moves),
+                ProgressModel::new(ProgressOp::Trash, subject, None),
+            ),
             None => Operation::new(
-                Job::Delete(DeleteWalk::from_plan(&confirm.plan)),
-                ProgressOp::Delete,
+                Job::delete(&confirm.plan),
+                ProgressModel::new(ProgressOp::Delete, subject, None),
             ),
         });
     }
 
+    /// What an operation on `paths` acts on, as its window's headline names
+    /// it: the one item by its name, or how many.
+    fn subject_of<'a>(paths: impl ExactSizeIterator<Item = &'a [String]>) -> Subject {
+        let count = paths.len();
+        let mut paths = paths;
+        match (count, paths.next().and_then(<[String]>::last)) {
+            (1, Some(name)) => Subject::One(name.clone()),
+            _ => Subject::Many(count),
+        }
+    }
+
     /// What one unit of an operation came to.
     impl Job {
-        /// Carry out one bounded unit: one listing, one removal, one rename,
-        /// one directory made, or one copy chunk. Every unit is the user's own
-        /// permission-checked call, so no new authority is used.
+        /// Carry out one bounded unit: one listing or one look at an item
+        /// while counting, then one removal, one rename, one directory made,
+        /// or one copy chunk. Every unit is the user's own permission-checked
+        /// call, so no new authority is used.
         fn step(&mut self) -> Step {
-            match self {
-                Job::Delete(walk) => delete_step(walk),
-                Job::Paste(paste) => paste.unit(),
-                Job::Trash(run) => trash_step(run),
+            let Some(survey) = self.survey.as_mut() else {
+                return match &mut self.walk {
+                    Walk::Delete(walk) => delete_step(walk, &mut self.current),
+                    Walk::Paste(paste) => paste.unit(&mut self.current),
+                    Walk::Trash(run) => trash_step(run, &mut self.current),
+                };
+            };
+            let counting = match &mut self.walk {
+                Walk::Delete(_) | Walk::Trash(_) => count_step(survey, None),
+                Walk::Paste(paste) => match paste.landing() {
+                    Ok(landing) => count_step(survey, Some(landing)),
+                    Err(refusal) => return refusal,
+                },
+            };
+            if let Some(next) = survey.next() {
+                name_into(&mut self.current, next.path());
             }
-        }
-
-        /// The honest count of items done so far.
-        fn done(&self) -> usize {
-            match self {
-                Job::Delete(walk) => walk.removed(),
-                Job::Paste(paste) => paste.done(),
-                Job::Trash(run) => run.index,
+            if counting.is_none() {
+                self.total = survey.total();
+                self.survey = None;
+                self.current.clear();
             }
+            Step::Working
         }
 
         /// The operation ends part-way: a destination file it was writing is
         /// removed rather than left half-copied.
         fn abandon(&mut self) {
-            if let Job::Paste(paste) = self {
+            if let Walk::Paste(paste) = &mut self.walk {
                 paste.abandon();
             }
+        }
+    }
+
+    impl Walk {
+        /// What is done so far.
+        /// Whether a move across volumes is removing the originals of what it
+        /// has carried.
+        fn removing(&self) -> bool {
+            matches!(self, Walk::Paste(paste) if matches!(paste.stage, PasteStage::Deleting(_)))
+        }
+
+        fn done(&self) -> Tally {
+            let items = |count: usize| u64::try_from(count).unwrap_or(u64::MAX);
+            match self {
+                Walk::Delete(walk) => Tally {
+                    items: items(walk.removed()),
+                    bytes: 0,
+                },
+                Walk::Paste(paste) => Tally {
+                    items: items(paste.done),
+                    bytes: paste.bytes_done(),
+                },
+                Walk::Trash(run) => Tally {
+                    items: items(run.index),
+                    bytes: 0,
+                },
+            }
+        }
+    }
+
+    /// Where a paste's items land and how: what a count needs to tell an item
+    /// a move renames in place, which carries nothing, from one it copies.
+    #[derive(Copy, Clone)]
+    struct Landing {
+        op: ClipboardOp,
+        volume: VolumeId,
+    }
+
+    /// One unit of counting what an operation will touch: one look at an item
+    /// whose kind is not yet known, or one listing. `landing` is a paste's.
+    /// Answers `None` once nothing is left to count.
+    fn count_step(survey: &mut Survey, landing: Option<Landing>) -> Option<()> {
+        match survey.next()? {
+            SurveyStep::Stat(path) => {
+                let path = path.to_vec();
+                let Some(stat) = stat_name(&path) else {
+                    survey.unreadable();
+                    return Some(());
+                };
+                let renamed = landing.is_some_and(|landing| {
+                    paste_strategy(landing.op, VolumeId::new(stat.id.volume), landing.volume)
+                        == PasteStrategy::Rename
+                });
+                let kind = copy_kind_of(stat.kind);
+                if renamed {
+                    survey.stated(false, 0);
+                } else {
+                    let bytes = if kind == CopyKind::File { stat.size } else { 0 };
+                    survey.stated(kind == CopyKind::Directory, bytes);
+                }
+            }
+            SurveyStep::List(path) => {
+                let path = path.to_vec();
+                match read_children(&path) {
+                    Ok(children) => {
+                        let counted: alloc::vec::Vec<(String, bool, u64)> = children
+                            .into_iter()
+                            .map(|(name, kind, size)| {
+                                let bytes = if kind.is_directory_backed() || kind.is_link() {
+                                    0
+                                } else {
+                                    size
+                                };
+                                (name, kind.is_directory_backed(), bytes)
+                            })
+                            .collect();
+                        survey.listed(&counted);
+                    }
+                    Err(_) => survey.unreadable(),
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// Put the last component of `path`, the name a reader knows it by, into
+    /// `name`, reusing what it holds.
+    fn name_into(name: &mut String, path: &[String]) {
+        name.clear();
+        if let Some(leaf) = path.last() {
+            name.push_str(leaf);
         }
     }
 
@@ -6795,6 +7224,7 @@ mod program {
         windows: &mut alloc::vec::Vec<OpenWindow>,
         client: &mut WindowClient<app::RtWindowTransport>,
         reads: &Reads,
+        motion: MotionTheme,
     ) -> bool {
         let mut working = false;
         let mut ended = alloc::vec::Vec::new();
@@ -6803,25 +7233,33 @@ mod program {
             let Some(progress) = win.progress() else {
                 continue;
             };
-            let Operation { here, progress, .. } = &mut progress.operation;
-            let Some(job) = here.as_mut() else {
+            let operation = &mut progress.operation;
+            let Some(mut job) = operation.here.take() else {
                 continue;
             };
             let until = tairix_rt::clock_get().saturating_add(Timeline::FRAME_NS / 2);
+            let cancelled = operation.progress.is_cancel_requested();
             let ending = run_slice(
                 || job.step(),
-                || progress.is_cancel_requested(),
+                || cancelled,
                 || tairix_rt::clock_get() >= until,
             );
             if ending == Some(Ending::Cancelled) {
                 job.abandon();
             }
-            let done = job.done();
-            let counted = done != progress.done();
-            progress.set_done(done);
+            let reading = job.reading();
+            let counted = operation.differs(&reading, &job.current);
+            operation.observe(reading, &job.current, tairix_rt::clock_get());
             if let Some(ending) = ending {
-                ended.push((id, Finished { done, ending }));
+                ended.push((
+                    id,
+                    Finished {
+                        done: reading.done,
+                        ending,
+                    },
+                ));
             } else {
+                operation.here = Some(job);
                 working = true;
                 if counted {
                     win.owed.owe_whole();
@@ -6830,7 +7268,8 @@ mod program {
         }
         for (id, finished) in ended {
             if let Some(index) = windows.iter().position(|win| win.pane.id() == id) {
-                end_operation(windows, index, client, reads, finished);
+                let now = tairix_rt::clock_get();
+                finish_operation(windows, index, client, reads, finished, (now, motion));
             }
         }
         working
@@ -6855,7 +7294,7 @@ mod program {
     /// One unit of a recursive removal: read a directory or unlink a node,
     /// contents before their container. The first refusal stops the removal,
     /// leaving what was already removed removed.
-    fn delete_step(walk: &mut DeleteWalk) -> Step {
+    fn delete_step(walk: &mut DeleteWalk, current: &mut String) -> Step {
         let step = walk.next_action().map(|action| match action {
             DeleteAction::List(path) => (true, path.to_vec(), false),
             DeleteAction::Remove { path, is_directory } => (false, path.to_vec(), is_directory),
@@ -6863,6 +7302,7 @@ mod program {
         let Some((is_list, path, is_directory)) = step else {
             return Step::Done;
         };
+        name_into(current, &path);
         if is_list {
             let children = match removal_children(&path) {
                 Ok(children) => children,
@@ -6898,10 +7338,11 @@ mod program {
 
     /// One unit of a move to Trash: one target renamed into its captured Trash
     /// destination, resolved collision-free when the dialog opened.
-    fn trash_step(run: &mut TrashRun) -> Step {
+    fn trash_step(run: &mut TrashRun, current: &mut String) -> Step {
         let Some((source, dest)) = run.moves.get(run.index) else {
             return Step::Done;
         };
+        name_into(current, source);
         if let Err(reason) = rename_item(source, dest) {
             return Step::Stopped(item_refusal("move", source, reason));
         }
@@ -6917,21 +7358,26 @@ mod program {
     /// Read the children of the directory at `path`: each child's leaf name
     /// and the browser's own classification of it, through the same
     /// capability-checked listing call and shared decode the browser
-    /// navigates with, so a walk sees exactly what the browser would.
+    /// navigates with, so a walk sees what is a directory, a file or a link
+    /// exactly as the browser would. Where a link points is not read: every
+    /// walk acts on a link as the leaf it is.
     ///
-    /// One read serves both walks, each taking the reading it needs: the
-    /// delete walk asks whether a child is directory-backed *on disk*
-    /// ([`removal_children`]), while the copy walk asks what a copy must *do*
-    /// with it ([`copy_children`]) — which is not the same question for a
+    /// One read serves the survey and both walks, each taking the reading it
+    /// needs: the delete walk asks whether a child is directory-backed *on
+    /// disk* ([`removal_children`]), while the copy walk asks what a copy must
+    /// *do* with it ([`copy_children`]) — which is not the same question for a
     /// symbolic link.
-    fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, EntryKind)>, Errno> {
+    fn read_children(path: &[String]) -> Result<alloc::vec::Vec<(String, EntryKind, u64)>, Errno> {
         let spelled = tairix_browse::vfs::absolute_path(path)?;
         let stream = tairix_rt::read_dir_all(spelled.as_bytes()).map_err(Errno::from_syscall)?;
-        let entries =
-            tairix_browse::vfs::entries_from_dir_stream(&spelled, &stream, &mut RtLinkReader)?;
+        let entries = tairix_browse::vfs::entries_from_dir_stream(
+            &spelled,
+            &stream,
+            &mut tairix_browse::vfs::NoLinks,
+        )?;
         Ok(entries
             .into_iter()
-            .map(|entry| (entry.name().to_string(), entry.kind()))
+            .map(|entry| (entry.name().to_string(), entry.kind(), entry.size()))
             .collect())
     }
 
@@ -6941,7 +7387,7 @@ mod program {
     fn removal_children(path: &[String]) -> Result<alloc::vec::Vec<(String, bool)>, Errno> {
         Ok(read_children(path)?
             .into_iter()
-            .map(|(name, kind)| (name, kind.is_directory_backed()))
+            .map(|(name, kind, _)| (name, kind.is_directory_backed()))
             .collect())
     }
 
@@ -6950,7 +7396,7 @@ mod program {
     fn copy_children(path: &[String]) -> Result<alloc::vec::Vec<(String, CopyKind)>, Errno> {
         Ok(read_children(path)?
             .into_iter()
-            .map(|(name, kind)| {
+            .map(|(name, kind, _)| {
                 let copy = if kind.is_directory_backed() {
                     CopyKind::Directory
                 } else if kind.is_link() {
@@ -7101,8 +7547,13 @@ mod program {
             ClipboardOp::Copy => ProgressOp::Copy,
             ClipboardOp::Cut => ProgressOp::Move,
         };
+        let subject = subject_of(plan.items().iter().map(PasteItem::source));
+        let destination = target.last().cloned();
         let paste = Paste::new(plan.op(), target.to_vec(), plan.items().to_vec());
-        overlays.starting = Some(Operation::new(Job::Paste(Box::new(paste)), op));
+        overlays.starting = Some(Operation::new(
+            Job::paste(paste),
+            ProgressModel::new(op, subject, destination),
+        ));
         Ok(())
     }
 
@@ -7149,6 +7600,10 @@ mod program {
         /// The honest count of nodes moved/copied so far (the progress figure);
         /// cross-volume cleanup removals are not counted as copied.
         done: usize,
+        /// The bytes of the files copied whole so far.
+        bytes: u64,
+        /// The name of the item in hand.
+        leaf: String,
         /// One reused, fixed-size copy buffer — never a per-file allocation and
         /// never sized to a file's length, so a copy of any size stays bounded.
         /// Taken on the first file copied, by the thread doing the copy.
@@ -7312,34 +7767,69 @@ mod program {
                 stage: PasteStage::Idle,
                 current_source: alloc::vec::Vec::new(),
                 done: 0,
+                bytes: 0,
+                leaf: String::new(),
                 buf: alloc::vec::Vec::new(),
             }
         }
 
-        /// One unit of the paste, its refusal stated naming the item.
-        fn unit(&mut self) -> Step {
+        /// Where the items land and how, the destination read on first ask.
+        fn landing(&mut self) -> Result<Landing, Step> {
+            if let Some(volume) = self.dest_vol {
+                return Ok(Landing {
+                    op: self.op,
+                    volume,
+                });
+            }
+            let Some(stat) = stat_node(&self.dest) else {
+                return Err(Step::Stopped(item_refusal(
+                    "paste into",
+                    &self.dest,
+                    "it could not be read",
+                )));
+            };
+            let volume = VolumeId::new(stat.id.volume);
+            self.dest_vol = Some(volume);
+            Ok(Landing {
+                op: self.op,
+                volume,
+            })
+        }
+
+        /// One unit of the paste, its refusal stated naming the item, and the
+        /// item in hand named in `current`.
+        fn unit(&mut self, current: &mut String) -> Step {
             let verb = match self.op {
                 ClipboardOp::Copy => "copy",
                 ClipboardOp::Cut => "move",
             };
-            if self.dest_vol.is_none() {
-                let Some(stat) = stat_node(&self.dest) else {
-                    return Step::Stopped(item_refusal(
-                        "paste into",
-                        &self.dest,
-                        "it could not be read",
-                    ));
-                };
-                self.dest_vol = Some(VolumeId::new(stat.id.volume));
-                return Step::Working;
+            if let Err(refusal) = self.landing() {
+                return refusal;
             }
-            match self.step() {
+            let outcome = self.step();
+            if *current != self.leaf {
+                current.clear();
+                current.push_str(&self.leaf);
+            }
+            match outcome {
                 StepOutcome::Working => Step::Working,
                 StepOutcome::Done => Step::Done,
                 StepOutcome::Failed(reason) => {
                     Step::Stopped(item_refusal(verb, &self.current_source, reason))
                 }
             }
+        }
+
+        /// The bytes copied so far, the file in flight's among them.
+        fn bytes_done(&self) -> u64 {
+            let flight = match &self.stage {
+                PasteStage::Copying {
+                    transfer: Some(transfer),
+                    ..
+                } => transfer.cursor.copied(),
+                _ => 0,
+            };
+            self.bytes.saturating_add(flight)
         }
 
         /// The paste ends part-way: a file it was copying is removed rather
@@ -7350,12 +7840,6 @@ mod program {
                     transfer.abandon();
                 }
             }
-        }
-
-        /// The honest count of nodes moved/copied so far — the rising progress
-        /// figure.
-        fn done(&self) -> usize {
-            self.done
         }
 
         /// Carry out one bounded unit of work, dispatching on the current
@@ -7388,9 +7872,15 @@ mod program {
             };
             self.index += 1;
             self.current_source = item.source().to_vec();
+            name_into(&mut self.leaf, item.source());
             if item.overwrites_source() {
                 return match self.op {
-                    ClipboardOp::Cut => StepOutcome::Working,
+                    ClipboardOp::Cut => {
+                        // Already where it would land: done, as the count of
+                        // the whole counted it.
+                        self.done += 1;
+                        StepOutcome::Working
+                    }
                     ClipboardOp::Copy => {
                         StepOutcome::Failed("an item cannot be copied onto itself")
                     }
@@ -7486,6 +7976,14 @@ mod program {
                 }
                 return StepOutcome::Working;
             };
+            match &step {
+                CopyStep::MakeDir(named)
+                | CopyStep::CopyFile(named, _)
+                | CopyStep::CopyLink(named, _) => {
+                    name_into(&mut self.leaf, named);
+                }
+                CopyStep::List(_) => {}
+            }
             match step {
                 CopyStep::MakeDir(dest) => {
                     let spelled = match spell_path(&dest) {
@@ -7560,6 +8058,7 @@ mod program {
                         return StepOutcome::Failed(LOST_TRACK);
                     }
                     self.done += 1;
+                    self.bytes = self.bytes.saturating_add(transfer.cursor.copied());
                     self.stage = PasteStage::Copying {
                         walk,
                         transfer: None,
@@ -7776,19 +8275,25 @@ mod program {
             in_selection,
             acts.double_click,
         ) {
-            PrimaryPress::Activate { index } => {
+            // The pair's first press may have selected more than the item, so
+            // the marks are reported from before it is chosen alone.
+            PrimaryPress::Activate {
+                index,
+                intent,
+                deselect,
+            } => {
+                let mark = ViewMark::of(browser, frame);
                 let _ = browser.select(index);
-                let changed = activate(
-                    browser,
-                    acts.launcher,
-                    acts.menu.client,
-                    scale,
-                    theme,
-                    viewport,
-                    toolbar,
-                    bundle_intent(modifiers.shift),
-                );
-                (whole_if(changed), false)
+                if activate(browser, overlays, acts, frame, intent) {
+                    return (Repaint::Whole, false);
+                }
+                if deselect {
+                    browser.clear_selection();
+                }
+                (
+                    Repaint::reported_if(mark.report(browser, frame, damage)),
+                    false,
+                )
             }
             PrimaryPress::Select { index, how } => select_pressed(
                 browser,
@@ -8226,7 +8731,6 @@ mod program {
         let scale = canvas.scale;
         let theme = canvas.theme();
         let toolbar = canvas.chrome.toolbar;
-        let launcher = acts.launcher;
         let frame = Frame {
             scale,
             theme,
@@ -8235,16 +8739,7 @@ mod program {
         };
         let (changed, close) = match command {
             ContextCommand::Open => (
-                activate(
-                    browser,
-                    launcher,
-                    acts.menu.client,
-                    scale,
-                    theme,
-                    viewport,
-                    toolbar,
-                    BundleIntent::Launch,
-                ),
+                activate(browser, overlays, acts, frame, BundleIntent::Launch),
                 false,
             ),
             ContextCommand::OpenWith => begin_open_with(browser, overlays, acts, canvas),
@@ -10164,9 +10659,13 @@ mod program {
         }
     }
 
-    /// Step down `ladder` past the place `err` refused, stating the move;
+    /// Step down `ladder` past the place `err` refused, stating the move — or,
+    /// for a file asked for, on to the folder that shows it — answering
     /// `false`, stated, when no place is left.
     fn step_down(ladder: &mut Ladder, err: tairix_browse::BrowseError) -> bool {
+        if ladder.show_instead(err) {
+            return true;
+        }
         let Some(reason) = ladder.step(command::listing_refusal(err)) else {
             report_error(&alloc::format!("listing refused ({err}); no window opened"));
             return false;
@@ -10225,6 +10724,9 @@ mod program {
             // fallback, or since — is raised in its place, saying why.
             let shown_at = landed.browser.components();
             if let Some(win) = windows.iter_mut().find(|win| win.shows(shown_at)) {
+                if let Some(name) = landed.ladder.shows_in(shown_at) {
+                    reveal_entry(win, name);
+                }
                 if raise_showing(client, win.pane.id()) {
                     if let (Some(reason), Some(state)) = (landed.ladder.moved(), win.browser()) {
                         state.overlays.notices.refuse(
@@ -10552,8 +11054,9 @@ mod program {
                 (&desktop, themes.grounds(MANAGER_WINDOW_GROUND), &icons),
                 event_endpoint,
             );
-            adopt_operations(&mut windows, &mut client, &reads);
-            moved |= step_here_operations(&mut windows, &mut client, &reads);
+            let motion = themes.active().motion();
+            adopt_operations(&mut windows, &mut client, &reads, motion);
+            moved |= step_here_operations(&mut windows, &mut client, &reads, motion);
             if let Some(code) = open_landed_windows(
                 &mut windows,
                 &opening,
@@ -10792,7 +11295,7 @@ mod program {
                     .filter_map(|win| match &mut win.kind {
                         WindowKind::Browser(state) => state.due(now),
                         WindowKind::Properties(props) => props.due(now),
-                        WindowKind::Progress(progress) => progress.operation.due_ns,
+                        WindowKind::Progress(progress) => progress.operation.due(),
                     })
                     .min(),
             );

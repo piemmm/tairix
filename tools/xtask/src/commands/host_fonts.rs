@@ -10,8 +10,8 @@
 //! resolution, per-scalar fallback, weight instancing or outline decoding is
 //! re-implemented here; only the on-disk reading is.
 
-use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use tairix_abi::font_ipc::{
@@ -20,7 +20,7 @@ use tairix_abi::font_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_font::{seam_outlines, OutlineReply};
-use tairix_fontd::discovery::{discover, FaceLoad, FontStore};
+use tairix_fontd::discovery::{discover, FaceLoad, FontStore, HandleFace, StoreFile};
 use tairix_fontd::FontService;
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PressureBand, ReportedPressure};
@@ -49,9 +49,6 @@ impl Sink for DiscardSink {
 /// The committed font store as the service's own discovery reads it.
 struct AssetStore {
     root: PathBuf,
-    /// Face bytes read so far, leaked into the arena the service borrows
-    /// from for the life of the pass.
-    read: BTreeMap<PathBuf, &'static [u8]>,
 }
 
 impl FontStore<'static> for AssetStore {
@@ -73,28 +70,29 @@ impl FontStore<'static> for AssetStore {
     }
 
     fn face_loader(&mut self, dir: &str, face: &str) -> Box<dyn FaceLoad<'static> + 'static> {
-        let path = self.root.join(dir).join(face);
-        let bytes = match self.read.get(&path) {
-            Some(held) => Some(*held),
-            None => fs::read(&path).ok().map(|owned| {
-                // Leaked deliberately: the service borrows a face for its
-                // whole life, and a verification pass *is* that life. The
-                // process exits when the build step does.
-                let leaked: &'static [u8] = Box::leak(owned.into_boxed_slice());
-                self.read.insert(path.clone(), leaked);
-                leaked
-            }),
-        };
-        Box::new(HostFace(bytes))
+        let file = fs::File::open(self.root.join(dir).join(face))
+            .ok()
+            .map(HostFile);
+        Box::new(HandleFace::new(file))
     }
 }
 
-/// One face's bytes, already read.
-struct HostFace(Option<&'static [u8]>);
+/// A face file in the committed store, read where the service asks.
+struct HostFile(fs::File);
 
-impl FaceLoad<'static> for HostFace {
-    fn load(&mut self) -> Result<&'static [u8], Errno> {
-        self.0.ok_or(Errno::NotFound)
+impl StoreFile for HostFile {
+    fn size(&self) -> Result<u64, Errno> {
+        self.0
+            .metadata()
+            .map(|meta| meta.len())
+            .map_err(|_| Errno::DeviceFault)
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        let mut file = &self.0;
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read(buf))
+            .map_err(|_| Errno::DeviceFault)
     }
 }
 
@@ -120,7 +118,6 @@ impl HostFonts {
         let cache = tairix_fontd::glyph_cache(HOST_RAM_BYTES, gauge, &SINK, HOST_HASH_KEY);
         let mut store = AssetStore {
             root: assets_root.to_path_buf(),
-            read: BTreeMap::new(),
         };
         let service = discover(&mut store, cache, &SINK).map_err(|err| {
             format!(
@@ -216,5 +213,61 @@ impl FontProvider for HostFonts {
             left = &left[answered..];
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tairix_fontd::discovery::FontStore as _;
+    use tairix_svg::font::{FaceRequest, FontProvider, FontStyle};
+
+    use super::super::font_store::ASSETS_DIR;
+    use super::{AssetStore, HostFonts};
+
+    fn committed_store() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(ASSETS_DIR)
+    }
+
+    #[test]
+    fn the_committed_store_draws_text_through_the_service() {
+        let mut fonts = HostFonts::open(&committed_store()).expect("the committed store");
+        let face = fonts
+            .select(&FaceRequest {
+                family: "sans-serif",
+                weight: 400,
+                style: FontStyle::Normal,
+                stretch: 10_000,
+            })
+            .expect("a sans-serif face");
+        let mut outlines = Vec::new();
+        // The alef is drawn by a fallback face, read only once it is asked for.
+        fonts
+            .outlines(face.id, &['T', 'a', '\u{05D0}'], &mut outlines)
+            .expect("outlines");
+        assert_eq!(outlines.len(), 3);
+        assert!(outlines.iter().all(|glyph| glyph.advance > 0.0));
+    }
+
+    #[test]
+    fn a_face_is_read_when_first_asked_for_not_when_discovered() {
+        let root = std::env::temp_dir().join(format!("xtask-hostfonts-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("family")).expect("scratch store");
+        let face = root.join("family").join("face.ttf");
+        std::fs::write(&face, b"as discovered").expect("a face");
+        let mut loader = AssetStore { root: root.clone() }.face_loader("family", "face.ttf");
+
+        std::fs::write(&face, b"as first asked for").expect("rewritten in place");
+
+        assert_eq!(loader.load().expect("read"), b"as first asked for");
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_listed_is_refused() {
+        assert!(HostFonts::open(&committed_store().join("no such store")).is_err());
     }
 }

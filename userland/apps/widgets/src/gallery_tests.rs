@@ -1247,3 +1247,62 @@ fn a_press_within_the_focused_form_moves_its_cursor_and_reports_it() {
         "the press moved the cursor"
     );
 }
+
+/// The busy trace on show sweeps once the gallery reports the clock: it asks
+/// for a frame, each step repaints only where it is drawn, and a panel with
+/// nothing moving asks for none.
+#[test]
+fn the_busy_trace_on_show_sweeps_on_the_clock_and_nothing_else_asks_for_frames() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Values);
+    assert_eq!(
+        gallery.animation_due_in(window(), Scale::ONE, theme),
+        None,
+        "nothing moves before the clock is reported"
+    );
+    let mut first = damage::sink();
+    let due = gallery.animate(0, window(), Scale::ONE, theme, &mut first);
+    assert!(!first.is_empty(), "the busy trace starts its sweep");
+    assert_eq!(
+        gallery.animation_due_in(window(), Scale::ONE, theme),
+        Some(tairix_theme::Timeline::FRAME_NS)
+    );
+    assert_eq!(
+        due,
+        Some(tairix_theme::Timeline::FRAME_NS),
+        "the step answers when its next frame is due"
+    );
+    let mut step = damage::sink();
+    gallery.animate(
+        tairix_theme::Timeline::FRAME_NS,
+        window(),
+        Scale::ONE,
+        theme,
+        &mut step,
+    );
+    let busy = gallery
+        .current_panel()
+        .iter()
+        .position(
+            |item| matches!(&item.widget, DemoWidget::Progress(w) if w.next_frame_in().is_some()),
+        )
+        .expect("the busy trace");
+    let drawn = gallery
+        .widget_rect_for_test(busy, window(), Scale::ONE, theme)
+        .expect("in view");
+    assert!(!step.is_empty(), "the moving trace is repainted");
+    assert!(
+        step.rects()
+            .iter()
+            .all(|rect| rect.intersection(&drawn) == *rect),
+        "only the moving trace is repainted"
+    );
+
+    let mut still = select_tab(gallery, GalleryTab::Buttons);
+    assert_eq!(
+        still.animate(0, window(), Scale::ONE, theme, &mut damage::sink()),
+        None
+    );
+    assert_eq!(still.animation_due_in(window(), Scale::ONE, theme), None);
+}

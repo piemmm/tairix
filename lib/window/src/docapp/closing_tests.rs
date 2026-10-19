@@ -1,6 +1,10 @@
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity};
 
-use super::{next_quit_step, save_changes_alert, CloseAnswer, QuitStanding, QuitStep};
+use tairix_abi::Errno;
+
+use super::{
+    next_quit_step, reveal_refusal, save_changes_alert, CloseAnswer, QuitStanding, QuitStep,
+};
 
 use QuitStanding::{Asking, Clear, Kept, Saving, Unasked};
 
@@ -64,4 +68,33 @@ fn a_window_saving_on_its_way_out_lets_the_next_be_asked() {
 fn a_window_kept_open_gives_the_quit_up() {
     assert_eq!(next_quit_step([Unasked, Kept]), QuitStep::GiveUp);
     assert_eq!(next_quit_step([Asking, Kept]), QuitStep::GiveUp);
+}
+
+#[test]
+fn the_save_question_shows_what_hides_in_the_documents_name() {
+    let question = save_changes_alert("evil\u{202e}txt.exe").expect("it fits an alert");
+    assert_eq!(
+        question.headline(),
+        "Save the changes to \u{201c}evil\u{fffd}txt.exe\u{201d}?"
+    );
+}
+
+#[test]
+fn a_document_not_shown_in_its_folder_says_why_in_words_the_user_can_act_on() {
+    assert_eq!(
+        reveal_refusal(Errno::NotFound),
+        "No file manager is running to show it."
+    );
+    assert_eq!(
+        reveal_refusal(Errno::OutOfRange),
+        "It is not kept in a folder."
+    );
+    for err in [
+        Errno::PermissionDenied,
+        Errno::NotSupported,
+        Errno::DeviceFault,
+    ] {
+        let why = reveal_refusal(err);
+        assert!(why.ends_with('.') && !why.is_empty(), "{err:?}: {why}");
+    }
 }

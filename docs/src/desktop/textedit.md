@@ -110,6 +110,18 @@ write-only descriptor to a new or confirmed-replaced file. A descriptor goes
 with the window that holds it, one inherited at launch included, so a resident
 editor keeps no access to a document it has closed.
 
+A secondary press on a window's close button closes it — asking first about
+changes it holds, as any close does — and then shows its file in the file
+manager: the folder holding it, brought forward where a window already shows
+it, the file selected. The editor never learns where that is. It mints the
+desktop a location grant on the document's descriptor (`fd_grant_location`,
+[system calls](../architecture/syscalls.md)), which tells the path and opens
+nothing, and asks to have it shown
+([session](session.md#showing-where-a-document-lives)); a refusal is stated in
+an alert. A window still reading its document in, or holding an untitled one,
+has nothing to show and just closes. This is the document host's, so Paint does
+the same.
+
 ## The loop
 
 TextEdit runs in the shared document host (`tairix_window::docapp`), which

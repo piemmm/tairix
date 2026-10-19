@@ -794,9 +794,7 @@ is what the declaration's `AppBarClick` says:
   bring one back. This is what an ordinary single-window application declares.
 - `AppBarClick::Raise` — raise the most recently used window and, with none,
   nothing. Only for an application that ends with its window and so can never
-  be clicked windowless: the Date & Time app runs under an elevated account,
-  and a resident windowless instance would keep that authority alive behind an
-  empty slot.
+  be clicked windowless, such as the WinterSun client.
 
 A press reports `AppDefault { app }`, `AppRaise { app }`, or `Ignored`
 accordingly.

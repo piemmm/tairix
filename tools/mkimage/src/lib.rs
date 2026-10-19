@@ -621,25 +621,84 @@ impl EntropySource for HostEntropy {
     }
 }
 
-/// Write `unlock`'s root volume key to `path` as its 64-hex-digit key-file
-/// body, readable by its owner alone before any key byte reaches it: the key
-/// mounts the image's root on a host.
+/// Replace the build output at `path` with `bytes`, whole or not at all.
+///
+/// The bytes are written beside `path` and renamed over it, so a build cut
+/// short never leaves a truncated image under the name, and an emulator still
+/// running the previous image keeps the disk it opened. Two builds writing the
+/// same output take turns on an advisory lock on `<name>.lock` beside it, so
+/// neither renames the other's half-written sibling over it.
 ///
 /// # Errors
 ///
-/// The I/O error that refused the open, the permission change, or the write.
-pub fn write_root_key(path: &std::path::Path, unlock: &RootUnlock) -> std::io::Result<()> {
+/// `InvalidInput` when `path` names something other than a regular file — a
+/// device or a link is never replaced by a file — else the I/O error that
+/// refused the write or the rename. `path` is then as it was.
+pub fn replace_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    replace_with(path, bytes, std::fs::OpenOptions::new())
+}
+
+fn replace_with(
+    path: &std::path::Path,
+    bytes: &[u8],
+    mut options: std::fs::OpenOptions,
+) -> std::io::Result<()> {
     use std::io::Write as _;
+    match std::fs::symlink_metadata(path) {
+        Ok(found) if !found.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+        _ => {}
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let sibling = |suffix: &str| {
+        let mut sibling = name.to_os_string();
+        sibling.push(suffix);
+        path.with_file_name(sibling)
+    };
+    let turn = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(sibling(".lock"))?;
+    turn.lock()?;
+    let staged = sibling(".part");
+    // What a cut-short build left is cleared, and the exclusive create then
+    // never writes through anything planted at the name.
+    match std::fs::remove_file(&staged) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+        _ => {}
+    }
+    let mut file = options.write(true).create_new(true).open(&staged)?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| std::fs::rename(&staged, path));
+    if written.is_err() {
+        // The refusal is the error to report; the sibling goes regardless.
+        let _ = std::fs::remove_file(&staged);
+    }
+    written
+}
+
+/// Write `unlock`'s root volume key to `path` as its 64-hex-digit key-file
+/// body, readable by its owner alone before any key byte reaches it: the key
+/// mounts the image's root on a host. It replaces the file whole, as an image
+/// is replaced ([`replace_file`]).
+///
+/// # Errors
+///
+/// As [`replace_file`].
+pub fn write_root_key(path: &std::path::Path, unlock: &RootUnlock) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    // The creation mode covers only a new file; an existing one is narrowed
-    // through the handle before it is written.
-    #[cfg(unix)]
-    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    file.write_all(&volume_key_to_hex(&unlock.key))
+    replace_with(path, &volume_key_to_hex(&unlock.key), options)
 }
 
 /// Remove the root-key file an earlier encrypted build left at `path`, so it
@@ -1214,6 +1273,94 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn a_replaced_image_leaves_a_running_reader_on_the_disk_it_opened() {
+        use std::io::Read as _;
+        let dir = std::env::temp_dir().join(format!("mkimage-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("disk.img");
+        std::fs::write(&path, b"the image a guest is running").expect("an earlier image");
+        let mut running = std::fs::File::open(&path).expect("a guest's open disk");
+        let staged = dir.join("disk.img.part");
+        std::fs::write(&staged, b"a build cut short").expect("a stale sibling");
+
+        replace_file(&path, b"the rebuilt image").expect("replaced");
+
+        let mut seen = String::new();
+        running
+            .read_to_string(&mut seen)
+            .expect("the guest reads on");
+        assert_eq!(seen, "the image a guest is running");
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            b"the rebuilt image"
+        );
+        assert!(!staged.exists(), "nothing is left beside the image");
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A second writer of one output waits for the first to finish, so
+    /// neither renames the other's half-written sibling over it.
+    #[test]
+    fn writers_of_one_output_take_turns() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("mkimage-turns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("disk.img");
+        let first = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join("disk.img.lock"))
+            .expect("the first writer's turn");
+        first.lock().expect("held");
+        let (done, finished) = mpsc::channel();
+        let second = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                replace_file(&path, b"second").expect("written in its turn");
+                let _ = done.send(());
+            })
+        };
+        assert!(
+            finished.recv_timeout(Duration::from_millis(200)).is_err(),
+            "it waits its turn"
+        );
+        assert!(!path.exists());
+        drop(first);
+        finished
+            .recv_timeout(Duration::from_secs(30))
+            .expect("its turn came");
+        second.join().expect("the second writer ends");
+        assert_eq!(std::fs::read(&path).expect("read back"), b"second");
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn only_a_regular_file_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("mkimage-irregular-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a directory")).expect("scratch dir");
+        let refused = replace_file(&dir.join("a directory"), b"image").expect_err("a directory");
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        #[cfg(unix)]
+        {
+            let target = dir.join("elsewhere");
+            std::fs::write(&target, b"untouched").expect("a link's target");
+            let link = dir.join("linked.img");
+            std::os::unix::fs::symlink(&target, &link).expect("a link");
+            let refused = replace_file(&link, b"image").expect_err("a link");
+            assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(std::fs::read(&target).expect("read"), b"untouched");
+            assert!(std::fs::symlink_metadata(&link)
+                .expect("the link stays")
+                .file_type()
+                .is_symlink());
+        }
+        assert!(!dir.join("a directory.part").exists());
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 

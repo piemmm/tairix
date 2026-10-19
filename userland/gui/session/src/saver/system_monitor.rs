@@ -249,6 +249,15 @@ impl SystemMonitor {
         }
     }
 
+    /// Lay the board out again where its orbit stands and draw it whole: text
+    /// it was measured with provisionally has landed.
+    pub(super) fn refit_text(&mut self, wm: WindowId, compositor: &mut Compositor) {
+        if let Some(board) = Board::new(self.screen, shifted(self.orbit), &self.theme) {
+            self.board = board;
+        }
+        self.repaint_whole(wm, compositor);
+    }
+
     /// Repaint `parts`, each in its own slot, over what the screen holds.
     fn repaint(&self, parts: &[Part], wm: WindowId, compositor: &mut Compositor) {
         let mut damage = Region::new();

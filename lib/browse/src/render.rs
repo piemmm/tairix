@@ -36,7 +36,8 @@ use core::cell::Cell;
 use tairix_controls::button::{Button, ButtonContent, ContentAlign};
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use tairix_controls::state::{
-    ActivityState, AuthorityState, ControlRole, ControlState, PointerState, SelectionState,
+    ActivityState, AuthorityState, ControlRole, ControlState, PointerState, ProgressValue,
+    SelectionState,
 };
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
@@ -78,6 +79,7 @@ use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 use tairix_abi::fs::FileKind;
 use tairix_abi::window_ipc::{AlertButton, AlertButtonRole, AlertSeverity, AlertSpec};
+use tairix_util::utf8::shown;
 
 /// Padding between a panel's edge and its label text, in logical pixels.
 const LABEL_PADDING: u32 = 4;
@@ -1174,10 +1176,12 @@ impl Tiles {
     /// soft shadow; a small one, like a list row's, casts none.
     #[must_use]
     pub fn tile(self, entry: &Entry, state: ControlState, icon: IconKind) -> IconTile {
-        let tile = IconTile::new(entry_label(entry), icon)
+        let label = entry_label(entry);
+        let cut = name_cut(&label);
+        let tile = IconTile::new(label, icon)
             .with_layout(self.layout())
             .with_state(state)
-            .with_name_cut(name_cut(entry.name()));
+            .with_name_cut(cut);
         match self {
             Self::Large => tile.with_picture_shadow(),
             Self::Small => tile,
@@ -1195,14 +1199,16 @@ pub fn name_cut(name: &str) -> Cut {
     }
 }
 
-/// The name shown for an entry: exactly the name the volume holds.
+/// The name shown for an entry: the name the volume holds, with any
+/// character in it that would draw nothing shown as U+FFFD
+/// ([`tairix_util::utf8::shown`]), so two names that differ never look alike.
 ///
 /// No kind suffix is appended — both views carry the entry's icon
 /// ([`icon_for_entry`]), so the label is the name and nothing else, and what
 /// the user reads on screen is what they type, copy, and rename.
 #[must_use]
 pub fn entry_label(entry: &Entry) -> String {
-    String::from(entry.name())
+    shown(entry.name()).into_owned()
 }
 
 /// Height in pixels of one rendered list row, measured on the theme's own body
@@ -1775,9 +1781,10 @@ pub fn entry_parts(
     scale: Scale,
     theme: &Theme,
 ) -> Option<TileParts> {
+    let name = shown(entry.name());
     tiles
         .layout()
-        .parts(cell, scale, theme, entry.name(), name_cut(entry.name()))
+        .parts(cell, scale, theme, &name, name_cut(&name))
 }
 
 /// The folder a drop at window-local `point` lands in, and the listed folder
@@ -1940,9 +1947,10 @@ pub fn entry_name_target<S: DirectorySource>(
     let name = match Tiles::of(browser.view_mode()) {
         None => list_name_rect(browser, entry, item, scale, theme)?,
         Some(tiles) => {
+            let shown = shown(entry.name());
             tiles
                 .layout()
-                .name_target(item, scale, theme, entry.name(), name_cut(entry.name()))?
+                .name_target(item, scale, theme, &shown, name_cut(&shown))?
         }
     };
     let offset = browser.scroll_offset();
@@ -4422,7 +4430,8 @@ pub const DELETE_CONFIRM_INDEX: usize = 1;
 pub fn delete_alert(plan: &DeletePlan, disposition: DeleteDisposition) -> Option<AlertSpec> {
     let named = |verb: &str, after: &str| {
         if plan.len() == 1 {
-            alloc::format!("{verb} \u{201c}{}\u{201d}{after}", plan.targets()[0].name())
+            let name = shown(plan.targets()[0].name());
+            alloc::format!("{verb} \u{201c}{name}\u{201d}{after}")
         } else {
             alloc::format!("{verb} {} items{after}", plan.len())
         }
@@ -4449,87 +4458,134 @@ pub fn delete_alert(plan: &DeletePlan, disposition: DeleteDisposition) -> Option
     AlertSpec::fitted(severity, &headline, detail, &[cancel, confirm]).ok()
 }
 
-/// The width of an operation's progress window, in logical pixels: room for
-/// its running count beside nothing else.
-const PROGRESS_WIDTH: u32 = 360;
+/// The width of an operation's progress window, in logical pixels: a
+/// headline naming a folder and its destination, and the figures beneath.
+const PROGRESS_WIDTH: u32 = 440;
 
-/// The client extent of an operation's progress window at `scale` in `theme`:
-/// its running count on a bar, the Cancel button beneath it, and a pad about
-/// both. The window's own band names the operation.
-#[must_use]
-pub fn progress_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
-    let pad = progress_pad(scale, theme);
-    let line = row_height(scale, theme);
-    (
-        scale.scale_length(PROGRESS_WIDTH),
-        pad.saturating_mul(3).saturating_add(line.saturating_mul(2)),
-    )
+/// What a progress window draws, top to bottom, and where: the headline, the
+/// item in hand, the bar, the figures beside the Cancel button.
+struct ProgressLayout {
+    headline: Rect,
+    current: Rect,
+    bar: Rect,
+    figures: Rect,
+    cancel: Rect,
 }
 
-/// The pad about a progress window's content.
+/// The type each line of a progress window is set in: the headline, the item
+/// in hand, and the figures.
+fn progress_fonts(scale: Scale, theme: &Theme) -> [BitmapFont; 3] {
+    let fonts = theme.fonts();
+    [
+        BitmapFont::for_role(fonts, TextRole::ItemTitle, scale),
+        BitmapFont::for_role(fonts, TextRole::Caption, scale),
+        BitmapFont::for_role(fonts, TextRole::Metric, scale),
+    ]
+}
+
+/// The pad about a progress window's content, and the gap between its lines.
 fn progress_pad(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().control_inset).max(1)
 }
 
-/// Where a progress window whose client is `client` draws its bar and its
-/// Cancel button: the one layout [`draw_progress_window`] paints and
-/// [`progress_cancel_at`] hit-tests.
-fn progress_layout(client: Rect, scale: Scale, theme: &Theme) -> (Rect, Rect) {
+/// Where the headline, the item in hand and the bar of a progress window whose
+/// client is `client` are drawn, and where the row beneath them may begin.
+fn progress_head(client: Rect, scale: Scale, theme: &Theme) -> ([Rect; 3], i32) {
     let pad = progress_pad(scale, theme);
-    let content = Rect::new(
-        client.left().saturating_add(to_i32(pad)),
-        client.top().saturating_add(to_i32(pad)),
-        client.width.saturating_sub(pad.saturating_mul(2)),
-        client.height.saturating_sub(pad.saturating_mul(2)),
-    );
-    let bar = Rect::new(
-        content.left(),
-        content.top(),
-        content.width,
-        row_height(scale, theme).min(content.height),
-    );
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    (bar, progress_cancel_rect(content, scale, theme, font))
+    let gap = to_i32(pad / 2);
+    let [headline, current, _] = progress_fonts(scale, theme);
+    let left = client.left().saturating_add(to_i32(pad));
+    let width = client.width.saturating_sub(pad.saturating_mul(2));
+    let mut y = client.top().saturating_add(to_i32(pad));
+    let mut line = |height: u32, after: i32| {
+        let rect = Rect::new(left, y, width, height);
+        y = y.saturating_add(to_i32(height)).saturating_add(after);
+        rect
+    };
+    let headline = line(headline.line_height(), 0);
+    let current = line(current.line_height(), gap);
+    let bar = line(Progress::band_height(scale, theme), to_i32(pad));
+    ([headline, current, bar], y)
 }
 
-/// The Cancel-button rectangle within the progress window's `content` area —
-/// bottom-right, sized to the "Cancel" label plus padding, clamped to the
-/// content so a small window never places it off the window. The one
-/// definition [`draw_progress_window`] paints and [`progress_cancel_at`]
-/// hit-tests, so a click resolves to exactly the drawn button.
-fn progress_cancel_rect(content: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Rect {
-    let pad = font.text_width("  ").max(scale.scale_length(LABEL_PADDING));
-    let width = font
-        .text_width("Cancel")
-        .saturating_add(pad.saturating_mul(2))
-        .min(content.width);
-    let height = row_height(scale, theme).min(content.height);
-    let x = content
-        .left()
-        .saturating_add(to_i32(content.width.saturating_sub(width)));
-    let y = content
-        .top()
-        .saturating_add(to_i32(content.height.saturating_sub(height)));
-    Rect::new(x, y, width, height)
+/// Where everything in a progress window whose client is `client` is drawn:
+/// the one layout [`draw_progress_window`] paints, [`progress_cancel_at`]
+/// hit-tests and [`progress_window_extent`] sizes the window to.
+fn progress_layout(client: Rect, scale: Scale, theme: &Theme) -> ProgressLayout {
+    let pad = progress_pad(scale, theme);
+    let ([headline, current, bar], below) = progress_head(client, scale, theme);
+    let [_, _, figures] = progress_fonts(scale, theme);
+    let button = Button::new(
+        ButtonContent::Label(String::from("Cancel")),
+        ControlRole::Neutral,
+    );
+    let width = bar.width;
+    let cancel_w = button.measured_width(scale, theme).min(width);
+    let row = row_height(scale, theme).max(figures.line_height());
+    // Raised to the client's foot in a window the desktop fitted shorter than
+    // its extent, so Cancel stays on show.
+    let foot = client
+        .bottom()
+        .saturating_sub(to_i32(pad))
+        .saturating_sub(to_i32(row));
+    let top = below.min(foot);
+    let cancel = Rect::new(
+        bar.left()
+            .saturating_add(to_i32(width.saturating_sub(cancel_w))),
+        top,
+        cancel_w,
+        row,
+    );
+    let figures_rect = Rect::new(
+        bar.left(),
+        top,
+        width.saturating_sub(cancel_w.saturating_add(pad)),
+        row,
+    );
+    ProgressLayout {
+        headline,
+        current,
+        bar,
+        figures: figures_rect,
+        cancel,
+    }
 }
 
-/// Build the progress window's [`Progress`] trace for `model`: an indeterminate
-/// "working" bar captioned with the model's honest running count.
-///
-/// The total is unknown until the driving walk's reads reveal it, so the trace
-/// is [`ActivityState::Working`] (a bounded moving segment) rather than a
-/// fabricated percentage. Its moving-segment phase is derived from the count,
-/// so the bar advances on real job-progress events, never an idle animation
-/// loop.
+/// The client extent of an operation's progress window at `scale` in `theme`:
+/// as tall as its lines, the bar and the Cancel button need, with a pad about
+/// them. The window's own band names the operation.
 #[must_use]
-pub fn build_progress(model: &ProgressModel) -> Progress {
-    let mut progress = Progress::new().with_label(model.status_line());
-    progress.set_state(ControlState::idle().with_activity(ActivityState::Working));
-    // A permille phase that turns over as items are processed — motion is
-    // driven by real progress, not a timer.
-    let phase = u16::try_from(model.done() % 1000).unwrap_or(0);
-    progress.set_phase(phase);
-    progress
+pub fn progress_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
+    let width = scale.scale_length(PROGRESS_WIDTH);
+    let layout = progress_layout(Rect::new(0, 0, width, u32::MAX / 2), scale, theme);
+    let bottom = layout
+        .cancel
+        .bottom()
+        .saturating_add(to_i32(progress_pad(scale, theme)));
+    (width, u32::try_from(bottom).unwrap_or(0))
+}
+
+/// Where a progress window whose client is `client` draws its bar: all that a
+/// frame of the bar's own motion repaints, found without laying out the rest.
+#[must_use]
+pub fn progress_bar_rect(client: Rect, scale: Scale, theme: &Theme) -> Rect {
+    progress_head(client, scale, theme).0[2]
+}
+
+/// The state a file operation's trace shows for `model`: a share of its whole
+/// once counted, busy while it prepares or where it could not count it, and
+/// still while it waits its turn.
+#[must_use]
+pub fn progress_state(model: &ProgressModel) -> ControlState {
+    let activity = if model.is_waiting() {
+        ActivityState::Idle
+    } else {
+        match model.fraction() {
+            Some(permille) => ActivityState::Progress(ProgressValue::new(permille)),
+            None => ActivityState::Working,
+        }
+    };
+    ControlState::idle().with_activity(activity)
 }
 
 /// Build the progress window's Cancel [`Button`] for `model`: enabled while the
@@ -4547,8 +4603,9 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
     button
 }
 
-/// Draw `model`'s progress across its own window's `client`: the honest
-/// running count on an indeterminate bar, and a Cancel button beneath.
+/// Draw `model`'s progress across its own window's `client`: what is moving
+/// where, the item in hand, `trace` — the window's own bar, clocked by its
+/// owner — the figures, and Cancel.
 ///
 /// Every blit clips, so a window the desktop fitted smaller than its extent
 /// shows what fits rather than panicking. It reads only the passed-in model
@@ -4557,15 +4614,40 @@ pub fn build_progress_cancel(model: &ProgressModel) -> Button {
 /// the read-only picker never does.
 pub fn draw_progress_window(
     surface: &mut Surface,
-    model: &ProgressModel,
+    (model, trace): (&ProgressModel, &Progress),
     scale: Scale,
     theme: &Theme,
     client: Rect,
 ) {
-    let (bar, cancel) = progress_layout(client, scale, theme);
-    fill_area(surface, client, Color::from(theme.palette().surface));
-    build_progress(model).render(surface, bar, scale, theme);
-    build_progress_cancel(model).render(surface, cancel, scale, theme);
+    let layout = progress_layout(client, scale, theme);
+    let palette = theme.palette();
+    let [headline, current, figures] = progress_fonts(scale, theme);
+    fill_area(surface, client, Color::from(palette.surface));
+    let line = |surface: &mut Surface, font: BitmapFont, rect: Rect, text: &str, color| {
+        let run = font.elide_to_width(text, rect.width);
+        tairix_controls::paint_run(surface, font, run, (rect.left(), rect.top()), color, None);
+    };
+    let ink = Color::from(palette.on_surface);
+    let muted = Color::from(palette.on_surface_muted);
+    line(surface, headline, layout.headline, &model.headline(), ink);
+    line(
+        surface,
+        current,
+        layout.current,
+        &shown(model.current()),
+        muted,
+    );
+    trace.render(surface, layout.bar, scale, theme);
+    let figures_at = Rect::new(
+        layout.figures.left(),
+        layout.figures.top().saturating_add(to_i32(
+            layout.figures.height.saturating_sub(figures.line_height()) / 2,
+        )),
+        layout.figures.width,
+        figures.line_height(),
+    );
+    line(surface, figures, figures_at, &model.figures(), muted);
+    build_progress_cancel(model).render(surface, layout.cancel, scale, theme);
 }
 
 /// Whether the Cancel button of a progress window whose client is `client`
@@ -4577,8 +4659,11 @@ pub fn draw_progress_window(
 /// changing nothing (fail closed).
 #[must_use]
 pub fn progress_cancel_at(client: Rect, scale: Scale, theme: &Theme, point: Point) -> bool {
-    let (_, rect) = progress_layout(client, scale, theme);
-    rect.width != 0 && rect.height != 0 && rect.contains(point)
+    let cancel = progress_layout(client, scale, theme).cancel;
+    cancel.width != 0
+        && cancel.height != 0
+        && cancel.intersection(&client) == cancel
+        && cancel.contains(point)
 }
 
 /// Most candidate rows the "Open With…" chooser's popup is sized to show at

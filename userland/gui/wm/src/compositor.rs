@@ -875,6 +875,22 @@ impl Compositor {
         true
     }
 
+    /// Draw every window's title again, now that text drawn provisionally has
+    /// landed (`tairix_font::text_generation`): each decorated window's
+    /// furniture is rendered afresh and only its title band is marked.
+    pub fn refresh_titles(&mut self) {
+        let titled: Vec<(WindowId, Rect)> = self
+            .windows
+            .iter()
+            .filter(|window| window.is_decorated())
+            .map(|window| (window.id(), window.title_band()))
+            .collect();
+        for (id, band) in titled {
+            self.chrome.invalidate(&id);
+            self.mark_layer(id, band);
+        }
+    }
+
     /// Re-resolve every decorated window's furniture band for the current
     /// output scale and theme (after a DPI or theme change), so each window's
     /// outer bounds reflect the new band thickness.

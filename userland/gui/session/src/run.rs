@@ -423,6 +423,10 @@ mod program {
     /// watch, and read the file where the file moved.
     const MACHINE_ZONE_TOKEN: u64 = 23;
 
+    /// The wait-set token of the font worker's wake: text the desktop drew
+    /// provisionally has been fetched.
+    const FONT_TOKEN: u64 = 24;
+
     /// How often the configuration directory's watch may report. A changed
     /// zone shows within this, and a burst of writes costs one read.
     const MACHINE_ZONE_WATCH_LATENCY_NS: u64 = 250_000_000;
@@ -2758,6 +2762,22 @@ mod program {
             );
         }
         let _elevate_guard = tairix_rt::work::WorkerGuard::new(&elevate_worker);
+        // The one thread that waits on the font service: the desktop draws
+        // without waiting, and this fetches what it drew provisionally. With
+        // no thread, text is fetched on the serve loop as it is drawn.
+        let font_worker = alloc::sync::Arc::new(Worker::new(
+            fetch_fonts,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        match Worker::start(&font_worker) {
+            Ok(_) => tairix_font::defer_fetches(),
+            Err(reason) => app::report(
+                APP_NAME,
+                format_args!("no font thread ({reason:?}); text is fetched on the serve loop"),
+            ),
+        }
+        let _font_guard = tairix_rt::work::WorkerGuard::new(&font_worker);
         // This session took the seat before it got here.
         effects.seat(true);
         let sound_themes = list_sound_themes();
@@ -3253,6 +3273,18 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "time zone wake wait refused");
             }
         }
+        if let Some(read) = font_worker.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                FONT_TOKEN,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "font wake wait refused");
+            }
+        }
         // A member reports a generation that moves after it joins, so each
         // is read once after joining and nothing published in between is
         // missed.
@@ -3478,6 +3510,9 @@ mod program {
         let mut reply = [0u8; WINDOW_REPLY_MAX];
         // The look the retained prompts were last painted in.
         let mut prompts_style = shell.style_generation();
+        // What deferred font fetches had brought when the desktop last laid
+        // its text out.
+        let mut text_drawn = tairix_font::text_generation();
         // Whether the screen was locked or handed to another session as of the
         // last turn, so a key held across that edge stops repeating.
         let mut was_screened = false;
@@ -3890,6 +3925,7 @@ mod program {
                 tairix_rt::cachereport::publish_if_due();
                 effects.seat(!switch.is_background());
                 pump_effects(&mut effects, &effects_worker, now_ns);
+                fetch_drawn_text(&font_worker);
                 continue;
             }
             // Dispatch on the woken member's token and handle only that
@@ -4838,6 +4874,11 @@ mod program {
             } else if token == ELEVATE_TOKEN {
                 elevate_worker.wake().drain();
                 adopt_elevations(&mut elevator, &mut elevate, &shell, &mut compositor);
+            } else if token == FONT_TOKEN {
+                // What landed is laid out again at the end of this turn, where
+                // every surface is brought up to date before the frame.
+                font_worker.wake().drain();
+                let _ = font_worker.collect();
             } else if token == MACHINE_ZONE_WATCH_TOKEN || token == MACHINE_ZONE_TOKEN {
                 // A change is drained and the file read on the worker; with no
                 // worker it ran here and its answer is already landed.
@@ -5076,10 +5117,22 @@ mod program {
             saver.keep_topmost(&mut compositor);
             lock.keep_topmost(&shell, &mut compositor, saver.window());
             elevate.keep_topmost(&mut compositor, saver.window());
+            let text_landed = tairix_font::text_generation() != text_drawn;
+            if text_landed {
+                text_drawn = tairix_font::text_generation();
+                refit_text(
+                    &mut shell,
+                    &mut compositor,
+                    &desktop,
+                    (&mut menu, &windows),
+                    (&mut lock, &mut saver),
+                );
+            }
             // A prompt keeps the pixels it was painted in, so one standing
             // through a change of look is repainted in the look now in force
-            // rather than left in the one the user just left.
-            if shell.style_generation() != prompts_style {
+            // rather than left in the one the user just left, and one laid out
+            // with text that has since landed is laid out again.
+            if shell.style_generation() != prompts_style || text_landed {
                 prompts_style = shell.style_generation();
                 confirm.repaint(&mut shell, &mut compositor);
                 elevate.repaint(&shell, &mut compositor);
@@ -5171,6 +5224,9 @@ mod program {
             // reader outside this process — a monitor, a shell, a regression
             // gate — asks for them instead of being pushed them.
             frame_stats.maybe_publish(&compositor, now_ns, &mut frame_sink);
+            // Misses are recorded as text is laid out and as the frame
+            // renders titles, so the fetch is asked for once both are done.
+            fetch_drawn_text(&font_worker);
             // The wake is fully handled and its frame is on screen: report
             // what the desktop's caches hold now, before parking again. A
             // change made this turn would otherwise wait for the next wake,
@@ -7306,6 +7362,27 @@ mod program {
         system: &'a SystemFacts,
     }
 
+    impl<S: DirectorySource, F: FnMut() -> S> SessionRoute<'_, S, F> {
+        /// Tell the window the event just routed took the pointer from, as
+        /// that event is routed, so the leave reaches it before anything the
+        /// pointer does next.
+        fn tell_pointer_left(&mut self, seat: &mut Seat<'_>) {
+            if let Some(gone) = seat.shell.take_client_left() {
+                tell_pointer_gone(
+                    gone,
+                    self.server,
+                    self.sink,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                );
+            }
+        }
+    }
+
     impl<S: DirectorySource, F: FnMut() -> S> SeatRouter for SessionRoute<'_, S, F> {
         fn route(
             &mut self,
@@ -7405,6 +7482,7 @@ mod program {
                 &mut self.apps.service,
                 seat.menu,
             );
+            self.tell_pointer_left(seat);
             routed
         }
 
@@ -9136,6 +9214,16 @@ mod program {
                 );
             }
             ShellOutcome::Taskbar(TaskbarResponse::SetDateTime) => {
+                let bundle = tairix_appstore::bundle_of_entry(DATETIME_RUN_PATH);
+                // The dialog has no slot to come back through, so asking
+                // while it is open raises it rather than starting a second
+                // elevated copy.
+                let open = bundle.and_then(|bundle| {
+                    window_of_bundle(bundle, server, windows, identity, &programs.bundles)
+                });
+                if open.is_some_and(|wm| shell.raise_window(compositor, wm)) {
+                    return Routed::Continue;
+                }
                 // The session holds no authority to set a clock and never
                 // will: it asks for an account that does, and the console's
                 // broker re-authenticates it and starts the application
@@ -9145,8 +9233,7 @@ mod program {
                     program: alloc::string::String::from(DATETIME_RUN_PATH),
                     elevation: Elevation::Launch,
                     requester: alloc::string::String::from(DATETIME_TITLE),
-                    bundle: tairix_appstore::bundle_of_entry(DATETIME_RUN_PATH)
-                        .map(alloc::string::String::from),
+                    bundle: bundle.map(alloc::string::String::from),
                     purpose: alloc::string::String::from(SET_TIME_PURPOSE),
                     window: None,
                 };
@@ -9617,6 +9704,47 @@ mod program {
             }
             ticket
         }
+    }
+
+    /// The font worker: one thread that may wait on the font service, with
+    /// no state of its own, answering whether a fetch landed anything.
+    type FontWorker = Worker<(), (), bool>;
+
+    /// The font worker's job: fetch what the desktop drew provisionally.
+    fn fetch_fonts(_: &mut (), _: &mut ()) -> bool {
+        tairix_font::fetch_deferred()
+    }
+
+    /// Ask the font worker for what the desktop drew provisionally, if it
+    /// drew anything: a request already waiting absorbs this one.
+    fn fetch_drawn_text(font_worker: &FontWorker) {
+        if tairix_font::has_deferred() {
+            let _ = font_worker.submit(());
+        }
+    }
+
+    /// Lay out and draw again whatever was drawn from a provisional font
+    /// answer, now that what it missed has landed. The prompts and alerts are
+    /// laid out again by the caller, beside a change of look.
+    fn refit_text<S: DirectorySource>(
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        desktop: &Desktop<S>,
+        (menu, windows): (&mut MenuChain, &SessionWindows),
+        (lock, saver): (&mut ScreenLock, &mut Screensaver),
+    ) {
+        shell.session_mut().taskbar_mut().redraw_text();
+        compositor.refresh_titles();
+        shell.present(compositor);
+        shell.present_desktop(compositor, desktop);
+        shell.redraw_drag_plate(compositor);
+        if menu.refit(&chain_geometry(shell.session(), compositor)) {
+            present_menu_chain(menu, shell, compositor, windows);
+        }
+        shell.present_tooltip(compositor);
+        lock.repaint(shell, compositor);
+        let scale = compositor.scale();
+        saver.refit_text(shell.session().active_theme(), scale, compositor);
     }
 
     /// The broker's answer to one question at the authorisation prompt, any
@@ -10611,6 +10739,21 @@ mod program {
             .find_map(|(ipc, wm)| (server.owner_of(ipc)? == app).then_some(wm))
     }
 
+    /// A window whose owner the kernel attests runs the bundle installed at
+    /// `bundle`, whoever started it.
+    fn window_of_bundle(
+        bundle: &str,
+        server: &WindowServer<RtShmMapper>,
+        windows: &SessionWindows,
+        identity: &RtWindowIdentity,
+        index: &BundleIndex,
+    ) -> Option<tairix_wm::WindowId> {
+        windows.served().find_map(|(ipc, wm)| {
+            let app = identity.app_of(server.owner_of(ipc)?)?;
+            (index.path_of(&app)? == bundle).then_some(wm)
+        })
+    }
+
     /// Resolve a program-library launch: the chosen entry's bundle names its
     /// `Run` binary; spawn it and record the launch under the entry's
     /// display name.
@@ -11062,6 +11205,23 @@ mod program {
 
         fn decline(&mut self, grant: u64, from: ProcId) {
             drop(tairix_rt::File::from_delegation_by(grant, from));
+        }
+
+        fn locate(&mut self, location: u64, from: ProcId) -> Result<alloc::string::String, Errno> {
+            let mut path = alloc::vec![0u8; tairix_abi::FS_PATH_MAX];
+            match tairix_rt::fd_redeem_location(location, from, &mut path) {
+                Ok(len) => {
+                    path.truncate(len);
+                    alloc::string::String::from_utf8(path).map_err(|_| Errno::OutOfRange)
+                }
+                // A file delegation named in a location's place stays pending
+                // until it is taken.
+                Err(Errno::OutOfRange) => {
+                    self.decline(location, from);
+                    Err(Errno::OutOfRange)
+                }
+                Err(err) => Err(err),
+            }
         }
     }
 
@@ -11577,8 +11737,9 @@ mod program {
     }
 
     /// Tell the clients the seat took the pointer from what they are owed:
-    /// the one whose press was taken, that the press is over, and one whose
-    /// window a resize was dragging, the size it settled at.
+    /// the one whose press was taken, that the press is over, the one whose
+    /// window the pointer left, that nothing in it is under the pointer, and
+    /// one whose window a resize was dragging, the size it settled at.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn deliver_abandoned<S: DirectorySource, F: FnMut() -> S>(
         server: &mut WindowServer<RtShmMapper>,
@@ -11591,39 +11752,10 @@ mod program {
         menu: &mut MenuChain,
     ) {
         let abandoned = shell.take_abandoned();
-        if let Some((wm, at)) = abandoned.client {
-            if picker.wm_id() == Some(wm) {
-                picker.handle_pointer(
-                    at,
-                    &tairix_wm::InputEvent::PointerCancelled,
-                    shell,
-                    compositor,
-                );
-            } else if windows.alerts.owns(wm) {
-                // A cancel completes no click, so it answers nothing.
-                let _ = windows.alerts.pointer(
-                    wm,
-                    at,
-                    &tairix_wm::InputEvent::PointerCancelled,
-                    tairix_rt::clock_get(),
-                    &mut windows.holds,
-                    shell,
-                    compositor,
-                );
-            } else if let (Some(window_id), Ok(x), Ok(y)) =
-                (windows.ipc_id(wm), u32::try_from(at.x), u32::try_from(at.y))
-            {
-                let event = WindowEvent::Pointer {
-                    window_id,
-                    x,
-                    y,
-                    action: PointerAction::Cancelled,
-                    modifiers: pointer_modifiers(shell),
-                };
-                deliver(
-                    server, sink, shell, compositor, windows, picker, apps, menu, &event,
-                );
-            }
+        for gone in [abandoned.client, abandoned.left].into_iter().flatten() {
+            tell_pointer_gone(
+                gone, server, sink, shell, compositor, windows, picker, apps, menu,
+            );
         }
         let settled = abandoned
             .resized
@@ -11632,6 +11764,55 @@ mod program {
             .moved
             .and_then(|wm| tool_move_abandoned_event(wm, windows));
         for event in [settled, left].into_iter().flatten() {
+            deliver(
+                server, sink, shell, compositor, windows, picker, apps, menu, &event,
+            );
+        }
+    }
+
+    /// Tell the owner of the window `wm` that the pointer is no longer its
+    /// own, at `at` in its client: the trusted picker or an alert directly,
+    /// and an application's window over its channel.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn tell_pointer_gone<S: DirectorySource, F: FnMut() -> S>(
+        (wm, at): (tairix_wm::WindowId, tairix_wm::Point),
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        if picker.wm_id() == Some(wm) {
+            picker.handle_pointer(
+                at,
+                &tairix_wm::InputEvent::PointerCancelled,
+                shell,
+                compositor,
+            );
+        } else if windows.alerts.owns(wm) {
+            // A cancel completes no click, so it answers nothing.
+            let _ = windows.alerts.pointer(
+                wm,
+                at,
+                &tairix_wm::InputEvent::PointerCancelled,
+                tairix_rt::clock_get(),
+                &mut windows.holds,
+                shell,
+                compositor,
+            );
+        } else if let (Some(window_id), Ok(x), Ok(y)) =
+            (windows.ipc_id(wm), u32::try_from(at.x), u32::try_from(at.y))
+        {
+            let event = WindowEvent::Pointer {
+                window_id,
+                x,
+                y,
+                action: PointerAction::Cancelled,
+                modifiers: pointer_modifiers(shell),
+            };
             deliver(
                 server, sink, shell, compositor, windows, picker, apps, menu, &event,
             );

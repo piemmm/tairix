@@ -341,6 +341,14 @@ trip itself is inherent (sandboxing the rasteriser is what puts the faces in
 another process), so the goal is one per run, converging to none once the
 cache is warm. Text stays always-correct and the pixels are unchanged.
 
+A scalar that draws nothing has no glyph: a control such as a line break or a
+tab, a line or paragraph separator, or a default-ignorable such as a zero-width
+joiner (`tairix_util::utf8::is_hidden`). The client answers a glyph for it
+locally, empty and zero-advance, and never fetches, batches or caches one. No
+face maps such a scalar, so asking would make the service search every face it
+has; an outline run that carries one has it answered by the service, which
+consults no face for it.
+
 A glyph's coverage reply carries that glyph's own advance, so `draw_text` reads
 the pen step from the very bitmap it is about to composite rather than asking
 the cache for the same glyph again to learn how far to move: a *proportional*
@@ -356,6 +364,32 @@ gives both a closure that returns one, which measures worse on both. Building a
 `BitmapFont` is by contrast free of any of this — it reads the theme and does
 arithmetic, with no lock, client call, or cache lookup — so resolving a themed
 role per control paint is not a cost worth hoisting.
+
+### Drawing without waiting
+
+A program whose drawing thread must never wait on another process — the
+desktop session — calls `defer_fetches`. From then on a glyph or metrics miss
+draws a provisional answer and records what was missed: no ink, on the console
+atlas's own advance (two cells for a wide scalar), and the atlas geometry for
+metrics. `fetch_deferred`, called on a thread that may wait, asks for what was
+recorded a face at a time, in runs, and moves `text_generation` and the
+measurement epoch whenever anything lands, so no width measured provisionally
+is served again; `tairix_controls::Measured` and the session key on the
+generation, which is read with no lock. A scalar the service refuses — the
+first of a batch it cannot draw — is let go and the rest of its run asked for;
+a service that cannot be reached, or asks to be asked again while it cannot
+yet read a face, ends the pass, so it costs one call a pass, and what was
+missed is recorded again by the next draw that misses it.
+What the glyph cache will not keep, or evicts to make room, is held outside it
+instead, and so is line metrics the metrics cache displaces, so a working set
+larger than either never has to be fetched again while it is shown. The
+contract that makes that safe: a deferring program draws again all the text it
+shows whenever text lands, and a held value is let go only at the pass after
+such a redraw, if the redraw did not draw it. Misses are recorded up to a fixed
+bound between two passes. Outlines and the family list still ask and wait.
+
+The service-manager connect handshake is made before the first request, on
+whichever thread sends it, so a deferring thread never makes it.
 
 ### Measuring proportional text once
 

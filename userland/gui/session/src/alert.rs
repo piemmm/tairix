@@ -111,8 +111,9 @@ pub struct AlertWindow {
     mark: Option<(Scale, Surface)>,
     /// The client extent it was last drawn at, which input is read against.
     extent: (u32, u32),
-    /// The density and screen that extent was fitted to.
-    fitted: (Scale, Rect),
+    /// The density and screen that extent was fitted to, and the text it was
+    /// measured with.
+    fitted: Fitted,
     /// How many alerts down from the centre it was set.
     cascade: u32,
     /// When its buttons arm; `None` until the serve loop first sees it.
@@ -124,6 +125,26 @@ pub struct AlertWindow {
     returns_to: Option<WindowId>,
     /// What input changed since the alert was last painted.
     owed: Region,
+}
+
+/// What an alert's extent was fitted to: the density, the screen, and the
+/// generation of the text it was measured with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Fitted {
+    scale: Scale,
+    screen: Rect,
+    text: u64,
+}
+
+impl Fitted {
+    /// What `compositor` would fit an alert to now.
+    fn now(compositor: &Compositor) -> Self {
+        Self {
+            scale: compositor.scale(),
+            screen: compositor.screen_rect(),
+            text: tairix_font::text_generation(),
+        }
+    }
 }
 
 impl AlertWindow {
@@ -139,6 +160,9 @@ impl AlertWindow {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<Self> {
+        // Read before measuring, so text landing meanwhile is fitted again
+        // rather than taken for what it was measured with.
+        let fitted = Fitted::now(compositor);
         let extent = extent(
             &alert,
             compositor.screen_rect(),
@@ -159,7 +183,7 @@ impl AlertWindow {
             alert,
             mark,
             extent,
-            fitted: (scale, compositor.screen_rect()),
+            fitted,
             cascade,
             armed_at: None,
             pressed_armed: false,
@@ -352,35 +376,65 @@ impl AlertWindow {
     /// A change of look keeps the extent and the place it has, so the buttons
     /// stay under a reader about to press one. A change of density or of
     /// screen fits it again and centres it on the screen now there, as it
-    /// opened: everything it drew has moved anyway.
+    /// opened: everything it drew has moved anyway. Text it was measured with
+    /// provisionally having landed fits it again too, about the centre it has,
+    /// so an alert the reader moved stays where they put it.
     pub fn repaint(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
-        let mode = (compositor.scale(), compositor.screen_rect());
-        let refit = mode != self.fitted;
-        if refit {
-            self.extent = extent(
+        let now = Fitted::now(compositor);
+        let recentre = (now.scale, now.screen) != (self.fitted.scale, self.fitted.screen);
+        let shown = compositor.window(self.wm).map(tairix_wm::Window::bounds);
+        let mut resized = false;
+        if now != self.fitted {
+            let extent = extent(
                 &self.alert,
                 compositor.screen_rect(),
                 compositor.scale(),
                 compositor.theme(),
             );
-            self.fitted = mode;
+            resized = extent != self.extent;
+            self.extent = extent;
+            self.fitted = now;
         }
         if let Some(surface) = self.render(shell, compositor) {
             if compositor.set_surface(self.wm, surface) {
                 self.owed.clear();
             }
         }
-        if refit {
+        if resized && !recentre {
+            if let (Some(shown), Some(bounds)) = (
+                shown,
+                compositor.window(self.wm).map(tairix_wm::Window::bounds),
+            ) {
+                let half = |length: u32| tairix_geometry::to_i32(length / 2);
+                let at = Rect::new(
+                    shown
+                        .left()
+                        .saturating_add(half(shown.width))
+                        .saturating_sub(half(bounds.width)),
+                    shown
+                        .top()
+                        .saturating_add(half(shown.height))
+                        .saturating_sub(half(bounds.height)),
+                    bounds.width,
+                    bounds.height,
+                )
+                .clamped_onto(now.screen)
+                .origin;
+                let _ = compositor.move_window(self.wm, at);
+            }
+        }
+        if recentre {
             if let Some(bounds) = compositor.window(self.wm).map(tairix_wm::Window::bounds) {
-                let step = tairix_geometry::to_i32(cascade_step(mode.0, self.cascade));
-                let centred = crate::shell::prompt_origin(mode.1, (bounds.width, bounds.height));
+                let step = tairix_geometry::to_i32(cascade_step(now.scale, self.cascade));
+                let centred =
+                    crate::shell::prompt_origin(now.screen, (bounds.width, bounds.height));
                 let at = Rect::new(
                     centred.x.saturating_add(step),
                     centred.y.saturating_add(step),
                     bounds.width,
                     bounds.height,
                 )
-                .clamped_onto(mode.1)
+                .clamped_onto(now.screen)
                 .origin;
                 let _ = compositor.move_window(self.wm, at);
             }

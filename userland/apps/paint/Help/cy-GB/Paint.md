@@ -157,7 +157,8 @@ dewislen: Torri, Copïo, Gludo, Dewis y cyfan a Dad-ddewis, yna Ffeil,
 Golygu, Llun, Haenau, Lliwiau, Addasu, Corluniau neu Dudalennau, Gweld ac
 Offer, pob un yn agor ei is-ddewislen ei hun. Nid oes bar dewislen gan y
 ffenestr. Mae cau ffenestr neu adael â newidiadau heb eu cadw'n gofyn yn
-gyntaf.
+gyntaf. Mae cau ffenestr â'r ail fotwm (de) ar ei botwm cau hefyd yn dangos
+ei ffeil yn y rheolwr ffeiliau, yn y ffolder sy'n ei dal.
 
 * `Ctrl+N` — llun newydd; `Ctrl+O` — agor ffeil
 * `Ctrl+S` — cadw; `Ctrl+Shift+S` — cadw fel

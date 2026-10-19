@@ -147,7 +147,9 @@ Pressing the secondary (right) mouse button anywhere in the window opens
 its menu: Cut, Copy, Paste, Select all and Deselect, then File, Edit, Image,
 Layers, Colours, Adjust, Sprites or Pages, View and Tools, each opening its
 own submenu. The window has no menu bar. Closing a window or quitting with
-changes not saved asks first.
+changes not saved asks first. Closing a window with the secondary (right)
+button on its close button also shows its file in the file manager, in the
+folder that holds it.
 
 * `Ctrl+N` — a new picture; `Ctrl+O` — open a file
 * `Ctrl+S` — save; `Ctrl+Shift+S` — save as

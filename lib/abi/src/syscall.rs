@@ -2914,6 +2914,48 @@ impl SyscallNumber {
     /// audited: it changes no authority.
     pub const HW_NODE_KEY_SOURCE: Self = Self(145);
 
+    /// Tell another live process, one-shot, where one of the caller's own
+    /// filesystem descriptors points — and nothing more.
+    ///
+    /// Arguments: `fd` (a descriptor of the caller's own table naming a file
+    /// or folder), then a user pointer to and the length of the recipient's
+    /// attested 16-byte [`crate::ProcId`]. Returns the minted handle, which
+    /// the caller forwards in-band and only the recipient can present, to
+    /// [`Self::FD_REDEEM_LOCATION`]; or `-errno`: [`Errno::NotFound`] for a
+    /// descriptor the caller does not hold or a recipient no live process
+    /// is, [`Errno::OutOfRange`] for a pipe, pty or resource, which is
+    /// stored nowhere, [`Errno::BufferTooSmall`] for a short identity, and
+    /// [`Errno::LimitExceeded`] past [`crate::FD_GRANT_PENDING_MAX`] pending
+    /// to that recipient, which it shares with delegations.
+    ///
+    /// A location opens nothing, and its path is told only to a recipient
+    /// that may name paths itself, so a program holding no filesystem
+    /// capability — an editor handed one document — can ask the desktop to
+    /// show the user where its file is without learning the path or passing
+    /// the file on. Ungated for that reason, and not audited: the
+    /// redemption is where anything is disclosed.
+    pub const FD_GRANT_LOCATION: Self = Self(146);
+
+    /// Read the absolute path a [`Self::FD_GRANT_LOCATION`] handle minted to
+    /// the calling task tells, **only if** the process instance the caller
+    /// names minted it.
+    ///
+    /// Arguments: `handle`, a user pointer to and the length of the expected
+    /// grantor's attested `ProcId`, then the buffer the path is written to
+    /// and its capacity. Returns the path's length, or `-errno`:
+    /// [`Errno::NotFound`] for a handle that instance did not mint to the
+    /// caller, as for a handle that never existed, [`Errno::OutOfRange`] for
+    /// a file delegation rather than a location, and
+    /// [`Errno::BufferTooSmall`] for a buffer shorter than the path — each
+    /// leaving the location pending — or [`Errno::PermissionDenied`] when the
+    /// descriptor reaches its file as another user than the caller, since a
+    /// path is told only to a principal that could have named it; that
+    /// location can never be read, so it is consumed, as is one told into a
+    /// buffer the caller cannot be written through. Requires
+    /// [`crate::CapabilityId::FS_ACCESS`], the authority to name a path at
+    /// all, and audited as the disclosure.
+    pub const FD_REDEEM_LOCATION: Self = Self(147);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3206,6 +3248,8 @@ mod tests {
         assert_eq!(SyscallNumber::PORT_UNBIND.as_u16(), 143);
         assert_eq!(SyscallNumber::CALL_PEER_PORT.as_u16(), 144);
         assert_eq!(SyscallNumber::HW_NODE_KEY_SOURCE.as_u16(), 145);
+        assert_eq!(SyscallNumber::FD_GRANT_LOCATION.as_u16(), 146);
+        assert_eq!(SyscallNumber::FD_REDEEM_LOCATION.as_u16(), 147);
     }
 
     #[test]

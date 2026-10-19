@@ -64,9 +64,10 @@ pub trait LinkReader {
 /// dangling.
 ///
 /// For a caller listing a tree that cannot hold links — a store the build
-/// itself authored — and for tests that plant none. It is never the right
-/// choice for a user's own directory: a link there would be shown as broken
-/// when it is not.
+/// itself authored — for a walk that needs only to tell a link from what is
+/// not one and shows none of them, and for tests that plant none. It is never
+/// the right choice for a listing a user sees: a link there would be shown as
+/// broken when it is not.
 pub struct NoLinks;
 
 impl LinkReader for NoLinks {

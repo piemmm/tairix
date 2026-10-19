@@ -1,6 +1,9 @@
 //! The sources a window's refusals come from, each keeping at most one notice
 //! waiting in the window's shared [`tairix_window::notices::Notices`] queue.
 
+use alloc::format;
+use alloc::string::String;
+
 /// What a refusal came from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NoticeSource {
@@ -20,6 +23,17 @@ pub enum NoticeSource {
 
 /// A window's refusal notices, by where each came from.
 pub type Notices = tairix_window::notices::Notices<NoticeSource>;
+
+/// The headline a refusal to open the item `name` is stated under. The name
+/// is untrusted, so a character that would draw as nothing shows as one that
+/// does.
+#[must_use]
+pub fn not_opened(name: &str) -> String {
+    format!(
+        "\u{201c}{}\u{201d} could not be opened",
+        tairix_util::utf8::shown(name)
+    )
+}
 
 /// Which of a window's alerts goes up next, one alert a window at a time.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -48,7 +62,20 @@ pub const fn next_alert(question: Option<bool>, notice_up: bool) -> NextAlert {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_alert, NextAlert};
+    use super::{next_alert, not_opened, NextAlert};
+
+    #[test]
+    fn an_unopened_item_is_named_with_what_hides_in_its_name_shown() {
+        assert_eq!(
+            not_opened("notes.txt"),
+            "\u{201c}notes.txt\u{201d} could not be opened"
+        );
+        assert_eq!(
+            not_opened("evil\u{202e}txt.exe"),
+            "\u{201c}evil\u{fffd}txt.exe\u{201d} could not be opened",
+            "a direction override could otherwise make the name read as another"
+        );
+    }
 
     #[test]
     fn a_window_answers_one_alert_at_a_time_its_question_first() {

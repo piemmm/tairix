@@ -598,6 +598,7 @@ fn common_motion() -> MotionTheme {
         600,  // backdrop change
         160,  // pointer enlarge
         360,  // pointer restore
+        1500, // progress sweep
     ])
 }
 

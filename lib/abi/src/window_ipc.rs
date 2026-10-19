@@ -3066,6 +3066,24 @@ pub enum WindowRequest {
         /// The document to hand that instance, or `None` for a bare launch.
         document: Option<HandOverDocument>,
     },
+    /// Show the user, in the file manager, the document behind the caller's
+    /// window `window_id`: the folder holding it, raised where a window
+    /// already shows it, with the document selected.
+    ///
+    /// The caller need hold no filesystem capability and never learns where
+    /// the document is. `location` is a `fd_grant_location` handle the caller
+    /// minted to the session from the document's own descriptor, which tells
+    /// the session the path and nothing else; the file manager then lists the
+    /// folder under its own authority, so no access crosses and nothing comes
+    /// back. Honoured only while the user is working in `window_id`, since it
+    /// brings another window forward; the session consumes the location
+    /// whatever it answers.
+    RevealDocument {
+        /// The caller's own window, which the user must be working in.
+        window_id: u64,
+        /// The `fd_grant_location` handle minted to the session. Never zero.
+        location: u64,
+    },
     /// Declare — or withdraw — the tooltip for a region of this window.
     ///
     /// The application says only *what* is being explained and *where*: the
@@ -3320,6 +3338,8 @@ const OP_CREATE_DIALOG: u16 = 40;
 const OP_TAKE_ZONE_STORE: u16 = 41;
 /// Wire operation discriminant of [`WindowRequest::Authorise`].
 const OP_AUTHORISE: u16 = 42;
+/// Wire operation discriminant of [`WindowRequest::RevealDocument`].
+const OP_REVEAL_DOCUMENT: u16 = 44;
 /// Wire operation discriminant of [`WindowRequest::TakeAuthorisedOutput`].
 const OP_TAKE_AUTHORISED_OUTPUT: u16 = 43;
 
@@ -3412,6 +3432,10 @@ const QUERY_DESKTOP_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 /// Encoded size of a [`WindowRequest::TakeMenuText`]: the header, the window
 /// the chain belonged to, and the open whose commit is being pulled.
 const TAKE_MENU_TEXT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
+
+/// Encoded size of a [`WindowRequest::RevealDocument`]: the header, the
+/// window, and the location handle.
+const REVEAL_DOCUMENT_WIRE_LEN: usize = REQUEST_HEADER_LEN + 16;
 
 /// Encoded size of a [`WindowRequest::QueryWallpapers`]: the header and the
 /// page's first entry. It names no window — the catalog is the seat's, not
@@ -3845,6 +3869,7 @@ impl WindowRequest {
             Self::PlaceLayer { .. } => PLACE_LAYER_WIRE_LEN,
             Self::TakeOpenTarget => TAKE_OPEN_TARGET_WIRE_LEN,
             Self::TakeMenuText { .. } => TAKE_MENU_TEXT_WIRE_LEN,
+            Self::RevealDocument { .. } => REVEAL_DOCUMENT_WIRE_LEN,
             Self::HandOverLaunch {
                 ref run_path,
                 ref document,
@@ -3980,6 +4005,7 @@ impl WindowRequest {
             Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
             Self::TakeMenuText { .. } => OP_TAKE_MENU_TEXT,
             Self::HandOverLaunch { .. } => OP_HAND_OVER_LAUNCH,
+            Self::RevealDocument { .. } => OP_REVEAL_DOCUMENT,
             Self::SetTooltip { .. } => OP_SET_TOOLTIP,
             Self::OpenLayer { .. } => OP_OPEN_LAYER,
             Self::PlaceLayer { .. } => OP_PLACE_LAYER,
@@ -4121,6 +4147,13 @@ impl WindowRequest {
             Self::TakeMenuText { window_id, open_id } => {
                 put_u64(out, 8, window_id);
                 put_u64(out, 16, open_id);
+            }
+            Self::RevealDocument {
+                window_id,
+                location,
+            } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, 16, location);
             }
             Self::SetSizing { .. }
             | Self::SetSizeState { .. }
@@ -4483,6 +4516,7 @@ impl WindowRequest {
                 let open_id = nonzero_id(read_u64(bytes, 16))?;
                 Ok(Self::TakeMenuText { window_id, open_id })
             }
+            OP_REVEAL_DOCUMENT => read_reveal_document(bytes),
             OP_HAND_OVER_LAUNCH => read_hand_over(bytes),
             OP_SET_TOOLTIP => read_set_tooltip(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
@@ -4790,6 +4824,16 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         _ => return Err(Errno::OutOfRange),
     };
     Ok(WindowRequest::PickFile { window_id, purpose })
+}
+
+/// Decode the operands of a [`WindowRequest::RevealDocument`]: neither id may
+/// be zero, since one names no window and the other no location.
+fn read_reveal_document(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, REVEAL_DOCUMENT_WIRE_LEN)?;
+    Ok(WindowRequest::RevealDocument {
+        window_id: nonzero_id(read_u64(bytes, 8))?,
+        location: nonzero_id(read_u64(bytes, 16))?,
+    })
 }
 
 /// Decode the operands of a [`WindowRequest::HandOverLaunch`].
@@ -7222,11 +7266,12 @@ pub enum PointerAction {
     Pressed(PointerButtonCode),
     /// A button came up at the carried position.
     Released(PointerButtonCode),
-    /// The press this window held ended without a release reaching it: the
-    /// desktop took the pointer for a surface of its own — the lock, a
-    /// prompt, a menu, a drag it carries. Whatever the press began completes
-    /// nothing. The carried position is where the window last saw the
-    /// pointer.
+    /// The pointer is no longer this window's: it left the window's content
+    /// for another window, the window's own frame or the desktop, or the
+    /// desktop took it for a surface of its own — the lock, a prompt, a menu, a
+    /// drag it carries — while a press here was held. Nothing in the window is
+    /// under the pointer, and whatever a press began completes nothing. The
+    /// carried position is where the window last saw the pointer.
     Cancelled,
 }
 
@@ -7722,6 +7767,22 @@ impl WindowEvent {
         put_u16(out, PREVIEW_EVENT_SIZE_OFFSET, width);
         put_u16(out, PREVIEW_EVENT_SIZE_OFFSET + 2, height);
         out[PREVIEW_EVENT_OUTCOME_OFFSET] = outcome.to_wire();
+    }
+
+    /// What this event says of whether its window is on show: `Some(false)`
+    /// once it is minimised or its content released, `Some(true)` once the
+    /// desktop shows it again — focus gained, a new size, or its pixels asked
+    /// for — and `None` for an event that says neither. Motion only an
+    /// onlooker would see waits on it.
+    #[must_use]
+    pub const fn on_show(&self) -> Option<bool> {
+        match self {
+            Self::Minimized { .. } | Self::ContentReleased { .. } => Some(false),
+            Self::Focus { focused: true, .. }
+            | Self::Resized { .. }
+            | Self::RedrawRequested { .. } => Some(true),
+            _ => None,
+        }
     }
 
     /// The window this event addresses, or `None` for an event addressed
@@ -8551,10 +8612,10 @@ mod tests {
         PREVIEW_EVENT_OUTCOME_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
         PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
         RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
-        REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET,
-        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
-        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        REQUEST_HEADER_LEN, REVEAL_DOCUMENT_WIRE_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX,
+        SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET,
+        SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
+        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
         TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
@@ -9096,6 +9157,44 @@ mod tests {
     /// operation added without a framing test cannot slip through. Visited
     /// one at a time rather than collected: a request carries a whole menu
     /// inline, so a list of them is more than belongs on a stack frame.
+    /// The requests that reach another application's instance: a bare
+    /// hand-over, the narrowest and widest with a document, and a reveal.
+    fn each_reach_request(visit: &mut impl FnMut(WindowRequest)) {
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: None,
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: Some(HandOverDocument {
+                name: DocumentName::new("holiday.png").expect("a valid name"),
+                grant: 7,
+                writable: false,
+            }),
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: BundleRunPath::new(&"p".repeat(HAND_OVER_RUN_PATH_MAX))
+                .expect("the widest path"),
+            document: Some(HandOverDocument {
+                name: DocumentName::new(&"n".repeat(crate::FS_NAME_MAX)).expect("the widest name"),
+                grant: u64::MAX,
+                writable: true,
+            }),
+        });
+        visit(WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: Some(HandOverDocument {
+                name: DocumentName::new("").expect("an unnamed document"),
+                grant: 1,
+                writable: false,
+            }),
+        });
+        visit(WindowRequest::RevealDocument {
+            window_id: 3,
+            location: 12,
+        });
+    }
+
     fn each_request(mut visit: impl FnMut(WindowRequest)) {
         each_opening_request(&mut visit);
         visit(sample_present());
@@ -9148,35 +9247,7 @@ mod tests {
         visit(opening(&one_of_each_bare_row()));
         visit(opening(&widest_open_menu()));
         visit(WindowRequest::TakeOpenTarget);
-        visit(WindowRequest::HandOverLaunch {
-            run_path: sample_run_path(),
-            document: None,
-        });
-        visit(WindowRequest::HandOverLaunch {
-            run_path: sample_run_path(),
-            document: Some(HandOverDocument {
-                name: DocumentName::new("holiday.png").expect("a valid name"),
-                grant: 7,
-                writable: false,
-            }),
-        });
-        visit(WindowRequest::HandOverLaunch {
-            run_path: BundleRunPath::new(&"p".repeat(HAND_OVER_RUN_PATH_MAX))
-                .expect("the widest path"),
-            document: Some(HandOverDocument {
-                name: DocumentName::new(&"n".repeat(crate::FS_NAME_MAX)).expect("the widest name"),
-                grant: u64::MAX,
-                writable: true,
-            }),
-        });
-        visit(WindowRequest::HandOverLaunch {
-            run_path: sample_run_path(),
-            document: Some(HandOverDocument {
-                name: DocumentName::new("").expect("an unnamed document"),
-                grant: 1,
-                writable: false,
-            }),
-        });
+        each_reach_request(&mut visit);
         visit(WindowRequest::SetTooltip {
             window_id: 3,
             region: sample_anchor(),
@@ -10111,6 +10182,24 @@ mod tests {
         let mut smuggled = [0u8; TAKE_MENU_TEXT_WIRE_LEN + 1];
         smuggled[..TAKE_MENU_TEXT_WIRE_LEN].copy_from_slice(&frame);
         assert_eq!(WindowRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
+    }
+
+    /// A reveal names both the window the user is working in and the location
+    /// handle, and a frame naming neither is no reveal.
+    #[test]
+    fn a_reveal_names_its_window_and_its_location() {
+        let request = WindowRequest::RevealDocument {
+            window_id: 3,
+            location: 12,
+        };
+        assert_eq!(request.wire_len(), REVEAL_DOCUMENT_WIRE_LEN);
+        let frame = request.frame();
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+        for at in [8, 16] {
+            let mut nameless = frame;
+            put_u64(&mut nameless, at, 0);
+            assert_eq!(WindowRequest::from_bytes(&nameless), Err(Errno::OutOfRange));
+        }
     }
 
     /// The pulled-text reply: the text, the honest "nothing held", and a
@@ -13710,5 +13799,40 @@ mod tests {
             decode_terrain_reply(&frame, &mut out),
             Err(Errno::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn a_window_is_off_show_once_minimised_or_released_and_back_once_shown() {
+        let window_id = 4;
+        for hidden in [
+            WindowEvent::Minimized { window_id },
+            WindowEvent::ContentReleased { window_id },
+        ] {
+            assert_eq!(hidden.on_show(), Some(false), "{hidden:?}");
+        }
+        for shown in [
+            WindowEvent::Focus {
+                window_id,
+                focused: true,
+            },
+            WindowEvent::RedrawRequested { window_id },
+            WindowEvent::Resized {
+                window_id,
+                width_px: 20,
+                height_px: 10,
+                state: WindowSizeState::Restored,
+            },
+        ] {
+            assert_eq!(shown.on_show(), Some(true), "{shown:?}");
+        }
+        for neither in [
+            WindowEvent::Focus {
+                window_id,
+                focused: false,
+            },
+            WindowEvent::CloseRequested { window_id },
+        ] {
+            assert_eq!(neither.on_show(), None, "{neither:?}");
+        }
     }
 }

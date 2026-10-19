@@ -946,6 +946,28 @@ impl OpenFile {
         }
     }
 
+    /// Where this descriptor points, held by user `holder`: reached as the
+    /// holder for a path it opened, and as the captured identity for a
+    /// delegation. `None` for what is stored nowhere — a pipe, pty or
+    /// resource.
+    #[must_use]
+    pub fn location(&self, holder: u32) -> Option<FileLocation> {
+        match &self.backing {
+            OpenBacking::Path(path) => Some(FileLocation {
+                path: path.clone(),
+                uid: holder,
+            }),
+            OpenBacking::Delegated(file) => Some(FileLocation {
+                path: file.path.clone(),
+                uid: file.uid,
+            }),
+            OpenBacking::Resource(_)
+            | OpenBacking::Pipe(_)
+            | OpenBacking::PtyMaster(_)
+            | OpenBacking::PtySlave(_) => None,
+        }
+    }
+
     /// Where this directory description's listing stands, made on its first
     /// `fs_readdir` and shared by every descriptor on the description.
     ///
@@ -1122,17 +1144,40 @@ struct TaskFdDelegations {
 /// exactly the process the grantor chose.
 #[derive(Clone, PartialEq, Eq)]
 struct PendingFdDelegation {
-    /// The path and the grantor's captured authority every later operation
-    /// on the redeemed descriptor is re-authorised under.
-    file: DelegatedFile,
-    /// The read/write access the grantor's own descriptor carried.
-    flags: OpenFlags,
+    /// What redeeming it hands over.
+    conveys: Conveyed,
     /// The process instance the grantor delegated to.
     recipient: ProcId,
     /// The process that minted it, which the delegation is charged to.
     grantor: ProcessId,
     /// That process's instance, which a deputy's redemption must name.
     grantor_instance: ProcId,
+}
+
+/// What a pending delegation hands its recipient.
+#[derive(Clone, PartialEq, Eq)]
+enum Conveyed {
+    /// A descriptor on the file.
+    File {
+        /// The path and the grantor's captured authority every later
+        /// operation on the redeemed descriptor is re-authorised under.
+        file: DelegatedFile,
+        /// The read/write access the grantor's own descriptor carried.
+        flags: OpenFlags,
+    },
+    /// Where the grantor's descriptor points, and nothing to reach it with.
+    Location(FileLocation),
+}
+
+/// Where a descriptor points: the absolute path it names, and the user it
+/// reaches that path as — its holder's own, or the identity a delegation
+/// captured.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLocation {
+    /// The absolute path.
+    pub path: String,
+    /// The user the descriptor reaches it as.
+    pub uid: u32,
 }
 
 /// The handle of the first entry in `by_handle` that `held` accepts — the
@@ -2839,30 +2884,66 @@ impl AddressSpaceRegistry {
         file: DelegatedFile,
         flags: OpenFlags,
     ) -> Result<u64, Errno> {
+        self.mint_pending(
+            recipient,
+            PendingFdDelegation {
+                conveys: Conveyed::File { file, flags },
+                recipient: instance,
+                grantor,
+                grantor_instance,
+            },
+        )
+    }
+
+    /// Mint `recipient` a one-shot handle telling `location`, where one of
+    /// `grantor`'s descriptors points (`fd_grant_location`), under
+    /// [`Self::mint_fd_delegation`]'s handle discipline and bound.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mint_fd_delegation`].
+    pub fn mint_fd_location(
+        &mut self,
+        recipient: ProcessId,
+        instance: ProcId,
+        grantor: ProcessId,
+        grantor_instance: ProcId,
+        location: FileLocation,
+    ) -> Result<u64, Errno> {
+        self.mint_pending(
+            recipient,
+            PendingFdDelegation {
+                conveys: Conveyed::Location(location),
+                recipient: instance,
+                grantor,
+                grantor_instance,
+            },
+        )
+    }
+
+    fn mint_pending(
+        &mut self,
+        recipient: ProcessId,
+        pending: PendingFdDelegation,
+    ) -> Result<u64, Errno> {
         let entry = self.fd_delegations.entry(recipient).or_default();
-        let pending = PendingFdDelegation {
-            file,
-            flags,
-            recipient: instance,
-            grantor,
-            grantor_instance,
-        };
         // A delegation still pending conveys exactly one right: "open this
-        // path under this captured authority". Re-granting it while the
-        // first is unredeemed adds nothing — descriptors here carry no
-        // position (every read names its own offset), so a second identical
-        // descriptor would be indistinguishable from the first — and letting
-        // it append would let a grantor grow the recipient's kernel-side
-        // table without limit by repeating one call. Hand back the pending
-        // handle instead; once redeemed the entry is consumed, so a later
-        // grant of the same file legitimately mints afresh.
+        // path under this captured authority", or "know where it is".
+        // Re-granting it while the first is unredeemed adds nothing —
+        // descriptors here carry no position (every read names its own
+        // offset), so a second identical descriptor would be
+        // indistinguishable from the first — and letting it append would let
+        // a grantor grow the recipient's kernel-side table without limit by
+        // repeating one call. Hand back the pending handle instead; once
+        // redeemed the entry is consumed, so a later grant of the same file
+        // legitimately mints afresh.
         if let Some(handle) = existing_handle(&entry.by_handle, |held| *held == pending) {
             return Ok(handle);
         }
         let charged = entry
             .by_handle
             .values()
-            .filter(|held| held.grantor == grantor)
+            .filter(|held| held.grantor == pending.grantor)
             .count();
         if charged >= tairix_abi::FD_GRANT_PENDING_MAX {
             return Err(Errno::LimitExceeded);
@@ -2903,8 +2984,9 @@ impl AddressSpaceRegistry {
     ///   instance of `task`'s number, or minted by other than `from` —
     ///   forgery and staleness both answer exactly like absence, so the
     ///   handle space leaks nothing, and the delegation stays pending).
-    /// * [`Errno::OutOfRange`] — descriptor-space exhaustion; the grant
-    ///   stays pending.
+    /// * [`Errno::OutOfRange`] — descriptor-space exhaustion, or a handle
+    ///   telling a location rather than delegating a file; the grant stays
+    ///   pending.
     pub fn redeem_fd_delegation(
         &mut self,
         task: ProcessId,
@@ -2912,24 +2994,85 @@ impl AddressSpaceRegistry {
         handle: u64,
         from: Option<ProcId>,
     ) -> Result<u32, Errno> {
-        let pending = self
-            .fd_delegations
+        let Conveyed::File { file, flags } = self
+            .pending_for(task, instance, handle, from)?
+            .conveys
+            .clone()
+        else {
+            return Err(Errno::OutOfRange);
+        };
+        let fd = self.open_backed(task, OpenBacking::Delegated(file), flags)?;
+        // The allocation succeeded; consume the grant (one-shot). The
+        // entry provably exists — it was read above under the same
+        // exclusive borrow — so the removes cannot miss.
+        self.consume_pending(task, handle);
+        Ok(fd)
+    }
+
+    /// Take the location `handle` tells, minted to `task` by `from`
+    /// (`fd_redeem_location`), for a reader that is user `uid` with `cap`
+    /// bytes to write the path into.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — as [`Self::redeem_fd_delegation`]; the
+    ///   location stays pending.
+    /// * [`Errno::OutOfRange`] — a file delegation rather than a location;
+    ///   it stays pending.
+    /// * [`Errno::BufferTooSmall`] — `cap` is shorter than the path; it stays
+    ///   pending.
+    /// * [`Errno::PermissionDenied`] — the descriptor reaches its file as
+    ///   another user than `uid`. Such a location can never be told, so it
+    ///   is consumed rather than left charged to its grantor.
+    pub fn redeem_fd_location(
+        &mut self,
+        task: ProcessId,
+        instance: ProcId,
+        handle: u64,
+        from: ProcId,
+        uid: u32,
+        cap: usize,
+    ) -> Result<String, Errno> {
+        let pending = self.pending_for(task, instance, handle, Some(from))?;
+        let Conveyed::Location(location) = &pending.conveys else {
+            return Err(Errno::OutOfRange);
+        };
+        if location.uid != uid {
+            self.consume_pending(task, handle);
+            return Err(Errno::PermissionDenied);
+        }
+        if location.path.len() > cap {
+            return Err(Errno::BufferTooSmall);
+        }
+        let path = location.path.clone();
+        self.consume_pending(task, handle);
+        Ok(path)
+    }
+
+    /// The delegation `handle` minted to `task`'s `instance`, by `from` where
+    /// that is named; [`Errno::NotFound`] for anything else, forgery and
+    /// staleness alike.
+    fn pending_for(
+        &self,
+        task: ProcessId,
+        instance: ProcId,
+        handle: u64,
+        from: Option<ProcId>,
+    ) -> Result<&PendingFdDelegation, Errno> {
+        self.fd_delegations
             .get(&task)
             .and_then(|entry| entry.by_handle.get(&handle))
             .filter(|pending| {
                 pending.recipient == instance
                     && from.is_none_or(|grantor| pending.grantor_instance == grantor)
             })
-            .cloned()
-            .ok_or(Errno::NotFound)?;
-        let fd = self.open_backed(task, OpenBacking::Delegated(pending.file), pending.flags)?;
-        // The allocation succeeded; consume the grant (one-shot). The
-        // entry provably exists — it was read above under the same
-        // exclusive borrow — so the removes cannot miss.
+            .ok_or(Errno::NotFound)
+    }
+
+    fn consume_pending(&mut self, task: ProcessId, handle: u64) {
         if let Some(entry) = self.fd_delegations.get_mut(&task) {
             entry.by_handle.remove(&handle);
         }
-        Ok(fd)
     }
 
     /// Create a pipe for `task`, allocating a read-end and a write-end

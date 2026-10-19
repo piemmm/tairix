@@ -4,18 +4,20 @@ files — navegador gráfico do sistema de ficheiros
 
 ## SYNOPSIS
 
-`files [--desktop] [directory] [-h | -?]`
+`files [--desktop] [path] [-h | -?]`
 
 ## DESCRIPTION
 
-Abre uma janela do ambiente de trabalho que lista o sistema de ficheiros, a
-começar pelo `directory` indicado na linha de comandos ou, se nenhum for
-indicado, pela pasta `Home` do utilizador que o inicia (o seu diretório
-pessoal, se essa pasta não puder ser listada). O título da janela indica o
-diretório atual; a janela lista as suas entradas, cada entrada selecionada
-realçada com a cor de destaque do tema ativo. Cada leitura de um diretório é
-uma listagem normal, sujeita a permissões, com a identidade do utilizador
-que o inicia: um diretório ilegível é recusado, nunca adivinhado.
+Abre uma janela do ambiente de trabalho que lista o sistema de ficheiros,
+a começar pela pasta que `path` indica na linha de comandos — ou, se
+indicar um ficheiro, pela pasta que contém esse ficheiro, com o ficheiro
+selecionado — ou, se nenhum for indicado, pela pasta `Home` do utilizador
+que o inicia (o seu diretório pessoal, se essa pasta não puder ser
+listada). O título da janela indica o diretório atual; a janela lista as
+suas entradas, cada entrada selecionada realçada com a cor de destaque do
+tema ativo. Cada leitura de um diretório é uma listagem normal, sujeita a
+permissões, com a identidade do utilizador que o inicia: um diretório
+ilegível é recusado, nunca adivinhado.
 
 O ambiente de trabalho inicia o explorador por si e mantém-no na barra de
 ícones: o menu do seu lugar lista os seus próprios locais e tudo o que
@@ -39,9 +41,12 @@ ligar aparece nela por si. `Ctrl+Shift+N` cria uma pasta nova.
 Uma listagem abre sem nada selecionado. Um clique seleciona um item, um
 clique com `Ctrl` acrescenta ou retira um, e um clique com `Shift` seleciona
 a sequência a partir do último item escolhido; um clique num espaço vazio
-limpa a seleção. Arrastar sobre um espaço vazio desenha uma caixa que
-seleciona tudo o que toca à medida que cresce; mantida no topo ou no fundo
-da listagem, esta desloca-se, e `Escape` desfaz o que a caixa selecionou.
+limpa a seleção. Um duplo clique abre um item; mantendo `Shift` premido,
+lista o conteúdo de uma aplicação em vez de a iniciar, e deixa
+desselecionado tudo o que abre noutro lugar. Arrastar sobre um espaço vazio
+desenha uma caixa que seleciona tudo o que toca à medida que cresce; mantida
+no topo ou no fundo da listagem, esta desloca-se, e `Escape` desfaz o que a
+caixa selecionou.
 
 O espaço à volta de cada ícone e do seu nome conta como vazio, por isso uma
 caixa pode começar em qualquer ponto entre os itens. `Ctrl+A` seleciona tudo
@@ -105,16 +110,15 @@ um para outro, `Space` ativa ou desativa uma permissão ou abre o
 proprietário ou o grupo para edição, e `Tab` ou `Escape` regressa às
 secções.
 
-O operando `directory` é tratado como entrada não fidedigna: tem de ser
-um caminho absoluto dentro do limite de comprimento de caminho do
-sistema, e cada um dos seus componentes tem de ser um nome de diretório
-verdadeiro — `.` e `..` não o são, pelo que uma escrita nunca pode
-significar outro lugar que não aquele que se lê. Um diretório que
-infrinja alguma dessas regras, ou que o utilizador que a lançou não
-possa listar, é recusado com a razão no fluxo de erro padrão e a janela
-abre-se antes na pasta `Home`, para que um argumento errado nunca
-deixe o utilizador sem janela. Um segundo operando é recusado de todo
-em vez de ignorado.
+O operando `path` é tratado como entrada não fidedigna: tem de ser um
+caminho absoluto dentro do limite de comprimento de caminho do sistema,
+e cada um dos seus componentes tem de ser um nome verdadeiro — `.` e
+`..` não o são, pelo que uma escrita nunca pode significar outro lugar
+que não aquele que se lê. Um caminho que infrinja alguma dessas regras,
+ou que o utilizador que o iniciou não possa listar, é recusado com a
+razão no fluxo de erro padrão e a janela abre-se antes na pasta `Home`,
+para que um argumento errado nunca deixe o utilizador sem janela. Um
+segundo operando é recusado de todo em vez de ignorado.
 
 ## OPTIONS
 
@@ -122,7 +126,7 @@ em vez de ignorado.
   ambiente de trabalho: um lugar permanente na barra de ícones que oferece os
   seus locais e os volumes montados, nenhuma janela até que uma seja pedida,
   e nenhuma forma de sair. A sessão do ambiente de trabalho passa esta opção
-  no arranque; nomear um `directory` junto dela é recusado, porque um componente
+  no arranque; nomear um `path` junto dela é recusado, porque um componente
   não abre nenhuma janela onde o pôr.
 - `-h, -?` — mostrar a ajuda curta deste próprio comando e sair.
 

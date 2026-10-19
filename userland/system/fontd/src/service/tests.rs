@@ -22,10 +22,11 @@ use tairix_abi::Errno;
 use tairix_fontface::{AxisSetting, Face};
 use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
+use tairix_util::utf8::is_hidden;
 
 use crate::discovery::discover;
-use crate::discovery::fixtures::{MemoryFamily, MemoryStore};
-use crate::service::{FontService, GlyphCache};
+use crate::discovery::fixtures::{MemoryFamily, MemoryStore, TalliedStore, Tally};
+use crate::service::{FaceCache, FontService, GlyphCache, Maps};
 
 /// A machine with plenty of RAM, so a test that is not about the bound gets
 /// a cache that comfortably holds what it asks for.
@@ -316,11 +317,13 @@ fn a_glyph_request_is_served_from_cache_on_a_second_call() {
 }
 
 /// Set difference of two faces' mapped codepoints: every scalar `a` maps
-/// that `b` does not.
+/// that `b` does not, leaving out those that draw nothing, which the service
+/// answers without consulting a face.
 fn mapped_only_in<'x>(a: &'x Face<'_>, b: &'x Face<'_>) -> impl Iterator<Item = u32> + 'x {
     a.mapped()
         .iter()
         .map(|&(code, _)| code)
+        .filter(|&code| char::from_u32(code).is_some_and(|scalar| !is_hidden(scalar)))
         .filter(|code| b.glyph_for(*code).is_none())
 }
 
@@ -338,17 +341,11 @@ fn resolution_walks_primary_then_companion_then_fallback_then_replacement() {
     let inter_face = Face::parse(&inter_bytes).expect("inter face parses");
 
     let own_primary_scalar = char::from_u32(
-        hebrew_face
-            .mapped()
-            .first()
-            .map(|&(code, _)| code)
-            .expect("the Hebrew face maps at least one codepoint"),
+        mapped_only_in(&hebrew_face, &mono_face)
+            .next()
+            .expect("the Hebrew face maps something the companion does not"),
     )
     .expect("a valid scalar");
-    assert!(
-        mono_face.glyph_for(u32::from(own_primary_scalar)).is_none(),
-        "the probe scalar must not also be covered by the companion face"
-    );
 
     // A scalar the companion (second, Latin) face covers but the Hebrew
     // primary does not — resolved from the second face in the family's own
@@ -1140,4 +1137,206 @@ fn an_outline_batch_answers_a_prefix_of_a_long_run() {
     )
     .expect("the run outlines");
     assert!(!glyphs.is_empty() && glyphs.len() <= run.len());
+}
+
+/// What a coverage read may cost `face`: its table directory and its `cmap`.
+fn coverage_bytes(face: &[u8]) -> usize {
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    let cmap = (0..count)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| &face[at..at + 4] == b"cmap")
+        .expect("a cmap record");
+    let len = u32::from_be_bytes(face[cmap + 12..cmap + 16].try_into().expect("a u32"));
+    12 + 16 * count + usize::try_from(len).expect("a length")
+}
+
+const HEBREW: &str = "NotoSansHebrew-ExtraCondensed.ttf";
+const INTER: &str = "Inter-Variable.ttf";
+
+/// A monospace family whose fallback set is the Hebrew face then Inter, each
+/// face tallying what it is asked for.
+fn tallied_store<'a>(mono: &'a [u8], hebrew: &'a [u8], inter: &'a [u8]) -> TalliedStore<'a> {
+    TalliedStore {
+        store: MemoryStore {
+            dirs: vec![
+                (
+                    "mono",
+                    MemoryFamily {
+                        manifest: "label = Mono\nkind = monospace\nface = Inconsolata-EX.ttf\n\
+                                   fallback = test-fallback\n",
+                        faces: vec![("Inconsolata-EX.ttf", mono)],
+                    },
+                ),
+                (
+                    "test-fallback",
+                    MemoryFamily {
+                        manifest: "label = Fallback\nkind = fallback\n\
+                                   face = NotoSansHebrew-ExtraCondensed.ttf\n\
+                                   face = Inter-Variable.ttf\n",
+                        faces: vec![(HEBREW, hebrew), (INTER, inter)],
+                    },
+                ),
+            ],
+        },
+        tallies: Vec::new(),
+    }
+}
+
+/// A scalar only Inter maps among the three faces.
+fn inter_only(mono: &[u8], hebrew: &[u8], inter: &[u8]) -> char {
+    let mono = Face::parse(mono).expect("mono parses");
+    let hebrew = Face::parse(hebrew).expect("hebrew parses");
+    let inter = Face::parse(inter).expect("inter parses");
+    let only = mapped_only_in(&inter, &mono).find(|&code| hebrew.glyph_for(code).is_none());
+    only.and_then(char::from_u32)
+        .expect("Inter maps something the others do not")
+}
+
+/// A scalar no face maps costs each fallback face its coverage alone, never
+/// the whole face, before its U+FFFD.
+#[test]
+fn a_scalar_no_face_maps_costs_each_fallback_face_its_coverage_alone() {
+    let (mono, hebrew, inter) = (
+        asset("mono/Inconsolata-EX.ttf"),
+        asset("mono/NotoSansHebrew-ExtraCondensed.ttf"),
+        asset("inter/Inter-Variable.ttf"),
+    );
+    let mut store = tallied_store(&mono, &hebrew, &inter);
+    let mut svc = discover_roomy_from(&mut store);
+    let key = FamilyKey::new("mono").expect("a key");
+
+    request_glyph(&mut svc, key, '\u{10FFFF}', 28, FontWeight::REGULAR).expect("U+FFFD");
+    request_glyph(&mut svc, key, '\u{10FFFE}', 28, FontWeight::REGULAR).expect("U+FFFD");
+    for (face, bytes) in [(HEBREW, &hebrew), (INTER, &inter)] {
+        let tally = store.tally(face);
+        assert_eq!(tally.loads, 0, "{face} is never read whole");
+        assert_eq!(
+            tally.read,
+            coverage_bytes(bytes),
+            "{face}: its directory and cmap, once"
+        );
+    }
+
+    let only = inter_only(&mono, &hebrew, &inter);
+    request_glyph(&mut svc, key, only, 28, FontWeight::REGULAR).expect("from Inter");
+    assert_eq!(store.tally(INTER).loads, 1, "the face that maps it is read");
+    assert_eq!(store.tally(HEBREW).loads, 0, "the one that does not is not");
+}
+
+#[test]
+fn a_scalar_that_draws_nothing_is_answered_empty_without_consulting_a_face() {
+    let (mono, hebrew, inter) = (
+        asset("mono/Inconsolata-EX.ttf"),
+        asset("mono/NotoSansHebrew-ExtraCondensed.ttf"),
+        asset("inter/Inter-Variable.ttf"),
+    );
+    let mut store = tallied_store(&mono, &hebrew, &inter);
+    let mut svc = discover_roomy_from(&mut store);
+    let key = FamilyKey::new("mono").expect("a key");
+
+    let batch = request_glyphs(&mut svc, key, &['\n', '\u{200d}'], 28, FontWeight::REGULAR)
+        .expect("answered");
+    assert_eq!(batch, vec![(0, 28, 0, 0, Vec::new()); 2]);
+    let (units, outlines) = request_outlines(
+        &mut svc,
+        key,
+        &['\t', '\u{feff}'],
+        FontWeight::REGULAR,
+        FontStyle::Normal,
+        FontStretch::NORMAL,
+    )
+    .expect("answered");
+    assert_eq!(outlines, vec![(units.0, 0.0, 0, 0, Synthesis::NONE); 2]);
+    for face in [HEBREW, INTER] {
+        assert_eq!(
+            store.tally(face),
+            Tally::default(),
+            "{face} is never touched"
+        );
+    }
+}
+
+/// A failed read is not remembered as "this face covers nothing", nor answered
+/// meanwhile with a replacement the client would keep as the scalar's glyph:
+/// the scalar is refused, and the face read again once its backoff allows.
+#[test]
+fn a_coverage_read_that_failed_is_refused_meanwhile_and_tried_again() {
+    let (mono, hebrew, inter) = (
+        asset("mono/Inconsolata-EX.ttf"),
+        asset("mono/NotoSansHebrew-ExtraCondensed.ttf"),
+        asset("inter/Inter-Variable.ttf"),
+    );
+    let mut store = tallied_store(&mono, &hebrew, &inter);
+    let mut svc = discover_roomy_from(&mut store);
+    let key = FamilyKey::new("mono").expect("a key");
+    let only = inter_only(&mono, &hebrew, &inter);
+
+    store.refuse(INTER, 1);
+    for ask in 0..2 {
+        assert_eq!(
+            request_glyph(&mut svc, key, only, 28, FontWeight::REGULAR).err(),
+            Some(Errno::WouldBlock),
+            "ask {ask}"
+        );
+    }
+    assert_eq!(store.tally(INTER).loads, 0);
+    request_glyph(&mut svc, key, only, 28, FontWeight::REGULAR).expect("from Inter");
+    assert_eq!(store.tally(INTER).loads, 1, "the coverage was read again");
+}
+
+/// A face that goes on failing is read at doubling intervals of asks rather
+/// than at every one.
+#[test]
+fn a_face_that_keeps_failing_is_read_ever_less_often() {
+    let (mono, hebrew, inter) = (
+        asset("mono/Inconsolata-EX.ttf"),
+        asset("mono/NotoSansHebrew-ExtraCondensed.ttf"),
+        asset("inter/Inter-Variable.ttf"),
+    );
+    let mut store = tallied_store(&mono, &hebrew, &inter);
+    let mut svc = discover_roomy_from(&mut store);
+    let key = FamilyKey::new("mono").expect("a key");
+    let only = inter_only(&mono, &hebrew, &inter);
+    let refusals = 1 << 20;
+
+    store.refuse(INTER, refusals);
+    for _ in 0..64 {
+        assert_eq!(
+            request_glyph(&mut svc, key, only, 28, FontWeight::REGULAR).err(),
+            Some(Errno::WouldBlock)
+        );
+    }
+    let reads = refusals - store.tally(INTER).refusing;
+    assert_eq!(reads, 6, "asks 1, 3, 6, 11, 20 and 37 read it");
+}
+
+/// A store file that could not be opened.
+struct Unopened;
+
+impl crate::discovery::StoreFile for Unopened {
+    fn size(&self) -> Result<u64, Errno> {
+        Err(Errno::NotFound)
+    }
+
+    fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
+        Err(Errno::NotFound)
+    }
+}
+
+/// A face that could not be opened is set aside for good: it covers nothing,
+/// so a scalar only it might have drawn is answered with the replacement
+/// rather than refused for ever.
+#[test]
+fn a_face_that_could_not_be_opened_is_set_aside_for_good() {
+    let mut face = FaceCache::new(Box::new(crate::discovery::HandleFace::<Unopened>::new(
+        None,
+    )));
+    assert_eq!(face.covers(u32::from('A')), Maps::No);
+    assert!(face.unusable());
+}
+
+/// A roomy-cache service discovered from a tallied `store`.
+fn discover_roomy_from<'a>(store: &mut TalliedStore<'a>) -> FontService<'a> {
+    let (cache, _gauge) = cache_for(ROOMY_MACHINE_BYTES, PressureBand::Normal);
+    discover(store, cache, &DiscardSink).expect("discovers")
 }

@@ -21,6 +21,14 @@
 //! request at a face's defaults, and any static face, applies no variation and
 //! rasterises byte-identically to an unvaried face.
 //!
+//! # Coverage, before the face
+//!
+//! [`Coverage::read`] answers which characters a face maps from its table
+//! directory and `cmap` alone, through positioned reads a caller supplies, and
+//! decodes that table exactly as [`Face::parse`] does. A caller holding many
+//! faces on disk can therefore read whole only the faces that map what it was
+//! asked for.
+//!
 //! # Monospace and proportional
 //!
 //! [`Face::rasterise_glyph`] fills a fixed cell for a monospace grid, while
@@ -87,7 +95,9 @@ mod tests;
 #[cfg(test)]
 mod variations_tests;
 
-pub use engine::{CellGeometry, Contour, Face, GlyphRaster, OutlineSegment};
+pub use engine::{
+    CellGeometry, Contour, Coverage, CoverageError, Face, GlyphRaster, OutlineSegment,
+};
 pub use family::FontFamily;
 pub use store::{
     check_manifest, manifest_line, FamilyManifest, FamilyRole, GenericFamily, ManifestLine,

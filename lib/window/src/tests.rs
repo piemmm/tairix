@@ -297,6 +297,10 @@ struct RecordingHost {
     /// What the host answers a hand-over with: `NotRunning` unless a test
     /// says otherwise, so the default is "nothing to reach".
     hand_over: Result<HandOverOutcome, Errno>,
+    /// Every reveal asked for, as `(caller, window, location)`, and what the
+    /// host answers one with.
+    reveals: Vec<(ProcId, u64, u64)>,
+    reveal: Result<(), Errno>,
     /// The desktop this host composites, or the refusal a host with no
     /// screen to describe answers with.
     desktop: Result<DesktopInfo, Errno>,
@@ -383,6 +387,8 @@ impl Default for RecordingHost {
             refuse_alert: None,
             hand_overs: Vec::new(),
             hand_over: Ok(HandOverOutcome::NotRunning),
+            reveals: Vec::new(),
+            reveal: Ok(()),
             desktop: Ok(sample_desktop()),
         }
     }
@@ -605,6 +611,17 @@ impl WindowHost for RecordingHost {
             }
         }
         self.hand_over
+    }
+
+    fn reveal_requested(
+        &mut self,
+        _desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        window_id: u64,
+        location: u64,
+    ) -> Result<(), Errno> {
+        self.reveals.push((caller, window_id, location));
+        self.reveal
     }
 
     fn menu_open_requested(
@@ -5829,6 +5846,24 @@ fn an_applications_queued_targets_die_with_the_client() {
         client.take_open_target(),
         Ok(None),
         "and the queue went with it"
+    );
+}
+
+#[test]
+fn a_reveal_reaches_the_host_with_the_callers_attested_identity_and_its_answer_returns() {
+    let loopback = Loopback::with_regions(&[]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    assert_eq!(client.reveal_document(5, 12), Ok(()));
+    loopback.borrow_mut().host.reveal = Err(Errno::PermissionDenied);
+    assert_eq!(
+        client.reveal_document(5, 13),
+        Err(Errno::PermissionDenied),
+        "a refusal is relayed as itself"
+    );
+    assert_eq!(
+        loopback.borrow().host.reveals,
+        alloc::vec![(proc_id(0xA1), 5, 12), (proc_id(0xA1), 5, 13)],
+        "the host sees who asked, from the kernel and not from the wire"
     );
 }
 

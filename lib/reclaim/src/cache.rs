@@ -557,6 +557,39 @@ where
         }
     }
 
+    /// [`retain`](Self::retain), handing back what it lets go rather than
+    /// wiping it: the value itself when the cache will not keep it, and every
+    /// entry evicted to make room for it, to `evicted`.
+    ///
+    /// For a consumer that must go on drawing what it is handed however small
+    /// the budget, such as text still on screen: what it is handed is outside
+    /// the cache's charge, and it wipes it when it lets go. A generation change
+    /// and the pressure band's shrink still wipe what they drop, since what
+    /// they release is not to be kept at all.
+    ///
+    /// # Errors
+    ///
+    /// The value, when the cache will not keep it.
+    pub fn retain_handing_back(
+        &mut self,
+        generation: &E,
+        key: K,
+        value: V,
+        mut evicted: impl FnMut(K, V),
+    ) -> Result<(), V> {
+        let policy = self.policy.filter(|_| !self.poisoned);
+        let Some(policy) = policy else {
+            return Err(value);
+        };
+        self.enter_generation(generation);
+        self.enforce_pressure();
+        // `None` is a cache that poisoned itself with the value already taken.
+        match self.admit_keeping(policy, key, value, 0, Some(&mut evicted)) {
+            Some(Served::Uncached(value)) => Err(value),
+            Some(Served::Cached(_)) | None => Ok(()),
+        }
+    }
+
     /// [`retain`](Self::retain), never at the cost of the entry `beside` holds:
     /// a value the cache could make room for only by evicting it is refused
     /// instead, and answers whether it was kept.
@@ -591,7 +624,7 @@ where
             self.discard(value);
             return false;
         };
-        match self.admit_keeping(policy, key, value, kept) {
+        match self.admit_keeping(policy, key, value, kept, None) {
             Some(Served::Cached(_)) => true,
             Some(Served::Uncached(value)) => {
                 self.discard(value);
@@ -727,7 +760,7 @@ where
         if before <= ceiling {
             return 0;
         }
-        self.evict_to(ceiling);
+        self.evict_to(ceiling, None);
         let released = before.saturating_sub(self.charged_bytes());
         if released > 0 {
             self.accounting.record_pressure_shrink(policy.class());
@@ -746,7 +779,7 @@ where
         };
         let ceiling = shrink_target(self.pressure.sample(), policy.class(), self.budget);
         let before = self.charged_bytes();
-        self.evict_to(ceiling);
+        self.evict_to(ceiling, None);
         before.saturating_sub(self.charged_bytes())
     }
 
@@ -780,17 +813,20 @@ where
     /// insertion that follows infallible — and the caller treats it exactly as
     /// a build that yielded nothing.
     fn admit(&mut self, policy: CachePolicy, key: K, value: V) -> Option<Served<'_, V>> {
-        self.admit_keeping(policy, key, value, 0)
+        self.admit_keeping(policy, key, value, 0, None)
     }
 
     /// [`admit`](Self::admit), evicting no further than leaves `kept` bytes
-    /// charged: the most recently used entry, at that cost, survives.
+    /// charged: the most recently used entry, at that cost, survives. What it
+    /// evicts goes to `evicted` where one is given, unwiped, and is wiped
+    /// otherwise.
     fn admit_keeping(
         &mut self,
         policy: CachePolicy,
         key: K,
         value: V,
         kept: usize,
+        evicted: Option<&mut dyn FnMut(K, V)>,
     ) -> Option<Served<'_, V>> {
         let _ = self.release(&key);
         let payload = value.payload_bytes();
@@ -820,7 +856,7 @@ where
             } else {
                 self.budget.low()
             };
-            self.evict_to(watermark.saturating_sub(cost).max(kept));
+            self.evict_to(watermark.saturating_sub(cost).max(kept), evicted);
         }
         if self.charged_bytes().saturating_add(cost) > ceiling {
             self.accounting.record_refusal(policy.class());
@@ -862,13 +898,13 @@ where
     }
 
     /// Evict oldest-first until the charged total is at or below
-    /// `ceiling`.
-    fn evict_to(&mut self, ceiling: usize) {
+    /// `ceiling`, handing each entry to `evicted` unwiped where one is given.
+    fn evict_to(&mut self, ceiling: usize, mut evicted: Option<&mut dyn FnMut(K, V)>) {
         while self.charged_bytes() > ceiling {
             let Some(policy) = self.policy else {
                 return;
             };
-            let Some((_, entry)) = self.entries.pop_lru() else {
+            let Some((key, entry)) = self.entries.pop_lru() else {
                 // Bytes remain charged with no entry left to release:
                 // the ledger and the index disagree.
                 if self.charged_bytes() > 0 {
@@ -876,7 +912,13 @@ where
                 }
                 return;
             };
-            self.wipe_and_discharge(policy, entry);
+            match evicted.as_mut() {
+                Some(evicted) => {
+                    self.discharge(policy, entry.charged_payload);
+                    evicted(key, entry.value);
+                }
+                None => self.wipe_and_discharge(policy, entry),
+            }
             self.accounting.record_eviction();
             if self.poisoned {
                 return;
@@ -1519,6 +1561,42 @@ mod tests {
         let (mut cache, _, _) = cache_of(PressureBand::Normal, candidate(Sensitivity::Public));
         cache.retain(&1, 7, witness(1 << 20));
         assert_eq!(wipes.get(), 3, "a public value is dropped unwiped");
+    }
+
+    /// What a hand-back admission lets go is its caller's, unwiped and no
+    /// longer charged: the entries evicted for it, and the value itself when
+    /// it is refused.
+    #[test]
+    fn a_hand_back_admission_hands_back_what_it_lets_go_unwiped() {
+        let wipes = Rc::new(Cell::new(0));
+        let witness = |len| Witness {
+            len,
+            wipes: Rc::clone(&wipes),
+        };
+        let (mut cache, _, _) = cache_of(PressureBand::Normal, candidate(Sensitivity::UserData));
+        let mut key = 0;
+        while cache.charged_bytes() + 512 + METADATA <= cache.budget.hard() {
+            assert!(cache
+                .retain_handing_back(&1, key, witness(512), |_, _| {})
+                .is_ok());
+            key += 1;
+        }
+        let charged = cache.charged_bytes();
+        let mut handed = Vec::new();
+        assert!(cache
+            .retain_handing_back(&1, key, witness(512), |key, value| handed
+                .push((key, value)))
+            .is_ok());
+        assert!(!handed.is_empty(), "room was made by evicting");
+        assert_eq!(handed[0].0, 0, "oldest first");
+        assert!(handed.iter().all(|(key, _)| cache.peek(&1, key).is_none()));
+        assert!(cache.peek(&1, &key).is_some(), "and the new value kept");
+        assert!(cache.charged_bytes() < charged);
+        assert_eq!(wipes.get(), 0, "nothing handed back is wiped");
+
+        let refused = cache.retain_handing_back(&1, 999, witness(1 << 20), |_, _| {});
+        assert!(matches!(refused, Err(Witness { len, .. }) if len == 1 << 20));
+        assert_eq!(wipes.get(), 0, "a refused value comes back unwiped");
     }
 
     #[test]

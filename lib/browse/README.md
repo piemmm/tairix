@@ -315,9 +315,9 @@ can never diverge in navigation semantics, listing policy, or look.
   `MAX_WALK_DEPTH` bound `DeleteWalk` obeys), and holds its exact position
   between steps so the app can cancel or be preempted without losing or
   repeating work. Driving it against the wrong step is
-  `CopyWalkError::OutOfStep`, leaving the walk unchanged. `copied` is the honest
-  rising count a progress indicator shows; the total is unknown until the reads
-  reveal it, so no fabricated percentage. The app performs every syscall under
+  `CopyWalkError::OutOfStep`, leaving the walk unchanged. `copied` is the walk's
+  own count of what it has copied, shown against the whole a `Survey` counted
+  before the copy began. The app performs every syscall under
   the user's own identity, so composing it grants nothing and the read-only
   picker never runs it.
 - **Delete** (`delete`, `Browser::plan_delete`, `plans/NEW-FILEMANAGER.md`
@@ -347,9 +347,9 @@ can never diverge in navigation semantics, listing policy, or look.
   `DeleteError::TooDeep`, never descended without limit), and holds its exact
   position between steps so the app can cancel or be preempted without losing or
   repeating work. Driving it against the wrong step is `DeleteError::OutOfStep`,
-  leaving the walk unchanged. `removed` is the honest rising count a progress
-  indicator shows; the total is unknown until the reads reveal it, so no
-  fabricated percentage. This is the browser engine's own component-path
+  leaving the walk unchanged. `removed` is the walk's own count of what it has
+  removed, shown against the whole a `Survey` counted. This is the browser
+  engine's own component-path
   traversal, distinct from `rm`'s coreutils removal engine — two consumers with
   two data models, not one algorithm copied twice. The question asked first is
   the renderer's `delete_alert`, a desktop alert naming the honest target count
@@ -659,22 +659,29 @@ can never diverge in navigation semantics, listing policy, or look.
   reproduce is offered back by key alone. The rows scroll in pixels in the
   band above the `key = value` editor, which stays put; the cursor over them
   is the shared `RowList`.
+- **Counting the whole** (`survey`, `plans/NEW-FILEMANAGER.md` FM7b): a
+  `Survey` totals the items beneath an operation's sources and the bytes of
+  their files, one look at a source or one directory listing a step, before
+  the operation begins; a tree it cannot count in full leaves the whole
+  uncounted rather than estimated.
 - **Progress + cancel** (`progress`, `plans/NEW-FILEMANAGER.md` FM7b): the
   pure display + cancel *state* of a long file operation the file manager
   runs off its event loop. `ProgressModel` carries the operation kind
   (`ProgressOp::Delete`/`Copy`/`Move`/`Trash`, each with the title a refusal
-  that stops it is stated under), the honest rising count
-  the driving walk reports (`DeleteWalk::removed` / `CopyWalk::copied` / the
-  move-to-Trash item count), and a
-  *latched* cancel; its `title`/`status_line` never fabricate a percentage,
-  since the total is unknown until the walk's reads reveal it, and an
-  operation waiting for those before it says so. The drawn surface is the
-  renderer's `draw_progress_window`, which fills the operation's own progress
-  window at `progress_window_extent` with an indeterminate `Progress`
-  "working" trace captioned with the count and a Cancel `Button`, with
-  `progress_cancel_at` the mirror hit-test resolving a click to the drawn
-  Cancel (fail closed off it). The model holds no authority and does no I/O,
-  so the read-only picker (which never deletes or copies) never builds one.
+  that stops it is stated under), what it acts on and where to, what is done
+  of the counted whole (`Tally`: items, and the bytes a copy streams), the
+  item in hand, a smoothed rate, and a *latched* cancel; `fraction` is a share
+  only of a counted whole, `headline` and `figures` say what is moving where
+  and how far it has got, the rate and time left once its readings have held,
+  and an operation waiting for those before it says so. The drawn surface is
+  the renderer's `draw_progress_window`, which fills the operation's own
+  progress window at `progress_window_extent` with those lines, the window's
+  own uncaptioned `Progress` bar (its state from `progress_state`, its motion
+  its owner's to clock) and a Cancel `Button`, with `progress_cancel_at` the
+  mirror hit-test resolving a click to the drawn Cancel (fail closed off it)
+  and `progress_bar_rect` what a frame of the bar's motion repaints. The model
+  holds no authority and does no I/O, so the read-only picker (which never
+  deletes or copies) never builds one.
   The delete, copy/paste, and move-to-Trash drives are all wired end to end in
   the files app, each in a progress window of its own.
 - **Renderer** (`render`): every entry point takes the desktop's

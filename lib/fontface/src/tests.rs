@@ -1,10 +1,12 @@
 //! Unit tests over the committed faces.
 
+use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::{CellGeometry, Face, FontFamily, ATLAS_EM_PX};
+use crate::{CellGeometry, Coverage, CoverageError, Face, FontFamily, ATLAS_EM_PX};
 
 /// The native cell height the atlas is authored at (ascent 13 + descent 3).
 const NATIVE_HEIGHT: u32 = 16;
@@ -230,4 +232,186 @@ fn garbage_fails_closed_rather_than_panicking() {
     assert!(Face::parse(&[]).is_err());
     assert!(Face::parse(&[0u8; 32]).is_err());
     assert!(FontFamily::parse(&[]).is_err());
+}
+
+/// Every committed face, by its path under `lib/font/assets`.
+fn committed_faces() -> Vec<(String, Vec<u8>)> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../font/assets");
+    let mut faces = Vec::new();
+    let mut dirs = vec![root];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).expect("assets list") {
+            let path = entry.expect("asset entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "ttf") {
+                let bytes = fs::read(&path).expect("asset reads");
+                faces.push((path.display().to_string(), bytes));
+            }
+        }
+    }
+    assert!(faces.len() >= 4, "the committed faces are found");
+    faces
+}
+
+/// A positioned read over `face` that records every span it was asked for.
+fn recording_read<'f>(
+    face: &'f [u8],
+    spans: &'f core::cell::RefCell<Vec<(u64, usize)>>,
+) -> impl FnMut(u64, &mut [u8]) -> Result<usize, ()> + 'f {
+    move |offset, buf| {
+        spans.borrow_mut().push((offset, buf.len()));
+        let start = usize::try_from(offset).map_err(|_| ())?.min(face.len());
+        let filled = buf.len().min(face.len() - start);
+        buf[..filled].copy_from_slice(&face[start..start + filled]);
+        Ok(filled)
+    }
+}
+
+/// What a face can draw is read from its directory and `cmap` alone, and is
+/// exactly what the parsed face maps: a scalar the coverage says no face
+/// covers must never be one a face would have drawn.
+#[test]
+fn coverage_is_what_the_parsed_face_maps_read_from_the_cmap_alone() {
+    for (name, bytes) in committed_faces() {
+        let spans = core::cell::RefCell::new(Vec::new());
+        let face_len = u64::try_from(bytes.len()).expect("small face");
+        let coverage = Coverage::read(face_len, recording_read(&bytes, &spans))
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let face = Face::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            coverage.count(),
+            u64::try_from(face.mapped().len()).expect("count"),
+            "{name}"
+        );
+        for &(code, _) in face.mapped() {
+            assert!(coverage.covers(code), "{name}: U+{code:04X}");
+        }
+        assert!(!coverage.covers(0x10_FFFF), "{name}");
+
+        let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        let cmap_len = (0..count)
+            .map(|i| 12 + 16 * i)
+            .find(|&at| &bytes[at..at + 4] == b"cmap")
+            .map(|at| u32::from_be_bytes(bytes[at + 12..at + 16].try_into().expect("u32")))
+            .expect("a cmap record");
+        let read: usize = spans.borrow().iter().map(|&(_, len)| len).sum();
+        assert_eq!(
+            read,
+            12 + 16 * count + usize::try_from(cmap_len).expect("len"),
+            "{name}: only the directory and the cmap are read"
+        );
+    }
+}
+
+#[test]
+fn coverage_refuses_a_malformed_face_and_passes_a_read_failure_on() {
+    let spans = core::cell::RefCell::new(Vec::new());
+    for garbage in [&[][..], &[0u8; 32][..]] {
+        let len = u64::try_from(garbage.len()).expect("len");
+        assert!(matches!(
+            Coverage::read(len, recording_read(garbage, &spans)),
+            Err(CoverageError::Malformed(_))
+        ));
+    }
+
+    // A directory naming a `cmap` far larger than the face: refused before
+    // anything is allocated or read for it.
+    let mut face = primary_bytes();
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    let cmap = (0..count)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| &face[at..at + 4] == b"cmap")
+        .expect("a cmap record");
+    face[cmap + 12..cmap + 16].copy_from_slice(&u32::MAX.to_be_bytes());
+    spans.borrow_mut().clear();
+    let len = u64::try_from(face.len()).expect("len");
+    assert!(matches!(
+        Coverage::read(len, recording_read(&face, &spans)),
+        Err(CoverageError::Malformed(_))
+    ));
+    assert_eq!(spans.borrow().len(), 2, "the header and the records only");
+
+    let failing = |_: u64, _: &mut [u8]| Err::<usize, &str>("disk gone");
+    assert_eq!(
+        Coverage::read(len, failing),
+        Err(CoverageError::Read("disk gone"))
+    );
+}
+
+/// A face of one table, a `cmap` whose format-4 segments are `segments`, each
+/// mapping its codes one glyph on.
+fn face_with_segments(segments: &[(u16, u16)]) -> Vec<u8> {
+    let count = u16::try_from(segments.len()).expect("few segments");
+    let mut subtable = Vec::new();
+    for word in [4, 0, 0, count * 2, 0, 0, 0] {
+        subtable.extend_from_slice(&u16::to_be_bytes(word));
+    }
+    let column = |subtable: &mut Vec<u8>, word: &dyn Fn(u16, u16) -> u16| {
+        for &(start, end) in segments {
+            subtable.extend_from_slice(&word(start, end).to_be_bytes());
+        }
+    };
+    column(&mut subtable, &|_, end| end);
+    subtable.extend_from_slice(&[0, 0]);
+    column(&mut subtable, &|start, _| start);
+    column(&mut subtable, &|_, _| 1);
+    column(&mut subtable, &|_, _| 0);
+    let length = u16::try_from(subtable.len()).expect("a short subtable");
+    subtable[2..4].copy_from_slice(&length.to_be_bytes());
+
+    let mut cmap = Vec::new();
+    for word in [0u16, 1, 3, 1] {
+        cmap.extend_from_slice(&word.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&subtable);
+
+    let mut face = Vec::new();
+    face.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    face.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+    face.extend_from_slice(b"cmap");
+    face.extend_from_slice(&0u32.to_be_bytes());
+    face.extend_from_slice(&28u32.to_be_bytes());
+    face.extend_from_slice(&u32::try_from(cmap.len()).expect("len").to_be_bytes());
+    face.extend_from_slice(&cmap);
+    face
+}
+
+fn coverage_of(face: &[u8]) -> Result<Coverage, CoverageError<()>> {
+    let spans = core::cell::RefCell::new(Vec::new());
+    Coverage::read(
+        u64::try_from(face.len()).expect("len"),
+        recording_read(face, &spans),
+    )
+}
+
+/// The lookup takes the first segment ending at or after a code, so a code
+/// an earlier segment reaches is never a later one's.
+#[test]
+fn overlapping_cmap_segments_decode_as_the_lookup_reads_them() {
+    let coverage =
+        coverage_of(&face_with_segments(&[(10, 20), (15, 30), (0xFFFF, 0xFFFF)])).expect("read");
+    assert!((10..=30).all(|code| coverage.covers(code)));
+    assert!(!coverage.covers(9) && !coverage.covers(31));
+    assert_eq!(coverage.count(), 21);
+
+    let coverage =
+        coverage_of(&face_with_segments(&[(10, 20), (5, 30), (0xFFFF, 0xFFFF)])).expect("read");
+    assert!(
+        !coverage.covers(7),
+        "the first segment ending past it starts after it"
+    );
+    assert!((10..=30).all(|code| coverage.covers(code)));
+}
+
+/// Segments that do not ascend would each be decoded whole: twenty spanning
+/// the plane are over a million entries from a table of a few hundred bytes.
+#[test]
+fn a_cmap_whose_segments_do_not_ascend_is_refused_without_decoding_them() {
+    let segments = [(0, 0xFFFE); 20];
+    assert!(matches!(
+        coverage_of(&face_with_segments(&segments)),
+        Err(CoverageError::Malformed(_))
+    ));
 }

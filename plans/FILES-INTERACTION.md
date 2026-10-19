@@ -55,6 +55,8 @@ waits on a disk), `plans/NEW-MENUS.md` (session-owned menus and submenus),
 | FI29 | List: one row per entry under a header — name, size, modified, type; a drive states its free space, filesystem and health | done |
 | FI30 | No activate-then-close command: the context menu's Open and Close row and its hand-off rule are deleted | done |
 | FI31 | The context menu names what it acts on: Display ▸, then the selection's own submenu holding the item verbs, New ▸, Select All, Clear Selection and Paste; Properties is Get Info… | done |
+| FI32 | A shift-double-click leaves what it opened elsewhere deselected, and an activation the engine refuses is stated over the window | done |
+| FI33 | A path naming a file is shown selected in the folder holding it, in a window already showing that folder where there is one | done |
 
 ## FI1 — item names one point smaller
 
@@ -752,6 +754,32 @@ selected the submenu is disabled with its reason (`AppMenuRow::Submenu`
 carries one) and holds no row. Properties is renamed Get Info… and its window
 is titled `name — Info`, spelled the same way, so no name can refuse it a
 title.
+
+## FI32 — a shift-double-click deselects
+
+A double-click activates its item (`gesture::PrimaryPress::Activate`), and its
+intent and what it leaves selected are the gesture's: shift lists a bundle's
+contents, and leaves an item that opened somewhere else — a file in its
+application — deselected. A plain double-click keeps the item selected, and
+`Shift+Enter` keeps the selection the keyboard moves from. The repaint is the
+selection marks that changed from before the pair's second press
+(`listing::ViewMark`), since its first may have selected more than the item. A
+refused activation — a link naming nothing, a folder that cannot be listed — is
+stated in an alert over the window (`notice::not_opened`), and nothing chosen is
+no refusal.
+
+## FI33 — a file is shown in its folder
+
+A path names a file or a folder (`OpenTarget::Path`), and a file manager shown
+a file shows the folder holding it with the file selected and brought into
+view. Listing the path is refused as not a folder, and the ladder tries its
+folder next instead (`command::Ladder::show_instead`, `shows_in`): no move to
+state, and never once the ladder has passed the place asked for. A window
+already listing that folder with the file in it is brought forward and selects
+it without a listing; one whose listing lacks the file yet selects it when one
+shows it (`Browser::follow`), and brings it into view at the present after its
+fit. The desktop's reveal of a document ([session](../docs/src/desktop/session.md))
+is the first sender, and the command line takes the same path.
 
 ## Sequencing
 

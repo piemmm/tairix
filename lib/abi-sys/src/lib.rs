@@ -231,6 +231,8 @@ const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
 const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 const NUM_FD_REDEEM_FROM: u64 = SyscallNumber::FD_REDEEM_FROM.as_u16() as u64;
+const NUM_FD_GRANT_LOCATION: u64 = SyscallNumber::FD_GRANT_LOCATION.as_u16() as u64;
+const NUM_FD_REDEEM_LOCATION: u64 = SyscallNumber::FD_REDEEM_LOCATION.as_u16() as u64;
 const NUM_SHM_MAP_FROM: u64 = SyscallNumber::SHM_MAP_FROM.as_u16() as u64;
 const NUM_BOOT_SESSION_GET: u64 = SyscallNumber::BOOT_SESSION_GET.as_u16() as u64;
 
@@ -3642,6 +3644,78 @@ pub extern "C" fn sys_fd_redeem_from(handle: u64, grantor: *mut c_void, grantor_
     }
 }
 
+/// `fd_grant_location`: tell the process instance at `(recipient,
+/// recipient_len)` — an attested `tairix_proc_id_t` — where the caller's own
+/// descriptor `fd` points, one-shot, returning the handle it redeems with
+/// `tairix_sys_fd_redeem_location` or `-errno`
+/// (`SyscallNumber::FD_GRANT_LOCATION`).
+///
+/// Confers nothing and needs no capability: the recipient opens nothing
+/// through it, and is told the path only when it may name paths, as the user
+/// `fd` reaches its file as. A pipe, pty or resource answers
+/// `TAIRIX_E_OUT_OF_RANGE`. Not audited.
+#[must_use]
+#[export_name = "tairix_sys_fd_grant_location"]
+pub extern "C" fn sys_fd_grant_location(
+    fd: u32,
+    recipient: *mut c_void,
+    recipient_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(recipient,
+    // recipient_len)` against the caller's address space and resolves the
+    // caller's own descriptor and a live recipient before minting anything.
+    unsafe {
+        raw_syscall(
+            NUM_FD_GRANT_LOCATION,
+            [
+                u64::from(fd),
+                ptr_arg(recipient),
+                recipient_len as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    }
+}
+
+/// `fd_redeem_location`: write the absolute path the location `handle`,
+/// minted to the caller by the instance at `(grantor, grantor_len)`, tells
+/// into `(out, out_len)`, returning its length or `-errno`
+/// (`SyscallNumber::FD_REDEEM_LOCATION`).
+///
+/// Requires `TAIRIX_CAP_FS_ACCESS`. A handle that instance did not mint
+/// answers `TAIRIX_E_NOT_FOUND`, a file delegation `TAIRIX_E_OUT_OF_RANGE`,
+/// and a short buffer `TAIRIX_E_BUFFER_TOO_SMALL`, each leaving it pending;
+/// a descriptor that reaches its file as another user answers
+/// `TAIRIX_E_PERMISSION_DENIED` and is consumed. Audited.
+#[must_use]
+#[export_name = "tairix_sys_fd_redeem_location"]
+pub extern "C" fn sys_fd_redeem_location(
+    handle: u64,
+    grantor: *mut c_void,
+    grantor_len: usize,
+    out: *mut c_void,
+    out_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates both `(pointer, len)`
+    // pairs against the caller's address space, writes at most `out_len`
+    // bytes, and resolves the handle owner- and grantor-bound first.
+    unsafe {
+        raw_syscall(
+            NUM_FD_REDEEM_LOCATION,
+            [
+                handle,
+                ptr_arg(grantor),
+                grantor_len as u64,
+                ptr_arg(out),
+                out_len as u64,
+                0,
+            ],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3780,6 +3854,8 @@ mod tests {
         (NUM_FD_GRANT, "fd_grant", 4),
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_FD_REDEEM_FROM, "fd_redeem_from", 3),
+        (NUM_FD_GRANT_LOCATION, "fd_grant_location", 3),
+        (NUM_FD_REDEEM_LOCATION, "fd_redeem_location", 5),
         (NUM_SHM_MAP_FROM, "shm_map_from", 4),
         (NUM_TOUCH_INJECT, "touch_inject", 3),
         (NUM_TOUCH_READ, "touch_read", 3),
@@ -4699,6 +4775,41 @@ mod tests {
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fd_grant_location_marshals_the_descriptor_and_the_recipient_instance() {
+        let mut instance = [0x5Du8; tairix_abi::PROC_ID_LEN];
+        let ptr = instance.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(4, || {
+            assert_eq!(sys_fd_grant_location(7, ptr, instance.len()), 4);
+        });
+        assert_eq!(number, NUM_FD_GRANT_LOCATION);
+        assert_eq!(args[0], 7);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fd_redeem_location_marshals_the_handle_the_grantor_and_the_buffer() {
+        let mut instance = [0x5Eu8; tairix_abi::PROC_ID_LEN];
+        let mut out = [0u8; 40];
+        let grantor = instance.as_mut_ptr().cast::<c_void>();
+        let buffer = out.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(12, || {
+            assert_eq!(
+                sys_fd_redeem_location(9, grantor, instance.len(), buffer, out.len()),
+                12
+            );
+        });
+        assert_eq!(number, NUM_FD_REDEEM_LOCATION);
+        assert_eq!(args[0], 9);
+        assert_eq!(args[1], grantor as usize as u64);
+        assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
+        assert_eq!(args[3], buffer as usize as u64);
+        assert_eq!(args[4], 40);
+        assert_eq!(args[5], 0);
     }
 
     #[test]

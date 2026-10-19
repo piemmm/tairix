@@ -57,7 +57,11 @@
 //! — its width is a multiplication.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+#[cfg(any(feature = "rt", feature = "test-util"))]
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::font_ipc::{
     decode_families_reply, decode_glyphs_reply, decode_metrics_reply, decode_outlines_reply,
@@ -68,8 +72,10 @@ use tairix_abi::font_ipc::{
 };
 use tairix_abi::Errno;
 use tairix_hash::BuildSipHash13;
-use tairix_reclaim::ReclaimCache;
+use tairix_reclaim::{CachedBytes, ReclaimCache};
 use tairix_rt::sync::{Mutex, MutexGuard};
+use tairix_util::utf8::is_hidden;
+use tairix_vt::char_width;
 
 use crate::atlas;
 use crate::glyph_cache::CachedGlyph;
@@ -170,12 +176,18 @@ impl MetricsCache {
             .find_map(|slot| slot.filter(|&(k, _)| k == key).map(|(_, metrics)| metrics))
     }
 
-    fn insert(&mut self, key: MetricsKey, metrics: FontMetrics) {
+    /// Keep `metrics` under `key`, answering the oldest entry it displaced.
+    fn insert(
+        &mut self,
+        key: MetricsKey,
+        metrics: FontMetrics,
+    ) -> Option<(MetricsKey, FontMetrics)> {
         if self.get(key).is_some() {
-            return;
+            return None;
         }
-        self.entries[self.next] = Some((key, metrics));
+        let displaced = self.entries[self.next].replace((key, metrics));
         self.next = (self.next + 1) % METRICS_CACHE_CAPACITY;
+        displaced
     }
 }
 
@@ -198,8 +210,10 @@ pub(crate) struct Caches {
     /// walked afresh — correct, merely one advance lookup per character.
     measure: Option<MeasureCache>,
     /// The generation retained measurements are keyed to, moved on whenever a
-    /// transport is installed.
+    /// transport is installed or a deferred fetch lands.
     advance_source: MeasureEpoch,
+    /// `Some` once the process draws without waiting on the service.
+    deferred: Option<Deferred>,
 }
 
 impl Caches {
@@ -210,6 +224,7 @@ impl Caches {
             metrics: MetricsCache::new(),
             measure: None,
             advance_source: 0,
+            deferred: None,
         }
     }
 
@@ -233,6 +248,118 @@ impl Caches {
     }
 }
 
+/// A glyph drawn provisionally: its face, pixel height and weight, then the
+/// scalar, so a fetch reads the misses of one face as one run.
+type PendingGlyph = (FamilyKey, u32, FontWeight, char);
+
+/// Line metrics answered provisionally.
+type PendingMetrics = (FamilyKey, u32, FontWeight);
+
+/// The most glyph misses a drawing thread records between two fetches: past
+/// any screen's distinct text, and a bound on what text drawn faster than it
+/// is fetched can make it keep. A miss past it is recorded by the next draw.
+const DEFERRED_MOST_GLYPHS: usize = 4096;
+
+/// The most line-metrics misses recorded between two fetches.
+const DEFERRED_MOST_METRICS: usize = 256;
+
+/// A value a deferred fetch brought that its cache does not keep, and whether
+/// it has been drawn since that fetch.
+struct Held<K, V> {
+    key: K,
+    value: V,
+    drawn: bool,
+}
+
+/// What a drawing thread holds outside its caches, sorted by key: values a
+/// cache would not keep, or let go to make room, while they are still drawn.
+/// Without them a working set larger than its cache would be fetched, let go
+/// and fetched again for ever.
+struct HeldSet<K, V> {
+    entries: Vec<Held<K, V>>,
+}
+
+impl<K, V> Default for HeldSet<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<K: Ord, V> HeldSet<K, V> {
+    /// The value held under `key`, marked drawn.
+    fn draw(&mut self, key: &K) -> Option<&V> {
+        let at = self
+            .entries
+            .binary_search_by(|held| held.key.cmp(key))
+            .ok()?;
+        let held = &mut self.entries[at];
+        held.drawn = true;
+        Some(&held.value)
+    }
+
+    /// Whether a value is held under `key`.
+    fn holds(&self, key: &K) -> bool {
+        self.entries
+            .binary_search_by(|held| held.key.cmp(key))
+            .is_ok()
+    }
+
+    /// Hold `fetched` too, and when `sweep`, let go of what has not been drawn
+    /// since the last sweep, handing it to `release`. Nothing fetched is held
+    /// already, since a held value is never asked for.
+    fn renew(&mut self, fetched: Vec<(K, V)>, sweep: bool, mut release: impl FnMut(&mut V)) {
+        if sweep {
+            self.entries.retain_mut(|held| {
+                if !held.drawn {
+                    release(&mut held.value);
+                }
+                core::mem::replace(&mut held.drawn, false)
+            });
+        }
+        self.entries
+            .extend(fetched.into_iter().map(|(key, value)| Held {
+                key,
+                value,
+                drawn: false,
+            }));
+        self.entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+    }
+}
+
+/// What a drawing thread that must not wait has missed, and holds.
+///
+/// A miss draws provisionally and is recorded here; [`fetch_deferred`] asks for
+/// it on a thread that may wait.
+#[derive(Default)]
+struct Deferred {
+    glyphs: BTreeSet<PendingGlyph>,
+    metrics: BTreeSet<PendingMetrics>,
+    held_glyphs: HeldSet<GlyphKey, CachedGlyph>,
+    held_metrics: HeldSet<MetricsKey, FontMetrics>,
+    /// Whether the last pass landed anything. The drawing thread then draws
+    /// again all the text it shows before the next pass, so what that redraw
+    /// did not draw is shown no longer and may be let go; text it did not
+    /// redraw is otherwise still on screen.
+    redrawn: bool,
+}
+
+impl Deferred {
+    /// Whether anything is waiting to be fetched.
+    fn is_pending(&self) -> bool {
+        !self.glyphs.is_empty() || !self.metrics.is_empty()
+    }
+}
+
+/// The glyph drawn for `scalar` until its own is fetched: no ink, on the
+/// console's own advance for it.
+fn provisional_glyph(scalar: char, pixel_height: u32) -> CachedGlyph {
+    let cell = scale_atlas_metric(atlas::CELL_WIDTH, pixel_height);
+    let advance = cell.saturating_mul(u32::from(char_width(scalar)));
+    CachedGlyph::new(0, pixel_height, advance, 0, Box::default())
+}
+
 /// The process's one channel to the font service: the installed transport and
 /// the reusable buffer it receives replies into.
 ///
@@ -247,6 +374,11 @@ pub(crate) struct Channel {
     /// installation happens once however many threads draw first.
     #[cfg(any(feature = "rt", feature = "test-util"))]
     defaulted: bool,
+    /// Whether the transport still owes the service manager its connect
+    /// handshake, which it makes before its first request: on the thread that
+    /// sends one, never on a thread that only draws. Only the runtime
+    /// transport owes one.
+    connect_first: bool,
 }
 
 impl Channel {
@@ -256,12 +388,23 @@ impl Channel {
             reply: Vec::new(),
             #[cfg(any(feature = "rt", feature = "test-util"))]
             defaulted: false,
+            connect_first: false,
         }
     }
 
     /// Install `transport` as this channel's advance source.
     fn install_transport(&mut self, transport: Box<dyn FontTransport>) {
         self.transport = Some(transport);
+        self.connect_first = false;
+    }
+
+    /// Make the connect handshake the transport owes, before the request
+    /// about to be sent.
+    fn ready(&mut self) {
+        if core::mem::take(&mut self.connect_first) {
+            #[cfg(feature = "rt")]
+            connect_font_service();
+        }
     }
 
     /// Fetch the outlines of a prefix of `scalars`, or `None` when no
@@ -273,6 +416,7 @@ impl Channel {
         family: FamilyKey,
         instance: (FontWeight, FontStyle, FontStretch),
     ) -> Option<OutlineReply> {
+        self.ready();
         let transport = self.transport.as_mut()?;
         fetch_outlines(
             transport.as_mut(),
@@ -292,9 +436,10 @@ impl Channel {
         family: FamilyKey,
         pixel_height: u32,
         weight: FontWeight,
-    ) -> Vec<CachedGlyph> {
+    ) -> Result<Vec<CachedGlyph>, Unanswered> {
+        self.ready();
         let Some(transport) = self.transport.as_mut() else {
-            return Vec::new();
+            return Err(Unanswered::Unreachable);
         };
         fetch_glyphs(
             transport.as_mut(),
@@ -313,6 +458,7 @@ impl Channel {
         pixel_height: u32,
         weight: FontWeight,
     ) -> Option<FontMetrics> {
+        self.ready();
         let transport = self.transport.as_mut()?;
         fetch_metrics(
             transport.as_mut(),
@@ -326,6 +472,7 @@ impl Channel {
     /// The installed families, or an empty list when no transport is
     /// installed or the service refuses the request (fail closed).
     fn families(&mut self) -> Vec<FamilyEntry> {
+        self.ready();
         let Some(transport) = self.transport.as_mut() else {
             return Vec::new();
         };
@@ -368,13 +515,17 @@ pub(crate) trait FontClient {
     ///
     /// Answers a prefix of `scalars`, in order, so the batch pairs
     /// positionally with the head of the run and may be shorter than it.
+    ///
+    /// # Errors
+    ///
+    /// Why nothing came back: see [`Unanswered`].
     fn fetch_glyphs(
         &mut self,
         scalars: &[char],
         family: FamilyKey,
         pixel_height: u32,
         weight: FontWeight,
-    ) -> Vec<CachedGlyph>;
+    ) -> Result<Vec<CachedGlyph>, Unanswered>;
 
     /// Fetch a run of glyph outlines over the channel, with the caches
     /// released.
@@ -490,6 +641,14 @@ pub(crate) trait FontClient {
     /// afterwards, which is what keeps the coverage blit off both locks and
     /// counts the one lookup exactly once.
     ///
+    /// A scalar that draws nothing ([`is_hidden`]) is served an empty,
+    /// zero-advance glyph with no lookup at all: no face draws it, and asking
+    /// would cost the service a search of every face for one that maps it.
+    ///
+    /// A process that draws without waiting ([`defer_fetches`]) is served a
+    /// held glyph or a [provisional](provisional_glyph) one on a miss, and the
+    /// miss is recorded for [`fetch_deferred`].
+    ///
     /// `None` — composite nothing, fail closed — when no transport is
     /// installed or the call or its reply could not be read.
     fn with_glyph<R>(
@@ -500,6 +659,9 @@ pub(crate) trait FontClient {
         weight: FontWeight,
         f: impl FnOnce(&CachedGlyph) -> R,
     ) -> Option<R> {
+        if is_hidden(scalar) {
+            return Some(f(&CachedGlyph::new(0, pixel_height, 0, 0, Box::default())));
+        }
         let key = glyph_key(scalar, family, pixel_height, weight);
         if let Some(cache) = self.caches().glyphs.as_mut() {
             // `build` answers `None` on purpose: the lookup is counted here,
@@ -509,8 +671,20 @@ pub(crate) trait FontClient {
                 return Some(f(&served));
             }
         }
+        if let Some(deferred) = self.caches().deferred.as_mut() {
+            if let Some(held) = deferred.held_glyphs.draw(&key) {
+                return Some(f(held));
+            }
+            if deferred.glyphs.len() < DEFERRED_MOST_GLYPHS {
+                deferred
+                    .glyphs
+                    .insert((family, pixel_height, weight, scalar));
+            }
+            return Some(f(&provisional_glyph(scalar, pixel_height)));
+        }
         let glyph = self
             .fetch_glyphs(&[scalar], family, pixel_height, weight)
+            .ok()?
             .into_iter()
             .next()?;
         let served = f(&glyph);
@@ -537,9 +711,12 @@ pub(crate) trait FontClient {
     /// Skipped with no cache installed, and abandoned as soon as a batch's
     /// results are not retained: warming is speculation on a cache keeping
     /// what it is given, and a cache that will not keep it would make every
-    /// further batch pure extra traffic on top of the per-glyph path.
+    /// further batch pure extra traffic on top of the per-glyph path. Skipped
+    /// too where the process draws without waiting: the misses the draw then
+    /// records are fetched together, off the drawing thread.
     fn warm(&mut self, text: &str, family: FamilyKey, pixel_height: u32, weight: FontWeight) {
-        if self.caches().glyphs.is_none() {
+        let caches = self.caches();
+        if caches.glyphs.is_none() || caches.deferred.is_some() {
             return;
         }
         let mut pending = ['\0'; FONT_MAX_GLYPH_RUN];
@@ -547,7 +724,8 @@ pub(crate) trait FontClient {
         loop {
             let mut len = 0;
             for scalar in chars.by_ref() {
-                if pending[..len].contains(&scalar)
+                if is_hidden(scalar)
+                    || pending[..len].contains(&scalar)
                     || self.holds_glyph(scalar, family, pixel_height, weight)
                 {
                     continue;
@@ -607,7 +785,9 @@ pub(crate) trait FontClient {
         pixel_height: u32,
         weight: FontWeight,
     ) -> usize {
-        let fetched = self.fetch_glyphs(scalars, family, pixel_height, weight);
+        let fetched = self
+            .fetch_glyphs(scalars, family, pixel_height, weight)
+            .unwrap_or_default();
         let answered = fetched.len();
         let mut retained = false;
         for (&scalar, glyph) in scalars.iter().zip(fetched) {
@@ -682,11 +862,22 @@ pub(crate) trait FontClient {
     ///
     /// Never fails: no transport installed or a refused request yields the
     /// console-atlas geometry scaled to `pixel_height` ([`fallback_metrics`])
-    /// rather than leaving a caller with nothing to lay text out with.
+    /// rather than leaving a caller with nothing to lay text out with. A
+    /// process that draws without waiting is answered the same geometry on a
+    /// miss, recorded for [`fetch_deferred`].
     fn metrics(&mut self, family: FamilyKey, pixel_height: u32, weight: FontWeight) -> FontMetrics {
         let key = (family.to_wire(), pixel_height, weight.to_wire());
         if let Some(metrics) = self.caches().metrics.get(key) {
             return metrics;
+        }
+        if let Some(deferred) = self.caches().deferred.as_mut() {
+            if let Some(&held) = deferred.held_metrics.draw(&key) {
+                return held;
+            }
+            if deferred.metrics.len() < DEFERRED_MOST_METRICS {
+                deferred.metrics.insert((family, pixel_height, weight));
+            }
+            return fallback_metrics(pixel_height);
         }
         let fetched = self.fetch_metrics(family, pixel_height, weight);
         let Some(metrics) = fetched else {
@@ -700,6 +891,149 @@ pub(crate) trait FontClient {
     fn families(&mut self) -> Vec<FamilyEntry> {
         self.fetch_families()
     }
+
+    /// Fetch what drawing without waiting has recorded, answering whether
+    /// anything landed.
+    ///
+    /// Glyphs are asked for a face at a time, in runs. Whatever lands moves
+    /// the measurement epoch, so a width measured from a provisional answer is
+    /// never served again. A scalar the service refuses is let go and the rest
+    /// of its run asked for; a service that cannot be reached ends the pass.
+    /// What was not fetched is recorded again by the next draw that misses
+    /// it, so a service that has gone costs one call a pass.
+    fn fetch_deferred(&mut self) -> bool {
+        let Some(deferred) = self.caches().deferred.as_mut() else {
+            return false;
+        };
+        let mut glyphs = core::mem::take(&mut deferred.glyphs);
+        let mut metrics = core::mem::take(&mut deferred.metrics);
+        // A miss drawn again while the last pass was out may have landed with
+        // it, so what is already kept or held is not asked for twice.
+        let caches = self.caches();
+        metrics.retain(|&(family, pixel_height, weight)| {
+            let key = (family.to_wire(), pixel_height, weight.to_wire());
+            caches.metrics.get(key).is_none()
+                && !caches
+                    .deferred
+                    .as_ref()
+                    .is_some_and(|deferred| deferred.held_metrics.holds(&key))
+        });
+        glyphs.retain(|&(family, pixel_height, weight, scalar)| {
+            let key = glyph_key(scalar, family, pixel_height, weight);
+            let cached = caches
+                .glyphs
+                .as_ref()
+                .is_some_and(|cache| cache.peek(&(), &key).is_some());
+            !cached
+                && !caches
+                    .deferred
+                    .as_ref()
+                    .is_some_and(|deferred| deferred.held_glyphs.holds(&key))
+        });
+        let mut landed = false;
+        let mut held_metrics = Vec::new();
+        for (family, pixel_height, weight) in metrics {
+            if let Some(fetched) = self.fetch_metrics(family, pixel_height, weight) {
+                let key = (family.to_wire(), pixel_height, weight.to_wire());
+                held_metrics.extend(self.caches().metrics.insert(key, fetched));
+                landed = true;
+            }
+        }
+        let mut held_glyphs = Vec::new();
+        let mut run: Vec<char> = Vec::with_capacity(FONT_MAX_GLYPH_RUN);
+        let mut glyphs = glyphs.into_iter().peekable();
+        while let Some((family, pixel_height, weight, scalar)) = glyphs.next() {
+            run.push(scalar);
+            let face_continues = glyphs
+                .peek()
+                .is_some_and(|&(f, h, w, _)| (f, h, w) == (family, pixel_height, weight));
+            if face_continues && run.len() < FONT_MAX_GLYPH_RUN {
+                continue;
+            }
+            let face = (family, pixel_height, weight);
+            let reached = self.fetch_run(&run, face, |client, scalar, glyph| {
+                landed = true;
+                let key = glyph_key(scalar, family, pixel_height, weight);
+                // What the cache lets go to make room may still be on screen,
+                // and so is what it will not keep.
+                let refused = match client.caches().glyphs.as_mut() {
+                    Some(cache) => cache
+                        .retain_handing_back(&(), key, glyph, |key, glyph| {
+                            held_glyphs.push((key, glyph));
+                        })
+                        .err(),
+                    None => Some(glyph),
+                };
+                held_glyphs.extend(refused.map(|glyph| (key, glyph)));
+            });
+            run.clear();
+            if reached.is_err() {
+                break;
+            }
+        }
+        let caches = self.caches();
+        if let Some(deferred) = caches.deferred.as_mut() {
+            let sweep = deferred.redrawn;
+            deferred
+                .held_glyphs
+                .renew(held_glyphs, sweep, CachedBytes::wipe);
+            deferred.held_metrics.renew(held_metrics, sweep, |_| {});
+            deferred.redrawn = landed;
+        }
+        if landed {
+            caches.advance_source = caches.advance_source.wrapping_add(1);
+        }
+        landed
+    }
+
+    /// Fetch `run` of one `face`, handing each glyph that lands to `land`.
+    ///
+    /// A refused batch lets its first scalar go — the one the service could
+    /// not draw — and asks for the rest, so one undrawable scalar never keeps
+    /// its neighbours blank.
+    ///
+    /// # Errors
+    ///
+    /// [`Unanswered::Unreachable`] once a call fails, or
+    /// [`Unanswered::Later`] once the service asks to be asked again, either
+    /// of which ends the run: such a service is asked once a pass, not once a
+    /// scalar.
+    fn fetch_run(
+        &mut self,
+        run: &[char],
+        face: PendingMetrics,
+        mut land: impl FnMut(&mut Self, char, CachedGlyph),
+    ) -> Result<(), Unanswered> {
+        let (family, pixel_height, weight) = face;
+        let mut from = 0;
+        while from < run.len() {
+            match self.fetch_glyphs(&run[from..], family, pixel_height, weight) {
+                Ok(fetched) if !fetched.is_empty() => {
+                    for (&scalar, glyph) in run[from..].iter().zip(fetched) {
+                        from += 1;
+                        land(self, scalar, glyph);
+                    }
+                }
+                Ok(_) | Err(Unanswered::Refused) => from += 1,
+                Err(ended @ (Unanswered::Later | Unanswered::Unreachable)) => return Err(ended),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a run of glyphs came back with none.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Unanswered {
+    /// An answer came, and it was no glyph: the service refuses a run whose
+    /// first scalar it cannot draw, and a frame that does not hold a batch, or
+    /// a run the protocol cannot carry, is no glyph either.
+    Refused,
+    /// The service cannot answer just now: a face that might draw the run's
+    /// first scalar cannot be read yet.
+    Later,
+    /// No answer could be had: no transport, or the call itself failed.
+    Unreachable,
 }
 
 /// Fetch a run of glyphs' coverage over `transport` into the reusable `reply`
@@ -707,10 +1041,15 @@ pub(crate) trait FontClient {
 ///
 /// The service answers a prefix of `scalars`, in order, so the returned batch
 /// pairs positionally with the head of the run and may be shorter than it.
-/// Every failure — a run the protocol will not carry, a refused call, a
-/// length the reply buffer cannot hold, a frame that does not decode — yields
-/// an empty batch, so a caller composites nothing rather than reading bitmaps
-/// the service did not send.
+/// A caller composites nothing rather than reading bitmaps the service did
+/// not send.
+///
+/// # Errors
+///
+/// [`Unanswered::Unreachable`] when the call fails, [`Unanswered::Later`] when
+/// the service asks to be asked again, and [`Unanswered::Refused`] for a run
+/// the protocol will not carry, a length the reply buffer cannot hold, or a
+/// frame that is not a batch of at most the run.
 fn fetch_glyphs(
     transport: &mut dyn FontTransport,
     reply: &mut Vec<u8>,
@@ -718,9 +1057,9 @@ fn fetch_glyphs(
     family: FamilyKey,
     pixel_height: u32,
     weight: FontWeight,
-) -> Vec<CachedGlyph> {
+) -> Result<Vec<CachedGlyph>, Unanswered> {
     let Ok(run) = GlyphRun::new(scalars) else {
-        return Vec::new();
+        return Err(Unanswered::Refused);
     };
     if reply.len() < FONT_MAX_GLYPH_REPLY {
         reply.resize(FONT_MAX_GLYPH_REPLY, 0);
@@ -733,21 +1072,23 @@ fn fetch_glyphs(
     }
     .to_le_bytes();
     let Ok(len) = transport.call(&request, reply) else {
-        return Vec::new();
+        return Err(Unanswered::Unreachable);
     };
     let Some(frame) = reply.get(..len) else {
-        return Vec::new();
+        return Err(Unanswered::Refused);
     };
-    let Ok(batch) = decode_glyphs_reply(frame) else {
-        return Vec::new();
+    let batch = match decode_glyphs_reply(frame) {
+        Ok(batch) => batch,
+        Err(Errno::WouldBlock) => return Err(Unanswered::Later),
+        Err(_) => return Err(Unanswered::Refused),
     };
     // The reply bound admits a batch as long as any run, so only the caller
     // knows how long *this* run was. A batch that answers more than was asked
     // for is a corrupt frame, refused whole rather than read down to size.
     if batch.glyphs().len() > scalars.len() {
-        return Vec::new();
+        return Err(Unanswered::Refused);
     }
-    batch
+    Ok(batch
         .glyphs()
         .iter()
         .map(|glyph| {
@@ -759,7 +1100,7 @@ fn fetch_glyphs(
                 Box::from(glyph.coverage),
             )
         })
-        .collect()
+        .collect())
 }
 
 /// Fetch the outlines of a prefix of `scalars` from `family`, instanced at
@@ -997,9 +1338,13 @@ fn fallback_metrics(pixel_height: u32) -> FontMetrics {
 /// the *channel* lock — the one this module holds across a syscall — and the
 /// built caches are installed after it is released, keeping the two locks
 /// disjoint. A second thread that arrives while the first is still building
-/// parks on the channel, then finds the work done.
+/// parks on the channel, then finds the work done. Every call after that reads
+/// [`DEFAULTED`] and takes neither lock.
 #[cfg(any(feature = "rt", feature = "test-util"))]
 fn install_defaults() {
+    if DEFAULTED.load(Ordering::Acquire) {
+        return;
+    }
     #[cfg(feature = "rt")]
     {
         let built = {
@@ -1009,8 +1354,8 @@ fn install_defaults() {
             }
             channel.defaulted = true;
             if channel.transport.is_none() {
-                connect_font_service();
                 channel.install_transport(Box::new(RtTransport));
+                channel.connect_first = true;
             }
             (default_cache(), default_measure_cache())
         };
@@ -1033,6 +1378,7 @@ fn install_defaults() {
             channel.install_transport(Box::new(SolidTestTransport));
         }
     }
+    DEFAULTED.store(true, Ordering::Release);
 }
 
 /// Ask the service manager to connect this process to the font service,
@@ -1181,6 +1527,16 @@ static CACHES: Mutex<Caches> = Mutex::new(Caches::new());
 /// discipline and why no thread ever holds both.
 static CHANNEL: Mutex<Channel> = Mutex::new(Channel::new());
 
+/// Set once this build's defaults are installed, and read before anything
+/// else, so a text call never takes the channel a fetch holds across its round
+/// trip.
+#[cfg(any(feature = "rt", feature = "test-util"))]
+static DEFAULTED: AtomicBool = AtomicBool::new(false);
+
+/// [`text_generation`]: moved on whenever a deferred fetch lands in the
+/// process's client, and read with no lock by every layout keyed on it.
+static TEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// A client over a locked caches/channel pair: the caches borrowed for the span
 /// of one run, and the channel taken only for a fetch.
 ///
@@ -1230,7 +1586,7 @@ impl FontClient for LockedClient<'_> {
         family: FamilyKey,
         pixel_height: u32,
         weight: FontWeight,
-    ) -> Vec<CachedGlyph> {
+    ) -> Result<Vec<CachedGlyph>, Unanswered> {
         self.with_channel(|channel| channel.glyphs(scalars, family, pixel_height, weight))
     }
 
@@ -1342,6 +1698,69 @@ pub fn set_outline_cache(cache: OutlineCache) {
 /// that has not drawn yet pays no service round trip to report zero.
 pub fn trim_glyph_cache() -> usize {
     CACHES.lock().trim()
+}
+
+/// Stop this process's text drawing from waiting on the font service.
+///
+/// From here a glyph or line-metrics miss draws a provisional answer — no ink,
+/// on the console's own advance and geometry — and is recorded, so a frame
+/// never waits on another process however slow, busy or hung it is.
+/// [`fetch_deferred`] asks for what was recorded, on a thread that may wait,
+/// and [`text_generation`] moves on when anything lands, so the drawing thread
+/// can lay out and draw again what it drew provisionally.
+///
+/// Once set it stays set: a surface that must not wait cannot be made to by a
+/// second caller. It covers glyphs and metrics, which is all a desktop
+/// draws text with; [`outline_run`] and [`families`] still ask and wait.
+pub fn defer_fetches() {
+    with_client(|client| {
+        client
+            .caches()
+            .deferred
+            .get_or_insert_with(Deferred::default);
+    });
+}
+
+/// Whether drawing has missed anything [`fetch_deferred`] has not yet asked
+/// for.
+#[must_use]
+pub fn has_deferred() -> bool {
+    CACHES
+        .lock()
+        .deferred
+        .as_ref()
+        .is_some_and(Deferred::is_pending)
+}
+
+/// Fetch what drawing has missed since [`defer_fetches`], answering whether
+/// anything landed.
+///
+/// For a thread that may wait on the service, never the one that draws.
+pub fn fetch_deferred() -> bool {
+    let landed = with_client(FontClient::fetch_deferred);
+    if landed {
+        TEXT_GENERATION.fetch_add(1, Ordering::Release);
+    }
+    landed
+}
+
+/// The generation of what deferred fetches have brought: it moves on whenever
+/// one lands, so a surface that laid out or drew text provisionally knows to
+/// do it again.
+#[must_use]
+pub fn text_generation() -> u64 {
+    TEXT_GENERATION.load(Ordering::Acquire)
+}
+
+/// Move the text generation on as a deferred fetch landing does, so a
+/// consumer's tests can show what it lays out and draws again.
+#[cfg(feature = "test-util")]
+pub fn note_text_landed() {
+    {
+        let mut caches = CACHES.lock();
+        caches.advance_source = caches.advance_source.wrapping_add(1);
+    }
+    TEXT_GENERATION.fetch_add(1, Ordering::Release);
 }
 
 /// Run `f` against the process-global client.
@@ -1623,7 +2042,7 @@ pub(crate) mod tests {
             family: FamilyKey,
             pixel_height: u32,
             weight: FontWeight,
-        ) -> Vec<CachedGlyph> {
+        ) -> Result<Vec<CachedGlyph>, Unanswered> {
             self.channel.glyphs(scalars, family, pixel_height, weight)
         }
 
@@ -2124,6 +2543,388 @@ pub(crate) mod tests {
             client.caches.glyphs.as_ref().expect("installed").len(),
             distinct(run).len()
         );
+    }
+
+    /// A line break, a tab or a zero-width character draws nothing, so no face
+    /// maps it, and asking would make the service search every face it has.
+    #[test]
+    fn a_scalar_that_draws_nothing_is_never_asked_for() {
+        let empty = |client: &mut LocalClient, scalar| {
+            client.with_glyph(scalar, INTER, 28, FontWeight::REGULAR, |glyph| {
+                (glyph.width, glyph.height, glyph.advance, glyph.data.len())
+            })
+        };
+        let (mut uncached, uncached_tally) = counting_client();
+        for hidden in ['\n', '\t', '\u{200d}', '\u{feff}', '\u{e0001}'] {
+            assert_eq!(
+                empty(&mut uncached, hidden),
+                Some((0, 28, 0, 0)),
+                "{hidden:?}"
+            );
+        }
+        assert_eq!(
+            uncached_tally.get(),
+            0,
+            "nothing hidden reaches the service"
+        );
+
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+        let broken = "Line one\nLine two";
+        let (measured, resolved) = client.measure_text(broken, INTER, 28, FontWeight::REGULAR);
+        assert!(
+            resolved,
+            "a break resolves to no width rather than failing the walk"
+        );
+        assert_eq!(
+            tally.get(),
+            1,
+            "the visible scalars are one run, the break none"
+        );
+        assert_eq!(
+            client.caches.glyphs.as_ref().expect("installed").len(),
+            distinct(broken).len() - 1,
+            "nothing is retained for the break"
+        );
+        let (joined, _) = client.measure_text("Line oneLine two", INTER, 28, FontWeight::REGULAR);
+        assert_eq!(measured.width(), joined.width(), "the break takes no room");
+    }
+
+    /// Make `client` draw without waiting on the service.
+    pub(crate) fn defer(client: &mut LocalClient) {
+        client.caches.deferred = Some(Deferred::default());
+    }
+
+    /// A deferring client over a counting transport, with room to cache what
+    /// lands.
+    fn deferring_client() -> (LocalClient, CallTally) {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+        defer(&mut client);
+        (client, tally)
+    }
+
+    /// What drawing `scalar` in Inter at 28 pixels hands the blitter: its
+    /// width, its advance and how much coverage it carries.
+    fn drawn(client: &mut LocalClient, scalar: char) -> Option<(u32, u32, usize)> {
+        client.with_glyph(scalar, INTER, 28, FontWeight::REGULAR, |glyph| {
+            (glyph.width, glyph.advance, glyph.data.len())
+        })
+    }
+
+    fn is_pending(client: &LocalClient) -> bool {
+        client
+            .caches
+            .deferred
+            .as_ref()
+            .is_some_and(Deferred::is_pending)
+    }
+
+    /// A deferring client never waits on the service: a miss draws
+    /// provisionally and is recorded.
+    #[test]
+    fn a_deferring_client_draws_provisionally_and_never_calls_the_service() {
+        let (mut client, tally) = deferring_client();
+        let cell = scale_atlas_metric(atlas::CELL_WIDTH, 28);
+        assert_eq!(
+            drawn(&mut client, 'A'),
+            Some((0, cell, 0)),
+            "no ink, a console cell"
+        );
+        assert_eq!(
+            drawn(&mut client, '\u{4e2d}'),
+            Some((0, 2 * cell, 0)),
+            "a wide scalar takes two cells, as on the console"
+        );
+        let (_, resolved) = client.measure_text("Hello", INTER, 28, FontWeight::REGULAR);
+        assert!(resolved);
+        assert_eq!(
+            client.metrics(INTER, 28, FontWeight::REGULAR),
+            fallback_metrics(28)
+        );
+        assert_eq!(tally.get(), 0, "nothing waits on the service");
+        let deferred = client.caches.deferred.as_ref().expect("deferring");
+        assert_eq!(deferred.glyphs.len(), distinct("A\u{4e2d}Hello").len());
+        assert_eq!(deferred.metrics.len(), 1);
+    }
+
+    #[test]
+    fn a_deferred_fetch_lands_the_misses_in_runs_and_moves_the_measurement_epoch() {
+        let (mut client, tally) = deferring_client();
+        let text: String = ('a'..='z').chain('A'..='Z').collect();
+        for scalar in text.chars() {
+            drawn(&mut client, scalar);
+        }
+        client.metrics(INTER, 28, FontWeight::REGULAR);
+        let epoch = client.caches.advance_source;
+
+        assert!(client.fetch_deferred());
+        assert_eq!(tally.get(), 3, "the metrics, then 52 glyphs in two runs");
+        assert_ne!(
+            client.caches.advance_source, epoch,
+            "a width measured provisionally is never served again"
+        );
+        assert!(!is_pending(&client));
+        let landed = drawn(&mut client, 'A').expect("drawn");
+        assert!(landed.0 > 0 && landed.2 > 0, "the fetched glyph has ink");
+        assert_ne!(
+            client.metrics(INTER, 28, FontWeight::REGULAR),
+            fallback_metrics(28)
+        );
+        assert_eq!(tally.get(), 3, "and is served from the cache");
+        let epoch = client.caches.advance_source;
+        assert!(!client.fetch_deferred(), "nothing more to land");
+        assert_eq!(
+            client.caches.advance_source, epoch,
+            "nothing to measure again"
+        );
+    }
+
+    /// A miss drawn again while a pass was out lands with that pass, so the
+    /// next pass does not ask for it twice.
+    #[test]
+    fn a_miss_already_landed_is_not_fetched_again() {
+        let (mut client, tally) = deferring_client();
+        drawn(&mut client, 'A');
+        client.metrics(INTER, 28, FontWeight::REGULAR);
+        assert!(client.fetch_deferred());
+        let fetched = tally.get();
+        if let Some(deferred) = client.caches.deferred.as_mut() {
+            deferred
+                .glyphs
+                .insert((INTER, 28, FontWeight::REGULAR, 'A'));
+            deferred.metrics.insert((INTER, 28, FontWeight::REGULAR));
+        }
+        assert!(!client.fetch_deferred(), "nothing new lands");
+        assert_eq!(tally.get(), fetched, "and nothing is asked again");
+    }
+
+    /// A refused fetch lands nothing, keeps nothing for another try, and is
+    /// asked again only when a draw misses again.
+    #[test]
+    fn a_refused_fetch_lands_nothing_and_is_asked_again_only_when_drawn_again() {
+        let mut client = client_with(Refusing);
+        defer(&mut client);
+        drawn(&mut client, 'A');
+        let epoch = client.caches.advance_source;
+        assert!(!client.fetch_deferred());
+        assert_eq!(
+            client.caches.advance_source, epoch,
+            "nothing to lay out again"
+        );
+        assert!(
+            !is_pending(&client),
+            "a refused run is not kept for another try"
+        );
+        drawn(&mut client, 'A');
+        assert!(is_pending(&client), "the next draw that misses asks again");
+    }
+
+    /// Without a cache that keeps what lands, a deferring client would draw
+    /// provisionally for ever: what a fetch brought is held while it is drawn.
+    #[test]
+    fn a_glyph_the_cache_will_not_keep_is_held_while_it_is_drawn() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(0));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+        defer(&mut client);
+        let inked = |client: &mut LocalClient, scalar| {
+            drawn(client, scalar).is_some_and(|(_, _, coverage)| coverage > 0)
+        };
+
+        drawn(&mut client, 'A');
+        assert!(client.fetch_deferred());
+        assert_eq!(tally.get(), 1, "fetched once, and held as it came");
+        assert!(inked(&mut client, 'A'), "drawn from what is held");
+
+        drawn(&mut client, 'B');
+        assert!(client.fetch_deferred());
+        assert!(inked(&mut client, 'A'), "kept: drawn since the last fetch");
+        assert!(inked(&mut client, 'B'));
+
+        assert!(!client.fetch_deferred(), "nothing new lands");
+        assert!(!client.fetch_deferred());
+        assert!(
+            inked(&mut client, 'A'),
+            "text not drawn again since no landing owed it a redraw is still shown"
+        );
+        drawn(&mut client, 'C');
+        assert!(
+            client.fetch_deferred(),
+            "a landing owes a redraw of all text"
+        );
+        assert!(!client.fetch_deferred());
+        assert!(
+            !inked(&mut client, 'B'),
+            "let go once the redraw a landing owed did not draw it"
+        );
+        assert!(is_pending(&client));
+    }
+
+    /// Whether drawing `scalar` in Inter at 28 pixels draws ink.
+    fn inked(client: &mut LocalClient, scalar: char) -> bool {
+        drawn(client, scalar).is_some_and(|(_, _, coverage)| coverage > 0)
+    }
+
+    /// Text whose glyphs outgrow the cache still draws whole once fetched:
+    /// what the cache lets go to make room while it is on screen is held, so
+    /// drawing it again misses nothing and owes no further pass.
+    #[test]
+    fn a_working_set_larger_than_the_cache_settles_rather_than_refetching() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, CacheBudget::from_ceiling(4096));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+        defer(&mut client);
+        let text: Vec<char> = ('a'..='z').collect();
+        for &scalar in &text {
+            drawn(&mut client, scalar);
+        }
+        assert!(client.fetch_deferred());
+        let kept = client.caches.glyphs.as_ref().expect("installed").len();
+        assert!(kept < text.len(), "the cache holds only {kept} of them");
+        let fetched = tally.get();
+        for _ in 0..3 {
+            for &scalar in &text {
+                assert!(inked(&mut client, scalar), "{scalar}");
+            }
+            assert!(!is_pending(&client), "nothing on screen is missed");
+            assert!(!client.fetch_deferred());
+        }
+
+        drawn(&mut client, 'A');
+        assert!(client.fetch_deferred());
+        for &scalar in text.iter().chain(&['A']) {
+            assert!(inked(&mut client, scalar), "{scalar}");
+        }
+        assert!(!is_pending(&client), "what the new glyph displaced is held");
+        assert_eq!(tally.get(), fetched + 1, "only the new glyph was fetched");
+        assert!(
+            !client.fetch_deferred(),
+            "the sweep keeps what the redraw drew"
+        );
+        for &scalar in text.iter().chain(&['A']) {
+            assert!(inked(&mut client, scalar), "{scalar}");
+        }
+    }
+
+    /// A transport that cannot draw one scalar: it answers a run up to it, and
+    /// refuses a run that begins with it, as the service does.
+    struct Choosy(char);
+    impl FontTransport for Choosy {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            let FontRequest::Glyphs {
+                family,
+                scalars,
+                pixel_height,
+                weight,
+            } = FontRequest::from_bytes(request)?
+            else {
+                return SolidTestTransport.call(request, reply);
+            };
+            match scalars
+                .scalars()
+                .iter()
+                .position(|&scalar| scalar == self.0)
+            {
+                Some(0) => {
+                    tairix_abi::font_ipc::encode_batch_error_reply(reply, Errno::NotSupported)
+                }
+                Some(at) => {
+                    let head = GlyphRun::new(&scalars.scalars()[..at])?;
+                    test_glyphs_reply(reply, family, &head, pixel_height, weight)
+                }
+                None => SolidTestTransport.call(request, reply),
+            }
+        }
+    }
+
+    /// One scalar the service cannot draw is let go and the rest of its run
+    /// still asked for, so it never keeps its neighbours blank.
+    #[test]
+    fn a_scalar_the_service_refuses_never_blanks_its_neighbours() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let mut client = client_with(Choosy('0'));
+        client.caches.glyphs = Some(cache);
+        defer(&mut client);
+        for scalar in ['0', 'A', 'B', 'C'] {
+            drawn(&mut client, scalar);
+        }
+        assert!(client.fetch_deferred());
+        for scalar in ['A', 'B', 'C'] {
+            assert!(inked(&mut client, scalar), "{scalar}");
+        }
+        assert!(
+            !inked(&mut client, '0'),
+            "the one it cannot draw stays provisional"
+        );
+    }
+
+    /// A transport that has gone, tallying how often it was asked.
+    struct Gone(CallTally);
+    impl FontTransport for Gone {
+        fn call(&mut self, _request: &[u8], _reply: &mut [u8]) -> Result<usize, Errno> {
+            self.0 .0.fetch_add(1, Ordering::Relaxed);
+            Err(Errno::NotFound)
+        }
+    }
+
+    /// A service asking to be asked again — a face it is reading cannot be
+    /// read just now — is asked once a pass, not once a scalar.
+    #[test]
+    fn a_service_that_asks_for_later_is_asked_once_a_pass() {
+        struct Busy(CallTally);
+        impl FontTransport for Busy {
+            fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+                self.0 .0.fetch_add(1, Ordering::Relaxed);
+                let FontRequest::Glyphs { .. } = FontRequest::from_bytes(request)? else {
+                    return SolidTestTransport.call(request, reply);
+                };
+                tairix_abi::font_ipc::encode_batch_error_reply(reply, Errno::WouldBlock)
+            }
+        }
+        let tally = CallTally::default();
+        let mut client = client_with(Busy(tally.clone()));
+        defer(&mut client);
+        for scalar in ['a', 'b', 'c', 'd'] {
+            drawn(&mut client, scalar);
+        }
+        assert!(!client.fetch_deferred());
+        assert_eq!(tally.get(), 1);
+        drawn(&mut client, 'a');
+        assert!(is_pending(&client), "asked again when next drawn");
+    }
+
+    /// A service that has gone is asked once a pass, however many faces and
+    /// scalars wait on it.
+    #[test]
+    fn a_service_that_has_gone_is_asked_once_a_pass() {
+        let tally = CallTally::default();
+        let mut client = client_with(Gone(tally.clone()));
+        defer(&mut client);
+        for family in [INTER, FamilyKey::MONO] {
+            for scalar in ['a', 'b', 'c'] {
+                client.with_glyph(scalar, family, 28, FontWeight::REGULAR, |_| ());
+            }
+        }
+        assert!(!client.fetch_deferred());
+        assert_eq!(tally.get(), 1);
+    }
+
+    /// A deferring draw records at most so many misses between fetches, so
+    /// text drawn faster than it is fetched cannot grow what it keeps.
+    #[test]
+    fn the_misses_kept_between_fetches_are_bounded() {
+        let mut client = client_with(Refusing);
+        defer(&mut client);
+        let past = u32::try_from(2 * DEFERRED_MOST_GLYPHS).expect("a small bound");
+        for code in 0x4E00..0x4E00 + past {
+            let scalar = char::from_u32(code).expect("a scalar");
+            client.with_glyph(scalar, INTER, 28, FontWeight::REGULAR, |_| ());
+        }
+        let deferred = client.caches.deferred.as_ref().expect("deferring");
+        assert_eq!(deferred.glyphs.len(), DEFERRED_MOST_GLYPHS);
     }
 
     /// The run bound is a validation bound, so longer text is consecutive

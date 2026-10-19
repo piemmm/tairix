@@ -168,7 +168,10 @@ ouvre son menu : Couper, Copier, Coller, Tout sélectionner et Désélectionner,
 puis Fichier, Édition, Image, Calques, Couleurs, Réglages, Sprites ou
 Pages, Affichage et Outils, chacun ouvrant son propre sous-menu. La fenêtre
 n'a pas de barre de menus. Fermer une fenêtre ou quitter avec des
-modifications non enregistrées demande d'abord.
+modifications non enregistrées demande d'abord. Fermer une fenêtre en
+cliquant sur son bouton de fermeture avec le bouton secondaire (droit)
+montre aussi son fichier dans le gestionnaire de fichiers, dans le dossier
+qui le contient.
 
 * `Ctrl+N` — une nouvelle image ; `Ctrl+O` — ouvrir un fichier
 * `Ctrl+S` — enregistrer ; `Ctrl+Shift+S` — enregistrer sous

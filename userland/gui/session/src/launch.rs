@@ -181,6 +181,16 @@ pub trait DocumentRelay {
     /// process's table for its asker's life. A grant already consumed, or
     /// one `from` did not mint, is left alone.
     fn decline(&mut self, grant: u64, from: ProcId);
+
+    /// The absolute path the `fd_grant_location` handle `location`, minted to
+    /// this process by `from`, tells — consumed whatever it answers, a file
+    /// delegation named in its place included.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the kernel refused: a handle `from` did not mint, or a file
+    /// the document's descriptor reaches as another user.
+    fn locate(&mut self, location: u64, from: ProcId) -> Result<String, Errno>;
 }
 
 /// `target` as the entry the engine queues for the live instance `app`,
@@ -608,6 +618,10 @@ mod tests {
         }
 
         fn decline(&mut self, _: u64, _: ProcId) {}
+
+        fn locate(&mut self, _: u64, _: ProcId) -> Result<String, Errno> {
+            Err(Errno::NotSupported)
+        }
     }
 
     #[test]

@@ -24,7 +24,7 @@ use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{MotionTheme, Theme};
 
 use crate::sidebar::SidebarDemo;
 
@@ -378,6 +378,29 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::WindowControl(w) => w.on_pointer(event, rect, damage).is_some(),
+        }
+    }
+
+    /// Nanoseconds until the widget next moves on its own — a busy trace's
+    /// sweep, a fill easing to its value — or `None` while it is still.
+    #[must_use]
+    pub fn next_frame_in(&self) -> Option<u64> {
+        match self {
+            DemoWidget::Progress(w) => w.next_frame_in(),
+            _ => None,
+        }
+    }
+
+    /// Step the widget's own motion to `now_ns`, answering whether it draws
+    /// differently for it.
+    pub fn animate(&mut self, now_ns: u64, motion: MotionTheme) -> bool {
+        match self {
+            DemoWidget::Progress(w) => {
+                let moving = w.next_frame_in().is_some();
+                w.set_clock(now_ns, motion);
+                moving || w.next_frame_in().is_some()
+            }
+            _ => false,
         }
     }
 

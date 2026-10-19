@@ -23,9 +23,8 @@ name = "datetime"
 title = "Date & Time"
 version = "0.1.0"
 kind = "component"
-# The identity the desktop's icon-bar information panel states, drawn from
-# this *signed* manifest rather than from anything the running process says
-# about itself (plans/NEW-TASKBAR.md).
+# What the bundle is for, from this *signed* manifest rather than anything the
+# running process says about itself (plans/NEW-TASKBAR.md).
 purpose = "Set the machine's date and time"
 author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_TIME_SET", "CAP_SETTINGS_WRITE", "CAP_FS_ACCESS"]
@@ -36,3 +35,6 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_TIME_SET", "CAP_SETTINGS_WR
 # wherever the bundle appears.
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "datetime.png"
+# No icon-bar slot of its own: the dialog is part of the desktop, opened from
+# its clock, and closing its window ends it, so a slot would hold nothing.
+icon-bar = false

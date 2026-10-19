@@ -4,19 +4,20 @@ files — porwr graffigol y system ffeiliau
 
 ## SYNOPSIS
 
-`files [--desktop] [directory] [-h | -?]`
+`files [--desktop] [path] [-h | -?]`
 
 ## DESCRIPTION
 
 Yn agor ffenestr bwrdd gwaith sy'n rhestru'r system ffeiliau, gan ddechrau
-yn y `directory` a enwir ar y llinell orchymyn, neu, os nad enwir un, yn
-ffolder `Home` y defnyddiwr sy'n ei lansio (ei gyfeiriadur cartref os
-na ellir rhestru hwnnw). Mae teitl y ffenestr yn enwi'r cyfeiriadur
-cyfredol; mae'r ffenestr yn rhestru ei gofnodion, a phob cofnod a ddewiswyd
-wedi'i amlygu â lliw acen y thema weithredol. Rhestriad cyffredin wedi'i
-wirio yn erbyn caniatâd, dan hunaniaeth y defnyddiwr sy'n ei lansio, yw pob
-darlleniad cyfeiriadur: gwrthodir cyfeiriadur na ellir ei ddarllen, a ni
-ddyfelir byth.
+yn y ffolder y mae `path` yn ei henwi ar y llinell orchymyn — neu, pan
+fo'n enwi ffeil, yn y ffolder sy'n dal y ffeil honno, gyda'r ffeil wedi'i
+dewis — neu, os nad enwir un, yn ffolder `Home` y defnyddiwr sy'n ei
+lansio (ei gyfeiriadur cartref os na ellir rhestru hwnnw). Mae teitl y
+ffenestr yn enwi'r cyfeiriadur cyfredol; mae'r ffenestr yn rhestru ei
+gofnodion, a phob cofnod a ddewiswyd wedi'i amlygu â lliw acen y thema
+weithredol. Rhestriad cyffredin wedi'i wirio yn erbyn caniatâd, dan
+hunaniaeth y defnyddiwr sy'n ei lansio, yw pob darlleniad cyfeiriadur:
+gwrthodir cyfeiriadur na ellir ei ddarllen, a ni ddyfelir byth.
 
 Mae'r bwrdd gwaith yn cychwyn y porwr i chi ac yn ei gadw ar y bar eiconau:
 mae dewislen ei slot yn rhestru eich lleoedd eich hun a phopeth sydd wedi'i
@@ -41,9 +42,12 @@ yn y golofn ohoni ei hun. Mae `Ctrl+Shift+N` yn creu ffolder newydd.
 Mae rhestriad yn agor heb ddim wedi'i ddewis. Mae clic yn dewis eitem, mae
 clic gyda `Ctrl` yn ychwanegu neu'n tynnu un, ac mae clic gyda `Shift` yn
 dewis y rhediad o'r eitem a ddewiswyd ddiwethaf; mae clic ar le gwag yn
-clirio'r dewisiad. Mae llusgo ar draws lle gwag yn tynnu blwch sy'n dewis
-popeth y mae'n ei gyffwrdd wrth iddo dyfu; o'i ddal ar frig neu waelod y
-rhestriad, mae'n sgrolio, ac mae `Escape` yn dadwneud yr hyn a ddewisodd.
+clirio'r dewisiad. Mae clic dwbl yn agor eitem; o ddal `Shift`, mae'n
+rhestru cynnwys rhaglen yn hytrach na'i chychwyn, ac yn gadael unrhyw beth
+y mae'n ei agor mewn man arall heb ei ddewis. Mae llusgo ar draws lle gwag
+yn tynnu blwch sy'n dewis popeth y mae'n ei gyffwrdd wrth iddo dyfu; o'i
+ddal ar frig neu waelod y rhestriad, mae'n sgrolio, ac mae `Escape` yn
+dadwneud yr hyn a ddewisodd.
 
 Mae'r lle o amgylch pob eicon a'i enw'n cyfrif fel lle gwag, felly gall
 blwch ddechrau unrhyw le rhwng eitemau. Mae `Ctrl+A` yn dewis popeth yn y
@@ -115,16 +119,15 @@ Mae `Chwith` a `De` yn symud rhwng adrannau'r ffenestr. Ar *Caniatâd*, mae
 symud rhyngddynt, mae `Space` yn toglo caniatâd neu'n agor y perchennog
 neu'r grŵp i'w olygu, ac mae `Tab` neu `Escape` yn dychwelyd at yr adrannau.
 
-Trinnir yr operand `directory` fel mewnbwn nad ymddiredir ynddo: rhaid
-iddo fod yn llwybr absoliwt o fewn terfyn hyd llwybr y system, a rhaid
-i bob un o'i gydrannau fod yn enw cyfeiriadur go iawn — nid yw `.` a
-`..` yn rhai felly, fel na all sillafiad byth olygu rhywle heblaw'r hyn
-y mae i'w ddarllen. Gwrthodir cyfeiriadur sy'n torri unrhyw un o'r
-rheolau hynny, neu na all y defnyddiwr a'i lansiodd ei restru, gyda'r
-rheswm ar y ffrwd gwall safonol, ac yna mae'r ffenestr yn agor yn y
-ffolder `Home` yn lle hynny, fel nad yw ymresymiad gwael byth yn
-gadael y defnyddiwr heb ffenestr. Gwrthodir ail operand yn llwyr yn
-hytrach na'i anwybyddu.
+Trinnir yr operand `path` fel mewnbwn nad ymddiredir ynddo: rhaid iddo
+fod yn llwybr absoliwt o fewn terfyn hyd llwybr y system, a rhaid i bob
+un o'i gydrannau fod yn enw go iawn — nid yw `.` a `..` yn rhai felly,
+fel na all sillafiad byth olygu rhywle heblaw'r hyn y mae i'w ddarllen.
+Gwrthodir llwybr sy'n torri unrhyw un o'r rheolau hynny, neu na all y
+defnyddiwr a'i lansiodd ei restru, gyda'r rheswm ar y ffrwd gwall
+safonol, ac yna mae'r ffenestr yn agor yn y ffolder `Home` yn lle hynny,
+fel nad yw ymresymiad gwael byth yn gadael y defnyddiwr heb ffenestr.
+Gwrthodir ail operand yn llwyr yn hytrach na'i anwybyddu.
 
 ## OPTIONS
 
@@ -132,7 +135,7 @@ hytrach na'i anwybyddu.
   slot parhaol ar y bar eiconau sy'n cynnig eich lleoedd a'r cyfrolau sydd
   wedi'u mowntio, dim ffenestr hyd nes y gofynnir am un, a dim ffordd i
   adael. Mae sesiwn y bwrdd gwaith yn pasio hyn wrth gychwyn; mae enwi
-  `directory` gydag ef yn cael ei wrthod, am nad yw cydran yn agor ffenestr
+  `path` gydag ef yn cael ei wrthod, am nad yw cydran yn agor ffenestr
   i'w roi ynddi.
 - `-h, -?` — dangos cymorth byr y gorchymyn hwn ei hun a gadael.
 

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 396 open, 791 closed, 1187 total.
+**closed**, and a partial fix stays **open**. 397 open, 791 closed, 1188 total.
 
-### Open (396)
+### Open (397)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -424,6 +424,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1186 | WinterSun's settings window, on a press entering a group from the strip or the other group, first moves that group's cursor to row 0 (`move_focus` sets `Some(0)`) and only then lets the group's own `on_pointer` move it to the row pressed, so every such press reports row 0's focus ring as damage it never paints differently | **nit, performance**; noticed reviewing the merge of `58bddddc3`; not absorbed (WinterSun). `userland/games/wintersun/app/src/settings.rs` `focus_under_press`, `move_focus` |
 | D1188 | the system's name is still spelled as a literal in the kernel's fatal and memtest banners and the Supervisor's (`kernel/arch/api/src/fatal.rs`, `kernel/core/src/{memtest,supervisor_system}.rs`, `lib/supervisor/src/memtest_ui.rs`, and `tools/qemu`'s matcher of the fatal banner), the login box's title, the `--version` lines of `stress`, `play`, `audioctl` and `mdadm`, netmap's OS-family label and the SBOM's vendor, though `tairix_abi::sysinfo::SYSTEM_NAME` now defines it; the `concat!` and fixed-byte sites need the name as a literal, so the one definition must be one a macro can expand there | low; noticed adding `SYSTEM_NAME` for the About window, which the identity lines — the greeter's, the login screen's, the Switchboard's and the About window's — now read; logged rather than absorbed, a sweep of the kernel, tools and command apps beyond the ten corrections asked for |
 | D1192 | Settings ended without seeing out the writes it owed: Quit dropped a change waiting behind the one in flight on its apply, sound-control and sound-choice desks, since stopping a desk discards what waits, and its teardown never stopped the sound-choice desk | fix landed: Settings sees its write desks out before it ends (`Desks::see_out`), refusals stated on `stderr`; open for its vertical — input is paced (keys 80 ms apart, one pointer action per poll tick), so no script can queue a write behind one in flight before Quit lands. `userland/apps/settings/src/run.rs` |
+| D1193 | the Switchboard's sampling cycle publishes its tray summary to the desktop with a blocking `ipc_call` on the loop that serves its window: while the desktop composites a long frame the open window answers nothing, measured at 270–520 ms blocked in the appbar, Date & Time and Settings verticals (`id=4266`, `blocked_in=ipc_call`, `RtHost::publish` ← `Service::publish_summary` ← `Service::cycle`) | open; noticed diagnosing the interactive loops the verticals report blocking (the other reports there are window-protocol presents waiting out the desktop's own frame, which the display protocol serialises). The summary, network and machine publications (D502 notes the last) go through a worker desk, latest-wins, the session's attested identity adopted from the reply when it lands; a host test that a publication answered late leaves the loop serving its window. `userland/gui/switchboard/src/{service,run}.rs` |
 
 ### Closed (791)
 

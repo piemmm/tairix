@@ -19,6 +19,9 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub use tairix_browse::Reading;
+use tairix_browse::Tally;
+
 /// How an operation ended. What was done before the end stays done.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Ending {
@@ -63,20 +66,23 @@ pub fn run_slice(
     }
 }
 
-/// An operation's answer: how many items it did, and how it ended.
+/// An operation's answer: what it did, and how it ended.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Finished {
-    /// The items done before it ended.
-    pub done: usize,
+    /// What was done before it ended.
+    pub done: Tally,
     /// How it ended.
     pub ending: Ending,
 }
 
-/// Where an operation stands, as its progress window shows it.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Standing {
-    /// The items done so far.
-    pub done: usize,
+/// Where an operation stands, as its progress window shows it: borrowed from
+/// the desk, so looking costs no copy until something new is to be shown.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Standing<'a> {
+    /// What its walk last said of itself.
+    pub reading: Reading,
+    /// The item in hand, by its name.
+    pub current: &'a str,
     /// Whether a cancel was asked for.
     pub cancelling: bool,
     /// Whether it waits for the operations asked before it.
@@ -97,7 +103,8 @@ pub enum Refusal {
 /// The operation the worker is carrying out.
 struct Running {
     id: u64,
-    done: usize,
+    reading: Reading,
+    current: String,
     cancel: bool,
     /// Its window closed, so its answer belongs to nobody.
     orphaned: bool,
@@ -166,10 +173,11 @@ impl<J> OperationDesk<J> {
 
     /// Where unfinished operation `id` stands, if it is held.
     #[must_use]
-    pub fn standing(&self, id: u64) -> Option<Standing> {
+    pub fn standing(&self, id: u64) -> Option<Standing<'_>> {
         if let Some(running) = self.running_for(id) {
             return Some(Standing {
-                done: running.done,
+                reading: running.reading,
+                current: &running.current,
                 cancelling: running.cancel,
                 waiting: false,
             });
@@ -177,10 +185,9 @@ impl<J> OperationDesk<J> {
         self.waiting
             .iter()
             .any(|(held, _)| *held == id)
-            .then_some(Standing {
-                done: 0,
-                cancelling: false,
+            .then(|| Standing {
                 waiting: true,
+                ..Standing::default()
             })
     }
 
@@ -196,7 +203,7 @@ impl<J> OperationDesk<J> {
             self.landed.push((
                 id,
                 Finished {
-                    done: 0,
+                    done: Tally::default(),
                     ending: Ending::Cancelled,
                 },
             ));
@@ -256,7 +263,8 @@ impl<J> OperationDesk<J> {
         let (id, job) = self.waiting.pop_front()?;
         self.running = Some(Running {
             id,
-            done: 0,
+            reading: Reading::default(),
+            current: String::new(),
             cancel: false,
             orphaned: false,
         });
@@ -269,13 +277,17 @@ impl<J> OperationDesk<J> {
         self.stopping || self.running.as_ref().is_some_and(|running| running.cancel)
     }
 
-    /// The running operation has done `done` items, answering whether the
-    /// loop is owed a wake to show it.
-    pub fn report(&mut self, done: usize) -> bool {
+    /// The running operation's walk says `reading` of itself, working on
+    /// `current`, answering whether the loop is owed a wake to show it.
+    pub fn report(&mut self, reading: Reading, current: &str) -> bool {
         let Some(running) = self.running.as_mut() else {
             return false;
         };
-        running.done = done;
+        running.reading = reading;
+        if running.current != current {
+            running.current.clear();
+            running.current.push_str(current);
+        }
         !running.orphaned && self.owe()
     }
 
@@ -291,7 +303,7 @@ impl<J> OperationDesk<J> {
         self.landed.push((
             running.id,
             Finished {
-                done: running.done,
+                done: running.reading.done,
                 ending,
             },
         ));

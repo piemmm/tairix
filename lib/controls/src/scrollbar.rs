@@ -7,8 +7,9 @@
 //! ([`crate::scroll`]) maps onto the screen. This module is the *drawn* form of
 //! that component: it lays a bar out into a decrement button, a track (before
 //! thumb / thumb / after thumb), and an increment button; paints the recessed
-//! Scroll Channel with the two end buttons and the thumb raised in it from the
-//! active [`Theme`] and [`Scale`]; classifies a pointer position; and maps
+//! Scroll Channel with the thumb raised in it and the end buttons' chevrons,
+//! raising an end button's plate only under the pointer, from the active
+//! [`Theme`] and [`Scale`]; classifies a pointer position; and maps
 //! pointer drag, track paging, end-button line steps, the wheel, and
 //! arrow/page/home/end keys back to a clamped offset through the shared
 //! [`ScrollModel`].
@@ -199,6 +200,15 @@ impl BarLayout {
     }
 }
 
+/// How an end control is lit.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Lit {
+    /// The pointer is over it with nothing held.
+    Hovered(ScrollPart),
+    /// Its own press is live: held, with the pointer on it.
+    Held(ScrollPart),
+}
+
 /// A window-manager or application scrollbar in either orientation (spec
 /// §11.28–§11.30).
 ///
@@ -218,11 +228,11 @@ impl BarLayout {
 ///
 /// Equal bars draw the same pixels, so a host may use `==` as its repaint
 /// gate. The visible interaction state compares: `dragging`/`held` brighten
-/// the thumb, and an end control is lit while its press is live — held, with
-/// the pointer on it — never merely because the pointer is over it. The part
-/// under the pointer, the raw pointer coordinate, the drag anchor and the
-/// repeat cadence do not: they are input bookkeeping no render path reads, so
-/// crossing between parts with nothing held draws the same pixels and must not
+/// the thumb, and an end control is lit while the pointer is over it with
+/// nothing else held, brighter while its own press is live. The part under the
+/// pointer, the raw pointer coordinate, the drag anchor and the repeat cadence
+/// do not: they are input bookkeeping no render path reads, so crossing the
+/// track or the thumb with nothing held draws the same pixels and must not
 /// force the host to repaint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ScrollBar {
@@ -234,8 +244,8 @@ pub struct ScrollBar {
     /// The part the pointer currently sits over, resolved when the pointer
     /// moves and after every step that moved the thumb under it.
     hover: RenderInvariant<ScrollPart>,
-    /// The end control drawn lit: the held one, while the pointer is on it.
-    lit: Option<ScrollPart>,
+    /// The end control drawn lit, and how.
+    lit: Option<Lit>,
     /// The last pointer position, classified on the next press or re-mapped on
     /// the next drag move — hit-testing input, never a drawn property.
     pointer: RenderInvariant<Point>,
@@ -296,6 +306,9 @@ impl ScrollBar {
     /// never keeps an offset separate from the viewport.
     pub fn set_model(&mut self, model: ScrollModel) {
         self.model = model;
+        // Content that moved under a hovered end control can make it live or
+        // leave it nothing to do.
+        self.lit = self.lighting();
     }
 
     /// The bar's composed control state.
@@ -446,13 +459,30 @@ impl ScrollBar {
     }
 
     /// Take `part` as the one under the pointer, relighting the end control
-    /// whose press that makes live or idle.
+    /// that makes hovered, live or idle.
     fn hover_on(&mut self, part: ScrollPart, bounds: Rect, damage: &mut Region) {
         *self.hover = part;
-        let live = self.held.filter(|held| {
-            *held == part && matches!(held, ScrollPart::Decrement | ScrollPart::Increment)
-        });
-        damage::set(&mut self.lit, live, bounds, damage);
+        let lit = self.lighting();
+        damage::set(&mut self.lit, lit, bounds, damage);
+    }
+
+    /// How the end control under the pointer is lit: hovered while nothing is
+    /// held, live while its own press is, and not at all while another part's
+    /// press runs, nor where a press on it would move nothing — exactly what
+    /// [`render`](Self::render) draws, so an unlit change repaints nothing.
+    fn lighting(&self) -> Option<Lit> {
+        let part = *self.hover;
+        let live = matches!(part, ScrollPart::Decrement | ScrollPart::Increment)
+            && self.state.is_actionable()
+            && self.moves(part);
+        if !live {
+            return None;
+        }
+        match self.held {
+            None if !self.dragging => Some(Lit::Hovered(part)),
+            Some(held) if held == part => Some(Lit::Held(part)),
+            _ => None,
+        }
     }
 
     /// Apply `change` to the held model, returning the requested offset when it
@@ -476,7 +506,8 @@ impl ScrollBar {
     fn end_press(&mut self, pointer: PointerState, bounds: Rect, damage: &mut Region) {
         damage::set(&mut self.dragging, false, bounds, damage);
         damage::set(&mut self.held, None, bounds, damage);
-        damage::set(&mut self.lit, None, bounds, damage);
+        let lit = self.lighting();
+        damage::set(&mut self.lit, lit, bounds, damage);
         damage::set(&mut self.state.pointer, pointer, bounds, damage);
         self.cadence.release();
     }
@@ -518,8 +549,8 @@ impl ScrollBar {
                 return None;
             }
             InputEvent::PointerCancelled => {
-                self.end_press(PointerState::None, bounds, damage);
                 *self.hover = ScrollPart::Outside;
+                self.end_press(PointerState::None, bounds, damage);
                 return None;
             }
             _ => {}
@@ -705,16 +736,15 @@ impl ScrollBar {
     /// Paint the bar into `surface` at `bounds` for the active theme.
     ///
     /// The Scroll Channel is recessed into the surface, edged along both long
-    /// sides in the theme's frame colour, and the two end buttons and the
-    /// thumb are raised in it alike: each end button a plate carrying its
-    /// chevron across the whole button, the thumb a rounded bar. An end button
-    /// whose step would move nothing — the content already at that end — draws
-    /// no plate and a dimmed chevron, so it reads as having nothing that way.
-    /// A hovered or held end button and an awake thumb take the neutral
-    /// `scroll_thumb_active` grey, never the accent, and a focused bar draws a
-    /// reactive outline distinct from a hover. Content changes are never
-    /// animated — the thumb follows the offset immediately — so the bar is
-    /// already reduced-motion correct.
+    /// sides in the theme's frame colour, with the thumb raised in it as a
+    /// rounded bar. An end button is its chevron alone until the pointer is
+    /// over it, when it raises a plate in the thumb's grey, and a held one the
+    /// neutral `scroll_thumb_active` grey, never the accent. One whose step
+    /// would move nothing — the content already at that end — dims its chevron
+    /// and lights for nothing. An awake thumb takes the same active grey, and a
+    /// focused bar draws a reactive outline distinct from a hover. Content
+    /// changes are never animated — the thumb follows the offset immediately —
+    /// so the bar is already reduced-motion correct.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {
             return;
@@ -800,8 +830,12 @@ impl ScrollBar {
         };
         let palette = theme.palette();
         let live = self.state.is_actionable() && self.moves(part);
-        let awake = live && self.lit == Some(part);
-        if live {
+        let face = match self.lit {
+            Some(Lit::Hovered(lit)) if live && lit == part => Some(palette.scroll_thumb),
+            Some(Lit::Held(lit)) if live && lit == part => Some(palette.scroll_thumb_active),
+            _ => None,
+        };
+        if let Some(face) = face {
             let inset = layout.inset();
             let plate = Rect::new(
                 rect.left() + to_i32(inset),
@@ -809,13 +843,8 @@ impl ScrollBar {
                 rect.width.saturating_sub(inset.saturating_mul(2)),
                 rect.height.saturating_sub(inset.saturating_mul(2)),
             );
-            let face = Color::from(if awake {
-                palette.scroll_thumb_active
-            } else {
-                palette.scroll_thumb
-            });
             if let Some(plate) = surface_rect(plate) {
-                paint_raised(surface, plate, layout.breadth / 4, face, theme);
+                paint_raised(surface, plate, layout.breadth / 4, Color::from(face), theme);
             }
         }
         let glyph = if live {

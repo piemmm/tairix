@@ -24,6 +24,7 @@ address space and I/O off its loop.
 | TE13 | A save that a crash cannot tear | blocked: no VFS primitive replaces a file's content atomically through a held descriptor |
 | TE15 | A document on a read-only volume is handed over read-only, and an open the hand-over refuses is stated in a window | done |
 | TE16 | Data: a picture opens as a report of its structure and metadata, then its bytes as a hex dump, parsed by a worker of its own | done |
+| TE17 | A secondary press on a window's close button closes it and shows its file selected in the file manager, without the editor learning the path | done |
 
 ## What it is
 
@@ -197,6 +198,15 @@ answers, never a parser.
   a handed-over document deliberately does not carry. The fix is a VFS
   operation that stages content against a held writable descriptor and swaps
   it in whole, implemented by each writable filesystem.
+- A secondary press on the close button closes the window, asking about its
+  changes as a close does, and shows its file in the file manager (TE17). The
+  editor still knows the document by name only: it mints the session a location
+  grant on the document's descriptor (`fd_grant_location`), which opens
+  nothing, and asks `RevealDocument`; the kernel tells the path only to a reader
+  of the user the descriptor reaches its file as, and the session hands it to
+  the file manager as a path target. The flag rides the close (`reveal_on_close`)
+  and is dropped once that close is turned back, so a later close of another
+  kind shows nothing. It is the document host's, so Paint does the same.
 
 ## The picker's Save mode
 

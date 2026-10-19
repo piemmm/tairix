@@ -12,9 +12,10 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
 use super::{
-    change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
-    item_refusal, mode_flip_allowed, move_refusal, progress_control, read_refusal, remove_refusal,
-    trash_read_refusal, ProgressControl,
+    change_refusal, completion_closes_at, confirmation_may_open, create_refusal,
+    empty_confirmation_may_open, item_refusal, mode_flip_allowed, move_refusal, progress_control,
+    read_refusal, remove_refusal, trash_read_refusal, BarPace, ProgressControl,
+    COMPLETION_DWELL_NS,
 };
 use tairix_abi::Errno;
 
@@ -283,4 +284,59 @@ fn a_permission_flip_waits_for_the_last_one_to_be_read_back() {
     assert!(mode_flip_allowed(false, false));
     assert!(!mode_flip_allowed(true, false), "in flight");
     assert!(!mode_flip_allowed(false, true), "landed, not yet read back");
+}
+
+/// A moving bar is drawn when its frame falls due and not before, so the loop
+/// parks between frames rather than turning for every one it might draw.
+#[test]
+fn a_bar_is_drawn_when_its_frame_falls_due_and_parks_between() {
+    let mut pace = BarPace::new();
+    assert!(pace.due(0), "owed its first frame at once");
+    pace.drawn(100, Some(16));
+    assert!(!pace.due(115), "not before its frame");
+    assert_eq!(pace.deadline(), Some(116), "the park ends at its frame");
+    assert!(pace.due(116));
+    pace.drawn(116, None);
+    assert!(!pace.due(u64::MAX), "a still bar is owed nothing");
+    assert_eq!(pace.deadline(), None, "and wakes nobody");
+    pace.restated();
+    assert!(pace.due(117), "a change is drawn at once");
+}
+
+/// A minimised window's bar is not drawn and wakes nobody; shown again, it is
+/// owed a frame at once.
+#[test]
+fn a_bar_off_show_is_neither_drawn_nor_woken_for() {
+    let mut pace = BarPace::new();
+    pace.drawn(0, Some(16));
+    pace.observe(&WindowEvent::Minimized {
+        window_id: WINDOW_ID,
+    });
+    assert!(!pace.on_show());
+    assert!(!pace.due(1_000));
+    assert_eq!(pace.deadline(), None);
+    pace.observe(&WindowEvent::Focus {
+        window_id: WINDOW_ID,
+        focused: true,
+    });
+    assert!(pace.on_show());
+    assert!(pace.due(1_000), "shown again, it is drawn at once");
+}
+
+/// A completed operation's window stays until its fill has eased to full and
+/// the dwell has passed, and no longer.
+#[test]
+fn a_completed_operation_closes_once_its_full_bar_has_been_seen() {
+    let motion = Theme::dark().motion();
+    let ease = u64::from(motion.duration(tairix_theme::MotionInteraction::JobProgressPulse))
+        * tairix_abi::time::NANOS_PER_MILLI;
+    assert_eq!(
+        completion_closes_at(5, motion),
+        5 + ease + COMPLETION_DWELL_NS
+    );
+    assert_eq!(
+        completion_closes_at(u64::MAX - 1, motion),
+        u64::MAX,
+        "late on the clock it saturates rather than wrapping to now"
+    );
 }

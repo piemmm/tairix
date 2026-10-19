@@ -166,3 +166,35 @@ fn a_clock_it_cannot_read_is_asked_again_a_minute_later() {
     face.advance(60 * SEC, wm, &mut comp, &mut || None);
     assert_eq!(face.due_ns(), 120 * SEC);
 }
+
+/// The face's lines were composed from text drawn provisionally: once it
+/// lands they are composed again where they stand, and a move under way
+/// carries the recomposed block rather than the provisional one.
+#[test]
+fn a_landing_composes_the_lines_again_where_they_stand() {
+    let mut comp = compositor();
+    let wm = canvas(&mut comp);
+    let mut face = face(Motion::Full, Some(reading()));
+    let (at, due) = (face.at, face.due_ns());
+    face.refit_text(wm, &mut comp);
+    assert_eq!(face.at, at, "it stays where it was");
+    assert!(inside_the_screen(&face));
+    assert_eq!(face.due_ns(), due, "and keeps its minute");
+
+    let tick = face.due_ns();
+    let mut later = || Some(after(53));
+    face.advance(tick, wm, &mut comp, &mut later);
+    let arriving = face
+        .moving
+        .as_ref()
+        .and_then(|moving| moving.next.as_ref())
+        .map(|next| next.1);
+    face.refit_text(wm, &mut comp);
+    let still = face
+        .moving
+        .as_ref()
+        .and_then(|moving| moving.next.as_ref())
+        .map(|next| next.1);
+    assert!(still.is_some(), "the move still carries a block");
+    assert_eq!(still, arriving, "to the place it was going");
+}

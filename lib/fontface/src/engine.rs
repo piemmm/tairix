@@ -81,12 +81,49 @@ impl Reader<'_> {
     }
 }
 
+/// The bytes before a face's table directory records: the sfnt version, the
+/// table count and the search fields.
+const DIRECTORY_HEADER_LEN: usize = 12;
+
+/// Bytes per table directory record.
+const TABLE_RECORD_LEN: usize = 16;
+
+/// One table directory record: a table's tag and where it lies in the face.
+struct TableRecord {
+    tag: [u8; 4],
+    offset: usize,
+    length: usize,
+}
+
+/// The `count` table directory records `r` reads, from where the directory's
+/// header ends.
+fn table_records<'r>(
+    count: u16,
+    r: &'r Reader<'_>,
+) -> impl Iterator<Item = Result<TableRecord, FontError>> + 'r {
+    (0..usize::from(count)).map(move |i| {
+        let entry = TABLE_RECORD_LEN * i;
+        Ok(TableRecord {
+            tag: [
+                r.u8(entry)?,
+                r.u8(entry + 1)?,
+                r.u8(entry + 2)?,
+                r.u8(entry + 3)?,
+            ],
+            offset: r.u32(entry + 8)? as usize,
+            length: r.u32(entry + 12)? as usize,
+        })
+    })
+}
+
 /// Offsets of the tables the engine needs, from the table directory. The
 /// variation tables are optional: a static face declares none.
 struct Tables {
     head: usize,
     maxp: usize,
-    cmap: usize,
+    /// Where the `cmap` lies and how long it is: it is read as a table of its
+    /// own, exactly as [`Coverage`] reads it.
+    cmap: (usize, usize),
     hhea: usize,
     hmtx: usize,
     loca: usize,
@@ -99,7 +136,13 @@ struct Tables {
 
 impl Tables {
     fn locate(r: &Reader<'_>) -> Result<Self, FontError> {
-        let count = r.u16(4)? as usize;
+        let count = r.u16(4)?;
+        let records = Reader {
+            data: r
+                .data
+                .get(DIRECTORY_HEADER_LEN..)
+                .ok_or(err("truncated table directory"))?,
+        };
         let mut head = None;
         let mut maxp = None;
         let mut cmap = None;
@@ -111,19 +154,16 @@ impl Tables {
         let mut avar = None;
         let mut gvar = None;
         let mut hvar = None;
-        for i in 0..count {
-            let entry = 12 + 16 * i;
-            let tag = [
-                r.u8(entry)?,
-                r.u8(entry + 1)?,
-                r.u8(entry + 2)?,
-                r.u8(entry + 3)?,
-            ];
-            let offset = r.u32(entry + 8)? as usize;
+        for record in table_records(count, &records) {
+            let TableRecord {
+                tag,
+                offset,
+                length,
+            } = record?;
             match &tag {
                 b"head" => head = Some(offset),
                 b"maxp" => maxp = Some(offset),
-                b"cmap" => cmap = Some(offset),
+                b"cmap" => cmap = Some((offset, length)),
                 b"hhea" => hhea = Some(offset),
                 b"hmtx" => hmtx = Some(offset),
                 b"loca" => loca = Some(offset),
@@ -191,8 +231,8 @@ impl<'a> Face<'a> {
     /// # Errors
     ///
     /// Returns a [`FontError`] when a required table is missing, a field is
-    /// truncated, the vertical metrics are non-positive, or the `cmap` has no
-    /// format-4 subtable.
+    /// truncated, the vertical metrics are non-positive, or the `cmap` runs
+    /// past the end of the face or has no format-4 subtable.
     pub fn parse(data: &'a [u8]) -> Result<Self, FontError> {
         Self::parse_instance(data, &[])
     }
@@ -209,9 +249,9 @@ impl<'a> Face<'a> {
     /// # Errors
     ///
     /// Returns a [`FontError`] when a required table is missing, a field is
-    /// truncated, the vertical metrics are non-positive, the `cmap` has no
-    /// format-4 subtable, or a variation table (`fvar`/`avar`/`gvar`) is
-    /// malformed.
+    /// truncated, the vertical metrics are non-positive, the `cmap` runs past
+    /// the end of the face or has no format-4 subtable, or a variation table
+    /// (`fvar`/`avar`/`gvar`) is malformed.
     pub fn parse_instance(data: &'a [u8], settings: &[AxisSetting]) -> Result<Self, FontError> {
         let r = Reader { data };
         let tables = Tables::locate(&r)?;
@@ -235,7 +275,12 @@ impl<'a> Face<'a> {
             return Err(err("numberOfHMetrics is zero"));
         }
         let glyph_count = r.u16(tables.maxp + 4)?;
-        let mapped = parse_cmap_format4(&r, tables.cmap)?;
+        let (cmap, cmap_len) = tables.cmap;
+        let cmap = cmap
+            .checked_add(cmap_len)
+            .and_then(|end| data.get(cmap..end))
+            .ok_or(err("cmap runs past the end of the face"))?;
+        let mapped = parse_cmap_format4(&Reader { data: cmap })?;
         let axes = match tables.fvar {
             Some(fvar) => variations::parse_fvar(&r, fvar)?,
             None => Vec::new(),
@@ -782,15 +827,15 @@ fn ink_extent(segments: &[Segment], left_edge: f64) -> Result<(i32, u32), FontEr
     Ok((mathf::round_i32(left_edge), width as u32))
 }
 
-/// Decode the first format-4 (BMP segment-mapped) `cmap` subtable into a
-/// sorted `(codepoint, glyph)` list.
-fn parse_cmap_format4(r: &Reader<'_>, cmap: usize) -> Result<Vec<(u32, u16)>, FontError> {
-    let subtables = r.u16(cmap + 2)?;
+/// Decode the first format-4 (BMP segment-mapped) subtable of the `cmap`
+/// table `r` reads into a sorted `(codepoint, glyph)` list.
+fn parse_cmap_format4(r: &Reader<'_>) -> Result<Vec<(u32, u16)>, FontError> {
+    let subtables = r.u16(2)?;
     let mut format4 = None;
     for i in 0..usize::from(subtables) {
-        let offset = r.u32(cmap + 8 + 8 * i)? as usize;
-        if r.u16(cmap + offset)? == 4 {
-            format4 = Some(cmap + offset);
+        let offset = r.u32(8 + 8 * i)? as usize;
+        if r.u16(offset)? == 4 {
+            format4 = Some(offset);
             break;
         }
     }
@@ -804,6 +849,7 @@ fn parse_cmap_format4(r: &Reader<'_>, cmap: usize) -> Result<Vec<(u32, u16)>, Fo
     let deltas = starts + 2 * seg_count;
     let range_offsets = deltas + 2 * seg_count;
     let mut mapped = Vec::new();
+    let mut reached: Option<u32> = None;
     for s in 0..seg_count {
         let end = u32::from(r.u16(ends + 2 * s)?);
         let start = u32::from(r.u16(starts + 2 * s)?);
@@ -812,7 +858,16 @@ fn parse_cmap_format4(r: &Reader<'_>, cmap: usize) -> Result<Vec<(u32, u16)>, Fo
         if start > end {
             return Err(err("cmap segment start exceeds end"));
         }
-        for code in start..=end {
+        // A code is looked up in the first segment ending at or after it, so
+        // the ends ascend and a code an earlier segment reaches is not this
+        // one's: each code is decoded once, at most 65 536 in all.
+        let first = match reached {
+            Some(last) if end <= last => return Err(err("cmap segments out of order")),
+            Some(last) => start.max(last + 1),
+            None => start,
+        };
+        reached = Some(end);
+        for code in first..=end {
             if code == 0xFFFF {
                 continue;
             }
@@ -833,8 +888,154 @@ fn parse_cmap_format4(r: &Reader<'_>, cmap: usize) -> Result<Vec<(u32, u16)>, Fo
             }
         }
     }
-    mapped.sort_unstable();
     Ok(mapped)
+}
+
+/// The characters a face maps, read from its table directory and its `cmap`
+/// alone, so what a face can draw is known before the rest of it is read.
+///
+/// Decoded exactly as [`Face::parse`] decodes the same table, so a face covers
+/// a code precisely when the parsed face maps it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Coverage {
+    /// The mapped codes, as ascending, disjoint, inclusive ranges.
+    ranges: Vec<(u32, u32)>,
+}
+
+/// Why a face's [`Coverage`] could not be read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoverageError<E> {
+    /// The face could not be read; asking again may succeed.
+    Read(E),
+    /// No buffer could be had for a table the face holds; asking again may
+    /// succeed.
+    OutOfMemory,
+    /// The face is not one this engine reads, and never will be.
+    Malformed(FontError),
+}
+
+impl Coverage {
+    /// Read the coverage of a face `face_len` bytes long through `read`, which
+    /// fills its buffer from an offset into the face and answers how many
+    /// bytes it filled: fewer only where the face ends.
+    ///
+    /// Reads the table directory and the `cmap` table, and nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`CoverageError::Read`] with whatever `read` raised;
+    /// [`CoverageError::OutOfMemory`] when a table's buffer cannot be had;
+    /// [`CoverageError::Malformed`] when the directory or the `cmap` is
+    /// truncated, lies past `face_len`, or holds no format-4 subtable.
+    pub fn read<E>(
+        face_len: u64,
+        mut read: impl FnMut(u64, &mut [u8]) -> Result<usize, E>,
+    ) -> Result<Self, CoverageError<E>> {
+        let mut header = [0u8; DIRECTORY_HEADER_LEN];
+        fill(&mut read, 0, &mut header)?;
+        let count = Reader { data: &header }
+            .u16(4)
+            .map_err(CoverageError::Malformed)?;
+        let records = read_table(
+            &mut read,
+            face_len,
+            DIRECTORY_HEADER_LEN,
+            TABLE_RECORD_LEN * usize::from(count),
+        )?;
+        let mut cmap = None;
+        for record in table_records(count, &Reader { data: &records }) {
+            let record = record.map_err(CoverageError::Malformed)?;
+            if &record.tag == b"cmap" {
+                cmap = Some(record);
+            }
+        }
+        let cmap = cmap.ok_or(CoverageError::Malformed(err("missing cmap table")))?;
+        let table = read_table(&mut read, face_len, cmap.offset, cmap.length)?;
+        let mapped =
+            parse_cmap_format4(&Reader { data: &table }).map_err(CoverageError::Malformed)?;
+        Ok(Self::of(&mapped))
+    }
+
+    /// The ranges the sorted `(codepoint, glyph)` pairs `mapped` cover.
+    fn of(mapped: &[(u32, u16)]) -> Self {
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for &(code, _) in mapped {
+            match ranges.last_mut() {
+                Some((_, end)) if code <= end.saturating_add(1) => *end = (*end).max(code),
+                _ => ranges.push((code, code)),
+            }
+        }
+        ranges.shrink_to_fit();
+        Self { ranges }
+    }
+
+    /// Whether the face maps `code` to a glyph.
+    #[must_use]
+    pub fn covers(&self, code: u32) -> bool {
+        self.ranges
+            .binary_search_by(|&(start, end)| {
+                if end < code {
+                    core::cmp::Ordering::Less
+                } else if start > code {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
+    }
+
+    /// How many codes the face maps.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.ranges
+            .iter()
+            .map(|&(start, end)| u64::from(end - start) + 1)
+            .sum()
+    }
+}
+
+/// Fill `buf` from `offset` through `read`, refusing a face that ends first.
+fn fill<E>(
+    read: &mut impl FnMut(u64, &mut [u8]) -> Result<usize, E>,
+    offset: u64,
+    buf: &mut [u8],
+) -> Result<(), CoverageError<E>> {
+    let filled = read(offset, buf).map_err(CoverageError::Read)?;
+    if filled == buf.len() {
+        Ok(())
+    } else {
+        Err(CoverageError::Malformed(err(
+            "the face ends inside a table",
+        )))
+    }
+}
+
+/// The `length` bytes at `offset` of a face `face_len` bytes long, read
+/// through `read`.
+///
+/// The span is checked against the face before anything is allocated, so a
+/// directory naming a table larger than the face costs nothing.
+fn read_table<E>(
+    read: &mut impl FnMut(u64, &mut [u8]) -> Result<usize, E>,
+    face_len: u64,
+    offset: usize,
+    length: usize,
+) -> Result<Vec<u8>, CoverageError<E>> {
+    let start = u64::try_from(offset).map_err(|_| CoverageError::Malformed(err("table offset")))?;
+    let size = u64::try_from(length).map_err(|_| CoverageError::Malformed(err("table length")))?;
+    if start.checked_add(size).is_none_or(|end| end > face_len) {
+        return Err(CoverageError::Malformed(err(
+            "a table runs past the end of the face",
+        )));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| CoverageError::OutOfMemory)?;
+    bytes.resize(length, 0);
+    fill(read, start, &mut bytes)?;
+    Ok(bytes)
 }
 
 /// One straight outline segment in pixel space (y grows downward).

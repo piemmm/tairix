@@ -478,6 +478,12 @@ impl SessionInputRouter {
         abandoned
     }
 
+    /// The window the pointer has left since this was last asked, with where
+    /// in its client it last was, which its owner is to be told.
+    pub fn take_client_left(&mut self) -> Option<(WindowId, Point)> {
+        self.wm.take_client_left()
+    }
+
     /// Follow the device to `to` while the stream is
     /// [yielded](Self::yield_pointer), delivering it to no surface.
     ///

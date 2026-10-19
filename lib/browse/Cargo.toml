@@ -32,6 +32,9 @@ tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }
 # component and a rename target through `tairix_path` rather than growing a
 # second copy of the "is this a legal name" rule.
 tairix-path = { path = "../path", version = "=0.0.0" }
+# The one rule for showing a name so nothing in it can hide: the listing and the
+# questions that name an item draw it through `tairix_util::utf8::shown`.
+tairix-util = { path = "../util", version = "=0.0.0" }
 # Shared integer screen geometry (`Point`/`Rect`) — the same vocabulary the
 # window manager and taskbar use.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }

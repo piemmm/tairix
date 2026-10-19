@@ -28,8 +28,8 @@ use std::process::ExitCode;
 
 use tairix_mkimage::firmware::FirmwareManifest;
 use tairix_mkimage::{
-    build_rpi_image, remove_stale_root_key, write_root_key, HostEntropy, ImageKind, ImageProfile,
-    VolumeProtection,
+    build_rpi_image, remove_stale_root_key, replace_file, write_root_key, HostEntropy, ImageKind,
+    ImageProfile, VolumeProtection,
 };
 
 fn main() -> ExitCode {
@@ -99,7 +99,7 @@ fn run(argv: &[OsString]) -> Result<(), String> {
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
     }
-    std::fs::write(&rpi.out, &built.image)
+    replace_file(&rpi.out, &built.image)
         .map_err(|e| format!("cannot write image {}: {e}", rpi.out.display()))?;
 
     let key_out = rpi

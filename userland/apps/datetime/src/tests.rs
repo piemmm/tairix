@@ -403,3 +403,23 @@ fn a_settings_change_is_asked_for_and_refused_in_its_own_words() {
     assert_eq!(headline, "The time zone was not changed");
     assert!(detail.contains("could not be read"));
 }
+
+#[test]
+fn the_bundle_presents_no_icon_bar_slot_and_runs_one_instance() {
+    // Only the signed manifest can carry either: the dialog ends with its
+    // window, so a slot would hold nothing, and the desktop raises the open
+    // dialog rather than starting a second elevated copy.
+    let manifest = include_str!("../AppInfo.toml");
+    let mut entries = manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'));
+    assert!(
+        entries.clone().any(|line| line == "icon-bar = false"),
+        "the manifest must declare no icon-bar slot"
+    );
+    assert!(
+        !entries.any(|line| line.starts_with("instances")),
+        "the dialog runs one instance, the manifest's default"
+    );
+}

@@ -1539,6 +1539,14 @@ fn apply_theme_swaps_the_owned_theme_and_latches_every_surface() {
 }
 
 #[test]
+fn a_text_landing_latches_every_surface() {
+    let mut bar = bottom_bar();
+    let _ = bar.take_repaint();
+    bar.redraw_text();
+    assert_eq!(bar.take_repaint(), TaskbarRepaint::ALL);
+}
+
+#[test]
 fn set_config_latches_every_surface() {
     let mut bar = bottom_bar();
     let _ = bar.take_repaint();

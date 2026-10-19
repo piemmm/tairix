@@ -2235,7 +2235,7 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("image: cannot create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&out, &built.image)
+    tairix_mkimage::replace_file(&out, &built.image)
         .map_err(|e| format!("image: cannot write {}: {e}", out.display()))?;
     let root = place_root_key(&out, built.unlock.as_ref())?;
     eprintln!(
@@ -2328,7 +2328,7 @@ fn build_virt_run_kernel(
     let boot_image =
         tairix_mkimage::elfflat::build_virt_boot_image(&elf).map_err(|e| format!("run: {e}"))?;
     let out = target_dir.join(format!("tairix-kernel-virt-{}.img", profile.label()));
-    std::fs::write(&out, &boot_image)
+    tairix_mkimage::replace_file(&out, &boot_image)
         .map_err(|e| format!("run: cannot write {}: {e}", out.display()))?;
     Ok(out)
 }

@@ -11956,6 +11956,76 @@ where
         Ok(u64::from(fd))
     }
 
+    fn fd_grant_location(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        recipient: u64,
+        recipient_len: usize,
+    ) -> SyscallResult {
+        // Ungated: a location opens nothing. `fd` is resolved against the
+        // caller's own table first, so a foreign or unopened descriptor is
+        // refused before anything else is read.
+        let location = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?
+            .location(caller.caps.owner().0)
+            .ok_or(Errno::OutOfRange)?;
+        if recipient_len < PROC_ID_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut instance_bytes = [0u8; PROC_ID_LEN];
+        self.copy_in_user(caller, recipient, &mut instance_bytes)?;
+        let instance = ProcId::from_raw(instance_bytes);
+        // Resolved and minted under one hold of the instance, as `fd_grant`
+        // is, so the location cannot land with a successor that drew the
+        // recipient's number.
+        self.for_instance(instance, |recipient| {
+            let mut registry = self.aspaces.write();
+            if !registry.contains(recipient) {
+                return Err(Errno::NotFound);
+            }
+            registry.mint_fd_location(
+                recipient,
+                instance,
+                caller.process(),
+                caller.caps.proc_id(),
+                location,
+            )
+        })
+    }
+
+    fn fd_redeem_location(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        grantor: u64,
+        grantor_len: usize,
+        out: u64,
+        out_cap: usize,
+    ) -> SyscallResult {
+        // `CAP_FS_ACCESS` was enforced by the dispatcher, which also audits
+        // the disclosure. Who the path may be told to is decided in the same
+        // hold of the registry that consumes it.
+        if grantor_len < PROC_ID_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut bytes = [0u8; PROC_ID_LEN];
+        self.copy_in_user(caller, grantor, &mut bytes)?;
+        let path = self.aspaces.write().redeem_fd_location(
+            caller.process(),
+            caller.caps.proc_id(),
+            handle,
+            ProcId::from_raw(bytes),
+            caller.caps.owner().0,
+            out_cap,
+        )?;
+        self.copy_out_user(caller, out, path.as_bytes())?;
+        Ok(path.len() as u64)
+    }
+
     /// Serve the **positional** read trap: the caller names both the
     /// descriptor and the byte offset, and the open-file description's
     /// shared cursor is left untouched, so two positional readers of one
@@ -43172,6 +43242,7 @@ mod tests {
     const GRANT_RECIPIENT: GrantHolder = GrantHolder {
         process: ProcessId(3),
         instance: ProcId::from_raw([0xA1; PROC_ID_LEN]),
+        uid: 2000,
         granted: &[],
     };
 
@@ -43180,15 +43251,17 @@ mod tests {
     const GRANT_ONWARD: GrantHolder = GrantHolder {
         process: ProcessId(4),
         instance: ProcId::from_raw([0xD4; PROC_ID_LEN]),
+        uid: 2000,
         granted: &[],
     };
 
     /// One process an `fd_grant` test delegates to: the number its kernel
     /// tables are keyed by, the attested instance a delegation names it as,
-    /// and the capabilities it holds.
+    /// the user it runs as, and the capabilities it holds.
     struct GrantHolder {
         process: ProcessId,
         instance: ProcId,
+        uid: u32,
         granted: &'static [CapabilityId],
     }
 
@@ -43278,9 +43351,14 @@ mod tests {
                 .register(holder.process, space, physmap)
                 .expect("holder registers");
             let granted = caps_with(holder.granted);
-            let caps =
-                TaskCapabilities::derive(holder.process, UserId(2000), granted, granted, self.sink)
-                    .with_proc_id(holder.instance);
+            let caps = TaskCapabilities::derive(
+                holder.process,
+                UserId(holder.uid),
+                granted,
+                granted,
+                self.sink,
+            )
+            .with_proc_id(holder.instance);
             self.table.write().insert(caps.clone());
             caps
         }
@@ -43945,6 +44023,187 @@ mod tests {
             h.fd_redeem_from(&rctx, handle, grantor_at, PROC_ID_LEN),
             Err(Errno::NotFound),
             "a bound redemption is one-shot too"
+        );
+    }
+
+    /// A location tells its path once, and only to a reader of the user the
+    /// descriptor reaches its file as: a stranger named as its grantor finds
+    /// nothing, a buffer too short leaves it pending, and a reader of another
+    /// user consumes it unread.
+    ///
+    /// Regression cover for the path behind a descriptor reaching a principal
+    /// that could not have named it.
+    #[test]
+    fn fd_redeem_location_tells_the_path_only_to_the_user_it_is_reached_as() {
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let mut page = grant_page(b"");
+        page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
+        let grantor_at = grant_addr(page.len() - PROC_ID_LEN);
+        let out = grant_addr(page.len());
+        let writable = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;
+        let same_user = GrantHolder {
+            uid: 1000,
+            granted: &[CapabilityId::FS_ACCESS],
+            ..GRANT_RECIPIENT
+        };
+        let reader_caps = rig.holder(&same_user, writable, &page);
+        let reader = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &reader_caps,
+        };
+        let other_user = GrantHolder {
+            granted: &[CapabilityId::FS_ACCESS],
+            ..GRANT_ONWARD
+        };
+        let other_caps = rig.holder(&other_user, writable, &page);
+        let other = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &other_caps,
+        };
+        let fd = u32::try_from(
+            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("grantor opens"),
+        )
+        .unwrap();
+        let told = h
+            .fd_grant_location(&gctx, fd, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("a location mints");
+
+        assert_eq!(
+            h.fd_redeem_location(
+                &reader,
+                told,
+                grant_addr(GRANT_STRANGER_AT),
+                PROC_ID_LEN,
+                out,
+                64
+            ),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, out, 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, out, 64),
+            Ok(2)
+        );
+        let mut path = [0u8; 2];
+        h.copy_in_user(&reader, out, &mut path)
+            .expect("the path was written");
+        assert_eq!(&path, b"/f");
+        assert_eq!(
+            h.fd_redeem_location(&reader, told, grantor_at, PROC_ID_LEN, out, 64),
+            Err(Errno::NotFound),
+            "a location is told once"
+        );
+
+        let refused = h
+            .fd_grant_location(&gctx, fd, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+            .expect("a location mints to another user too");
+        assert_eq!(
+            h.fd_redeem_location(&other, refused, grantor_at, PROC_ID_LEN, out, 64),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.fd_redeem_location(&other, refused, grantor_at, PROC_ID_LEN, out, 64),
+            Err(Errno::NotFound),
+            "a location that can never be told is not left pending"
+        );
+    }
+
+    /// A location and a file delegation are each redeemed only as what they
+    /// are, and a delegated descriptor's location is reached as the identity
+    /// the delegation captured rather than as whoever holds it; what is
+    /// stored nowhere has no location to tell.
+    #[test]
+    fn a_location_is_reached_as_the_identity_its_descriptor_acts_as() {
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let mut holder_page = grant_page(b"");
+        holder_page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
+        let grantor_at = grant_addr(holder_page.len() - PROC_ID_LEN);
+        // Another user holding nothing: the delegation is all it has.
+        let holder_caps = rig.holder(
+            &GRANT_RECIPIENT,
+            MapFlags::READ | MapFlags::USER,
+            &holder_page,
+        );
+        let holder = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &holder_caps,
+        };
+        // The grantor's own user, holding the authority to name paths.
+        let reader = GrantHolder {
+            uid: 1000,
+            granted: &[CapabilityId::FS_ACCESS],
+            ..GRANT_ONWARD
+        };
+        let reader_page = grant_page(b"");
+        let out = grant_addr(reader_page.len());
+        let reader_caps = rig.holder(
+            &reader,
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &reader_page,
+        );
+        let reader = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &reader_caps,
+        };
+        let fd = u32::try_from(
+            h.fs_open(&gctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("grantor opens"),
+        )
+        .unwrap();
+        let file = h
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("the file is delegated");
+        assert_eq!(
+            h.fd_redeem_location(&holder, file, grantor_at, PROC_ID_LEN, out, 64),
+            Err(Errno::OutOfRange),
+            "a file delegation is no location"
+        );
+        let held = u32::try_from(h.fd_redeem(&holder, file).expect("it is still pending")).unwrap();
+
+        let told = h
+            .fd_grant_location(&holder, held, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+            .expect("a holder of no capability tells where its file is");
+        assert_eq!(
+            h.fd_redeem(&reader, told),
+            Err(Errno::OutOfRange),
+            "a location opens nothing"
+        );
+        assert_eq!(
+            h.fd_redeem_location(
+                &reader,
+                told,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+                out,
+                64
+            ),
+            Ok(2),
+            "the descriptor reaches the file as the grantor's user, which the reader is"
+        );
+
+        let (pipe, _) = rig
+            .aspaces
+            .write()
+            .open_pipe(ProcessId(2))
+            .expect("a pipe opens");
+        assert_eq!(
+            h.fd_grant_location(&gctx, pipe, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN),
+            Err(Errno::OutOfRange),
+            "a pipe is stored nowhere"
+        );
+        assert_eq!(
+            h.fd_grant_location(&gctx, 99, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN),
+            Err(Errno::NotFound)
         );
     }
 

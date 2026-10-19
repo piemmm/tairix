@@ -2010,6 +2010,45 @@ fn client_hover_moves_route_to_the_window_under_the_pointer() {
     );
 }
 
+/// The window whose content the pointer leaves — for another window, the
+/// desktop, or a release outside it once a press there ends — is owed word of
+/// it, with where it last saw the pointer, so nothing in it stays lit.
+#[test]
+fn a_window_the_pointer_leaves_is_owed_word_of_it() {
+    let mut c = new_compositor(mode(80, 60), BLUE).expect("compositor");
+    let left = c.add_window(Point::new(5, 10), opaque(20, 20, RED));
+    let right = c.add_window(Point::new(40, 10), opaque(20, 20, RED));
+    let mut router = InputRouter::new();
+
+    router.handle(moved(10, 15), &mut c, T0);
+    router.handle(moved(12, 16), &mut c, T0);
+    assert_eq!(
+        router.take_client_left(),
+        None,
+        "moving within it leaves nothing"
+    );
+    router.handle(moved(45, 15), &mut c, T0);
+    assert_eq!(router.take_client_left(), Some((left, Point::new(7, 6))));
+    router.handle(moved(70, 50), &mut c, T0);
+    assert_eq!(router.take_client_left(), Some((right, Point::new(5, 5))));
+    assert_eq!(router.take_client_left(), None, "told once");
+
+    router.handle(moved(10, 15), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(70, 50), &mut c, T0);
+    assert_eq!(router.take_client_left(), None, "a press holds the pointer");
+    router.handle(release_primary(), &mut c, T0);
+    assert_eq!(router.take_client_left(), Some((left, Point::new(19, 19))));
+
+    router.handle(moved(45, 15), &mut c, T0);
+    router.set_pointer_focus(PointerFocus::Left, &mut c);
+    assert_eq!(
+        router.take_client_left(),
+        Some((right, Point::new(5, 5))),
+        "a pointer taken elsewhere leaves it too"
+    );
+}
+
 #[test]
 fn client_press_captures_the_pointer_until_release() {
     let mut c = new_compositor(mode(60, 60), BLUE).expect("compositor");
@@ -4385,6 +4424,27 @@ fn setting_a_title_repaints_only_the_title_band() {
     assert!(!c.set_window_title(WindowId(9_999), "x"));
 }
 
+/// Text drawn provisionally lands after the frame that drew it: every title is
+/// drawn again, and nothing beyond the title bands is recomposited.
+#[test]
+fn refreshing_titles_redraws_only_the_title_bands() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_window_title(id, "Documents"));
+    let plain = c.add_window(Point::new(150, 150), opaque(10, 10, RED));
+    c.composite();
+    assert!(!c.has_damage());
+    assert_eq!(c.chrome_cache_len(), 1);
+
+    c.refresh_titles();
+    let client = c.window_client_rect(id).unwrap();
+    let bounds = c.window(id).unwrap().bounds();
+    assert!(c.damage_covers(Point::new(centre(bounds).x, bounds.top())));
+    assert!(!c.damage_covers(centre(client)));
+    assert!(!c.damage_covers(Point::new(centre(bounds).x, bounds.bottom() - 1)));
+    assert!(!c.damage_covers(centre(c.window(plain).unwrap().bounds())));
+    assert_eq!(c.chrome_cache_len(), 0, "the title is rendered afresh");
+}
+
 #[test]
 fn the_window_title_is_rendered_in_the_title_bar() {
     // Two identical decorated windows differing only in their title must
@@ -6525,6 +6585,7 @@ fn an_abandoned_resize_stays_where_it_was_dragged_and_is_owed_its_size() {
         router.abandon_gesture(&mut c),
         crate::Abandoned {
             client: None,
+            left: None,
             resized: Some(id),
             moved: None,
         }
@@ -6563,6 +6624,7 @@ fn an_abandoned_move_is_owed_only_once_it_moved_the_window() {
         router.abandon_gesture(&mut c),
         crate::Abandoned {
             client: None,
+            left: None,
             resized: None,
             moved: Some(id),
         }
@@ -6594,6 +6656,7 @@ fn an_abandoned_client_press_names_the_client_and_where_the_pointer_was() {
                     pressed.y - client.top()
                 )
             )),
+            left: None,
             resized: None,
             moved: None,
         }

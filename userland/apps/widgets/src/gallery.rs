@@ -522,6 +522,55 @@ impl Gallery {
         }
     }
 
+    /// Nanoseconds until a widget the shown panel has in view next moves on
+    /// its own, or `None` while none does.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn animation_due_in(
+        &self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<u64> {
+        let (frame, _) = self.resolve(viewport, scale, theme);
+        self.panels[self.current.index()]
+            .iter()
+            .zip(&frame.items)
+            .filter(|(_, rect)| frame.view.to_window(**rect).is_some())
+            .filter_map(|(item, _)| item.widget.next_frame_in())
+            .min()
+    }
+
+    /// Step the motion of every widget the shown panel has in view to
+    /// `now_ns`, reporting where those that moved are drawn, and answer when
+    /// the next of them moves on, or `None` while none does.
+    pub fn animate(
+        &mut self,
+        now_ns: u64,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<u64> {
+        let (frame, _) = self.resolve(viewport, scale, theme);
+        let items = self.panels[self.current.index()]
+            .iter_mut()
+            .zip(&frame.items);
+        let mut next: Option<u64> = None;
+        for (item, rect) in items {
+            let Some(shown) = frame.view.to_window(*rect) else {
+                continue;
+            };
+            if item.widget.animate(now_ns, theme.motion()) {
+                damage.add(shown);
+            }
+            if let Some(wait) = item.widget.next_frame_in() {
+                next = Some(next.map_or(wait, |due| due.min(wait)));
+            }
+        }
+        next.map(|wait| now_ns.saturating_add(wait))
+    }
+
     /// Step the press a part holds if its repeat is due at `now_ns`, returning
     /// whether the view should repaint.
     pub fn repeat(

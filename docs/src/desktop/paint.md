@@ -346,7 +346,8 @@ edge lands on the nearest line.
 The manifest requests no filesystem capability and declares
 `document-access = "read-write"`: a document reaches Paint only as the user's
 own act, and a save writes back through the descriptor it was handed, exactly
-as for [TextEdit](textedit.md). A document is untrusted input and so is a
+as for [TextEdit](textedit.md). A secondary press on a window's close button
+closes it and shows its file in the file manager, as TextEdit's does. A document is untrusted input and so is a
 pasted picture, so both are decoded by a capability-empty worker this binary
 is re-entered as ([sandbox](../security/sandbox.md)); each document is read by
 a fresh one, released once the document is in. A pasted file of layers is

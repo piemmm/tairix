@@ -36,7 +36,7 @@ sitting over a document never swallows a click meant for it.
 Closing the pen does not quit. Closing it with Cinder inside puts him away;
 closing it while he is out leaves him roaming. Clicking his icon opens the pen
 again, and *Quit* ends him and takes him off the desktop. This is the
-convention `widgets`, `sapper` and `datetime` all follow.
+convention `widgets` and `sapper` both follow.
 
 ## The elevated camera
 

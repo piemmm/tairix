@@ -38,10 +38,12 @@ reach it.
 
 ## Invocation
 
-`files [directory] [-h | -?]`
+`files [--desktop] [path] [-h | -?]`
 
-The optional `directory` operand is the location to open — the desktop
-opens a folder by launching the file manager with that folder's path.
+The optional `path` operand is the location to open — the desktop opens a
+folder by launching the file manager with that folder's path. A path that
+names a file opens the folder holding it with the file selected
+(`Ladder::show_instead`), as the desktop's reveal of a document does.
 With no operand the window opens among the launching user's own files
 (`$HOME/Home`), then at their home when that cannot be listed, and at
 the root view when `HOME` is unset or neither can be listed; each refusal

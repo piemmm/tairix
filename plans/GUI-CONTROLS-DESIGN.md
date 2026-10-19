@@ -842,12 +842,25 @@ Sliders are measured controls with a rail, value track, thumb, and optional sema
 
 ### 11.7 Progress
 
-Progress is an instrument trace, not decoration.
+Progress is an instrument trace, not decoration, and each state reads as
+itself.
 
-- Known progress: Heat Seam or bar with a stable percentage/value label.
-- Indeterminate progress: bounded moving trace, disabled by reduced motion.
-- Completed: success bead and static completion line.
-- Failed: recovery or warning rim with concise reason.
+- Known progress: a fill from the track's start with its percentage. A rising
+  amount eases to its new value over the job-progress duration; a lower one (a
+  new run) is shown at once, so the fill never runs backwards.
+- Working or indeterminate: a comet sweeps the track for as long as the work
+  lasts — easing in from beyond one end and out beyond the other, densest at
+  its head, one crossing per `ProgressSweep` duration — so nothing about it can
+  be read as an amount. Still, under reduced motion or with no clock reported,
+  it is a segment centred on the track and feathered at both ends; no amount is
+  ever drawn that way.
+- Completed: the track full in the success colour.
+- Failed: the amount reached, in the recovery colour, beside its reason under a
+  recovery rim; a failure with no amount washes its track. A failed trace does
+  not move.
+- The motion is the owner's to clock: it reports the frame clock and the
+  theme's motion (`set_clock`) and draws the frames `next_frame_in` asks for,
+  arming a one-shot deadline only while a trace it shows is moving.
 
 Progress surfaces should expose throughput or remaining work only when the source model provides typed values.
 
@@ -1437,7 +1450,7 @@ ScrollBar
 - The thumb position maps the clamped `offset` across the draggable track. The same mapping is used in paint, hit testing, keyboard updates, and tests.
 - When the viewport covers the content, the offset is zero and the bar follows the declared layout policy: hidden, or a reserved quiet gutter with a non-draggable thumb. It must not oscillate between policies as content changes by a pixel.
 - Idle: low-contrast thumb and quiet Scroll Channel, its two long sides edged one rim-width in the theme's `frame` colour so the bar's extent reads against any ground. A bar embedded in a plate whose own rim already bounds it draws no edge (`ScrollBar::without_edges`): an edge standing mid-plate with open ends reads as a stray line. The Settings category strip's bar is the one such bar.
-- Hover, keyboard focus, wheel input, or active scrolling: the thumb steps to the neutral `scroll_thumb_active` grey without changing geometry — never the accent, which is the selection's; the focus ring stays the bar's one accent line. An end control takes the same grey only while its press is live — held, with the pointer on it, the moments its hold steps — and never for hover alone, so which part the pointer is over draws nothing while nothing is held.
+- Hover, keyboard focus, wheel input, or active scrolling: the thumb steps to the neutral `scroll_thumb_active` grey without changing geometry — never the accent, which is the selection's; the focus ring stays the bar's one accent line. An end control is its chevron alone at rest, however much content lies that way: it raises a plate in the thumb's grey while the pointer is over it with nothing else held, takes the active grey while its own press is live — held, with the pointer on it, the moments its hold steps — and lights for nothing toward an end the content already rests at, its chevron dimmed. Elsewhere on the bar the part under the pointer draws nothing.
 - The end controls' chevrons are the shared grid-fitted triangle, centred exactly across the bar in a button of either parity and along it by their weight.
 - Thumb drag captures the pointer and preserves the initial pointer-to-thumb anchor so the content does not jump when the drag begins.
 - A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop. The cadence is the control's own: it states when its next step is due and steps when asked at that time, and its owner folds that one deadline into its wait rather than keeping a timer beside the control. A hold steps only while the pointer is on the part it pressed and the step would move something, and a press toward a bound already reached presses nothing.

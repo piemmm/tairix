@@ -78,6 +78,16 @@ setting written, a document published, another process told — belongs on the
 settle alone. Acting on every value change means acting once per pointer-motion
 sample, which is how a slider ends up wired to a disk write.
 
+A progress trace reads each state as itself. A known amount fills from the
+track's start and eases to each new value; a busy trace sweeps a comet across
+the track, so nothing about it reads as an amount; a failed one keeps the amount
+it reached in the recovery colour beside its reason; a complete one is full in
+the success colour. The motion is its owner's to clock: it calls
+`Progress::set_clock` with the frame clock and the theme's motion and draws the
+frames `next_frame_in` asks for, so a screen with no moving trace takes no timer.
+Unclocked, or under reduced motion, a busy trace is a still segment centred on
+the track, feathered at both ends.
+
 ### Choosing a colour
 
 The colour picker holds its colour as hue, saturation and value (`lib/colour`),
@@ -380,15 +390,17 @@ whatever its rows are; `ScrollBar::wheel` applies that with the carry in the
 bar and reports the bar, and a wheel over the bar itself scrolls it. The
 owner reports the content it slid.
 
-A `ScrollBar`'s ends are two raised buttons with grid-fitted chevrons, so an
-arrow is whole pixels at every density and centred exactly in a button of either
-parity, and a press toward an end the content already rests at presses nothing.
-Its channel is edged along both long sides in the theme's `frame` colour, except
-on a bar embedded in a plate whose rim already bounds it (`without_edges`), and
-an awake thumb and an end button while its press is live — held, with the pointer
-on it — take the neutral `scroll_thumb_active` grey, never the accent; hover
-alone lights no end button. **A held press repeats on the control's own
-cadence** (`HoldRepeat`): the first step lands with the press, then one after
+A `ScrollBar`'s ends are two buttons with grid-fitted chevrons, so an arrow is
+whole pixels at every density and centred exactly in a button of either parity,
+and a press toward an end the content already rests at presses nothing. An end
+button is its chevron alone at rest; it raises a plate in the thumb's grey only
+while the pointer is over it, and one toward an end already reached dims its
+chevron and lights for nothing. Its channel is edged along both long sides in
+the theme's `frame` colour, except on a bar embedded in a plate whose rim
+already bounds it (`without_edges`), and an awake thumb and an end button while
+its press is live — held, with the pointer on it — take the neutral
+`scroll_thumb_active` grey, never the accent. **A held press repeats on the
+control's own cadence** (`HoldRepeat`): the first step lands with the press, then one after
 `REPEAT_DELAY_NS` and one every `REPEAT_INTERVAL_NS`, the one cadence every
 press-and-hold stepping control shares. The owner keeps no timer of its own:
 after routing its events it asks `repeat_deadline(now)`, folds the answer into
@@ -1345,6 +1357,14 @@ carries — never sees its release. The window channel then delivers
 there completing nothing: a button lets go without firing, a slider settles
 where it stands, a scrollbar's drag and held step stop, a text selection ends.
 A control never needs to tell a cancel from a release that missed it.
+
+The same event tells a window the pointer has left it. When the pointer goes
+from a window's content to another window, to the window's own frame or to the
+desktop, or a press held there ends with the pointer elsewhere, the window
+manager notes the leave (`InputRouter::take_client_left`) and the window is sent
+`PointerAction::Cancelled` where it last saw the pointer, so whatever it lit for
+the pointer — a hovered button, a scrollbar's end control — goes out with no
+further motion.
 
 ## A hover has to be able to end without the pointer moving
 

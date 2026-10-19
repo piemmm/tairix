@@ -24,7 +24,7 @@ use tairix_abi::Errno;
 use tairix_browse::render::progress_cancel_at;
 use tairix_browse::DeletePlan;
 use tairix_geometry::{Rect, Scale};
-use tairix_theme::{Theme, Timeline};
+use tairix_theme::{MotionInteraction, MotionTheme, Theme, Timeline};
 
 use crate::sidebar::press_point;
 
@@ -86,6 +86,92 @@ pub const fn progress_due(now_ns: u64, shown_ns: u64) -> bool {
     now_ns.saturating_sub(shown_ns) >= Timeline::FRAME_NS
 }
 
+/// How long a completed operation's window stays once its bar has filled: long
+/// enough to be seen, short enough never to be waited on.
+pub const COMPLETION_DWELL_NS: u64 = 350 * tairix_abi::time::NANOS_PER_MILLI;
+
+/// When the window of an operation that completed at `now_ns` closes under
+/// `motion`: once its fill has eased to full and the dwell has passed.
+#[must_use]
+pub fn completion_closes_at(now_ns: u64, motion: MotionTheme) -> u64 {
+    let ease = u64::from(motion.duration(MotionInteraction::JobProgressPulse))
+        * tairix_abi::time::NANOS_PER_MILLI;
+    now_ns
+        .saturating_add(ease)
+        .saturating_add(COMPLETION_DWELL_NS)
+}
+
+/// When a progress window's bar draws its next frame.
+///
+/// The bar is clocked only when a frame of it is owed, so its motion is paced
+/// by its own deadline rather than by every turn of the loop, and it holds
+/// still while its window is off show.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BarPace {
+    /// When the bar is next owed a frame; `None` while it holds still.
+    next_ns: Option<u64>,
+    on_show: bool,
+}
+
+impl Default for BarPace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BarPace {
+    /// A bar on show, owed its first frame at once.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            next_ns: Some(0),
+            on_show: true,
+        }
+    }
+
+    /// The bar's state changed: a frame is owed at once, which sets off any
+    /// motion the change began.
+    pub fn restated(&mut self) {
+        self.next_ns = Some(0);
+    }
+
+    /// Whether a frame is owed at `now_ns`.
+    #[must_use]
+    pub fn due(&self, now_ns: u64) -> bool {
+        self.on_show && self.next_ns.is_some_and(|at| now_ns >= at)
+    }
+
+    /// A frame was drawn at `now_ns`, and the bar asks for its next one
+    /// `next_in` later, or for none.
+    pub fn drawn(&mut self, now_ns: u64, next_in: Option<u64>) {
+        self.next_ns = next_in.map(|wait| now_ns.saturating_add(wait));
+    }
+
+    /// When the loop must next wake for the bar, if at all.
+    #[must_use]
+    pub fn deadline(&self) -> Option<u64> {
+        self.next_ns.filter(|_| self.on_show)
+    }
+
+    /// Whether the window is on show.
+    #[must_use]
+    pub const fn on_show(&self) -> bool {
+        self.on_show
+    }
+
+    /// Take what `event` says of the window being on show. Shown again, the
+    /// bar is owed a frame: it may have moved meanwhile.
+    pub fn observe(&mut self, event: &WindowEvent) {
+        let Some(on_show) = event.on_show() else {
+            return;
+        };
+        if on_show && !self.on_show {
+            self.next_ns = Some(0);
+        }
+        self.on_show = on_show;
+    }
+}
+
 /// Whether a delete confirmation for `asked`, whose plan has just come back,
 /// may open: only over the very selection it plans, `planned_now`, in a
 /// window with nothing else open (`busy`). A confirmation opened over anything
@@ -113,7 +199,10 @@ pub fn empty_confirmation_may_open(trash: &[String], shown: &[String], busy: boo
 #[must_use]
 pub fn item_refusal(verb: &str, path: &[impl AsRef<str>], reason: &str) -> String {
     let name = path.last().map_or("", AsRef::as_ref);
-    alloc::format!("could not {verb} \u{201c}{name}\u{201d}: {reason}")
+    alloc::format!(
+        "could not {verb} \u{201c}{}\u{201d}: {reason}",
+        tairix_util::utf8::shown(name)
+    )
 }
 
 /// Why a copy could not make its destination file or folder, from the

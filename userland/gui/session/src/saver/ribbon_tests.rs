@@ -209,3 +209,33 @@ fn the_time_is_lettered_over_a_dark_sky() {
         Some((0, 0, 0))
     );
 }
+
+/// The ribbon's type was fitted with advances that may have been
+/// provisional: once text lands it is set again, and the very next frame
+/// draws the lines in it without waiting for the minute to turn.
+#[test]
+fn a_landing_sets_the_lines_again_on_the_next_frame() {
+    let mut comp = compositor();
+    let mut face = face(Motion::Reduced, Some(after(0)), RibbonOptions::default());
+    let wm = canvas(&mut comp, &mut face);
+    let (fonts, block) = (
+        face.fonts,
+        face.block.as_ref().map(Surface::pixels).map(<[_]>::to_vec),
+    );
+    let minute = face.telling.tick_ns();
+    face.refit_text(&theme(Motion::Reduced), Scale::ONE);
+    assert_eq!(face.due_ns(), 0, "owed at once");
+    let mut asked = false;
+    face.advance(SEC, wm, &mut comp, &mut || {
+        asked = true;
+        Some(after(1))
+    });
+    assert!(!asked, "the time is not read again before the minute turns");
+    assert_eq!(face.telling.tick_ns(), minute);
+    assert_eq!(face.fonts, fonts, "the same advances set the same type");
+    assert_eq!(
+        face.block.as_ref().map(Surface::pixels).map(<[_]>::to_vec),
+        block
+    );
+    assert_eq!(face.due_ns(), minute, "and it waits for the minute again");
+}

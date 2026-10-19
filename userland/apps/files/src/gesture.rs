@@ -22,7 +22,7 @@
 //! | click on the listing's ground | clear the selection, unless ctrl or shift is held |
 //! | drag on the listing's ground | draw a band selecting what it covers; escape takes it back ([`press_step`]) |
 //! | double-click | activate: descend, run a bundle, or open a file |
-//! | shift-double-click | list a bundle's contents instead of running it |
+//! | shift-double-click | list a bundle's contents instead of running it; anything else opens as a double-click opens it, and is left deselected |
 //! | click on the one selected item's name | rename it, once the click can no longer pair ([`RenameArm`]) |
 //! | right-click | ask the desktop for the context menu on the item |
 //!
@@ -107,6 +107,11 @@ pub enum PrimaryPress {
     Activate {
         /// The item the pair landed on.
         index: usize,
+        /// What the pair means for a bundle.
+        intent: BundleIntent,
+        /// Whether the item is deselected once it has opened somewhere else,
+        /// as a shift-double-click leaves it.
+        deselect: bool,
     },
     /// A lone press on the item at `index`, changing the selection `how`.
     Select {
@@ -164,7 +169,11 @@ pub fn primary_press(
     };
     let subject = u64::try_from(index).unwrap_or(u64::MAX);
     match tracker.register(now_ns, subject, PointerButton::Primary, interval) {
-        ClickKind::Double => PrimaryPress::Activate { index },
+        ClickKind::Double => PrimaryPress::Activate {
+            index,
+            intent: bundle_intent(keys.extend),
+            deselect: keys.extend,
+        },
         ClickKind::Single => PrimaryPress::Select {
             index,
             how: if keys.toggle {
@@ -604,7 +613,59 @@ mod tests {
         );
         assert_eq!(
             primary_press(&mut tracker, 1_000, Some(2), DOUBLE_CLICK_DEFAULT),
-            PrimaryPress::Activate { index: 2 }
+            PrimaryPress::Activate {
+                index: 2,
+                intent: BundleIntent::Launch,
+                deselect: false,
+            }
+        );
+    }
+
+    /// Shift asks a pair for a bundle's contents and for nothing to be left
+    /// selected; `Ctrl` changes what the first press selects and nothing the
+    /// pair does.
+    #[test]
+    fn a_shifted_pair_browses_a_bundle_and_leaves_its_item_deselected() {
+        let pair = |keys| {
+            let mut tracker = DoubleClickTracker::new();
+            press_with(
+                &mut tracker,
+                0,
+                PressHit::Item(4),
+                keys,
+                false,
+                DOUBLE_CLICK_DEFAULT,
+            );
+            press_with(
+                &mut tracker,
+                1_000,
+                PressHit::Item(4),
+                keys,
+                false,
+                DOUBLE_CLICK_DEFAULT,
+            )
+        };
+        assert_eq!(
+            pair(SelectKeys {
+                toggle: false,
+                extend: true,
+            }),
+            PrimaryPress::Activate {
+                index: 4,
+                intent: BundleIntent::Browse,
+                deselect: true,
+            }
+        );
+        assert_eq!(
+            pair(SelectKeys {
+                toggle: true,
+                extend: false,
+            }),
+            PrimaryPress::Activate {
+                index: 4,
+                intent: BundleIntent::Launch,
+                deselect: false,
+            }
         );
     }
 

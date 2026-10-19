@@ -645,8 +645,8 @@ fn the_bundle_presents_no_icon_bar_slot_and_runs_one_instance() {
     // machine's configuration, each able to overwrite the other's applies.
     //
     // A singleton is the signed header's default, so what this pins is that
-    // no `multi-instance` key was ever added; the icon-bar exception has to
-    // be declared, so that one is read directly.
+    // no `instances` key was ever added; the icon-bar exception has to be
+    // declared, so that one is read directly.
     let manifest = include_str!("../AppInfo.toml");
     let declares = |key: &str| {
         manifest
@@ -660,7 +660,7 @@ fn the_bundle_presents_no_icon_bar_slot_and_runs_one_instance() {
         "the manifest must declare no icon-bar slot"
     );
     assert!(
-        !declares("multi-instance"),
+        !declares("instances"),
         "a second Settings could overwrite the first's applies"
     );
 }

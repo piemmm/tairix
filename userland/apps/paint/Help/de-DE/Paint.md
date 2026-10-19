@@ -170,7 +170,9 @@ Ausschneiden, Kopieren, Einfügen, Alles auswählen und Auswahl aufheben, dann
 Datei, Bearbeiten, Bild, Ebenen, Farben, Korrekturen, Sprites oder Seiten,
 Ansicht und Werkzeuge, jedes mit eigenem Untermenü. Das Fenster hat keine
 Menüleiste. Das Schließen eines Fensters oder Beenden mit ungespeicherten
-Änderungen fragt zuerst nach.
+Änderungen fragt zuerst nach. Wird ein Fenster mit der sekundären (rechten)
+Maustaste über seine Schließen-Schaltfläche geschlossen, zeigt die
+Dateiverwaltung außerdem seine Datei in dem Ordner, der sie enthält.
 
 * `Ctrl+N` — ein neues Bild; `Ctrl+O` — eine Datei öffnen
 * `Ctrl+S` — speichern; `Ctrl+Shift+S` — speichern unter

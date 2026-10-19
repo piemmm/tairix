@@ -635,15 +635,14 @@ fn a_cancelled_press_ends_without_moving_anything() {
     assert_eq!(bar.model().offset(), dragged, "the drag is over");
 }
 
-/// Each end button is a plate raised in the channel with its chevron across
-/// it, in the theme's foreground, so the arrows read at a glance; one toward
-/// an end the content already rests at draws no plate.
+/// An end button is its chevron alone, in the theme's foreground, until the
+/// pointer is over it, when it raises its plate; one toward an end the content
+/// already rests at raises none.
 #[test]
-fn an_end_button_is_a_raised_plate_unless_there_is_nothing_that_way() {
+fn an_end_button_raises_its_plate_only_under_the_pointer() {
     let theme = theme();
     let mut bar = vbar();
     bar.set_model(bar.model().scroll_to(300));
-    let surface = render(&bar, vbounds(), &theme);
     let button = bar
         .part_rect(ScrollPart::Decrement, vbounds(), Scale::ONE, &theme)
         .expect("a decrement button");
@@ -652,14 +651,31 @@ fn an_end_button_is_a_raised_plate_unless_there_is_nothing_that_way() {
             .any(|y| (0..button.width).any(|x| surface.get(x, y) == Some(premul(colour))))
     };
     let palette = theme.palette();
-    assert!(inside(&surface, palette.scroll_thumb), "a plate");
-    assert!(inside(&surface, palette.on_surface), "a readable chevron");
+    let resting = render(&bar, vbounds(), &theme);
+    assert!(
+        !inside(&resting, palette.scroll_thumb),
+        "no plate at rest, though there is content that way"
+    );
+    assert!(inside(&resting, palette.on_surface), "a readable chevron");
+
+    let centre = button.center();
+    bar.on_pointer(
+        &moved(centre.x, centre.y),
+        vbounds(),
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert!(
+        inside(&render(&bar, vbounds(), &theme), palette.scroll_thumb),
+        "a plate under the pointer"
+    );
 
     bar.set_model(bar.model().to_start());
     let at_start = render(&bar, vbounds(), &theme);
     assert!(
         !inside(&at_start, palette.scroll_thumb),
-        "no plate at the start"
+        "nothing that way lights nothing, even hovered"
     );
     assert!(
         !inside(&at_start, palette.on_surface),
@@ -678,8 +694,8 @@ fn render_draws_the_channel_and_an_idle_thumb() {
 
 /// An awake bar's thumb, and an end control while its press is live, take the
 /// neutral active grey: the accent is the selection's, and a bar in use is
-/// handled, not selected. The end control is lit by its press alone — hover
-/// lights the thumb, never an arrow.
+/// handled, not selected. Hover raises an end control's plate in the thumb's
+/// grey; only its live press takes the active one.
 #[test]
 fn an_awake_bar_takes_the_active_grey_never_the_accent() {
     let theme = theme();
@@ -707,7 +723,7 @@ fn an_awake_bar_takes_the_active_grey_never_the_accent() {
     let hovered = render(&bar, vbounds(), &theme);
     assert!(
         !on_button(&hovered, palette.scroll_thumb_active),
-        "hover alone lights no end control"
+        "hover alone takes no active grey"
     );
     assert!(on_button(&hovered, palette.scroll_thumb));
     assert!(
@@ -971,38 +987,95 @@ fn a_move_within_one_part_leaves_a_scrollbar_equal() {
     }
 }
 
-/// Which part the pointer is over draws nothing while nothing is held, so
-/// crossing from the track onto an end control repaints nothing. The
-/// regression: hover lit an end control's plate.
+/// Of the parts the pointer crosses with nothing held, only an end control
+/// draws anything: crossing the track repaints nothing, and crossing onto an
+/// end control that would move something lights it.
+/// An end control with nothing to do lights for nothing, so hovering one
+/// repaints nothing at all.
 #[test]
-fn the_part_under_the_pointer_draws_nothing_until_a_press_is_held() {
+fn hovering_an_end_with_nothing_to_do_repaints_nothing() {
+    let theme = theme();
+    let mut bar = vbar();
+    bar.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink());
+    let mut damage = sink();
+    // The content rests at its start, so the decrement has nothing to do.
+    bar.on_pointer(&moved(2, 2), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(damage.is_empty(), "nothing it draws has changed");
+}
+
+#[test]
+fn only_an_end_control_draws_the_part_under_the_pointer() {
     let theme = theme();
     // The increment, because at the start there is nothing above for the
     // decrement to light.
     let foot = i32::try_from(VH).expect("small") - 2;
-    let mut on_end = vbar();
-    on_end.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut sink());
     let mut on_track = vbar();
     on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink());
+    let mut damage = sink();
+    on_track.on_pointer(&moved(2, 170), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(damage.is_empty(), "crossing the track repaints nothing");
 
-    assert_eq!(on_end, on_track, "the same composition");
-    assert_eq!(
+    let mut on_end = on_track;
+    let mut damage = sink();
+    on_end.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(!damage.is_empty(), "crossing onto an end control lights it");
+    assert_ne!(
+        on_end, on_track,
+        "a lit end control is a different composition"
+    );
+    assert_ne!(
         render(&on_end, vbounds(), &theme).pixels(),
         render(&on_track, vbounds(), &theme).pixels(),
     );
-    let mut damage = sink();
-    on_track.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut damage);
-    assert!(
-        damage.is_empty(),
-        "crossing onto an end control repaints nothing"
-    );
 
     let mut damage = sink();
-    on_track.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut damage);
-    assert!(!damage.is_empty(), "a press lights it");
+    on_end.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(!damage.is_empty(), "leaving it puts it out");
+    assert_eq!(on_end, on_track);
+
+    on_end.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut sink());
+    on_end.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
     let mut damage = sink();
-    on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut damage);
+    on_end.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut damage);
     assert!(!damage.is_empty(), "leaving it while held puts it out");
+    let mut damage = sink();
+    on_end.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(!damage.is_empty(), "returning to it while held relights it");
+}
+
+/// While the thumb is dragged, an end control the pointer crosses stays dark,
+/// even one with somewhere to go: the press is the thumb's.
+#[test]
+fn a_drag_lights_no_end_control_it_crosses() {
+    let theme = theme();
+    let foot = i32::try_from(VH).expect("small") - 2;
+    let mut bar = vbar();
+    bar.on_pointer(&moved(8, 20), vbounds(), Scale::ONE, &theme, &mut sink());
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert!(bar.is_pressing(), "the thumb press captured the drag");
+    bar.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut sink());
+    // Content that grew under the drag gives the increment somewhere to go
+    // while the pointer is still on it.
+    let offset = bar.model().offset();
+    bar.set_model(ScrollModel::new(
+        ScrollRange::new(4000, 300, offset),
+        10,
+        100,
+    ));
+    let button = bar
+        .part_rect(ScrollPart::Increment, vbounds(), Scale::ONE, &theme)
+        .expect("an increment button");
+    let surface = render(&bar, vbounds(), &theme);
+    let palette = theme.palette();
+    let lit = (button.top()..button.bottom()).any(|y| {
+        (button.left()..button.right()).any(|x| {
+            let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+                return false;
+            };
+            surface.get(x, y) == Some(premul(palette.scroll_thumb))
+        })
+    });
+    assert!(!lit, "no plate under a drag");
 }
 
 /// A release clears the drag latch and the pressed look the bar draws, so it

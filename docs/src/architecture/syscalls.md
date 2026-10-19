@@ -198,6 +198,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 143 | `port_unbind`  | `IpcEndpoint` (own port)                | `errno`       | —                       | yes     |
 | 144 | `call_peer_port` | `IpcEndpoint`, `Handle` (ticket), `IpcEndpoint` (port) | `errno` | —             | no      |
 | 145 | `hw_node_key_source` | —                                 | `errno`       | `CAP_INPUT_INJECT` | no    |
+| 146 | `fd_grant_location` | `u32 fd`, `*const ProcId recipient`, `usize len` | `u64` (handle) | —           | no      |
+| 147 | `fd_redeem_location` | `Handle` (location), `*const ProcId grantor`, `usize len`, `user_ptr` (path out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | yes |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -1358,6 +1360,27 @@ not exist, and stays pending for its own grantor. Wrappers
 `tairix_rt::fd_grant` / `tairix_rt::fd_redeem` / `tairix_rt::fd_redeem_from`;
 C stubs `tairix_sys_fd_grant` / `tairix_sys_fd_redeem` /
 `tairix_sys_fd_redeem_from`.
+
+`fd_grant_location(fd, recipient)` (no. 146) tells one live instance where
+one of the caller's own descriptors points, and hands it nothing to reach the
+file with: the recipient redeems the handle with
+`fd_redeem_location(handle, grantor, out)` (no. 147), which writes the absolute
+path, and opens nothing. A path is told only to a principal that could have
+named it: the redemption needs `CAP_FS_ACCESS`, and refuses with
+`PermissionDenied` — consuming the location, which can never be told — when the
+descriptor reaches its file as another user than the reader. For a descriptor
+the holder opened that is the holder; for a delegation, the identity it
+captured. So an application holding no filesystem capability, handed one
+document, can have the desktop show the user where it lives
+([`RevealDocument`](../desktop/session.md#showing-where-a-document-lives))
+without itself learning the path or passing the file on. Minting is ungated and
+unaudited, since it discloses nothing until a reader the kernel admits redeems
+it, and the redemption is audited. A location shares a delegation's handle
+space, duplicate suppression and per-recipient bound, and each is redeemed only
+as what it is: `fd_redeem` refuses a location and `fd_redeem_location` a file
+delegation, both with `OutOfRange`, leaving it pending. Wrappers
+`tairix_rt::fd_grant_location` / `tairix_rt::fd_redeem_location`; C stubs
+`tairix_sys_fd_grant_location` / `tairix_sys_fd_redeem_location`.
 
 `waitset_wait` (no. 45) reports **one** member per call, and hands the
 ready ones out **in turn**. Most member kinds are level-triggered peeks

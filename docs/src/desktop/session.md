@@ -789,9 +789,10 @@ performs what needs capabilities the shell does not hold
   listing is current.
 - `LibraryDismissed`, `NotificationActivated` — surfaced for the embedder;
   the bar's own state is already up to date.
-- `SetDateTime` — the clock menu's set-time row was chosen; the session asks
-  for an account that may set the clock (see *Asking for an account that
-  may*), because it holds no such capability itself.
+- `SetDateTime` — the clock menu's set-time row was chosen; the session
+  raises the Date & Time dialog when one is open, and otherwise asks for an
+  account that may set the clock (see *Asking for an account that may*),
+  because it holds no such capability itself.
 
 The bar's **context menu** is presented by the presenter as its own small
 rounded window (a third window beside the bar and popup).
@@ -1014,6 +1015,35 @@ one read as the program's name and never seen: the file manager's
 `--desktop` role switch, the folder a desktop icon opens, the document an
 icon launch names. One rule, in one place, for every launch site
 (`AGENTS.md` §2.2).
+
+## Showing where a document lives
+
+An application holding no filesystem capability — a document editor handed one
+file — may ask the desktop to show the user where that file is
+(`WindowRequest::RevealDocument`) without ever learning the path. It mints the
+session a **location grant** on the document's own descriptor
+(`fd_grant_location`, [system calls](../architecture/syscalls.md)), which opens
+nothing, and names it with the window the request is about.
+`ShellWindowHost::reveal_requested` decides, in this order:
+
+- the window must be the caller's and the one the user is working in — it holds
+  the keyboard and took the user's last key or button, a press on its close
+  control included — or the request is refused, since it brings another
+  window forward;
+- the location is redeemed bound to the caller (`DocumentRelay::locate`,
+  `fd_redeem_location`), whatever the answer, so a refusal leaves nothing
+  pending; the kernel tells the path only to a reader of the user the
+  descriptor reaches its file as;
+- the path goes to the desktop's file manager as an ordinary path target,
+  through the same launch funnel the desktop's own launches take, lent the raise
+  a hand-over lends. The file manager shows a file named that way selected in
+  its folder, bringing forward a window already showing it. With no file manager
+  running the request is refused: the desktop spawns nothing on an
+  application's behalf.
+
+Every refusal is on the audit trail as `REVEAL_REFUSED` (20027), with the
+caller and why. The editors' secondary press on a window's close button is the
+first consumer ([TextEdit](textedit.md)).
 
 ## Ending the session
 
@@ -2209,7 +2239,8 @@ by `tairix_greeter::AuthoriseSheet`).
 ### What it asks
 
 Choosing *Set Date & Time…* in the [clock's
-menu](taskbar.md#the-clocks-menu) makes a request: the program, how it runs
+menu](taskbar.md#the-clocks-menu) while no Date & Time dialog is open makes a
+request: the program, how it runs
 (started and left running, or run and waited for, or run with its output
 handed back), who is asking and what it does, in words. The session first asks
 the broker which accounts may allow the program (`ElevateRequest::Authorisers`,
@@ -2429,7 +2460,8 @@ bar's clock left where the last real event put it, since a cancel carries no
 time. What the window manager abandoned (`InputRouter::abandon_gesture`) is
 kept for the serve loop to deliver once the drain is done: the client whose
 press was taken is sent `PointerAction::Cancelled` — an alert or the trusted
-picker is handed it directly — a window a resize was dragging is told the
+picker is handed it directly — and so, once, is a window the pointer has left
+since (`InputRouter::take_client_left`), a window a resize was dragging is told the
 size it settled at, and a tool window's owner that its move ended over
 nothing, so a dock it marked clears and nothing docks.
 
@@ -2700,6 +2732,26 @@ asking again for a folder whose read is merely under way (`take`) joins it.
   catalogue it was not read from. The one read that stays on the session's own
   task is the bring-up read, before any window is on screen and before anything
   can be clicked.
+
+### Text never waits on the font service
+
+The font service is another process, and every glyph or line metric the
+desktop has not drawn before is a round trip to it, as slow as the reads that
+answer it. So the session draws without waiting
+(`tairix_font::defer_fetches`): a miss draws a provisional answer — no ink, on
+the console's own advance — and is recorded, and one font worker, the only
+thread that waits on the service, fetches what each frame recorded once the
+frame is presented. When a fetch lands, the end of that turn lays out and draws
+again everything drawn from a provisional answer (`refit_text`): the icon bar,
+every window title band and nothing else of the window, the desktop's labels,
+an open menu chain (a plate the user dragged keeps its place), the tooltip, a
+carried drag's plate, the lock and the screensaver's text, the trusted picker,
+and the prompts and alerts, which are measured again and keep their centre if
+their size changed. That redraw of all the text the session shows is also the
+contract the font client's held glyphs rest on: what the glyph cache let go of
+while it was on screen is kept until the fetch after such a redraw, and only
+what the redraw did not draw goes then. With no thread to fetch on, the serve
+loop fetches text as it draws it.
 
 ## Running-task list ↔ window stack
 

@@ -108,6 +108,14 @@ never baked into the kernel.
   also answers [`FontRequest::Metrics`] with the family's line metrics, and
   [`FontRequest::Families`] with the installed selectable families so a
   settings surface offers exactly what the store holds.
+- **Reads a face whole only once it maps the scalar asked for.** Until then
+  only the face's table directory and `cmap` are read, by position
+  (`tairix_fontface::Coverage`, the same decoding the face parser applies), so
+  a scalar no face maps costs each fallback face tens of kilobytes rather than
+  all of it. A failed read is tried again on the next request; only a face
+  that does not parse is set aside. A scalar that draws nothing
+  (`tairix_util::utf8::is_hidden`) is answered empty without consulting a
+  face.
 
 ### 2.2 `FONT_ENDPOINT` — the IPC protocol (`lib/abi/src/font_ipc.rs`)
 
@@ -199,6 +207,24 @@ follows (`cargo xtask c-header`).
   compiled-in console atlas (§2.4) the boot console draws from.
 - Protocol request/reply encoders live in `lib/abi::font_ipc` and are shared
   by client and service (§2.2), never re-spelled.
+- **A scalar that draws nothing is never asked for.** A control, a separator
+  or a default-ignorable resolves locally to an empty, zero-advance glyph.
+- **A drawing thread that must not wait does not.** After `defer_fetches` a
+  glyph or metrics miss draws a provisional answer — no ink, on the console's
+  own advance and geometry — and is recorded; `fetch_deferred`, on a thread
+  that may wait, fetches what was recorded a face at a time in runs, and moves
+  `text_generation` (and the measurement epoch) when anything lands, so the
+  drawing thread lays out and draws again what it drew provisionally — all the
+  text it shows, which is the contract the held values rest on. What the glyph
+  cache will not keep or evicts to make room, and metrics the metrics cache
+  displaces, are held until the pass after a redraw that did not draw them. A
+  scalar the service refuses is let go and the rest of its run asked for; an
+  unreachable service, or one asking to be asked again, ends the pass. While a face that might draw a scalar
+  cannot be read, the service refuses the scalar rather than answering U+FFFD,
+  and reads the face again at doubling intervals of asks.
+  The service-manager connect handshake is made before the first request, on
+  the thread that sends it. The desktop session draws this way; `outline_run`
+  and `families` still ask and wait.
 
 ### 2.4 Kernel console atlas subset (`lib/fbcon` / kernel path)
 

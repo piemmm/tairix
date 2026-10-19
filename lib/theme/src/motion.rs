@@ -3,8 +3,10 @@
 //!
 //! Reactive Alloy motion is *magnetic, not liquid*: a control may lift,
 //! compress, brighten, or expose a seam, driven by a state change, but never
-//! runs an idle decorative loop. The durations here are the spec §9 timing
-//! targets as theme *data*, so a control never hard-codes a timing. A theme's
+//! runs an idle decorative loop. The one motion that runs for as long as its
+//! state lasts is a busy progress trace's sweep, because the motion is what it
+//! says: work is going on. The durations here are the spec §9 timing targets
+//! as theme *data*, so a control never hard-codes a timing. A theme's
 //! reduced-motion mode collapses every animated transition to an immediate
 //! state change while the state itself still changes visibly (through
 //! contrast, rail thickness, shape marks, and labels).
@@ -67,13 +69,15 @@ pub enum MotionInteraction {
     /// A found pointer settling back to its own size once it rests: slower
     /// than it grew, so the eye can follow it home.
     PointerRestore,
+    /// One crossing of a busy progress trace's sweep.
+    ProgressSweep,
 }
 
 impl MotionInteraction {
     /// Every interaction, in the order a [`MotionTheme`]'s duration table
     /// holds them: the table is indexed by the variant, so this order is the
     /// meaning of [`MotionTheme::new`]'s argument.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::HoverEnter,
         Self::HoverExit,
         Self::PressCompress,
@@ -92,6 +96,7 @@ impl MotionInteraction {
         Self::BackdropChange,
         Self::PointerEnlarge,
         Self::PointerRestore,
+        Self::ProgressSweep,
     ];
 
     /// How many durations a [`MotionTheme`] carries.

@@ -6,6 +6,8 @@ use alloc::format;
 use tairix_abi::window_ipc::{
     AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec,
 };
+use tairix_abi::Errno;
+use tairix_util::utf8::shown;
 
 /// The index of *Don't Save* in [`save_changes_alert`]'s question.
 const DISCARD: u8 = 1;
@@ -27,11 +29,26 @@ pub(super) fn save_changes_alert(name: &str) -> Option<AlertSpec> {
     ];
     AlertSpec::fitted(
         AlertSeverity::Warning,
-        &format!("Save the changes to \u{201c}{name}\u{201d}?"),
+        &format!("Save the changes to \u{201c}{}\u{201d}?", shown(name)),
         "Your changes will be lost if you do not save them.",
         &buttons,
     )
     .ok()
+}
+
+/// Why the desktop did not show where a document lives, from its refusal.
+#[must_use]
+pub(super) const fn reveal_refusal(err: Errno) -> &'static str {
+    match err {
+        Errno::NotFound => "No file manager is running to show it.",
+        Errno::PermissionDenied => {
+            "Its window was no longer the one you were working in, or its folder is not one \
+             you may see."
+        }
+        Errno::OutOfRange => "It is not kept in a folder.",
+        Errno::NotSupported => "This desktop does not show where documents are kept.",
+        _ => "The desktop could not show it.",
+    }
 }
 
 /// How the user answered [`save_changes_alert`]'s question.

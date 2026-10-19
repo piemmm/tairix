@@ -612,6 +612,24 @@ impl DesktopShell {
         }
     }
 
+    /// Paint the carried drag's plate afresh where the pointer is: the name it
+    /// shows was drawn provisionally and its text has landed.
+    pub fn redraw_drag_plate(&mut self, compositor: &mut Compositor) {
+        let Some(carried) = self.drag.carried.as_ref() else {
+            return;
+        };
+        let (old, items) = (carried.plate, carried.items);
+        if let Some(old) = old {
+            compositor.remove(old);
+        }
+        let at = self.router().pointer();
+        let theme = self.session().floating_theme();
+        let plate = place_plate(None, &items, at, theme, compositor);
+        if let Some(carried) = self.drag.carried.as_mut() {
+            carried.plate = plate;
+        }
+    }
+
     /// Stop carrying, answering how it ended: where the pointer is if
     /// `dropped` and what is there takes the drag — a slot's application, or a
     /// place whose last answer the pointer shows — and otherwise on nothing.

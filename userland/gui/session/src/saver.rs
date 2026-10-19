@@ -39,7 +39,7 @@ use tairix_theme::Theme;
 use tairix_tz::CivilClock;
 use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions};
 use tairix_window::WallpaperName;
-use tairix_wm::{Color, Compositor, Surface, WindowId};
+use tairix_wm::{Color, Compositor, Scale, Surface, WindowId};
 
 use crate::switchuser::park_within;
 
@@ -428,6 +428,25 @@ impl Screensaver {
             Scene::RetroGames(games) => games.advance(now_ns, shown.wm, compositor),
             Scene::SystemMonitor(board) => board.advance(now_ns, shown.wm, compositor, wall),
             Scene::Still | Scene::Slideshow(_) => {}
+        }
+    }
+
+    /// Lay out and draw again the text the scene shows, in `theme` at
+    /// `scale`: text it was drawn with provisionally has landed.
+    pub fn refit_text(&mut self, theme: &Theme, scale: Scale, compositor: &mut Compositor) {
+        let Some(shown) = self.shown.as_mut() else {
+            return;
+        };
+        match &mut shown.scene {
+            Scene::Clock(face) => face.refit_text(shown.wm, compositor),
+            Scene::Ribbon(face) => face.refit_text(theme, scale),
+            Scene::Raytrace(tracer) => tracer.refit_text(theme, scale, compositor),
+            Scene::SystemMonitor(board) => board.refit_text(shown.wm, compositor),
+            Scene::Still
+            | Scene::Slideshow(_)
+            | Scene::Starfield(_)
+            | Scene::Life(_)
+            | Scene::RetroGames(_) => {}
         }
     }
 

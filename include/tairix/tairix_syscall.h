@@ -170,6 +170,8 @@ extern "C" {
 #define TAIRIX_SYS_PORT_UNBIND 143u
 #define TAIRIX_SYS_CALL_PEER_PORT 144u
 #define TAIRIX_SYS_HW_NODE_KEY_SOURCE 145u
+#define TAIRIX_SYS_FD_GRANT_LOCATION 146u
+#define TAIRIX_SYS_FD_REDEEM_LOCATION 147u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -686,6 +688,8 @@ int32_t tairix_sys_waitset_close(uint64_t a0);
 int32_t tairix_sys_port_unbind(uint64_t a0);
 int32_t tairix_sys_call_peer_port(uint64_t a0, uint64_t a1, uint64_t a2);
 int32_t tairix_sys_hw_node_key_source(void);
+uint64_t tairix_sys_fd_grant_location(uint32_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_fd_redeem_location(uint64_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -13,7 +13,7 @@ use tairix_reclaim::{CacheBudget, CachedBytes, PressureBand, ReclaimOwner, Repor
 
 use super::*;
 use crate::client::tests::{
-    cache_at, caching_client, client_with, glyph_lookups, LocalClient, INTER,
+    cache_at, caching_client, client_with, defer, glyph_lookups, LocalClient, INTER,
 };
 use crate::client::FontClient;
 
@@ -459,4 +459,28 @@ fn a_measurement_key_separates_face_scale_weight_and_text() {
         base,
         measure::measure_key(NOTO, HEIGHT, FontWeight::REGULAR, "hell")
     );
+}
+
+/// A width measured from provisional advances is retained like any other, so
+/// it must never be served once the real advances land.
+#[test]
+fn a_provisional_measurement_is_measured_again_once_its_glyphs_land() {
+    let measured = |client: &mut LocalClient| {
+        client.with_measurement("Wallpaper", INTER, HEIGHT, FontWeight::REGULAR, |m| {
+            m.width()
+        })
+    };
+    let (mut reference, _gauge) = roomy_client();
+    let expected = measured(&mut reference);
+
+    let (mut client, _gauge) = roomy_client();
+    defer(&mut client);
+    let provisional = measured(&mut client);
+    assert_eq!(
+        measured(&mut client),
+        provisional,
+        "served from the memo meanwhile"
+    );
+    assert!(client.fetch_deferred());
+    assert_eq!(measured(&mut client), expected);
 }

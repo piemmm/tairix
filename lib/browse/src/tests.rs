@@ -4284,6 +4284,37 @@ mod create_model {
         assert_eq!(focused(&browser).map(Entry::name), Some("Downloads"));
     }
 
+    /// What a file manager shows a file in its folder with: the name is
+    /// selected alone at once when the listing has it, and otherwise waits
+    /// for a listing that does, moving nothing meanwhile.
+    #[test]
+    fn following_a_name_selects_it_alone_now_or_once_a_listing_shows_it() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        browser.select_all();
+        browser.follow("System");
+        assert_eq!(focused(&browser).map(Entry::name), Some("System"));
+        assert_eq!(browser.selection().len(), 1, "selected alone");
+        assert_eq!(browser.focus_pending(), None);
+        browser.follow("Not yet listed");
+        assert_eq!(browser.focus_pending(), Some("Not yet listed"));
+        assert_eq!(
+            focused(&browser).map(Entry::name),
+            Some("System"),
+            "nothing moved while the name waits"
+        );
+        let users = browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == "Users")
+            .expect("the root lists Users");
+        browser.open_index(users).expect("lists");
+        assert_eq!(
+            browser.focus_pending(),
+            None,
+            "a name in one folder is not looked for in another"
+        );
+    }
+
     #[test]
     fn an_invalid_name_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
@@ -10556,6 +10587,18 @@ fn a_delete_question_names_a_single_target() {
     assert!(!alert.detail().to_ascii_lowercase().contains("folder"));
 }
 
+/// The question naming what it removes shows what would hide in the name.
+#[test]
+fn a_delete_question_shows_what_would_hide_in_the_name() {
+    let plan = DeletePlan::new(vec![(comps(&["Home", "a\u{200b}b"]), false)]).expect("a plan");
+    let alert = delete_alert(&plan, DeleteDisposition::Permanent).expect("an alert");
+    assert!(
+        alert.headline().contains("a\u{fffd}b"),
+        "{}",
+        alert.headline()
+    );
+}
+
 #[test]
 fn a_delete_question_reports_the_honest_count_and_folder_warning() {
     let alert = delete_alert(&folder_plan(), DeleteDisposition::Permanent).expect("an alert");
@@ -10624,77 +10667,224 @@ fn trash_dir_is_the_library_trash_subtree_of_home() {
 
 // --- FM7b: the long-operation progress + cancel surface -------------------
 
-use crate::progress::{ProgressModel, ProgressOp};
+use crate::progress::{ProgressModel, ProgressOp, Reading, Subject, Tally};
 use crate::render::{
-    build_progress_cancel, draw_progress_window, progress_cancel_at, progress_window_extent,
+    build_progress_cancel, draw_progress_window, progress_cancel_at, progress_state,
+    progress_window_extent,
 };
+use tairix_controls::state::ActivityState;
+
+const SEC_NS: u64 = 1_000_000_000;
+
+fn reading(done: Tally, total: Option<Tally>, preparing: bool) -> Reading {
+    Reading {
+        done,
+        total,
+        preparing,
+        removing: false,
+    }
+}
+
+fn tally(items: u64, bytes: u64) -> Tally {
+    Tally { items, bytes }
+}
+
+fn copying_to_backup() -> ProgressModel {
+    ProgressModel::new(
+        ProgressOp::Copy,
+        Subject::One(String::from("Photos")),
+        Some(String::from("Backup")),
+    )
+}
 
 #[test]
-fn progress_model_reports_the_honest_count_and_never_a_percentage() {
-    let mut model = ProgressModel::new(ProgressOp::Delete);
-    assert_eq!(model.done(), 0);
-    // Zero and plural counts read naturally; the verb matches the operation.
-    assert_eq!(model.status_line(), "0 items removed");
-    model.set_done(1);
-    assert_eq!(model.status_line(), "1 item removed");
-    model.set_done(42);
-    assert_eq!(model.status_line(), "42 items removed");
-    // No fabricated percentage anywhere in the caption.
-    assert!(!model.status_line().contains('%'));
-
-    // A copy model reads with the copy verb.
-    let mut copy = ProgressModel::new(ProgressOp::Copy);
-    copy.set_done(3);
-    assert_eq!(copy.status_line(), "3 items copied");
-    assert!(copy.title().starts_with("Copying"));
-    assert!(model.title().starts_with("Deleting"));
-
-    // A move-to-Trash model reads with the Trash verb (`plans/NEW-FILEMANAGER.md`
-    // FM10): an honest recoverable-move caption, never "removed".
-    let mut trash = ProgressModel::new(ProgressOp::Trash);
-    trash.set_done(1);
-    assert_eq!(trash.status_line(), "1 item moved to Trash");
+fn the_headline_says_what_moves_where() {
+    assert_eq!(
+        copying_to_backup().headline(),
+        "Copying \u{201c}Photos\u{201d} to \u{201c}Backup\u{201d}"
+    );
+    let deleting = ProgressModel::new(ProgressOp::Delete, Subject::Many(12), None);
+    assert_eq!(deleting.headline(), "Deleting 12 items");
+    assert!(deleting.title().starts_with("Deleting"));
+    let trash = ProgressModel::new(ProgressOp::Trash, Subject::Many(1), None);
+    assert_eq!(trash.headline(), "Moving 1 item to Trash");
     assert!(trash.title().starts_with("Moving to Trash"));
-
-    // A move says it moves, not that it copies.
-    let mut moving = ProgressModel::new(ProgressOp::Move);
-    moving.set_done(2);
-    assert_eq!(moving.status_line(), "2 items moved");
+    let moving = ProgressModel::new(
+        ProgressOp::Move,
+        Subject::Many(2),
+        Some(String::from("Archive")),
+    );
     assert_eq!(moving.title(), "Moving\u{2026}");
-    // A refusal's notice names the operation it stopped.
     assert_eq!(moving.stopped_title(), "Move stopped");
     assert_eq!(trash.stopped_title(), "Move to Trash stopped");
 }
 
+/// A whole that is counted is shown as a share of it; until it is counted,
+/// and where it could not be, the window states what it has done and no
+/// share at all.
+#[test]
+fn the_share_shown_is_of_a_counted_whole_and_reaches_all_of_it() {
+    let mut model = copying_to_backup();
+    model.observe(reading(tally(40, 4_000), None, true), "", 0);
+    assert!(model.reading().preparing);
+    assert_eq!(model.fraction(), None, "no share while it counts");
+    assert!(model.figures().starts_with("Preparing"));
+    assert!(model.figures().contains("40 items"));
+
+    let whole = tally(100, 10_000_000);
+    model.observe(
+        reading(tally(50, 2_500_000), Some(whole), false),
+        "one.jpg",
+        SEC_NS,
+    );
+    assert_eq!(model.fraction(), Some(250), "a copy goes by its bytes");
+    assert_eq!(model.current(), "one.jpg");
+    model.observe(reading(whole, Some(whole), false), "last.jpg", 2 * SEC_NS);
+    assert_eq!(model.fraction(), Some(1000), "the bar reaches the end");
+
+    let mut uncounted = ProgressModel::new(ProgressOp::Delete, Subject::Many(3), None);
+    uncounted.observe(reading(tally(7, 0), None, false), "", 0);
+    assert_eq!(uncounted.fraction(), None);
+    assert_eq!(uncounted.figures(), "7 items");
+    assert!(!uncounted.figures().contains('%'));
+
+    let mut removal = ProgressModel::new(ProgressOp::Delete, Subject::Many(3), None);
+    removal.observe(reading(tally(3, 0), Some(tally(12, 900)), false), "", 0);
+    assert_eq!(removal.fraction(), Some(250), "a removal goes by its items");
+    assert_eq!(removal.figures(), "3 of 12 items");
+}
+
+/// A rate is taken only from work against a counted whole: the time an
+/// operation spent waiting its turn, or counting, is not time it spent going
+/// slowly.
+#[test]
+fn waiting_and_counting_never_slow_the_stated_rate() {
+    let mut model = copying_to_backup();
+    let whole = tally(10, 100 * 1024 * 1024);
+    let mib = 1024 * 1024;
+    model.set_waiting(true);
+    model.observe(reading(Tally::default(), None, false), "", 0);
+    model.set_waiting(false);
+    model.observe(reading(tally(4, 0), None, true), "", 60 * SEC_NS);
+    for second in 0..=3 {
+        model.observe(
+            reading(tally(second, second * 10 * mib), Some(whole), false),
+            "",
+            (90 + second) * SEC_NS,
+        );
+    }
+    let figures = model.figures();
+    assert!(figures.contains("10.0 MiB/s"), "{figures}");
+    assert!(figures.contains("about 5 seconds left"), "{figures}");
+}
+
+/// A move across volumes removing the originals it carried says so in place of
+/// a time left, and the pause does not slow the rate it states once it
+/// carries on.
+#[test]
+fn removing_originals_is_stated_and_never_slows_the_rate() {
+    let mut model = ProgressModel::new(
+        ProgressOp::Move,
+        Subject::One(String::from("Photos")),
+        Some(String::from("Backup")),
+    );
+    let whole = tally(10, 100 * 1024 * 1024);
+    let mib = 1024 * 1024;
+    for second in 0..=3 {
+        model.observe(
+            reading(tally(second, second * 10 * mib), Some(whole), false),
+            "",
+            second * SEC_NS,
+        );
+    }
+    let removing = Reading {
+        removing: true,
+        ..reading(tally(3, 30 * mib), Some(whole), false)
+    };
+    model.observe(removing, "", 4 * SEC_NS);
+    assert_eq!(model.figures(), "Removing the originals\u{2026}");
+    for second in 0..=1 {
+        model.observe(
+            reading(
+                tally(3 + second, (3 + second) * 10 * mib),
+                Some(whole),
+                false,
+            ),
+            "",
+            (60 + second) * SEC_NS,
+        );
+    }
+    let figures = model.figures();
+    assert!(figures.contains("10.0 MiB/s"), "{figures}");
+}
+
+/// A pace that has all but stopped is still stated in hours rather than
+/// overflowing on the way to them.
+#[test]
+fn an_all_but_stopped_pace_is_stated_in_hours() {
+    let mut model = copying_to_backup();
+    let whole = tally(1, u64::MAX);
+    model.observe(reading(tally(0, 0), Some(whole), false), "", 0);
+    model.observe(reading(tally(0, 3), Some(whole), false), "", 3 * SEC_NS);
+    let figures = model.figures();
+    assert!(figures.contains("hours left"), "{figures}");
+}
+
+/// The rate and the time left are stated only once the readings have held
+/// long enough to mean something.
+#[test]
+fn the_rate_and_time_left_wait_for_the_pace_to_settle() {
+    let mut model = copying_to_backup();
+    let whole = tally(10, 100 * 1024 * 1024);
+    let mib = 1024 * 1024;
+    model.observe(reading(tally(0, 0), Some(whole), false), "", 0);
+    model.observe(reading(tally(1, 10 * mib), Some(whole), false), "", SEC_NS);
+    assert!(!model.figures().contains("left"), "too soon to say");
+    for second in 2..=4 {
+        model.observe(
+            reading(tally(second, second * 10 * mib), Some(whole), false),
+            "",
+            second * SEC_NS,
+        );
+    }
+    let figures = model.figures();
+    assert!(figures.starts_with("40.0 MiB of 100.0 MiB"), "{figures}");
+    assert!(figures.contains("10.0 MiB/s"), "{figures}");
+    assert!(figures.contains("about 5 seconds left"), "{figures}");
+}
+
+#[test]
+fn a_waiting_operation_says_so_and_shows_a_still_track() {
+    let mut model = copying_to_backup();
+    model.set_waiting(true);
+    assert!(model.is_waiting());
+    assert_eq!(model.figures(), "Waiting for the operations before it");
+    assert_eq!(progress_state(&model).activity, ActivityState::Idle);
+    model.set_waiting(false);
+    model.observe(reading(tally(1, 0), None, true), "", 0);
+    assert_eq!(progress_state(&model).activity, ActivityState::Working);
+}
+
 #[test]
 fn progress_cancel_is_latched_and_shown() {
-    let mut model = ProgressModel::new(ProgressOp::Delete);
+    let mut model = ProgressModel::new(ProgressOp::Delete, Subject::Many(2), None);
     assert!(!model.is_cancel_requested());
     model.request_cancel();
     assert!(model.is_cancel_requested());
-    // The title reflects the pending cancel while the current step finishes.
     assert!(model.title().starts_with("Cancelling"));
-    // The latch cannot be reverted by a second request.
+    assert_eq!(
+        model.headline(),
+        "Deleting 2 items",
+        "the headline still names the work"
+    );
+    assert_eq!(model.figures(), "Cancelling\u{2026}");
     model.request_cancel();
     assert!(model.is_cancel_requested());
-    // The Cancel button reads differently once cancel is latched (disabled), so
-    // a second press cannot re-request what is already stopping.
-    let running = ProgressModel::new(ProgressOp::Delete);
+    let running = ProgressModel::new(ProgressOp::Delete, Subject::Many(2), None);
     assert_ne!(
         build_progress_cancel(&model).state(),
         build_progress_cancel(&running).state()
     );
-}
-
-#[test]
-fn a_waiting_operation_says_so_and_then_counts() {
-    let mut model = ProgressModel::new(ProgressOp::Copy);
-    model.set_waiting(true);
-    assert!(model.is_waiting());
-    assert_eq!(model.status_line(), "Waiting for the operations before it");
-    model.set_waiting(false);
-    model.set_done(2);
-    assert_eq!(model.status_line(), "2 items copied");
 }
 
 #[test]
@@ -10708,22 +10898,51 @@ fn a_progress_window_is_sized_to_its_content_and_grows_with_the_density() {
 }
 
 #[test]
-fn a_progress_window_paints_across_its_client_without_panicking() {
+fn a_progress_window_paints_its_lines_and_bar_without_panicking() {
+    use tairix_controls::value::Progress;
     use tairix_raster::Surface;
 
     let theme = Theme::dark();
     let (width, height) = progress_window_extent(Scale::ONE, &theme);
     let client = Rect::new(0, 0, width, height);
-    let mut model = ProgressModel::new(ProgressOp::Copy);
-    model.set_done(7);
+    let mut model = copying_to_backup();
+    model.observe(
+        reading(tally(3, 30), Some(tally(10, 100)), false),
+        "three.jpg",
+        0,
+    );
+    let mut trace = Progress::new().uncaptioned();
+    trace.set_state(progress_state(&model));
     let mut surface = Surface::new(width, height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_progress_window(&mut surface, &model, Scale::ONE, &theme, client);
+    draw_progress_window(&mut surface, (&model, &trace), Scale::ONE, &theme, client);
     assert_ne!(surface.pixels().to_vec(), before);
 
-    // A window the desktop fitted to almost nothing draws what fits.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_progress_window(&mut tiny, &model, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
+    draw_progress_window(
+        &mut tiny,
+        (&model, &trace),
+        Scale::ONE,
+        &theme,
+        Rect::new(0, 0, 2, 2),
+    );
+}
+
+/// A window the desktop fitted shorter than its extent keeps its Cancel on
+/// show, raised to the client's foot.
+#[test]
+fn a_progress_window_fitted_shorter_keeps_its_cancel() {
+    let theme = Theme::dark();
+    let (width, height) = progress_window_extent(Scale::ONE, &theme);
+    let short = Rect::new(0, 0, width, height - height / 4);
+    let reachable = (0..i32::try_from(short.height).unwrap()).any(|y| {
+        (0..i32::try_from(width).unwrap())
+            .any(|x| progress_cancel_at(short, Scale::ONE, &theme, Point::new(x, y)))
+    });
+    assert!(
+        reachable,
+        "Cancel is drawn wholly inside the shorter client"
+    );
 }
 
 #[test]
@@ -10731,9 +10950,6 @@ fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_it() {
     let theme = Theme::dark();
     let (width, height) = progress_window_extent(Scale::ONE, &theme);
     let client = Rect::new(0, 0, width, height);
-
-    // Scanning the whole window, the Cancel hit-test resolves true for a
-    // reachable region in the lower right and false everywhere else.
     let mut hits = 0u32;
     for y in 0..i32::try_from(height).unwrap() {
         for x in 0..i32::try_from(width).unwrap() {
@@ -10751,8 +10967,6 @@ fn progress_cancel_at_mirrors_the_cancel_button_and_fails_closed_off_it() {
         &theme,
         Point::new(-5, -5)
     ));
-    // In a window too small to place the button, nothing resolves (fail
-    // closed) rather than a phantom button.
     let tiny = Rect::new(0, 0, 4, 4);
     assert!(!progress_cancel_at(
         tiny,
@@ -11775,6 +11989,20 @@ mod entry_labels {
                 tairix_abi::time::Time64::UNIX_EPOCH,
             )),
             "Thing.app"
+        );
+    }
+
+    /// A character that would draw nothing is shown in a name, so a name that
+    /// differs from another only by one never looks like it.
+    #[test]
+    fn a_label_shows_what_would_hide_in_its_name() {
+        assert_eq!(
+            entry_label(&Entry::file("report\u{200b}.pdf")),
+            "report\u{fffd}.pdf"
+        );
+        assert_ne!(
+            entry_label(&Entry::file("ab")),
+            entry_label(&Entry::file("a\u{202e}b"))
         );
     }
 

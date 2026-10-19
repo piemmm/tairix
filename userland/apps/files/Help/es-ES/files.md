@@ -4,19 +4,20 @@ files — navegador gráfico del sistema de archivos
 
 ## SYNOPSIS
 
-`files [--desktop] [directorio] [-h | -?]`
+`files [--desktop] [ruta] [-h | -?]`
 
 ## DESCRIPTION
 
 Abre una ventana de escritorio que lista el sistema de archivos, empezando
-por el `directorio` nombrado en la línea de órdenes o, si no se nombra
-ninguno, por la carpeta `Home` del usuario que lo inicia (su directorio
-personal si esa carpeta no puede listarse). El título de la ventana nombra
-el directorio actual; la ventana lista sus entradas, cada entrada
-seleccionada resaltada con el color de acento del tema activo. Cada lectura
-de un directorio es un listado ordinario, sujeto a permisos, bajo la
-identidad del usuario que lo inicia: un directorio ilegible se rechaza,
-nunca se adivina.
+por la carpeta que `ruta` nombra en la línea de órdenes — o, si nombra un
+archivo, por la carpeta que contiene ese archivo, con el archivo
+seleccionado — o, si no se nombra ninguna, por la carpeta `Home` del usuario
+que lo inicia (su directorio personal si esa carpeta no puede listarse). El
+título de la ventana nombra el directorio actual; la ventana lista sus
+entradas, cada entrada seleccionada resaltada con el color de acento del
+tema activo. Cada lectura de un directorio es un listado ordinario, sujeto
+a permisos, bajo la identidad del usuario que lo inicia: un directorio
+ilegible se rechaza, nunca se adivina.
 
 El escritorio inicia el explorador por usted y lo mantiene en la barra de
 iconos: el menú de su ranura lista sus propios lugares y todo lo montado, y
@@ -40,10 +41,12 @@ una carpeta nueva.
 Un listado se abre sin nada seleccionado. Un clic selecciona un elemento, un
 clic con `Ctrl` añade o quita uno, y un clic con `Shift` selecciona la serie
 desde el último elemento elegido; un clic en un espacio vacío borra la
-selección. Arrastrar por un espacio vacío traza un recuadro que selecciona
-todo lo que toca a medida que crece; sostenido en el borde superior o
-inferior del listado, este se desplaza, y `Escape` deshace lo que el
-recuadro seleccionó.
+selección. Un doble clic abre un elemento; manteniendo `Shift`, lista el
+contenido de una aplicación en lugar de iniciarla, y deja sin seleccionar
+lo que abra en otro lugar. Arrastrar por un espacio vacío traza un recuadro
+que selecciona todo lo que toca a medida que crece; sostenido en el borde
+superior o inferior del listado, este se desplaza, y `Escape` deshace lo
+que el recuadro seleccionó.
 
 El espacio que rodea cada icono y su nombre cuenta como vacío, así que un
 recuadro puede empezar en cualquier punto entre los elementos. `Ctrl+A`
@@ -108,16 +111,15 @@ que explica por qué.
 entre ellos, `Space` activa o desactiva un permiso o abre el propietario o
 el grupo para editarlo, y `Tab` o `Escape` vuelve a las secciones.
 
-El operando `directorio` se trata como entrada no confiable: debe ser
-una ruta absoluta dentro del límite de longitud de ruta del sistema, y
-cada uno de sus componentes debe ser un nombre de directorio real —
-`.` y `..` no lo son, de modo que una escritura nunca puede significar
-un lugar distinto del que se lee. Un directorio que incumpla alguna de
-esas reglas, o que el usuario que lo lanzó no pueda listar, se rechaza
-con el motivo por el flujo de error estándar y la ventana se abre en la
-carpeta `Home`, de modo que un argumento incorrecto nunca deja al
-usuario sin ventana. Un segundo operando se rechaza de plano en lugar
-de ignorarse.
+El operando `ruta` se trata como entrada no confiable: debe ser una ruta
+absoluta dentro del límite de longitud de ruta del sistema, y cada uno de
+sus componentes debe ser un nombre real — `.` y `..` no lo son, de modo
+que una escritura nunca puede significar un lugar distinto del que se
+lee. Una ruta que incumpla alguna de esas reglas, o que el usuario que lo
+lanzó no pueda listar, se rechaza con el motivo por el flujo de error
+estándar y la ventana se abre en la carpeta `Home`, de modo que un
+argumento incorrecto nunca deja al usuario sin ventana. Un segundo
+operando se rechaza de plano en lugar de ignorarse.
 
 ## OPTIONS
 
@@ -125,8 +127,8 @@ de ignorarse.
   del escritorio: una ranura permanente en la barra de iconos que ofrece sus
   lugares y los volúmenes montados, ninguna ventana hasta que se pida una, y
   ninguna forma de salir. La sesión de escritorio pasa esta opción al
-  arrancar; nombrar un `directorio` junto a ella se rechaza, porque un componente
-  no abre ninguna ventana en la que ponerlo.
+  arrancar; nombrar una `ruta` junto a ella se rechaza, porque un componente
+  no abre ninguna ventana en la que ponerla.
 - `-h, -?` — mostrar la ayuda corta de esta orden y salir.
 
 ## EXIT STATUS

@@ -1366,8 +1366,8 @@ is bounded by `MAX_DELETE_DEPTH` (a fail-closed defence — a deeper tree is
 its exact position between steps so the app can cancel or be preempted without
 losing or repeating work (§2.23 — no unbounded buffer, no spin); driving it
 against the wrong step is `DeleteError::OutOfStep`, leaving the walk unchanged.
-`removed` is the honest rising count a progress indicator shows (the total is
-unknown until the reads reveal it, so no fabricated percentage, §2.24). It is
+`removed` is the walk's own count of what it has removed, which the progress
+window shows as a share of the whole a preparing pass counted (`Survey`). It is
 the browser engine's own component-path traversal, deliberately distinct from
 `rm`'s coreutils removal engine — two consumers with two data models, not one
 algorithm copied twice (§2.2). Host-tested in `lib/browse` (single file, empty
@@ -1454,16 +1454,37 @@ autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
 interactive verb drives its walk on the window's loop: the confirmed work is a
 `Job` the operations worker carries out one unit at a time — one directory
 read, one unlink, one `fs_mkdir`, one copy chunk, or one rename — while its own
-modeless progress window, a dialog of the folder window, shows its count and
+modeless progress window, a dialog of the folder window, shows its progress and
 takes a cancel (FM20). One `Job` carries a `DeleteWalk`, a `TrashRun` or the
-app-side `Paste` state machine, so all three run through one path (§2.2). The
-drawn surface is the shared `lib/browse::progress` model (`ProgressModel` — op
-kind, the honest rising count from the walk's own figure, whether it waits for
-the operations before it, and a *latched* cancel) painted across the progress
-window by `render::draw_progress_window` as an indeterminate `Progress` trace (a
-"working" bar, no fabricated percentage since the total is unknown until the
-reads reveal it, §2.24) + a Cancel `Button`; `render::progress_cancel_at` is the
-mirror hit-test resolving a click to the drawn button (fail closed off it,
+app-side `Paste` state machine, so all three run through one path (§2.2).
+
+**The whole is counted before the work begins.** A delete and a paste first run
+a preparing pass on the same worker (`lib/browse::Survey`): one look at a source
+whose kind is not known, or one directory listing, a unit, so preparing is as
+cancellable as the walk. It totals every item beneath the sources and the bytes
+of every file a copy streams; a move a rename carries counts its item and no
+bytes. A move to Trash knows its whole at once (one rename each). Where part of
+a tree cannot be listed, or runs past the walks' depth, the whole stays
+uncounted and the window states what has been done and no share — counted,
+never estimated. The walks report what they have done in the same units (items,
+and a paste's bytes including the file in flight), so the share reaches the
+whole as the work does.
+
+**The window says what is moving where.** The drawn surface is the shared
+`lib/browse::progress` model (`ProgressModel`: the operation, what it acts on,
+its destination, what is done of what whole, the item in hand, a smoothed rate,
+whether it waits, and a *latched* cancel) painted by
+`render::draw_progress_window`: the headline ("Copying “Photos” to “Backup”"),
+the item in hand, the window's own `Progress` bar — busy while preparing or
+uncounted, a share of the whole once counted, still while it waits — and the
+figures beside the Cancel `Button` ("12.3 MiB of 45.6 MiB · 2.1 MiB/s · about
+15 seconds left", the rate and time left once the readings have held two
+seconds, and "Removing the originals…" while a move across volumes removes
+what it carried). The window clocks its bar only while it is on show and
+moving, a frame of that motion repaints the bar alone, and the loop parks
+between frames. A completed operation's window shows its bar full for a moment
+before it closes; its folder is read again at once. `render::progress_cancel_at` is
+the mirror hit-test resolving a click to the drawn button (fail closed off it,
 §2.2/§5.4). A latched cancel stops the walk at
 the next unit boundary (never mid-node, and never mid-chunk), and a completed or
 cancelled/refused run alike re-lists so a partial result is shown honestly
@@ -1989,7 +2010,7 @@ keyboard `Enter` uses, so pointer and keyboard can never open different things
 | gesture | what it does |
 |---|---|
 | double-click / `Enter` | activate: descend, run a bundle, or open a file |
-| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it |
+| shift-double-click / `Shift+Enter` | list a bundle's contents instead of running it; a shift-double-click leaves what it opened deselected (`plans/FILES-INTERACTION.md` FI32) |
 | right-click | ask the desktop for the context menu on the item |
 
 There is no right-*double*-click. The menu the first press opens is the

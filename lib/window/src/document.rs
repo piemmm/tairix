@@ -190,6 +190,12 @@ impl<H, S> DocumentFile<H, S> {
         self.handle = handle;
     }
 
+    /// The file the document was read from, or last saved as, if it has one.
+    #[must_use]
+    pub fn handle(&self) -> Option<&Arc<H>> {
+        self.handle.as_ref()
+    }
+
     /// Whether the window is on its way to closing once its document is
     /// saved.
     #[must_use]

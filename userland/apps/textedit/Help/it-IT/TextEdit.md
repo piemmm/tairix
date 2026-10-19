@@ -72,7 +72,9 @@ sottomenu. La finestra non ha una barra dei menu.
 La riga di stato mostra la riga e la colonna del cursore, ciò che la verifica
 ha trovato e, come campi che aprono un menu al clic: il formato, testo o
 esadecimale, i fine riga e il rientro. Chiudere una finestra o uscire con
-modifiche non salvate chiede prima conferma.
+modifiche non salvate chiede prima conferma. Chiudere una finestra con il
+tasto secondario (destro) sul suo pulsante di chiusura mostra anche il suo
+file nel gestore dei file, nella cartella che lo contiene.
 
 * `Ctrl+N` — una nuova finestra
 * `Ctrl+O` — aprire un file

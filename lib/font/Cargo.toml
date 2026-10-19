@@ -70,6 +70,9 @@ tairix-svg = { path = "../svg", version = "=0.0.0", optional = true }
 # genuinely nowhere to send a reclaim audit record, so it passes the discard
 # sink rather than pretending to have a live one.
 tairix-log = { path = "../log", version = "=0.0.0" }
+# This crate's own tests, with the lazily installed test transport the
+# process-wide client defaults to under `test-util`.
+tairix-font = { path = ".", features = ["test-util"] }
 
 [features]
 default = ["render"]

@@ -4,19 +4,20 @@ files — browser grafico del filesystem
 
 ## SYNOPSIS
 
-`files [--desktop] [directory] [-h | -?]`
+`files [--desktop] [path] [-h | -?]`
 
 ## DESCRIPTION
 
 Apre una finestra del desktop che elenca il file system, a partire dalla
-`directory` indicata sulla riga di comando o, se non ne è indicata alcuna,
-dalla cartella `Home` dell'utente che lo avvia (la sua directory home
-se quella non può essere elencata). Il titolo della finestra indica la
-directory corrente; la finestra ne elenca le voci, ogni voce selezionata
-evidenziata con il colore d'accento del tema attivo. Ogni lettura di una
-directory è un normale elenco soggetto ai permessi, con l'identità
-dell'utente che lo avvia: una directory illeggibile viene rifiutata, mai
-indovinata.
+cartella indicata da `path` sulla riga di comando — o, se indica un file,
+dalla cartella che contiene quel file, con il file selezionato — o, se non
+ne è indicato alcuno, dalla cartella `Home` dell'utente che lo avvia (la
+sua directory home se quella non può essere elencata). Il titolo della
+finestra indica la directory corrente; la finestra ne elenca le voci, ogni
+voce selezionata evidenziata con il colore d'accento del tema attivo. Ogni
+lettura di una directory è un normale elenco soggetto ai permessi, con
+l'identità dell'utente che lo avvia: una directory illeggibile viene
+rifiutata, mai indovinata.
 
 Il desktop avvia il browser per voi e lo tiene sulla barra delle icone: il
 menu della sua posizione elenca i vostri luoghi e tutto ciò che è montato, e
@@ -40,10 +41,12 @@ appena collegato vi compare da solo. `Ctrl+Shift+N` crea una nuova cartella.
 Un elenco si apre senza nulla di selezionato. Un clic seleziona una voce, un
 clic con `Ctrl` ne aggiunge o ne toglie una, e un clic con `Shift` seleziona
 la serie a partire dall'ultima voce scelta; un clic su uno spazio vuoto
-annulla la selezione. Trascinare su uno spazio vuoto traccia un riquadro che
-seleziona tutto ciò che tocca mentre cresce; tenuto al bordo superiore o
-inferiore dell'elenco, questo scorre, e `Escape` annulla ciò che il riquadro
-ha selezionato.
+annulla la selezione. Un doppio clic apre una voce; tenendo premuto `Shift`,
+elenca il contenuto di un'applicazione anziché avviarla, e lascia
+deselezionato ciò che apre altrove. Trascinare su uno spazio vuoto traccia
+un riquadro che seleziona tutto ciò che tocca mentre cresce; tenuto al bordo
+superiore o inferiore dell'elenco, questo scorre, e `Escape` annulla ciò che
+il riquadro ha selezionato.
 
 Lo spazio intorno a ogni icona e al suo nome conta come vuoto, quindi un
 riquadro può partire ovunque tra le voci. `Ctrl+A` seleziona tutto l'elenco
@@ -63,7 +66,7 @@ nuovo nome — un nome che il volume rifiuta resta aperto con il motivo — e
 `Escape` lo abbandona.
 
 Trascinare le voci selezionate su un'altra finestra del gestore di file, su
-una cartella in essa o sul desktop le copia lì; tenendo premuto Maiusc,
+una cartella in essa o sul desktop le copia lì; tenendo premuto `Shift`,
 invece, le sposta. Il cursore mostra un più finché il rilascio copierebbe e
 una freccia finché sposterebbe, e la cartella in cui finirebbe il rilascio è
 evidenziata. Un singolo file trascinato sulla posizione di un'applicazione
@@ -109,16 +112,16 @@ dall'uno all'altro, `Space` attiva o disattiva un permesso o apre il
 proprietario o il gruppo per la modifica, e `Tab` o `Escape` torna alle
 sezioni.
 
-L'operando `directory` è trattato come input non fidato: deve essere un
-percorso assoluto entro il limite di lunghezza dei percorsi del
-sistema, e ognuno dei suoi componenti deve essere un vero nome di
-directory — `.` e `..` non lo sono, così che una scrittura non possa
-mai indicare un luogo diverso da come si legge. Una directory che
-infrange una di quelle regole, o che l'utente che ha avviato il
-programma non può elencare, viene rifiutata con il motivo sul flusso di
-errore standard e la finestra si apre invece sulla cartella `Home`,
-così che un argomento sbagliato non lasci mai l'utente senza finestra.
-Un secondo operando viene rifiutato del tutto anziché ignorato.
+L'operando `path` è trattato come input non fidato: deve essere un
+percorso assoluto entro il limite di lunghezza dei percorsi del sistema,
+e ognuno dei suoi componenti deve essere un vero nome — `.` e `..` non
+lo sono, così che una scrittura non possa mai indicare un luogo diverso
+da come si legge. Un percorso che infrange una di quelle regole, o che
+l'utente che ha avviato il programma non può elencare, viene rifiutato
+con il motivo sul flusso di errore standard e la finestra si apre invece
+sulla cartella `Home`, così che un argomento sbagliato non lasci mai
+l'utente senza finestra. Un secondo operando viene rifiutato del tutto
+anziché ignorato.
 
 ## OPTIONS
 
@@ -126,8 +129,8 @@ Un secondo operando viene rifiutato del tutto anziché ignorato.
   una posizione permanente sulla barra delle icone che offre i propri luoghi
   e i volumi montati, nessuna finestra finché non ne viene chiesta una, e
   nessun modo di uscire. La sessione desktop passa questa opzione all'avvio;
-  indicare una `directory` accanto ad essa è rifiutato, perché un componente non
-  apre alcuna finestra in cui metterla.
+  indicare un `path` accanto ad essa è rifiutato, perché un componente non
+  apre alcuna finestra in cui metterlo.
 - `-h, -?` — mostrare la breve guida di questo comando e uscire.
 
 ## EXIT STATUS

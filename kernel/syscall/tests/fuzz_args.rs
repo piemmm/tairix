@@ -1105,6 +1105,28 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fd_grant_location(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _recipient: u64,
+        _recipient_len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fd_redeem_location(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _grantor: u64,
+        _grantor_len: usize,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn resource_open(
         &self,
         _c: &CallerContext<'_>,

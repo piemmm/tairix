@@ -126,6 +126,19 @@ descriptor that is already a delegation passes through carrying its own
 grantor's identity rather than being re-captured, so a spawn can never launder
 authority its holder was never given.
 
+**Where a descriptor points can be told without passing anything on.** A
+holder that may not delegate — no `CAP_FS_ACCESS` — can still mint one live
+instance a *location* of its own descriptor (`fd_grant_location`), which carries
+the path and the user the descriptor reaches it as, and no access. The
+recipient reads the path through `fd_redeem_location`, which needs
+`CAP_FS_ACCESS` and refuses a reader of another user, so a path reaches only a
+principal that could have named it, and nothing is opened. A location shares the
+delegations' handles, bound and duplicate suppression; `fd_redeem` refuses one
+and `fd_redeem_location` refuses a file delegation. The redemption is audited,
+as the disclosure. This is how an editor knowing its document by name only
+has the desktop show the user where it lives
+([session](../desktop/session.md#showing-where-a-document-lives)).
+
 ## Exercise, release, revoke
 
 - **Exercise.** Every syscall/IPC dispatch checks the caller's effective

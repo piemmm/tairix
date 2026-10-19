@@ -1892,6 +1892,29 @@ impl<T: WindowTransport> WindowClient<T> {
         decode_hand_over_reply(reply.get(..n).ok_or(Errno::LengthOutOfRange)?)
     }
 
+    /// Ask the desktop to show the user, in the file manager, the document
+    /// behind this client's window `window_id`, which `location` — a
+    /// `fd_grant_location` handle minted to the [`session`](Self::session)
+    /// from the document's descriptor — tells the desktop the place of.
+    ///
+    /// The caller never learns the path, and gets nothing back but whether
+    /// the document was shown.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window of this client's, or no file
+    ///   manager is running to show it.
+    /// * [`Errno::PermissionDenied`] — the user is not working in the window,
+    ///   or the desktop may not be told where the document is.
+    /// * [`Errno::NotSupported`] — the desktop shows no documents.
+    /// * Any transport refusal, or a malformed reply.
+    pub fn reveal_document(&mut self, window_id: u64, location: u64) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::RevealDocument {
+            window_id,
+            location,
+        })
+    }
+
     /// Declare — or withdraw — the tooltip for `region` of `window_id`.
     ///
     /// The application says only what is being explained and where; the dwell

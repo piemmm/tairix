@@ -158,6 +158,39 @@ impl ClockFace {
         self.step_move(now_ns, wm, compositor);
     }
 
+    /// Compose the lines again where they stand: text they were drawn with
+    /// provisionally has landed. Mid-move, the block on its way out keeps its
+    /// minute and the one arriving is composed again.
+    pub(super) fn refit_text(&mut self, wm: WindowId, compositor: &mut Compositor) {
+        if let Some((next, to)) = self.moving.as_mut().and_then(|moving| moving.next.take()) {
+            let next = next.and(self.compose());
+            let to = self.kept_in_place(next.as_ref(), to);
+            if let Some(moving) = self.moving.as_mut() {
+                moving.next = Some((next, to));
+            }
+            return;
+        }
+        self.damage.clear();
+        self.damage.add(lettered_rect(self.block.as_ref(), self.at));
+        let block = self.compose();
+        self.at = self.kept_in_place(block.as_ref(), self.at);
+        self.block = block;
+        self.repaint(wm, compositor);
+    }
+
+    /// `at`, moved only as far as keeps `block` on the screen.
+    fn kept_in_place(&self, block: Option<&Surface>, at: Point) -> Point {
+        let Some(block) = block else {
+            return at;
+        };
+        let room =
+            |screen: u32, extent: u32| i32::try_from(screen.saturating_sub(extent)).unwrap_or(0);
+        Point::new(
+            at.x.clamp(0, room(self.screen.0, block.width())),
+            at.y.clamp(0, room(self.screen.1, block.height())),
+        )
+    }
+
     /// The minute has turned: read the time and set the block moving to a new
     /// place, or move it at once under reduced motion.
     fn turn(&mut self, now_ns: u64, wall: &mut dyn FnMut() -> Option<WallClockReading>) {

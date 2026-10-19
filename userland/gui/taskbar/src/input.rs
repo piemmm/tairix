@@ -206,6 +206,7 @@ pub enum TaskbarResponse {
         key: u32,
     },
     /// The clock menu's *Set Date & Time…* row was chosen. The embedder
+    /// raises the Date & Time window when one is open, and otherwise
     /// authenticates an account that holds `CAP_TIME_SET` through its
     /// console's broker and starts the Date & Time application as that
     /// account; the bar holds no such authority and sets no clock itself.

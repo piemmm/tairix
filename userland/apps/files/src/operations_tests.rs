@@ -4,8 +4,19 @@ fn desk() -> OperationDesk<&'static str> {
     OperationDesk::new(3)
 }
 
-fn ended(done: usize, ending: Ending) -> Finished {
-    Finished { done, ending }
+fn ended(items: u64, ending: Ending) -> Finished {
+    Finished {
+        done: Tally { items, bytes: 0 },
+        ending,
+    }
+}
+
+/// A walk's reading of `items` done, counted whole or not.
+fn items(items: u64) -> Reading {
+    Reading {
+        done: Tally { items, bytes: 0 },
+        ..Reading::default()
+    }
 }
 
 #[test]
@@ -18,9 +29,8 @@ fn operations_run_one_at_a_time_in_the_order_asked() {
     assert_eq!(
         desk.standing(2),
         Some(Standing {
-            done: 0,
-            cancelling: false,
             waiting: true,
+            ..Standing::default()
         }),
         "the second waits"
     );
@@ -34,7 +44,7 @@ fn an_answer_reaches_only_the_operation_it_belongs_to() {
     desk.submit(1, "copy").expect("taken");
     desk.submit(2, "delete").expect("taken");
     let _ = desk.next_job();
-    assert!(desk.report(4));
+    assert!(desk.report(items(4), ""));
     desk.finish(Ending::Stopped(String::from("the destination is full")));
     assert_eq!(desk.take(2), None);
     assert_eq!(
@@ -58,9 +68,8 @@ fn a_cancel_stops_a_running_operation_before_its_next_step() {
     assert_eq!(
         desk.standing(1),
         Some(Standing {
-            done: 0,
             cancelling: true,
-            waiting: false,
+            ..Standing::default()
         })
     );
     desk.finish(Ending::Cancelled);
@@ -89,7 +98,7 @@ fn a_forgotten_operation_stops_and_its_answer_is_dropped() {
     desk.forget(2);
     assert!(desk.cancelled(), "the running one is told to stop");
     assert_eq!(desk.standing(1), None);
-    assert!(!desk.report(3), "nobody is owed a wake for it");
+    assert!(!desk.report(items(3), ""), "nobody is owed a wake for it");
     assert!(!desk.finish(Ending::Cancelled));
     assert_eq!(desk.take(1), None);
     assert_eq!(desk.next_job(), None, "a forgotten waiting job never runs");
@@ -125,13 +134,16 @@ fn a_run_of_reports_owes_one_wake_until_the_loop_looks() {
     let mut desk = desk();
     desk.submit(1, "copy").expect("taken");
     let _ = desk.next_job();
-    assert!(desk.report(1));
-    assert!(!desk.report(2));
+    assert!(desk.report(items(1), ""));
+    assert!(!desk.report(items(2), ""));
     assert!(!desk.finish(Ending::Completed), "already owed one");
     desk.acknowledge();
     desk.submit(2, "next").expect("taken");
     let _ = desk.next_job();
-    assert!(desk.report(1), "owed again once the loop has looked");
+    assert!(
+        desk.report(items(1), ""),
+        "owed again once the loop has looked"
+    );
 }
 
 #[test]
@@ -140,12 +152,12 @@ fn a_held_desk_owes_no_wake_until_the_loop_looks_again() {
     desk.submit(1, "copy").expect("taken");
     let _ = desk.next_job();
     desk.hold();
-    assert!(!desk.report(1));
+    assert!(!desk.report(items(1), ""));
     assert!(!desk.finish(Ending::Completed));
     desk.acknowledge();
     desk.submit(2, "next").expect("taken");
     let _ = desk.next_job();
-    assert!(desk.report(1));
+    assert!(desk.report(items(1), ""));
 }
 
 #[test]
@@ -200,5 +212,37 @@ fn an_operation_run_on_the_loop_runs_a_slice_at_a_time() {
             || false
         ),
         Some(Ending::Stopped(String::from("refused")))
+    );
+}
+
+/// The window shows the walk's own figures and the item in hand, and the
+/// answer carries what was done.
+#[test]
+fn a_report_carries_the_reading_and_the_item_in_hand() {
+    let mut desk = desk();
+    desk.submit(1, "copy").expect("taken");
+    let _ = desk.next_job();
+    let reading = Reading {
+        done: Tally {
+            items: 3,
+            bytes: 300,
+        },
+        total: Some(Tally {
+            items: 9,
+            bytes: 900,
+        }),
+        ..Reading::default()
+    };
+    assert!(desk.report(reading, "two.jpg"));
+    let standing = desk.standing(1).expect("running");
+    assert_eq!(standing.reading, reading);
+    assert_eq!(standing.current, "two.jpg");
+    desk.finish(Ending::Completed);
+    assert_eq!(
+        desk.take(1).map(|finished| finished.done),
+        Some(Tally {
+            items: 3,
+            bytes: 300
+        })
     );
 }

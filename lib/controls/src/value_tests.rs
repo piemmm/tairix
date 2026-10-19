@@ -11,7 +11,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{MotionInteraction, TextRole, Theme, Timeline};
 
 use crate::damage::sink;
 use crate::paint::{measured_thickness, progress_thickness};
@@ -870,29 +870,227 @@ fn idle_progress_shows_only_the_groove() {
     assert!(!has_pixel(&surface, premul(theme.palette().accent)));
 }
 
+/// The pixels a still trace shows in a column of its band.
+fn column_has(surface: &Surface, theme: &Theme, column: u32, colour: Pixel) -> bool {
+    region_has(surface, (column, column + 1), band_rows(theme), colour)
+}
+
+/// Whether the middle row of the band is painted in `column`, however faintly:
+/// it differs there from an idle trace's bare track.
+fn column_inked(surface: &Surface, theme: &Theme, column: u32) -> bool {
+    let (top, bottom) = band_rows(theme);
+    let row = top + (bottom - top) / 2;
+    surface.get(column, row) != progress_surface(&Progress::new(), theme).get(column, row)
+}
+
+/// A milestone in the sweep: `share` permille of one crossing in.
+fn sweep_at(theme: &Theme, share: u64) -> u64 {
+    let period = u64::from(theme.motion().duration(MotionInteraction::ProgressSweep));
+    period * 1_000_000 * share / 1000
+}
+
+/// A busy trace whose owner reports the clock sweeps a comet across the track;
+/// two instants of one crossing draw it in different places.
 #[test]
-fn indeterminate_trace_moves_with_phase() {
+fn a_busy_trace_sweeps_while_its_owner_reports_the_clock() {
     let theme = Theme::dark();
-    let mut early = progress_with(ActivityState::Indeterminate);
-    early.set_phase(150);
-    let mut late = progress_with(ActivityState::Indeterminate);
-    late.set_phase(850);
-    assert_ne!(
-        progress_surface(&early, &theme).pixels(),
-        progress_surface(&late, &theme).pixels()
+    let mut trace = progress_with(ActivityState::Indeterminate);
+    trace.set_clock(0, theme.motion());
+    assert_eq!(trace.next_frame_in(), Some(Timeline::FRAME_NS));
+    trace.set_clock(sweep_at(&theme, 300), theme.motion());
+    let early = progress_surface(&trace, &theme);
+    trace.set_clock(sweep_at(&theme, 700), theme.motion());
+    let late = progress_surface(&trace, &theme);
+    assert_ne!(early.pixels(), late.pixels());
+    assert!(
+        column_inked(&early, &theme, W / 5),
+        "early on it is near the start"
+    );
+    assert!(column_inked(&late, &theme, W - W / 5), "later near the end");
+}
+
+/// Nothing still about a busy trace may read as an amount: without a clock,
+/// or under reduced motion, it is a segment centred on the track, so its
+/// start is never inked the way a known amount's always is.
+#[test]
+fn a_busy_trace_that_cannot_move_is_centred_and_asks_for_no_frame() {
+    let accent_of = |theme: &Theme| premul(theme.palette().accent);
+    let still = progress_with(ActivityState::Working);
+    let theme = Theme::dark();
+    let surface = progress_surface(&still, &theme);
+    assert!(column_inked(&surface, &theme, W / 2));
+    assert!(!column_has(&surface, &theme, 4, accent_of(&theme)));
+    assert_eq!(
+        still.next_frame_in(),
+        None,
+        "an unclocked trace asks for nothing"
+    );
+
+    let reduced = reduced_motion();
+    let mut trace = progress_with(ActivityState::Indeterminate);
+    trace.set_clock(0, reduced.motion());
+    assert_eq!(trace.next_frame_in(), None);
+    let first = progress_surface(&trace, &reduced);
+    trace.set_clock(sweep_at(&theme, 500), reduced.motion());
+    assert_eq!(first.pixels(), progress_surface(&trace, &reduced).pixels());
+}
+
+/// A rising amount moves to its value over the theme's ease; a new run's
+/// lower amount is shown at once, so the fill never runs backwards.
+#[test]
+fn a_rising_amount_eases_to_its_value_and_a_new_run_is_shown_at_once() {
+    let theme = Theme::dark();
+    let accent = premul(theme.palette().accent);
+    let (top, bottom) = band_rows(&theme);
+    let row = top + (bottom - top) / 2;
+    let ease = u64::from(theme.motion().duration(MotionInteraction::JobProgressPulse)) * 1_000_000;
+    let mut trace = progress_with(ActivityState::Progress(ProgressValue::new(200)));
+    trace.set_clock(0, theme.motion());
+    let start = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
+
+    trace.set_state(
+        ControlState::idle().with_activity(ActivityState::Progress(ProgressValue::new(800))),
+    );
+    assert_eq!(
+        active_extent(&progress_surface(&trace, &theme), accent, row),
+        Some(start),
+        "the rise has not begun to show"
+    );
+    assert!(trace.next_frame_in().is_some(), "the ease asks for frames");
+    // It stood still, so it sets off at the next frame rather than from the
+    // instant it was last clocked at.
+    let set_off = 10 * ease;
+    trace.set_clock(set_off, theme.motion());
+    assert_eq!(
+        active_extent(&progress_surface(&trace, &theme), accent, row),
+        Some(start),
+        "set off, not jumped to its end"
+    );
+    trace.set_clock(set_off + ease / 2, theme.motion());
+    let halfway = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
+    trace.set_clock(set_off + ease, theme.motion());
+    let end = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
+    assert!(
+        start < halfway && halfway < end,
+        "{start} < {halfway} < {end}"
+    );
+    assert_eq!(
+        trace.next_frame_in(),
+        None,
+        "a settled fill asks for nothing"
+    );
+
+    trace.set_state(
+        ControlState::idle().with_activity(ActivityState::Progress(ProgressValue::new(100))),
+    );
+    let restarted = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
+    assert!(restarted < start, "a lower amount is shown at once");
+    assert_eq!(trace.next_frame_in(), None);
+}
+
+/// Readings that rise a frame apart are followed closely: each eases out from
+/// where the fill is, so none restarts the climb slowly, and one that only
+/// repeats the last changes nothing.
+#[test]
+fn a_run_of_rising_readings_is_followed_closely() {
+    let theme = Theme::dark();
+    let accent = premul(theme.palette().accent);
+    let (top, bottom) = band_rows(&theme);
+    let row = top + (bottom - top) / 2;
+    let state = |permille| {
+        ControlState::idle().with_activity(ActivityState::Progress(ProgressValue::new(permille)))
+    };
+    let full = active_extent(
+        &progress_surface(
+            &progress_with(ActivityState::Progress(ProgressValue::new(1000))),
+            &theme,
+        ),
+        accent,
+        row,
+    )
+    .expect("a full fill");
+
+    let mut trace = progress_with(ActivityState::Progress(ProgressValue::new(0)));
+    let mut repeated = trace.clone();
+    let mut now = 0;
+    trace.set_clock(now, theme.motion());
+    repeated.set_clock(now, theme.motion());
+    for step in 1..=60u16 {
+        now += Timeline::FRAME_NS;
+        trace.set_state(state(step * 1000 / 60));
+        repeated.set_state(state(step * 1000 / 60));
+        repeated.set_state(state(step * 1000 / 60));
+        trace.set_clock(now, theme.motion());
+        repeated.set_clock(now, theme.motion());
+    }
+    let shown = active_extent(&progress_surface(&trace, &theme), accent, row).expect("a fill");
+    assert!(
+        full - shown <= full / 16,
+        "{shown} of {full} after a second of readings"
+    );
+    assert_eq!(
+        active_extent(&progress_surface(&repeated, &theme), accent, row),
+        Some(shown),
+        "a repeated reading is not a new one"
     );
 }
 
+/// A failure keeps the amount it reached, in the recovery colour; one with no
+/// known amount washes its track and stops moving.
 #[test]
-fn reduced_motion_freezes_the_indeterminate_trace() {
-    let theme = reduced_motion();
-    let mut early = progress_with(ActivityState::Indeterminate);
-    early.set_phase(150);
-    let mut late = progress_with(ActivityState::Indeterminate);
-    late.set_phase(850);
+fn a_failed_trace_keeps_its_amount_in_the_recovery_colour_and_stops() {
+    let theme = Theme::dark();
+    let recovery = premul(theme.palette().recovery);
+    let accent = premul(theme.palette().accent);
+    let mut reached = Progress::new().with_label("Disk full");
+    reached.set_state(
+        ControlState::idle()
+            .with_activity(ActivityState::Progress(ProgressValue::new(600)))
+            .with_recovery(RecoveryState::Recoverable),
+    );
+    let surface = progress_surface(&reached, &theme);
+    assert!(
+        column_has(&surface, &theme, W / 3, recovery),
+        "the reached amount, in recovery"
+    );
+    assert!(!has_pixel(&surface, accent));
+
+    let mut stopped = Progress::new().with_label("Disk full");
+    stopped.set_clock(0, theme.motion());
+    stopped.set_state(
+        ControlState::idle().with_activity(ActivityState::Progress(ProgressValue::new(200))),
+    );
+    stopped.set_state(
+        ControlState::idle()
+            .with_activity(ActivityState::Progress(ProgressValue::new(600)))
+            .with_recovery(RecoveryState::Recoverable),
+    );
     assert_eq!(
-        progress_surface(&early, &theme).pixels(),
-        progress_surface(&late, &theme).pixels()
+        stopped.next_frame_in(),
+        None,
+        "a failed trace stands where its work stopped"
+    );
+    assert_eq!(
+        progress_surface(&stopped, &theme).pixels(),
+        surface.pixels(),
+        "shown at the amount it failed at, at once"
+    );
+
+    let mut busy = Progress::new().with_label("Failed");
+    busy.set_clock(0, theme.motion());
+    busy.set_state(
+        ControlState::idle()
+            .with_activity(ActivityState::Working)
+            .with_recovery(RecoveryState::Recoverable),
+    );
+    assert_eq!(busy.next_frame_in(), None, "a failed trace does not sweep");
+    let surface = progress_surface(&busy, &theme);
+    assert!(!has_pixel(&surface, accent));
+    let (top, bottom) = band_rows(&theme);
+    assert_ne!(
+        surface.get(W / 2, top + (bottom - top) / 2),
+        progress_surface(&Progress::new(), &theme).get(W / 2, top + (bottom - top) / 2),
+        "its track is washed, not left empty"
     );
 }
 
@@ -932,19 +1130,6 @@ fn progress_renders_in_both_themes() {
     assert_ne!(
         progress_surface(&p, &Theme::dark()).pixels(),
         progress_surface(&p, &Theme::light()).pixels()
-    );
-}
-
-#[test]
-fn progress_phase_is_clamped() {
-    let theme = Theme::dark();
-    let mut full = progress_with(ActivityState::Indeterminate);
-    full.set_phase(1000);
-    let mut over = progress_with(ActivityState::Indeterminate);
-    over.set_phase(60000);
-    assert_eq!(
-        progress_surface(&full, &theme).pixels(),
-        progress_surface(&over, &theme).pixels()
     );
 }
 

@@ -495,6 +495,12 @@ const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 /// `fd_redeem_from` syscall number (as above).
 const NUM_FD_REDEEM_FROM: u64 = SyscallNumber::FD_REDEEM_FROM.as_u16() as u64;
 
+/// `fd_grant_location` syscall number (as above).
+const NUM_FD_GRANT_LOCATION: u64 = SyscallNumber::FD_GRANT_LOCATION.as_u16() as u64;
+
+/// `fd_redeem_location` syscall number (as above).
+const NUM_FD_REDEEM_LOCATION: u64 = SyscallNumber::FD_REDEEM_LOCATION.as_u16() as u64;
+
 /// `shm_map_from` syscall number (as above).
 const NUM_SHM_MAP_FROM: u64 = SyscallNumber::SHM_MAP_FROM.as_u16() as u64;
 
@@ -4618,6 +4624,88 @@ pub fn fd_redeem_from(handle: u64, grantor: ProcId) -> i64 {
     ret as i64
 }
 
+/// Tell `recipient`, one-shot, where the caller's own descriptor `fd` points,
+/// answering the handle it redeems through [`fd_redeem_location`]
+/// (`SyscallNumber::FD_GRANT_LOCATION`).
+///
+/// Confers nothing: the recipient can open nothing through it, and is told
+/// the path only when it may name paths itself, as the user `fd` reaches its
+/// file as. So a program holding no filesystem capability may call it.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for a descriptor not held or a recipient that is no
+/// live process, [`Errno::OutOfRange`] for a pipe, pty or resource, and
+/// [`Errno::LimitExceeded`] with too many pending to that recipient.
+pub fn fd_grant_location(fd: u32, recipient: ProcId) -> Result<u64, Errno> {
+    let instance = recipient.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke. The one pointer is to
+    // this frame's `instance` array, live across the call and exactly the
+    // length passed; the kernel resolves the caller's own descriptor and the
+    // live recipient before minting anything.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the handle-or-errno encoding (handle ≥ 1, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FD_GRANT_LOCATION,
+            [
+                u64::from(fd),
+                instance.as_ptr() as u64,
+                instance.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    #[allow(clippy::cast_sign_loss)] // `ret >= 0` here: it is the handle.
+    Ok(ret as u64)
+}
+
+/// Write the absolute path the [`fd_grant_location`] handle `handle`, minted
+/// to the caller by `grantor`, tells into `out`, answering its length
+/// (`SyscallNumber::FD_REDEEM_LOCATION`).
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for a handle `grantor` did not mint to the caller,
+/// [`Errno::OutOfRange`] for a file delegation, and
+/// [`Errno::BufferTooSmall`] for `out` shorter than the path, each leaving it
+/// pending; [`Errno::PermissionDenied`] when the descriptor reaches its file
+/// as another user, or without `CAP_FS_ACCESS`.
+pub fn fd_redeem_location(handle: u64, grantor: ProcId, out: &mut [u8]) -> Result<usize, Errno> {
+    let instance = grantor.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke. Both pointers are to
+    // live buffers exactly the lengths passed — `instance` in this frame and
+    // the caller's `out`, which the kernel writes at most `out.len()` bytes
+    // of — and the kernel resolves the handle owner- and grantor-bound first.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the length-or-errno encoding (length ≥ 0, else -errno).
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FD_REDEEM_LOCATION,
+            [
+                handle,
+                instance.as_ptr() as u64,
+                instance.len() as u64,
+                out.as_mut_ptr() as u64,
+                out.len() as u64,
+                0,
+            ],
+        )
+    } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    usize::try_from(ret)
+        .ok()
+        .filter(|&len| len <= out.len())
+        .ok_or(Errno::LengthOutOfRange)
+}
+
 /// Ask whether the in-flight caller of served call endpoint `endpoint`
 /// (ticket `ticket`) holds seat `seat`'s live lease
 /// (`SyscallNumber::CALL_PEER_SEAT`, `plans/DISPLAY.md` D7a — the display
@@ -7541,6 +7629,54 @@ mod tests {
         assert_eq!(
             File::from_delegation_by(9, grantor).err(),
             Some(-i64::from(Errno::NotFound.as_i32()))
+        );
+    }
+
+    #[test]
+    fn fd_grant_location_names_the_descriptor_and_a_whole_instance() {
+        let recipient = ProcId::from_raw([0x5A; tairix_abi::PROC_ID_LEN]);
+        let (number, args) = capture(3, || {
+            assert_eq!(fd_grant_location(7, recipient), Ok(3));
+        });
+        assert_eq!(number, NUM_FD_GRANT_LOCATION);
+        assert_eq!(args[0], 7);
+        assert_ne!(args[1], 0, "the instance is passed by address");
+        assert_eq!(
+            args[2],
+            u64::try_from(tairix_abi::PROC_ID_LEN).expect("fits")
+        );
+        assert_eq!(&args[3..], &[0, 0, 0]);
+        seam::arm(refusal(Errno::OutOfRange));
+        assert_eq!(fd_grant_location(7, recipient), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn fd_redeem_location_takes_no_answer_longer_than_its_buffer() {
+        let grantor = ProcId::from_raw([0xA5; tairix_abi::PROC_ID_LEN]);
+        let mut out = [0u8; 32];
+        let (number, args) = capture(5, || {
+            assert_eq!(fd_redeem_location(9, grantor, &mut out), Ok(5));
+        });
+        assert_eq!(number, NUM_FD_REDEEM_LOCATION);
+        assert_eq!(args[0], 9);
+        assert_ne!(args[1], 0, "the instance is passed by address");
+        assert_eq!(
+            args[2],
+            u64::try_from(tairix_abi::PROC_ID_LEN).expect("fits")
+        );
+        assert_ne!(args[3], 0, "the buffer is passed by address");
+        assert_eq!(args[4], 32);
+        assert_eq!(args[5], 0);
+        capture(33, || {
+            assert_eq!(
+                fd_redeem_location(9, grantor, &mut out),
+                Err(Errno::LengthOutOfRange)
+            );
+        });
+        seam::arm(refusal(Errno::PermissionDenied));
+        assert_eq!(
+            fd_redeem_location(9, grantor, &mut out),
+            Err(Errno::PermissionDenied)
         );
     }
 

@@ -4,12 +4,13 @@ files — graphical filesystem browser
 
 ## SYNOPSIS
 
-`files [--desktop] [directory] [-h | -?]`
+`files [--desktop] [path] [-h | -?]`
 
 ## DESCRIPTION
 
-Opens a desktop window listing the filesystem, starting at the
-`directory` named on the command line, or at the launching user's
+Opens a desktop window listing the filesystem, starting at the folder
+`path` names on the command line — or, when it names a file, at the folder
+holding that file, with the file selected — or at the launching user's
 `Home` folder when none is named (their home directory if that cannot
 be listed). The window's title names the current directory; the window
 lists its entries, every selected entry highlighted with the active
@@ -38,7 +39,10 @@ rail; a newly attached volume appears in the rail on its own.
 
 A listing opens with nothing selected. A click selects an item, a
 `Ctrl`-click adds or removes one, and a `Shift`-click selects the run from
-the item last chosen; a click on empty space clears the selection.
+the item last chosen; a click on empty space clears the selection. A
+double-click opens an item; with `Shift` held it lists an application's
+contents instead of starting it, and leaves anything it opens elsewhere
+unselected.
 Dragging across empty space draws a band that selects everything it touches
 as it grows; held at the top or bottom of the listing it scrolls, and
 `Escape` takes back what it selected.
@@ -99,22 +103,21 @@ saying why.
 `Space` toggles a permission or opens the owner or group for editing, and
 `Tab` or `Escape` returns to the sections.
 
-The `directory` operand is treated as untrusted input: it must be an
+The `path` operand is treated as untrusted input: it must be an
 absolute path within the system's path length limit, and each of its
-components must be a real directory name — `.` and `..` are not, so a
-spelling can never mean somewhere other than it reads as. A directory
-that fails any of those rules, or that the launching user cannot list,
-is refused with the reason on the standard error stream and the window
-opens at the `Home` folder instead, so a bad argument never leaves the
-user with no window. A second operand is refused outright rather than
-ignored.
+components must be a real name — `.` and `..` are not, so a spelling can
+never mean somewhere other than it reads as. A path that fails any of
+those rules, or that the launching user cannot list, is refused with the
+reason on the standard error stream and the window opens at the `Home`
+folder instead, so a bad argument never leaves the user with no window.
+A second operand is refused outright rather than ignored.
 
 ## OPTIONS
 
 - `--desktop` — run as the desktop's own file-manager component: a
   permanent icon-bar slot offering your places and the mounted volumes,
   no window until one is asked for, and no way to quit. The desktop
-  session passes this at bring-up; naming a `directory` alongside it is
+  session passes this at bring-up; naming a `path` alongside it is
   refused, because a component opens no window to put one in.
 - `-h, -?` — show this command's own short help and exit.
 

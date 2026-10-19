@@ -162,7 +162,9 @@ ventana abre su menú: Cortar, Copiar, Pegar, Seleccionar todo y
 Deseleccionar, y después Archivo, Edición, Imagen, Capas, Colores, Ajustes,
 Sprites o Páginas, Ver y Herramientas, cada uno con su propio submenú. La
 ventana no tiene barra de menús. Cerrar una ventana o salir con cambios sin
-guardar pregunta primero.
+guardar pregunta primero. Cerrar una ventana pulsando su botón de cierre con
+el botón secundario (derecho) muestra además su archivo en el gestor de
+archivos, en la carpeta que lo contiene.
 
 * `Ctrl+N` — una imagen nueva; `Ctrl+O` — abrir un archivo
 * `Ctrl+S` — guardar; `Ctrl+Shift+S` — guardar como

@@ -2380,6 +2380,54 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Mint the recipient named at `recipient` (`recipient_len` bytes, an
+    /// attested `ProcId`, as for [`Self::fd_grant`]) a one-shot handle telling
+    /// where the caller's own descriptor `fd` points, and nothing more.
+    ///
+    /// Needs no capability: a location opens nothing, and its path is told
+    /// only to a recipient [`Self::fd_redeem_location`] admits. A descriptor
+    /// stored nowhere — a pipe, pty or resource — fails closed with
+    /// [`Errno::OutOfRange`]; the pending location shares the delegations'
+    /// per-recipient bound.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn fd_grant_location(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _recipient: u64,
+        _recipient_len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Write the absolute path the [`Self::fd_grant_location`] handle `handle`
+    /// tells into `out` (`out_cap` bytes), answering its length, only if the
+    /// instance at `grantor` (`grantor_len` bytes) minted it to the caller.
+    ///
+    /// Gated on `CAP_FS_ACCESS` by the dispatcher, and told only when the
+    /// descriptor reaches its file as the caller's own user, so a path goes
+    /// to no principal that could not have named it. A refusal leaves the
+    /// location pending, but for that one and a fault writing `out`, either
+    /// of which consumes it.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn fd_redeem_location(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _grantor: u64,
+        _grantor_len: usize,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Create a caller-owned wait-set that multiplexes the readiness of
     /// several event sources, returning its kernel-minted handle
     /// (`plans/USB.md`).
@@ -4352,6 +4400,32 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .fd_redeem_from(caller, args.0[0], args.0[1], grantor_len)
             }
+            SyscallNumber::FD_GRANT_LOCATION => {
+                // args[0] is the caller's own descriptor (resolved
+                // owner-checked by the handler); args[1] is the non-null
+                // attested-`ProcId` `UserPtr` (dispatcher-checked) naming the
+                // recipient, and args[2] is its length.
+                let fd = decode_u32(args.0[0]);
+                let recipient_len = decode_len(args.0[2])?;
+                self.handlers
+                    .fd_grant_location(caller, fd, args.0[1], recipient_len)
+            }
+            SyscallNumber::FD_REDEEM_LOCATION => {
+                // args[0] is the handle; args[1]/args[2] the non-null grantor
+                // `UserPtr` (dispatcher-checked) and its length; args[3]/args[4]
+                // the non-null out `UserPtr` (dispatcher-checked) and its
+                // capacity.
+                let grantor_len = decode_len(args.0[2])?;
+                let out_cap = decode_len(args.0[4])?;
+                self.handlers.fd_redeem_location(
+                    caller,
+                    args.0[0],
+                    args.0[1],
+                    grantor_len,
+                    args.0[3],
+                    out_cap,
+                )
+            }
             SyscallNumber::SYSINFO_INTROSPECT => {
                 // args[0] is the `IntrospectDomain` discriminant (validated by
                 // the handler); args[1] is the domain-specific selector/offset;
@@ -6083,6 +6157,30 @@ mod tests {
             _grantor_len: usize,
         ) -> SyscallResult {
             self.record("fd_redeem_from");
+            Ok(handle)
+        }
+
+        fn fd_grant_location(
+            &self,
+            _c: &CallerContext<'_>,
+            fd: u32,
+            _recipient: u64,
+            _recipient_len: usize,
+        ) -> SyscallResult {
+            self.record("fd_grant_location");
+            Ok(u64::from(fd))
+        }
+
+        fn fd_redeem_location(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            _grantor: u64,
+            _grantor_len: usize,
+            _out: u64,
+            _out_cap: usize,
+        ) -> SyscallResult {
+            self.record("fd_redeem_location");
             Ok(handle)
         }
     }

@@ -998,6 +998,35 @@ fn a_dragged_plate_keeps_its_position_when_the_chain_re_places() {
     );
 }
 
+/// Text a chain was measured with provisionally lands after it opened: every
+/// surface is measured and drawn again, and a plate the user put somewhere
+/// stays there.
+#[test]
+fn refitting_measures_every_surface_again_and_keeps_a_dragged_plate_put() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    assert!(!chain.refit(&g), "no chain, nothing to present");
+    open(&mut chain, APP, nested_model(), Point::new(200, 200), &g);
+    let root = plate(&chain, 0);
+    let band = Point::new(root.left() + 20, root.top() + 2);
+    chain.handle(&moved(band.x, band.y), band, &g, 0);
+    chain.handle(&PRESS, band, &g, 0);
+    let to = Point::new(band.x + 80, band.y + 30);
+    chain.handle(&moved(to.x, to.y), to, &g, 0);
+    chain.handle(&RELEASE, to, &g, 0);
+    settle_on(&mut chain, 0, 1, &g);
+    present_all(&mut chain);
+    let (dragged, child) = (plate(&chain, 0), plate(&chain, 1));
+
+    tairix_font::note_text_landed();
+    assert!(chain.refit(&g));
+    assert_eq!(plate(&chain, 0).origin, dragged.origin, "the user's place");
+    assert_eq!(plate(&chain, 1), child, "the same text measures the same");
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), Repaint::Whole);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(1)), Repaint::Whole);
+}
+
 // --- the information sheet -----------------------------------------------
 
 /// The sheet an attested application named `App` states.

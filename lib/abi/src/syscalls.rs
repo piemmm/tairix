@@ -3532,6 +3532,51 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::INPUT_INJECT),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FD_GRANT_LOCATION,
+        name: "fd_grant_location",
+        arg_count: 3,
+        args: [
+            // The caller's own descriptor, then the recipient's attested
+            // `ProcId` and its length.
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the minted handle (or a negated errno), like
+        // `fd_grant`.
+        ret: AbiType::U64,
+        // A location opens nothing, so it takes no capability; what it tells
+        // is recorded where it is told, at the redemption.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FD_REDEEM_LOCATION,
+        name: "fd_redeem_location",
+        arg_count: 5,
+        args: [
+            // The handle, the expected grantor's attested `ProcId` and its
+            // length, then the buffer the path is written to and its
+            // capacity.
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+        ],
+        // `U64` carries the path's length (or a negated errno), like
+        // `fs_getcwd`.
+        ret: AbiType::U64,
+        // A path is told only to a principal that may name one; the telling
+        // is audited.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -3979,6 +4024,16 @@ mod tests {
                 spec_for(n).unwrap().name
             );
         }
+    }
+
+    #[test]
+    fn a_location_is_told_only_to_who_may_name_paths_and_the_telling_is_audited() {
+        let grant = spec_for(SyscallNumber::FD_GRANT_LOCATION).unwrap();
+        assert_eq!(grant.required_capability, None, "a location opens nothing");
+        assert!(!grant.audit, "nothing is disclosed until it is redeemed");
+        let redeem = spec_for(SyscallNumber::FD_REDEEM_LOCATION).unwrap();
+        assert_eq!(redeem.required_capability, Some(CapabilityId::FS_ACCESS));
+        assert!(redeem.audit);
     }
 
     #[test]

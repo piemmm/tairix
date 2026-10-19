@@ -8722,6 +8722,10 @@ impl DocumentRelay for RefusingRelay {
     }
 
     fn decline(&mut self, _: u64, _: ProcId) {}
+
+    fn locate(&mut self, _: u64, _: ProcId) -> Result<String, Errno> {
+        Err(Errno::NotSupported)
+    }
 }
 
 /// A reach that counts what it was asked and refuses everything: the

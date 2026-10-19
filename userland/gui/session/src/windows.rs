@@ -131,6 +131,14 @@ pub const HAND_OVER_WITHHELD: EventId = EventId(20_021);
 /// The exact message [`HAND_OVER_WITHHELD`] is emitted with.
 pub const HAND_OVER_WITHHELD_MESSAGE: &str = "hand-over raise withheld";
 
+/// Event id of an application's request to show the user where the document
+/// behind one of its windows lives, refused: the window was not its own or
+/// not the one the user works in, or the document could not be located.
+pub const REVEAL_REFUSED: EventId = EventId(20_027);
+
+/// The exact message [`REVEAL_REFUSED`] is emitted with.
+pub const REVEAL_REFUSED_MESSAGE: &str = "document reveal refused";
+
 /// Event id of an application's own window brought forward with the keyboard
 /// on its request: it is at the front of the stack, moved there or already
 /// there, so what is pressed next lands on it.
@@ -446,6 +454,13 @@ impl SessionWindows {
         if pressed {
             self.worked_in = event.window_id();
         }
+    }
+
+    /// Note the user's press on the served window `ipc`'s close control: a
+    /// request to that window's application, so the user working in it as a
+    /// press inside it would be.
+    fn note_close_pressed(&mut self, ipc: u64) {
+        self.worked_in = Some(ipc);
     }
 
     /// Whether the served window `ipc` is the one the user last pressed a key
@@ -849,7 +864,10 @@ pub fn window_control_event(
     // Only a served window has a window-channel id and an owning app.
     let window_id = windows.ipc_id(wm)?;
     match control {
-        WindowControlKind::Close => Some(WindowEvent::CloseRequested { window_id }),
+        WindowControlKind::Close => {
+            windows.note_close_pressed(window_id);
+            Some(WindowEvent::CloseRequested { window_id })
+        }
         WindowControlKind::Minimize => Some(WindowEvent::Minimized { window_id }),
         WindowControlKind::PutToBack => None,
         WindowControlKind::SizeToggle => resized.map(|(state, client)| {
@@ -1014,11 +1032,14 @@ fn apply_window_control(
 pub fn window_control_alternate_event(
     control: WindowControlKind,
     wm: WindowId,
-    windows: &SessionWindows,
+    windows: &mut SessionWindows,
 ) -> Option<WindowEvent> {
     let window_id = windows.ipc_id(wm)?;
     match control {
-        WindowControlKind::Close => Some(WindowEvent::AlternateCloseRequested { window_id }),
+        WindowControlKind::Close => {
+            windows.note_close_pressed(window_id);
+            Some(WindowEvent::AlternateCloseRequested { window_id })
+        }
         WindowControlKind::Minimize
         | WindowControlKind::PutToBack
         | WindowControlKind::SizeToggle => None,
@@ -1273,6 +1294,29 @@ impl ShellWindowHost<'_> {
         } else {
             Activation::Withheld
         }
+    }
+
+    /// Record a refused reveal asked for by `caller`.
+    fn note_reveal_refused(&self, caller: ProcId, reason: &'static str) {
+        let caller = self.apps.attested_identity(caller);
+        tairix_log::log(
+            self.shell.audit(),
+            &tairix_log::Event {
+                level: tairix_log::Level::Warn,
+                id: REVEAL_REFUSED,
+                message: REVEAL_REFUSED_MESSAGE,
+                fields: &[
+                    Field {
+                        key: "caller",
+                        value: FieldValue::Str(caller.as_ref().map_or("", |app| app.name.as_str())),
+                    },
+                    Field {
+                        key: "reason",
+                        value: FieldValue::Str(reason),
+                    },
+                ],
+            },
+        );
     }
 
     /// Record a refused raise of `window_id`, asked for by `caller`.
@@ -2337,6 +2381,60 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         }
     }
 
+    fn reveal_requested(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        window_id: u64,
+        location: u64,
+    ) -> Result<(), Errno> {
+        // Decided before the location is read, which consumes it whatever
+        // follows, so a refusal leaves nothing pending for the caller's life.
+        let permitted = if self.windows.owner_of(window_id) == Some(caller) {
+            self.require_user(window_id)
+                .map_err(|err| (err, "the user is not working in the window"))
+        } else {
+            Err((Errno::NotFound, "the window is not the caller's"))
+        };
+        let located = self
+            .relay
+            .locate(location, caller)
+            .map_err(|err| (err, "the document could not be located"));
+        let path = match permitted.and(located) {
+            Ok(path) => path,
+            Err((err, reason)) => {
+                self.note_reveal_refused(caller, reason);
+                return Err(err);
+            }
+        };
+        // Reached exactly as the desktop's own launches reach it, so a folder
+        // the file manager already shows is brought forward, not opened twice.
+        let bundle = tairix_appstore::bundle_of_entry(tairix_abi::FILES_RUN_PATH)
+            .unwrap_or(tairix_abi::FILES_RUN_PATH);
+        let running = self.apps.resident(bundle);
+        let one_instance = self.apps.runs_one_instance(bundle);
+        let activation = self.hand_over_activation(caller);
+        let mut reach = DeskReach {
+            desk,
+            host: self,
+            activation,
+        };
+        match resolve_launch(
+            &mut reach,
+            running,
+            one_instance,
+            Some(LaunchTarget::Path(&path)),
+        ) {
+            Launch::Reused { .. } => Ok(()),
+            // Spawning on an application's behalf would lend it the
+            // desktop's own launch authority.
+            Launch::Spawn => {
+                self.note_reveal_refused(caller, "no file manager is running");
+                Err(Errno::NotFound)
+            }
+        }
+    }
+
     fn app_bar_declared(&mut self, owner: ProcId, bar: &AppBar) -> Result<(), Errno> {
         // The engine attested the caller and bounded the declaration; the
         // icon-bar service records it, and the strip is re-resolved from the
@@ -2705,6 +2803,9 @@ mod tests {
         relayed: alloc::vec::Vec<(DocumentAuthority, bool, ProcId)>,
         declined: alloc::vec::Vec<(u64, ProcId)>,
         mints: Option<u64>,
+        /// Every location read, and the path one tells.
+        located: alloc::vec::Vec<(u64, ProcId)>,
+        location: Option<&'static str>,
     }
 
     impl DocumentRelay for WiredRelay {
@@ -2720,6 +2821,13 @@ mod tests {
 
         fn decline(&mut self, grant: u64, from: ProcId) {
             self.declined.push((grant, from));
+        }
+
+        fn locate(&mut self, location: u64, from: ProcId) -> Result<String, Errno> {
+            self.located.push((location, from));
+            self.location
+                .map(String::from)
+                .ok_or(Errno::PermissionDenied)
         }
     }
 
@@ -3655,6 +3763,106 @@ mod tests {
             assert_eq!(host.raise_requested(2), Err(Errno::SeatBusy));
             assert_eq!(host.focused_window(), Some(1), "nothing moved");
         });
+    }
+
+    /// The bench with [`resident`] running the desktop's file manager, whose
+    /// documents tell the path `location`.
+    fn reveal_bench(location: Option<&'static str>) -> HandOverBench {
+        let mut bench = HandOverBench::new();
+        let files = tairix_appstore::bundle_of_entry(tairix_abi::FILES_RUN_PATH)
+            .expect("the file manager's entry names its bundle");
+        bench.bar.residents.push((String::from(files), resident()));
+        bench.relay.location = location;
+        bench
+    }
+
+    impl HandOverBench {
+        /// Ask the session to reveal the document behind `window` for
+        /// [`caller`], telling where it is through location 41.
+        fn reveal(&mut self, window: u64) -> Result<(), Errno> {
+            let mut host = ShellWindowHost {
+                shell: &mut self.shell,
+                compositor: &mut self.compositor,
+                windows: &mut self.windows,
+                picker: &mut self.picker,
+                apps: &mut self.bar,
+                menu: &mut self.menu,
+                seat_held: self.seat_held,
+                screensaver: None,
+                relay: &mut self.relay,
+                wallpapers: &mut self.gallery,
+                cursor_sets: &[],
+                clipboard: &mut self.clipboard,
+                authorise: None,
+            };
+            host.reveal_requested(&mut self.desk, caller(), window, 41)
+        }
+    }
+
+    /// The file manager is handed the document's path, and lent the raise
+    /// that brings its folder forward, only from the window the user is
+    /// working in; the location is read, and so consumed, whatever the
+    /// answer.
+    #[test]
+    fn a_reveal_hands_the_file_manager_the_path_only_from_the_window_the_user_works_in() {
+        let mut bench = reveal_bench(Some("/Users/ada/Home/notes.txt"));
+        bench.open(caller(), 9);
+        assert_eq!(bench.reveal(9), Err(Errno::PermissionDenied));
+        assert!(bench.desk.handed.is_empty());
+        bench.work_in(9);
+        assert_eq!(bench.reveal(9), Ok(()));
+        assert_eq!(
+            bench.desk.handed,
+            [(
+                resident(),
+                OpenEntry::Path(String::from("/Users/ada/Home/notes.txt"))
+            )]
+        );
+        assert_eq!(
+            bench.desk.activations,
+            [Activation::Granted { focus: Some(9) }]
+        );
+        assert_eq!(bench.relay.located, [(41, caller()), (41, caller())]);
+    }
+
+    /// A reveal of another application's window, of a document that cannot
+    /// be located, or with no file manager to show it, hands nothing over
+    /// and is on the audit trail.
+    #[test]
+    fn a_reveal_that_cannot_be_carried_out_hands_nothing_over_and_is_recorded() {
+        static AUDIT: RevealAudit = RevealAudit(core::sync::atomic::AtomicUsize::new(0));
+        let refused = || AUDIT.0.load(core::sync::atomic::Ordering::Relaxed);
+        let mut bench = reveal_bench(Some("/Users/ada/Home/notes.txt"));
+        bench.shell = crate::tests::shell_audited(TaskbarConfig::bottom_bar(640, 480), &AUDIT);
+        bench.open(resident(), 5);
+        bench.open(caller(), 9);
+        bench.work_in(9);
+        assert_eq!(bench.reveal(5), Err(Errno::NotFound), "not the caller's");
+        assert_eq!(refused(), 1);
+        bench.relay.location = None;
+        assert_eq!(bench.reveal(9), Err(Errno::PermissionDenied));
+        assert_eq!(refused(), 2);
+        bench.bar.residents.clear();
+        bench.relay.location = Some("/Users/ada/Home/notes.txt");
+        assert_eq!(
+            bench.reveal(9),
+            Err(Errno::NotFound),
+            "the desktop launches nothing on an application's behalf"
+        );
+        assert_eq!(refused(), 3);
+        assert!(bench.desk.handed.is_empty());
+        assert_eq!(bench.relay.located.len(), 3, "every location was consumed");
+    }
+
+    /// Counts the reveal refusals it records.
+    struct RevealAudit(core::sync::atomic::AtomicUsize);
+
+    impl tairix_log::Sink for RevealAudit {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
+            if event.id == REVEAL_REFUSED {
+                self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 
     /// Counts the raises, raise refusals and withheld hand-overs it records.
@@ -5586,8 +5794,12 @@ mod tests {
             .expect("a session window");
 
         assert_eq!(
-            window_control_alternate_event(WindowControlKind::Close, wm, &windows),
+            window_control_alternate_event(WindowControlKind::Close, wm, &mut windows),
             Some(WindowEvent::AlternateCloseRequested { window_id: 7 })
+        );
+        assert!(
+            windows.worked_in(7),
+            "the press on its close control is the user working in the window"
         );
         // The session performs nothing of its own: the window is still open,
         // visible, and where it was.
@@ -5600,14 +5812,14 @@ mod tests {
             WindowControlKind::SizeToggle,
         ] {
             assert_eq!(
-                window_control_alternate_event(control, wm, &windows),
+                window_control_alternate_event(control, wm, &mut windows),
                 None,
                 "{control:?} has no alternate meaning"
             );
         }
         // A session-owned window's close control leaks no event.
         assert_eq!(
-            window_control_alternate_event(WindowControlKind::Close, session_owned, &windows),
+            window_control_alternate_event(WindowControlKind::Close, session_owned, &mut windows),
             None
         );
         assert!(compositor.window(session_owned).expect("live").is_visible());

@@ -788,6 +788,20 @@ what it wants first is recorded in `plans/VIEW.md`.**
   shows, the same user-mediated widening a pick is — and it hands the
   descriptor on, never the path.
 
+  **Where a descriptor points may be told without passing it on.** A holder
+  that may not delegate — an editor holding no filesystem capability, handed
+  one document — can still mint one live instance a *location*
+  (`fd_grant_location`): the descriptor's absolute path and the user it reaches
+  it as, and no access at all. The recipient learns the path through
+  `fd_redeem_location`, which needs `CAP_FS_ACCESS` and refuses a reader of
+  another user, so a path is told only to a principal that could have named it.
+  Locations share the delegations' handle space, bound and duplicate
+  suppression, and each redeems only as what it is. The mint is ungated and
+  unaudited, since it discloses nothing until an admitted reader redeems it;
+  the redemption is audited. It is what lets the desktop show the user where a
+  document lives while the editor knows it by name only
+  (`plans/TEXTEDIT.md` TE17).
+
   **The recipient is named by its attested `ProcId`, never by a task id.**
   `fd_grant(fd, write_ceiling, recipient, len)` takes a pointer to the
   16-byte instance the grantor read from an `Origin`; the kernel resolves it

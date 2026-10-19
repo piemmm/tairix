@@ -2729,6 +2729,7 @@ impl DesktopShell {
             client,
             resized,
             moved,
+            ..
         } = self
             .router
             .yield_pointer(compositor, self.session.taskbar_mut());
@@ -2737,11 +2738,25 @@ impl DesktopShell {
         self.abandoned.moved = self.abandoned.moved.or(moved);
     }
 
+    /// The window the pointer has left since this was last asked, with where
+    /// in its client it last was, which its owner is to be told.
+    pub fn take_client_left(&mut self) -> Option<(WindowId, Point)> {
+        self.router.take_client_left()
+    }
+
     /// What the last yields of the pointer left the serve loop to tell — the
     /// client whose press is over, a window a resize settled, a window a move
-    /// left — leaving nothing owed.
+    /// left — and a window the pointer has since left that no routed event
+    /// has told yet, leaving nothing owed. A window whose press is over is
+    /// told once, not twice.
     pub fn take_abandoned(&mut self) -> Abandoned {
-        core::mem::take(&mut self.abandoned)
+        let mut abandoned = core::mem::take(&mut self.abandoned);
+        let held = abandoned.client.map(|(window, _)| window);
+        abandoned.left = self
+            .router
+            .take_client_left()
+            .filter(|&(window, _)| Some(window) != held);
+        abandoned
     }
 
     /// Follow the device to `to` while the stream is

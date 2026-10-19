@@ -34,8 +34,9 @@ tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
 # The theme a document window's engine is laid out and drawn under, and the
 # registry the shell primes from the session's reported appearance.
 tairix-theme = { path = "../theme", version = "=0.0.0" }
-# The queue a document application's saves are written on.
-tairix-util = { path = "../util", version = "=0.0.0", optional = true }
+# The queue a document application's saves are written on, and the spelling
+# an untrusted name is stated in.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [features]
 default = ["rt"]
@@ -47,7 +48,6 @@ rt = [
     "dep:tairix-rt",
     "dep:tairix-procinfo",
     "dep:tairix-raster",
-    "dep:tairix-util",
 ]
 
 [lints]

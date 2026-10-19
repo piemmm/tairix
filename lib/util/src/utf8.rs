@@ -79,11 +79,47 @@ pub const fn is_hidden(ch: char) -> bool {
     )
 }
 
+/// `text` as it is shown where what it says must be what is drawn, as a
+/// name is: each [`is_hidden`] character replaced by U+FFFD, so two names
+/// that differ only by one never look alike. Borrowed when there is none.
+#[must_use]
+pub fn shown(text: &str) -> alloc::borrow::Cow<'_, str> {
+    if !text.chars().any(is_hidden) {
+        return alloc::borrow::Cow::Borrowed(text);
+    }
+    alloc::borrow::Cow::Owned(
+        text.chars()
+            .map(|ch| {
+                if is_hidden(ch) {
+                    char::REPLACEMENT_CHARACTER
+                } else {
+                    ch
+                }
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use core::cmp::Ordering;
 
-    use super::{fold, folded, is_hidden, reader_order, sequence_len};
+    use super::{fold, folded, is_hidden, reader_order, sequence_len, shown};
+
+    #[test]
+    fn a_name_is_shown_with_what_hides_in_it_made_visible() {
+        assert!(matches!(
+            shown("report.pdf"),
+            alloc::borrow::Cow::Borrowed("report.pdf")
+        ));
+        assert_eq!(shown("report\u{200b}.pdf"), "report\u{fffd}.pdf");
+        assert_eq!(shown("a\u{202e}b\nc"), "a\u{fffd}b\u{fffd}c");
+        assert_ne!(
+            shown("ab"),
+            shown("a\u{200b}b"),
+            "two names that differ never look alike"
+        );
+    }
 
     #[test]
     fn names_sort_by_their_folded_letters_and_never_compare_equal_unless_they_are() {

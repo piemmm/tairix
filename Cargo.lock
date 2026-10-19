@@ -1162,6 +1162,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-rt",
  "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2455,6 +2456,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-crc32c",
+ "tairix-font",
  "tairix-geometry",
  "tairix-hash",
  "tairix-log",
@@ -2482,6 +2484,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-reclaim",
  "tairix-rt",
+ "tairix-util",
  "tairix-vt",
 ]
 

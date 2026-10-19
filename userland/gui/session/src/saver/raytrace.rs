@@ -266,6 +266,12 @@ impl Raytrace {
         self.readout.take_down(compositor);
     }
 
+    /// Measure and draw the readout again: text it was measured with
+    /// provisionally has landed.
+    pub(super) fn refit_text(&mut self, theme: &Theme, scale: Scale, compositor: &mut Compositor) {
+        self.readout.refit(theme, scale, self.size, compositor);
+    }
+
     /// When the next frame is due.
     pub(super) const fn due_ns(&self) -> u64 {
         self.due_ns

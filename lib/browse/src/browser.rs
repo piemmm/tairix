@@ -841,9 +841,10 @@ impl<S: DirectorySource> Browser<S> {
         self.finish_entry(&pending, outcome).map(drop)
     }
 
-    /// Move the focus onto the entry `name`, now if the listing shows it, else
-    /// when a listing first does.
-    fn follow(&mut self, name: &str) {
+    /// Select the entry `name` alone, moving the focus onto it: now if the
+    /// listing shows it, else when the listing first does — until the browser
+    /// moves elsewhere or a whole fresh listing of it does not show the name.
+    pub fn follow(&mut self, name: &str) {
         self.focus_intent = Some(String::from(name));
         self.apply_focus_intent();
     }

@@ -1505,3 +1505,31 @@ fn a_disabled_tone_is_grey_and_fades_as_far_as_the_muted_label_does() {
     }
     assert_eq!(ArtworkTone::desaturated(40).strength, u8::MAX);
 }
+
+/// A width measured while the text's glyphs were still on their way is taken
+/// again once they land, never served from memory.
+#[test]
+fn a_remembered_measurement_is_taken_again_once_its_text_lands() {
+    let memo = crate::paint::Measured::<u32>::default();
+    let taken = core::cell::Cell::new(0u32);
+    let measure = || {
+        taken.set(taken.get() + 1);
+        taken.get()
+    };
+    let first = memo.get_or(7, measure);
+    let mut again = memo.get_or(7, measure);
+    // Another test in this process may land text too; only a landing
+    // between the two asks can make the second measure.
+    if again != first {
+        again = memo.get_or(7, measure);
+        assert_eq!(memo.get_or(7, measure), again);
+    }
+    tairix_font::note_text_landed();
+    let landed = memo.get_or(7, measure);
+    assert!(landed > again, "measured again after the landing");
+    assert_eq!(
+        memo.get_or(8, measure),
+        landed + 1,
+        "another key is its own"
+    );
+}

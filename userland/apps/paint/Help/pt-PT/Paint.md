@@ -159,7 +159,9 @@ o seu menu: Cortar, Copiar, Colar, Selecionar tudo e Desselecionar, e depois
 Ficheiro, Editar, Imagem, Camadas, Cores, Ajustes, Sprites ou Páginas, Ver e
 Ferramentas, cada um com o seu próprio submenu. A janela não tem barra de
 menus. Fechar uma janela ou sair com alterações por guardar pergunta
-primeiro.
+primeiro. Fechar uma janela com o botão secundário (direito) sobre o seu
+botão de fechar também mostra o seu ficheiro no gestor de ficheiros, na
+pasta que o contém.
 
 * `Ctrl+N` — uma nova imagem; `Ctrl+O` — abrir um ficheiro
 * `Ctrl+S` — guardar; `Ctrl+Shift+S` — guardar como

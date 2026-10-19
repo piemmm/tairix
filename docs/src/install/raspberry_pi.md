@@ -122,7 +122,9 @@ This one step builds the aarch64 kernel, fetches any missing firmware
 blob from the pinned source, verifies the firmware against the
 manifest, and writes `images/tairix-aarch64-rpi-debug.img`, the flashable
 image, for the default `debug` profile; pass `--profile installer` for the
-installer image.
+installer image. The image is replaced whole, written beside the old one and
+renamed over it: a build cut short leaves the previous image, and a
+`cargo xtask run` session still running keeps the disk it booted.
 
 The root partition is **plaintext** in both profiles, so the image boots with
 no passphrase. A debug image can be asked for with an encrypted root instead,

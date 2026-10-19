@@ -794,6 +794,12 @@ impl Taskbar {
         self.repaint = TaskbarRepaint::ALL;
     }
 
+    /// Draw everything again: text drawn provisionally has landed
+    /// (`tairix_font::text_generation`), and every surface draws text.
+    pub fn redraw_text(&mut self) {
+        self.repaint = TaskbarRepaint::ALL;
+    }
+
     /// Reposition or resize the bar. Every surface is laid out from the
     /// config (the popups and menu anchor off the bar's own computed
     /// geometry), so every surface repaints.

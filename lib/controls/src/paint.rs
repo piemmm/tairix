@@ -599,10 +599,11 @@ pub(crate) enum TextAlign {
 /// layout, a paint and a hit test that each ask again measure the text once.
 ///
 /// For text its owner never changes in place: a builder that changes it
-/// forgets what was remembered. It compares equal to any other, because
-/// nothing drawn reads it.
+/// forgets what was remembered. A measurement taken before text drawn
+/// provisionally landed ([`tairix_font::text_generation`]) is taken again.
+/// It compares equal to any other, because nothing drawn reads it.
 #[derive(Clone, Debug)]
-pub struct Measured<K: Copy + Eq>(Cell<Option<(K, u32)>>);
+pub struct Measured<K: Copy + Eq>(Cell<Option<(K, u64, u32)>>);
 
 // Written out because the derive would demand a default key, which an
 // empty memory never holds.
@@ -615,13 +616,14 @@ impl<K: Copy + Eq> Default for Measured<K> {
 impl<K: Copy + Eq> Measured<K> {
     /// The measurement remembered for `key`, or `measure`'s answer, remembered.
     pub fn get_or(&self, key: K, measure: impl FnOnce() -> u32) -> u32 {
-        if let Some((held, height)) = self.0.get() {
-            if held == key {
+        let generation = tairix_font::text_generation();
+        if let Some((held, measured_in, height)) = self.0.get() {
+            if held == key && measured_in == generation {
                 return height;
             }
         }
         let height = measure();
-        self.0.set(Some((key, height)));
+        self.0.set(Some((key, generation, height)));
         height
     }
 }

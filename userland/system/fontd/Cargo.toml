@@ -60,6 +60,9 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # draws a monospace family's glyph into that many cells and the client steps
 # the pen by the same count, so both must read the same table.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The one definition of a scalar that draws nothing, which the service answers
+# with an empty glyph exactly as the client does without asking.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime: `tairix-rt`
 # provides `_start`, the stack canary, the panic handler, the

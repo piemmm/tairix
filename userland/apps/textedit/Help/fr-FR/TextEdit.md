@@ -76,7 +76,9 @@ La ligne d'état indique la ligne et la colonne du curseur, ce que la
 vérification a trouvé et, sous forme de champs qui ouvrent un menu au clic :
 le format, texte ou hexadécimal, les fins de ligne et l'indentation. Fermer
 une fenêtre ou quitter avec des modifications non enregistrées demande
-d'abord confirmation.
+d'abord confirmation. Fermer une fenêtre en cliquant sur son bouton de
+fermeture avec le bouton secondaire (droit) montre aussi son fichier dans
+le gestionnaire de fichiers, dans le dossier qui le contient.
 
 * `Ctrl+N` — une nouvelle fenêtre
 * `Ctrl+O` — ouvrir un fichier

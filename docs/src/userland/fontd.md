@@ -82,6 +82,18 @@ face — which matters on a small machine, where the shipped CJK companions are
 tens of megabytes. What is retained is bounded by the store's own size, not by
 anything a caller can grow.
 
+**Whether a face is worth reading is known from its `cmap` alone.** Before a
+face is read whole, only its table directory and `cmap` are read, by position
+(`tairix_fontface::Coverage`, decoded exactly as the face parser decodes the
+same table). A scalar the face does not map therefore costs it no more than
+that: tens of kilobytes where the face is megabytes. A read that fails is tried
+again rather than remembered as "covers nothing", at doubling intervals of
+asks while it goes on failing, and a handle whose whole read failed is kept for
+the next try; only a face that does not parse, or could not be opened, is set
+aside for good. While a face that might draw a scalar cannot be read, the
+scalar is refused rather than answered with U+FFFD, which a client would keep
+as its glyph.
+
 ## The dispatcher
 
 The host-testable core is `FontService`, the rasterising dispatcher. It owns
@@ -93,7 +105,10 @@ instances, and a byte-budgeted coverage cache, and turns one decoded
    manifest order, then its declared fallback family's faces in the same
    order, then U+FFFD from the family's primary face. A scalar is never
    refused for lack of coverage; an *unknown family key* is refused with
-   `Errno::NotFound` and never silently substituted.
+   `Errno::NotFound` and never silently substituted. A scalar that draws
+   nothing (`tairix_util::utf8::is_hidden`: a control, a separator, a
+   default-ignorable) is answered with an empty, zero-advance glyph or outline
+   without consulting any face.
 2. Rasterise once at the geometry the family's **primary** face defines at the
    requested pixel height — pixels per em, baseline row, box height — even
    when the glyph came from a fallback face, so mixing scripts never shifts

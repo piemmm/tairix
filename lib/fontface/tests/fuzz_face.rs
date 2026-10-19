@@ -30,15 +30,21 @@
 //!   a consumer that will transform and fill whatever it is given. Every
 //!   contour it returns must be closed and finite, or the bound it broke must
 //!   have refused it.
+//! * **Coverage, read apart from the face.** Every candidate is also read
+//!   through [`Coverage::read`]'s positioned reads, which must fail closed as
+//!   the parser does; wherever the face parses, its coverage must be exactly
+//!   the face's own map, or the font service would skip a face that draws a
+//!   scalar or read one whole that does not.
 //!
 //! No external fuzz runner: a per-run-seeded `Prng` (seed drawn and logged by
 //! `tairix_fuzzseed`) drives the loop. A plain `cargo test` runs the fixed
 //! [`SMOKE_ITERATIONS`] sweep once; `cargo xtask fuzz` extends it to a
 //! wall-clock budget.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 
-use tairix_fontface::{AxisSetting, CellGeometry, Face, OutlineSegment, ATLAS_EM_PX};
+use tairix_fontface::{AxisSetting, CellGeometry, Coverage, Face, OutlineSegment, ATLAS_EM_PX};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -52,6 +58,15 @@ const SMOKE_ITERATIONS: u64 = 20_000;
 /// service's own bound is far larger; this is a harness-speed cap, not a
 /// contract).
 const MAX_FUZZ_HEIGHT: u32 = 48;
+
+/// Fill `buf` from `offset` into `bytes`, answering how many bytes were
+/// filled: fewer only where `bytes` ends.
+fn read_at(bytes: &[u8], offset: u64, buf: &mut [u8]) -> usize {
+    let start = usize::try_from(offset).map_or(bytes.len(), |at| at.min(bytes.len()));
+    let filled = buf.len().min(bytes.len() - start);
+    buf[..filled].copy_from_slice(&bytes[start..start + filled]);
+    filled
+}
 
 /// A cell height in `8..=max` pixels.
 fn cell_height(rng: &mut Prng, max: u32) -> u32 {
@@ -236,7 +251,15 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
             &scratch
         };
 
+        let coverage = Coverage::read(candidate.len() as u64, |offset, buf| {
+            Ok::<_, Infallible>(read_at(candidate, offset, buf))
+        });
         if let Ok(face) = Face::parse(candidate) {
+            let coverage = coverage.expect("a face that parses has a readable cmap");
+            if !face.mapped().is_empty() {
+                let (code, _) = *rng.pick(face.mapped());
+                assert!(coverage.covers(code), "U+{code:04X} is mapped");
+            }
             // A face that parses must not panic any accessor. Probe the map and
             // draw a couple of its glyphs, both fixed-cell and proportional, at
             // a random height.
@@ -245,7 +268,9 @@ fn parsing_any_bytes_fails_closed_and_every_draw_stays_in_bounds() {
             for probe in 0..4u64 {
                 let code =
                     u32::try_from(rng.next_u64().wrapping_add(probe) & 0x1F_FFFF).unwrap_or(0);
-                if let Some(glyph) = face.glyph_for(code) {
+                let glyph = face.glyph_for(code);
+                assert_eq!(coverage.covers(code), glyph.is_some(), "U+{code:04X}");
+                if let Some(glyph) = glyph {
                     let height = cell_height(&mut rng, 32);
                     exercise_rasterise(&face, glyph, height);
                     exercise_proportional(&face, glyph, height);

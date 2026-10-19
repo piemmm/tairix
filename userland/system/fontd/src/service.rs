@@ -56,11 +56,13 @@ use tairix_abi::font_ipc::{
 use tairix_abi::Errno;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, CachedGlyph};
 use tairix_fontface::{
-    lineart, AxisSetting, CellGeometry, Contour, Face, GenericFamily, OutlineSegment,
+    lineart, AxisSetting, CellGeometry, Contour, Coverage, CoverageError, Face, GenericFamily,
+    OutlineSegment,
 };
 use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::Sink;
 use tairix_reclaim::{PressureGauge, ReclaimCache, ReclaimOwner};
+use tairix_util::utf8::is_hidden;
 use tairix_vt::char_width;
 
 use crate::discovery::FaceLoad;
@@ -244,20 +246,79 @@ const SYNTHETIC_OBLIQUE_DEGREES: f32 = 14.0;
 /// and the service has no business carrying trigonometry for one number.
 const SYNTHETIC_OBLIQUE_SHEAR: i16 = 4085;
 
+/// The most asks a face whose read failed waits before it is read again.
+const BACKOFF_MOST_ASKS: u32 = 1024;
+
+/// How long a face whose read failed waits before it is read again, counted
+/// in asks of it: doubling from one ask while it goes on failing, so a face
+/// that cannot be read costs the service a logarithmic share of its work
+/// rather than a read at every ask.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Backoff {
+    wait: u32,
+    left: u32,
+}
+
+impl Backoff {
+    /// Whether the face may be read now; an ask while it waits is counted.
+    fn ready(&mut self) -> bool {
+        let ready = self.left == 0;
+        self.left = self.left.saturating_sub(1);
+        ready
+    }
+
+    /// A read failed: the next waits twice as long as the last.
+    fn failed(&mut self) {
+        self.wait = self.wait.saturating_mul(2).clamp(1, BACKOFF_MOST_ASKS);
+        self.left = self.wait;
+    }
+
+    /// A read succeeded.
+    fn cleared(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// What a face says of whether it maps a scalar.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Maps {
+    Yes,
+    No,
+    /// It could not be read just now, so nobody knows yet.
+    Unknown,
+}
+
+/// How far one face has been read.
+enum Reading<'a> {
+    /// Nothing of it yet.
+    Unread,
+    /// Its `cmap` alone: what it maps, and so whether it is worth reading.
+    Covered(Coverage),
+    /// Whole, and parsed at its default instance.
+    Parsed(Box<Face<'a>>),
+    /// Not a face the engine reads, or one that could not be opened, and
+    /// never will be: it covers nothing.
+    Malformed,
+}
+
 /// One face's lazily-read bytes and its cached parsed instances.
 ///
-/// The face's bytes are read on first use ([`FaceLoad::load`]) and retained
-/// for the service's life. The default (unvaried) instance is parsed once
-/// and used for every codepoint lookup and as the geometry source, since a
-/// face's `cmap` and vertical metrics never change with variation in this
-/// engine. A face declaring an axis a request moves additionally caches one
-/// instanced [`Face`] per distinct [`FaceInstance`] actually asked for; a
-/// face declaring none of them reuses the one default instance and is
-/// completed by the caller-side synthesis the reply reports.
+/// Until something it maps is asked for, only the face's table directory and
+/// `cmap` are read ([`FaceLoad::read_at`]), so a scalar it does not cover
+/// never costs the rest of it. The bytes are read whole the first time a
+/// scalar it maps is drawn ([`FaceLoad::load`]) and retained for the service's
+/// life. The default (unvaried) instance is parsed once and used for every
+/// codepoint lookup and as the geometry source, since a face's `cmap` and
+/// vertical metrics never change with variation in this engine. A face
+/// declaring an axis a request moves additionally caches one instanced
+/// [`Face`] per distinct [`FaceInstance`] actually asked for; a face declaring
+/// none of them reuses the one default instance and is completed by the
+/// caller-side synthesis the reply reports.
 pub(crate) struct FaceCache<'a> {
     loader: Box<dyn FaceLoad<'a> + 'a>,
     bytes: Option<&'a [u8]>,
-    default: Option<Face<'a>>,
+    reading: Reading<'a>,
+    backoff: Backoff,
     axes: FaceAxes,
     instances: Vec<(FaceInstance, Face<'a>)>,
 }
@@ -268,10 +329,58 @@ impl<'a> FaceCache<'a> {
         Self {
             loader,
             bytes: None,
-            default: None,
+            reading: Reading::Unread,
+            backoff: Backoff::default(),
             axes: FaceAxes::default(),
             instances: Vec::new(),
         }
+    }
+
+    /// Whether this face maps `code`.
+    ///
+    /// Read from the `cmap` alone until the face itself has been. A read that
+    /// failed is [`Maps::Unknown`], and is tried again once the face's backoff
+    /// lets it.
+    fn covers(&mut self, code: u32) -> Maps {
+        if let Reading::Unread = self.reading {
+            if !self.backoff.ready() {
+                return Maps::Unknown;
+            }
+            let loader = &mut self.loader;
+            let read = loader
+                .size()
+                .map_err(CoverageError::Read)
+                .and_then(|len| Coverage::read(len, |offset, buf| loader.read_at(offset, buf)));
+            self.reading = match read {
+                Ok(coverage) => {
+                    self.backoff.cleared();
+                    Reading::Covered(coverage)
+                }
+                Err(CoverageError::Malformed(_) | CoverageError::Read(Errno::NotFound)) => {
+                    Reading::Malformed
+                }
+                Err(CoverageError::Read(_) | CoverageError::OutOfMemory) => {
+                    self.backoff.failed();
+                    return Maps::Unknown;
+                }
+            };
+        }
+        let maps = match &self.reading {
+            Reading::Covered(coverage) => coverage.covers(code),
+            Reading::Parsed(face) => face.glyph_for(code).is_some(),
+            Reading::Unread | Reading::Malformed => false,
+        };
+        if maps {
+            Maps::Yes
+        } else {
+            Maps::No
+        }
+    }
+
+    /// Whether this face will never be read: it does not parse, or could not
+    /// be opened.
+    const fn unusable(&self) -> bool {
+        matches!(self.reading, Reading::Malformed)
     }
 
     /// This face's bytes, reading them on the first call and retaining them
@@ -289,12 +398,34 @@ impl<'a> FaceCache<'a> {
 
     /// Read this face's bytes and parse its default instance, if either has
     /// not already happened.
+    ///
+    /// A face that does not parse never will, since its bytes are retained,
+    /// so it is not parsed again.
     fn ensure_default(&mut self) -> Result<(), Errno> {
-        if self.default.is_some() {
-            return Ok(());
+        match self.reading {
+            Reading::Parsed(_) => return Ok(()),
+            Reading::Malformed => return Err(Errno::BadMagic),
+            Reading::Unread | Reading::Covered(_) => {}
         }
-        let bytes = self.face_bytes()?;
-        let face = Face::parse(bytes).map_err(|_| Errno::BadMagic)?;
+        if !self.backoff.ready() {
+            return Err(Errno::WouldBlock);
+        }
+        let bytes = match self.face_bytes() {
+            Ok(bytes) => bytes,
+            Err(Errno::NotFound) => {
+                self.reading = Reading::Malformed;
+                return Err(Errno::NotFound);
+            }
+            Err(err) => {
+                self.backoff.failed();
+                return Err(err);
+            }
+        };
+        self.backoff.cleared();
+        let Ok(face) = Face::parse(bytes) else {
+            self.reading = Reading::Malformed;
+            return Err(Errno::BadMagic);
+        };
         let declared = |tag: &[u8; 4], bit: u8| {
             u8::from(face.axes().iter().any(|axis| axis.tag == *tag)) * bit
         };
@@ -304,7 +435,7 @@ impl<'a> FaceCache<'a> {
                 | declared(b"ital", FaceAxes::ITAL)
                 | declared(b"slnt", FaceAxes::SLNT),
         );
-        self.default = Some(face);
+        self.reading = Reading::Parsed(Box::new(face));
         Ok(())
     }
 
@@ -312,7 +443,10 @@ impl<'a> FaceCache<'a> {
     /// the family's shared geometry.
     fn default_face(&mut self) -> Result<&Face<'a>, Errno> {
         self.ensure_default()?;
-        self.default.as_ref().ok_or(Errno::BadMagic)
+        match &self.reading {
+            Reading::Parsed(face) => Ok(face),
+            Reading::Unread | Reading::Covered(_) | Reading::Malformed => Err(Errno::BadMagic),
+        }
     }
 
     /// Which variation axes this face declares.
@@ -720,17 +854,34 @@ impl<'a> FontService<'a> {
     }
 
     /// The first face in `family_index`'s own faces whose `cmap` maps
-    /// `code`, as `(face index, glyph)`.
-    fn resolve_within(&mut self, family_index: usize, code: u32) -> Option<(usize, u16)> {
-        let family = self.families.get_mut(family_index)?;
+    /// `code`, as `(face index, glyph)`, and whether a face that might map it
+    /// could not be read just now.
+    ///
+    /// A face is read whole only once its `cmap` says it maps `code`.
+    fn resolve_within(&mut self, family_index: usize, code: u32) -> (Option<(usize, u16)>, bool) {
+        let Some(family) = self.families.get_mut(family_index) else {
+            return (None, false);
+        };
+        let mut unsure = false;
         for (face_index, face) in family.faces.iter_mut().enumerate() {
-            if let Ok(default_face) = face.default_face() {
-                if let Some(glyph) = default_face.glyph_for(code) {
-                    return Some((face_index, glyph));
+            match face.covers(code) {
+                Maps::No => continue,
+                Maps::Unknown => {
+                    unsure = true;
+                    continue;
                 }
+                Maps::Yes => {}
+            }
+            match face.default_face() {
+                Ok(default_face) => {
+                    if let Some(glyph) = default_face.glyph_for(code) {
+                        return (Some((face_index, glyph)), unsure);
+                    }
+                }
+                Err(_) => unsure |= !face.unusable(),
             }
         }
-        None
+        (None, unsure)
     }
 
     /// Resolve `scalar` for a [`FontRequest::Glyphs`] naming `family_index`:
@@ -739,12 +890,16 @@ impl<'a> FontService<'a> {
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] only in the structurally-impossible case that even
-    /// the primary face cannot yield U+FFFD — every shipped face maps it, so
-    /// this is a defensive fail-closed rather than an expected outcome.
+    /// [`Errno::WouldBlock`] while a face that might draw it cannot be read
+    /// just now: a replacement then would be kept by the client as the
+    /// scalar's glyph for good. [`Errno::NotFound`] only in the
+    /// structurally-impossible case that even the primary face cannot yield
+    /// U+FFFD — every shipped face maps it, so this is a defensive fail-closed
+    /// rather than an expected outcome.
     fn resolve(&mut self, family_index: usize, scalar: char) -> Result<GlyphSource, Errno> {
         let code = u32::from(scalar);
-        if let Some((face_index, glyph)) = self.resolve_within(family_index, code) {
+        let (found, mut unsure) = self.resolve_within(family_index, code);
+        if let Some((face_index, glyph)) = found {
             let key = self.families.get(family_index).ok_or(Errno::NotFound)?.key;
             return Ok(GlyphSource {
                 resolved_family_index: family_index,
@@ -760,7 +915,8 @@ impl<'a> FontService<'a> {
             .fallback;
         if let Some(fallback_key) = fallback_key {
             if let Some(fallback_index) = self.index_of(fallback_key) {
-                if let Some((face_index, glyph)) = self.resolve_within(fallback_index, code) {
+                let (found, fallback_unsure) = self.resolve_within(fallback_index, code);
+                if let Some((face_index, glyph)) = found {
                     return Ok(GlyphSource {
                         resolved_family_index: fallback_index,
                         resolved_family_key: fallback_key,
@@ -768,7 +924,11 @@ impl<'a> FontService<'a> {
                         glyph,
                     });
                 }
+                unsure |= fallback_unsure;
             }
+        }
+        if unsure {
+            return Err(Errno::WouldBlock);
         }
         // Neither the family nor its fallback covers this scalar: fall back
         // to the replacement glyph from the requested family's own primary
@@ -922,7 +1082,8 @@ impl<'a> FontService<'a> {
     /// A scalar the grid draws as geometry is computed here and served
     /// without touching the cache: it is arithmetic over one cell, not a
     /// rasterisation, and retaining it would evict a real glyph to hold
-    /// something cheaper to recompute than to look up.
+    /// something cheaper to recompute than to look up. A scalar that draws
+    /// nothing is answered empty without consulting a face.
     fn push_glyph(
         &mut self,
         family: FamilyKey,
@@ -932,6 +1093,15 @@ impl<'a> FontService<'a> {
         weight: FontWeight,
         writer: &mut GlyphBatchWriter<'_>,
     ) -> Result<bool, Errno> {
+        if is_hidden(scalar) {
+            return writer.push(&GlyphCoverage {
+                width: 0,
+                height: geometry.height,
+                advance: 0,
+                left: 0,
+                coverage: &[],
+            });
+        }
         let cell = geometry.cell(scalar);
         if let Some(cell) = cell {
             if let Some(drawn) = cell.line_art(scalar, geometry.height) {
@@ -1016,7 +1186,16 @@ impl<'a> FontService<'a> {
             units.line_gap,
         )?;
         for &scalar in run.scalars() {
-            let pushed = self.push_outline(family_index, scalar, instance, &mut writer);
+            let pushed = if is_hidden(scalar) {
+                writer.push(&OutlineSource {
+                    units_per_em: units.units_per_em,
+                    advance: FontUnits::from_raw(0),
+                    synth: Synthesis::NONE,
+                    contours: &[],
+                })
+            } else {
+                self.push_outline(family_index, scalar, instance, &mut writer)
+            };
             let fitted = match pushed {
                 Ok(fitted) => fitted,
                 Err(err) if writer.count() == 0 => return Err(err),

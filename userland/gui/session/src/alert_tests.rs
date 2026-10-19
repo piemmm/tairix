@@ -448,6 +448,74 @@ fn a_change_of_density_fits_an_alert_again() {
     assert!(after.right() <= screen.right() && after.bottom() <= screen.bottom());
 }
 
+/// An alert measured before its text landed is measured again; one the
+/// landing leaves the same size stays exactly where the reader saw it.
+#[test]
+fn an_alert_whose_text_lands_is_fitted_again_and_stays_put_at_its_size() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    assert!(alerts.open(
+        (1, None, None),
+        (&ok(), "Error from Files"),
+        (true, false),
+        &mut holds,
+        &mut shell,
+        &mut comp
+    ));
+    let wm = alerts.up[0].window.wm();
+    let moved_to = Point::new(10, 12);
+    assert!(comp.move_window(wm, moved_to));
+    let before = comp.window(wm).expect("up").bounds();
+    tairix_font::note_text_landed();
+    let landed = tairix_font::text_generation();
+    alerts.repaint(&shell, &mut comp);
+    // Other tests in this process land text too, so the generation it was
+    // fitted to is this landing's or a later one.
+    assert!(alerts.up[0].window.fitted.text >= landed);
+    assert_eq!(comp.window(wm).expect("up").bounds(), before);
+}
+
+/// An alert the reader moved, whose text lands at another size, is fitted
+/// again about the centre it has rather than put back in the middle.
+#[test]
+fn an_alert_moved_and_fitted_again_keeps_its_centre() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut alerts = Alerts::default();
+    let mut holds = Holds::new();
+    assert!(alerts.open(
+        (1, None, None),
+        (&ok(), "Error from Files"),
+        (true, false),
+        &mut holds,
+        &mut shell,
+        &mut comp
+    ));
+    let wm = alerts.up[0].window.wm();
+    // Near the top, and where the grown alert still fits about its centre.
+    assert!(comp.move_window(wm, Point::new(137, 30)));
+    let before = comp.window(wm).expect("up").bounds();
+    let centre = |rect: Rect| {
+        (
+            rect.left() + tairix_geometry::to_i32(rect.width / 2),
+            rect.top() + tairix_geometry::to_i32(rect.height / 2),
+        )
+    };
+    alerts.up[0].window.alert.set_detail(
+        "A much longer reason than the alert opened with, which wraps onto lines \
+         it did not have when it was measured, so the alert grows to hold it.",
+    );
+    tairix_font::note_text_landed();
+    alerts.repaint(&shell, &mut comp);
+    let after = comp.window(wm).expect("up").bounds();
+    assert_ne!(after.height, before.height, "fitted again at its new size");
+    let (was, is) = (centre(before), centre(after));
+    assert!(
+        was.0.abs_diff(is.0) <= 1 && was.1.abs_diff(is.1) <= 1,
+        "{was:?} became {is:?}"
+    );
+}
+
 #[test]
 fn a_desktop_notice_holds_nothing_and_its_answer_is_relayed_to_no_one() {
     let (mut shell, mut comp) = headless_desktop();

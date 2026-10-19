@@ -73,7 +73,9 @@ submenu. A janela não tem barra de menus.
 A linha de estado mostra a linha e a coluna do cursor, o que a verificação
 encontrou e, como campos que abrem um menu ao clicar: o formato, texto ou
 hexadecimal, os finais de linha e a indentação. Fechar uma janela ou sair
-com alterações por guardar pergunta primeiro.
+com alterações por guardar pergunta primeiro. Fechar uma janela com o
+botão secundário (direito) sobre o seu botão de fechar também mostra o seu
+ficheiro no gestor de ficheiros, na pasta que o contém.
 
 * `Ctrl+N` — uma janela nova
 * `Ctrl+O` — abrir um ficheiro

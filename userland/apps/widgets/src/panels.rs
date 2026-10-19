@@ -15,9 +15,10 @@ use tairix_controls::{
     ActivityState, Aspect, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox,
     ControlRole, ControlState, Dialog, FieldControl, FieldGroup, FieldRow, FlagSet, HelpTip,
     IconButton, ListRow, Menu, MenuItem, Panel, PictureChoice, PictureItem, PictureSection,
-    Progress, ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
-    SearchField, SelectionState, Slider, SplitButton, Swatch, TableCell, TableRow, TextArea,
-    TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl, WindowControlKind,
+    Progress, ProgressValue, Radio, RecoveryState, ScrollBar, ScrollModel, ScrollOrientation,
+    ScrollRange, SearchField, SelectionState, Slider, SplitButton, Swatch, TableCell, TableRow,
+    TextArea, TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl,
+    WindowControlKind,
 };
 use tairix_icon::IconKind;
 
@@ -152,11 +153,11 @@ fn values() -> Vec<DemoItem> {
     );
     let mut working = Progress::new().with_label("Scanning");
     working.set_state(ControlState::idle().with_activity(ActivityState::Indeterminate));
-    let mut failed = Progress::new().with_label("Failed");
+    let mut failed = Progress::new().with_label("Disk full");
     failed.set_state(
         ControlState::idle()
-            .with_activity(ActivityState::Working)
-            .with_validation(ValidationState::Invalid),
+            .with_activity(ActivityState::Progress(ProgressValue::new(420)))
+            .with_recovery(RecoveryState::Recoverable),
     );
 
     vec![

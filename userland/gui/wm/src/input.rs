@@ -297,13 +297,18 @@ pub enum InputResponse {
     },
 }
 
-/// What ending a gesture early leaves its embedder to tell
-/// ([`InputRouter::abandon_gesture`]).
+/// What ending a gesture early, or the pointer leaving a window, leaves its
+/// embedder to tell ([`InputRouter::abandon_gesture`],
+/// [`InputRouter::take_client_left`]).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Abandoned {
     /// The window whose client held the press, with where in its client the
     /// pointer last was: its owner is owed word that the press is over.
     pub client: Option<(WindowId, Point)>,
+    /// The window whose client the pointer has left, with where in it the
+    /// pointer last was: its owner is owed word that nothing in it is under
+    /// the pointer any more, so nothing stays lit for a pointer elsewhere.
+    pub left: Option<(WindowId, Point)>,
     /// The window an interactive resize was dragging, which stays where the
     /// drag left it: its owner is owed the size it settled at.
     pub resized: Option<WindowId>,
@@ -432,6 +437,13 @@ pub struct InputRouter {
     /// window manager sees a pointer over its own decorations, so nothing
     /// else can clear one.
     frame_hover: Option<WindowId>,
+    /// The window whose client content the pointer was last over, and where:
+    /// only the window manager sees the pointer go to another window, to the
+    /// window's own frame or to the desktop, so it is what tells the owner.
+    client_hover: Option<(WindowId, Point)>,
+    /// A window the pointer has left since the embedder last asked
+    /// ([`take_client_left`](Self::take_client_left)), with where it last was.
+    client_left: Option<(WindowId, Point)>,
     /// The modifiers the seat currently holds, from the key and
     /// modifier-edge events routed through here. A modifier key produces no
     /// key a surface can see, so this is the only place the state exists on
@@ -598,8 +610,26 @@ impl InputRouter {
                 if let Some(left) = self.frame_hover.take() {
                     compositor.frame_pointer_left(left);
                 }
+                self.hover_client(None);
             }
         }
+    }
+
+    /// The window the pointer has left since this was last asked, with where
+    /// in its client it last was, which its owner is to be told.
+    pub fn take_client_left(&mut self) -> Option<(WindowId, Point)> {
+        self.client_left.take()
+    }
+
+    /// Take `now` as the client content the pointer is over, owing the window
+    /// it was over before word of the leave when that is another.
+    fn hover_client(&mut self, now: Option<(WindowId, Point)>) {
+        if let Some((was, at)) = self.client_hover {
+            if now.map(|(window, _)| window) != Some(was) {
+                self.client_left = Some((was, at));
+            }
+        }
+        self.client_hover = now;
     }
 
     /// End the gesture in flight, because the embedder has taken the rest of
@@ -630,6 +660,7 @@ impl InputRouter {
             client,
             resized,
             moved,
+            ..Abandoned::default()
         }
     }
 
@@ -1002,25 +1033,17 @@ impl InputRouter {
                 self.client_grab = None;
                 return InputResponse::Ignored;
             };
-            return InputResponse::ClientPointerMoved {
-                window,
-                local: client_local(to, client),
-            };
+            let local = client_local(to, client);
+            self.client_hover = Some((window, local));
+            return InputResponse::ClientPointerMoved { window, local };
         }
-        let over = compositor.window_at(to);
         self.hover_furniture(Self::hover_target(to, compositor), compositor);
-        let Some(window) = over else {
-            return InputResponse::DesktopPointerMoved;
-        };
-        if !over_client(window, to, compositor) {
-            return InputResponse::Ignored;
-        }
-        let Some(client) = compositor.window_client_rect(window) else {
-            return InputResponse::Ignored;
-        };
-        InputResponse::ClientPointerMoved {
-            window,
-            local: client_local(to, client),
+        let under = client_under(to, compositor);
+        self.hover_client(under);
+        match under {
+            Some((window, local)) => InputResponse::ClientPointerMoved { window, local },
+            None if compositor.window_at(to).is_none() => InputResponse::DesktopPointerMoved,
+            None => InputResponse::Ignored,
         }
     }
 
@@ -1527,6 +1550,8 @@ impl InputRouter {
             return InputResponse::FurniturePressed { window };
         }
         if let Some(window) = self.client_grab.take() {
+            let under = client_under(self.pointer, compositor);
+            self.hover_client(under);
             let Some(client) = compositor.window_client_rect(window) else {
                 return InputResponse::Ignored;
             };
@@ -1754,6 +1779,17 @@ fn over_client(window: WindowId, point: Point, compositor: &Compositor) -> bool 
 /// (so an in-content drag keeps tracking the grabbed edge rather than jumping
 /// or wrapping). The result is always non-negative, so the session can encode
 /// it as the unsigned window-local pixels the pointer event carries.
+/// The window whose client content lies under `point`, and where in it: no
+/// window, furniture, or a window whose client has gone is none.
+fn client_under(point: Point, compositor: &Compositor) -> Option<(WindowId, Point)> {
+    let window = compositor.window_at(point)?;
+    if !over_client(window, point, compositor) {
+        return None;
+    }
+    let client = compositor.window_client_rect(window)?;
+    Some((window, client_local(point, client)))
+}
+
 fn client_local(point: Point, client: Rect) -> Point {
     let max_x = client.right().saturating_sub(1).max(client.left());
     let max_y = client.bottom().saturating_sub(1).max(client.top());

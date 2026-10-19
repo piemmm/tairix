@@ -4,19 +4,20 @@ files — navigateur de fichiers graphique
 
 ## SYNOPSIS
 
-`files [--desktop] [répertoire] [-h | -?]`
+`files [--desktop] [chemin] [-h | -?]`
 
 ## DESCRIPTION
 
 Ouvre une fenêtre de bureau listant le système de fichiers, en partant du
-`répertoire` nommé sur la ligne de commande ou, à défaut, du dossier
-`Home` de l'utilisateur qui le lance (son répertoire personnel si ce
-dossier ne peut être listé). Le titre de la fenêtre nomme le répertoire
-courant ; la fenêtre liste ses entrées, chaque entrée sélectionnée mise en
-évidence avec la couleur d'accent du thème actif. Chaque lecture de
-répertoire est un listage ordinaire, soumis aux permissions, sous l'identité
-de l'utilisateur qui le lance : un répertoire illisible est refusé, jamais
-deviné.
+dossier que `chemin` nomme sur la ligne de commande — ou, s'il nomme un
+fichier, du dossier qui contient ce fichier, avec le fichier
+sélectionné — ou, à défaut, du dossier `Home` de l'utilisateur qui le
+lance (son répertoire personnel si ce dossier ne peut être listé). Le
+titre de la fenêtre nomme le répertoire courant ; la fenêtre liste ses
+entrées, chaque entrée sélectionnée mise en évidence avec la couleur
+d'accent du thème actif. Chaque lecture de répertoire est un listage
+ordinaire, soumis aux permissions, sous l'identité de l'utilisateur qui
+le lance : un répertoire illisible est refusé, jamais deviné.
 
 Le bureau démarre le navigateur pour vous et le garde dans la barre d'icônes
 : le menu de son emplacement liste vos propres lieux et tout ce qui est
@@ -42,10 +43,12 @@ un nouveau dossier.
 Un listage s'ouvre sans rien de sélectionné. Un clic sélectionne une entrée,
 un clic avec `Ctrl` en ajoute ou en retire une, et un clic avec `Shift`
 sélectionne la suite depuis la dernière entrée choisie ; un clic dans un
-espace vide efface la sélection. Faire glisser dans un espace vide trace un
-cadre qui sélectionne tout ce qu'il touche à mesure qu'il grandit ; maintenu
-en haut ou en bas du listage, celui-ci défile, et `Escape` reprend ce que le
-cadre avait sélectionné.
+espace vide efface la sélection. Un double-clic ouvre une entrée ; en
+maintenant `Shift`, il liste le contenu d'une application au lieu de la
+lancer, et laisse désélectionné tout ce qu'il ouvre ailleurs. Faire glisser
+dans un espace vide trace un cadre qui sélectionne tout ce qu'il touche à
+mesure qu'il grandit ; maintenu en haut ou en bas du listage, celui-ci
+défile, et `Escape` reprend ce que le cadre avait sélectionné.
 
 L'espace autour de chaque icône et de son nom compte comme vide, si bien
 qu'un cadre peut commencer n'importe où entre les entrées. `Ctrl+A`
@@ -113,16 +116,16 @@ passent de l'une à l'autre, `Space` bascule une permission ou ouvre le
 propriétaire ou le groupe pour le modifier, et `Tab` ou `Escape` revient aux
 sections.
 
-L'opérande `répertoire` est traité comme une entrée non fiable : ce doit
-être un chemin absolu dans la limite de longueur de chemin du système,
-et chacun de ses composants doit être un vrai nom de répertoire — `.` et
-`..` n'en sont pas, si bien qu'une écriture ne peut jamais désigner
-ailleurs que ce qu'elle donne à lire. Un répertoire qui enfreint une de
-ces règles, ou que l'utilisateur qui a lancé le programme ne peut pas
-lister, est refusé avec la raison sur le flux d'erreur standard et la
-fenêtre s'ouvre alors sur le dossier `Home`, de sorte qu'un
-mauvais argument ne laisse jamais l'utilisateur sans fenêtre. Un second
-opérande est refusé d'emblée plutôt qu'ignoré.
+L'opérande `chemin` est traité comme une entrée non fiable : ce doit être
+un chemin absolu dans la limite de longueur de chemin du système, et
+chacun de ses composants doit être un vrai nom — `.` et `..` n'en sont
+pas, si bien qu'une écriture ne peut jamais désigner ailleurs que ce
+qu'elle donne à lire. Un chemin qui enfreint une de ces règles, ou que
+l'utilisateur qui a lancé le programme ne peut pas lister, est refusé
+avec la raison sur le flux d'erreur standard et la fenêtre s'ouvre alors
+sur le dossier `Home`, de sorte qu'un mauvais argument ne laisse jamais
+l'utilisateur sans fenêtre. Un second opérande est refusé d'emblée plutôt
+qu'ignoré.
 
 ## OPTIONS
 
@@ -130,7 +133,7 @@ opérande est refusé d'emblée plutôt qu'ignoré.
   bureau lui-même : un emplacement permanent sur la barre d'icônes offrant
   vos lieux et les volumes montés, aucune fenêtre jusqu'à ce qu'on en demande
   une, et aucun moyen de quitter. La session de bureau passe cette option au
-  démarrage ; nommer un `répertoire` avec elle est refusé, car un composant
+  démarrage ; nommer un `chemin` avec elle est refusé, car un composant
   n'ouvre aucune fenêtre où le mettre.
 - `-h, -?` — afficher la courte aide de cette commande et quitter.
 

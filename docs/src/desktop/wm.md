@@ -662,6 +662,13 @@ actions, reporting each through `InputResponse`:
   resize was dragging is told the size it settled at, and a tool window's owner
   is told its move ended over nothing. A pressed window command is released
   without firing.
+- **A window the pointer leaves is told.** The router keeps the window whose
+  content the pointer is over; motion onto another window, the window's own
+  frame or the desktop, a release with the pointer outside the window that
+  held the press, and the pointer passing to another router all leave a note
+  (`InputRouter::take_client_left`), and the window's owner is sent
+  `PointerAction::Cancelled` where it last saw the pointer, so nothing in it
+  stays lit for a pointer elsewhere.
 - **A dragged window keeps a grabbable patch of its title bar on screen.**
   The grab captures the bar's move surface — `TitleBarLayout::drag`, the
   span between the two command clusters — in window-local coordinates, and
@@ -1583,8 +1590,10 @@ as its colour. See [theming](./theming.md) for the four roles.
   manager never destroys a window behind the app's back); a **secondary**
   press on Close is a distinct gesture, `WindowEvent::AlternateCloseRequested`
   (`window_control_alternate_event`), which closes nothing itself — the file
-  manager reads it as "go up a folder", an app with no such notion ignores it,
-  and a session-owned window with no channel drops it; **Minimize** hides
+  manager reads it as "go up a folder", a document window closes and shows its
+  file in the file manager, an app with no such notion ignores it, and a
+  session-owned window with no channel drops it. A press on Close, either
+  button, is the user working in that window, as a press inside it is; **Minimize** hides
   the window, marks its taskbar entry minimised, drops focus, and returns
   `WindowEvent::Minimized`; **PutToBack** restacks to the bottom of the
   z-order with no app-ward event; **SizeToggle** maximizes to the session work

@@ -73,7 +73,9 @@ submenú. La ventana no tiene barra de menús.
 La línea de estado muestra la línea y la columna del cursor, lo que encontró
 la comprobación y, como campos que abren un menú al pulsarlos: el formato,
 texto o hexadecimal, los finales de línea y la sangría. Cerrar una ventana o
-salir con cambios sin guardar pregunta antes.
+salir con cambios sin guardar pregunta antes. Cerrar una ventana pulsando su
+botón de cierre con el botón secundario (derecho) muestra además su archivo
+en el gestor de archivos, en la carpeta que lo contiene.
 
 * `Ctrl+N` — una ventana nueva
 * `Ctrl+O` — abrir un archivo

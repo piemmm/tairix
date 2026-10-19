@@ -24,8 +24,10 @@ use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Ring, RingInk, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface};
+use tairix_theme::motion::ease_out;
+use tairix_theme::{MotionInteraction, MotionTheme, TextRole, Theme, Timeline};
+use tairix_util::mathf;
 
 use crate::damage;
 use crate::paint::{
@@ -705,18 +707,98 @@ impl Slider {
 /// A read-only instrument trace of known, working, indeterminate, complete, or
 /// failed work (spec §11.7).
 ///
-/// Progress is *not* decoration and runs no idle loop: its appearance is
-/// driven entirely by the [`ControlState::activity`] its owner sets and, for an
-/// indeterminate trace, by a [`phase`](Progress::set_phase) the owner advances
-/// on job-progress events. Known progress shows a stable percentage; a failed
-/// job shows a recovery rim and a concise reason; an indeterminate trace is a
-/// bounded moving segment that renders statically under reduced motion.
+/// Each state reads as itself. Known progress fills from the start of the
+/// track, easing to each new value rather than jumping to it, and is captioned
+/// with its percentage. Working and indeterminate work sweep a comet along the
+/// track for as long as they last, so nothing about them can be read as an
+/// amount. Failed work keeps the amount it reached, in the recovery colour,
+/// beside its reason; complete work is full in the success colour.
+///
+/// The motion runs only while its owner reports the frame clock
+/// ([`set_clock`](Self::set_clock)) and draws the frames
+/// [`next_frame_in`](Self::next_frame_in) asks for: a trace whose owner does
+/// not, or a theme with reduced motion, is drawn still — a busy trace as a
+/// segment feathered at both ends, centred, which no amount is drawn as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Progress {
     role: ControlRole,
     state: ControlState,
-    phase: u16,
     label: Option<String>,
+    /// Whether it states its own percentage or note beneath the band.
+    captioned: bool,
+    /// The frame clock and motion its owner last reported; `None` draws still.
+    clock: Option<(u64, MotionTheme)>,
+    /// When the sweep set out, or `None` until the next clock report sets it
+    /// off, as for [`FillEase`].
+    sweep_from_ns: Option<u64>,
+    /// The fill easing to the known amount.
+    fill: FillEase,
+}
+
+/// A known amount's fill moving to its value: what it set out from, and when.
+///
+/// A trace that was moving is clocked every frame, so an ease set then sets
+/// off at the last report; one set while the trace stood still sets off at the
+/// next, never from the stale instant it was last clocked at.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct FillEase {
+    from: u16,
+    started_ns: Option<u64>,
+}
+
+/// How much of the track a busy trace's comet spans, in permille.
+const COMET: u32 = 400;
+
+/// The opacity a trace that failed with no known amount washes its track in:
+/// enough to read as stopped beside its reason, without passing for a fill.
+const FAILED_WASH: u8 = 96;
+
+/// Where a busy trace's comet lies along its track, in permille of it; the
+/// head may lie beyond the track's end while the comet leaves it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Comet {
+    tail: u32,
+    head: u32,
+    moving: bool,
+}
+
+/// Paint `comet` along the track whose inner area is `inner`, rounded at
+/// `radius`: confined to the track's own rounded profile and feathered,
+/// towards its tail while it moves and towards both ends at rest.
+fn paint_comet(
+    surface: &mut Surface,
+    inner: (u32, u32, u32, u32),
+    radius: u32,
+    comet: Comet,
+    colour: Color,
+) {
+    let (ix, iy, iw, ih) = inner;
+    let full = u64::from(FULL);
+    let width = u64::from(iw);
+    let span = u64::from(comet.head.saturating_sub(comet.tail).max(1));
+    let first = u32::try_from(u64::from(comet.tail) * width / full).unwrap_or(iw);
+    let last = u32::try_from((u64::from(comet.head) * width).div_ceil(full))
+        .unwrap_or(iw)
+        .min(iw);
+    if first >= last {
+        return;
+    }
+    let weight = |column: u32| {
+        let centre = (u64::from(column) * 2 + 1) * full / (2 * width);
+        let through = (centre.saturating_sub(u64::from(comet.tail)) * full / span).min(full);
+        let weight = if comet.moving {
+            through * through / full
+        } else {
+            full - (2 * through).abs_diff(full)
+        };
+        u8::try_from(weight * u64::from(u8::MAX) / full).unwrap_or(u8::MAX)
+    };
+    surface.wash_region(ix + first, iy, last - first, ih, colour, |x, y| {
+        let column = first + x;
+        div255(
+            u32::from(weight(column)) * u32::from(round_rect_coverage(column, y, iw, ih, radius)),
+        )
+    });
 }
 
 impl Default for Progress {
@@ -732,9 +814,27 @@ impl Progress {
         Self {
             role: ControlRole::Neutral,
             state: ControlState::idle(),
-            phase: 0,
             label: None,
+            captioned: true,
+            clock: None,
+            sweep_from_ns: None,
+            fill: FillEase::default(),
         }
+    }
+
+    /// How tall a trace's band is at `scale` in `theme`: the row an
+    /// [uncaptioned](Self::uncaptioned) trace needs.
+    #[must_use]
+    pub fn band_height(scale: Scale, theme: &Theme) -> u32 {
+        progress_thickness(theme, scale).max(1)
+    }
+
+    /// This trace with no caption of its own, its band centred in its row:
+    /// for an owner that states the figures beside it.
+    #[must_use]
+    pub fn uncaptioned(mut self) -> Self {
+        self.captioned = false;
+        self
     }
 
     /// This trace with a non-default role.
@@ -759,14 +859,112 @@ impl Progress {
     }
 
     /// Replace the trace's composed state (e.g. from a model update).
+    ///
+    /// The state it already shows changes nothing. A known amount that rises
+    /// eases out from what is shown to it, fastest as it sets off, so a run of
+    /// rising readings is followed closely rather than restarted slowly at
+    /// each; any other change is shown at once, so a new run never appears to
+    /// run backwards.
     pub fn set_state(&mut self, state: ControlState) {
+        if state == self.state {
+            return;
+        }
+        let shown = self.shown();
+        let failed = state.disposition() == ControlDisposition::FailedClosed
+            || state.recovery != RecoveryState::None;
+        let sets_off = self
+            .next_frame_in()
+            .and(self.clock)
+            .map(|(clocked, _)| clocked);
+        if let ActivityState::Progress(value) = state.activity {
+            // A failed trace stands where its work stopped.
+            let rising = !failed
+                && matches!(self.state.activity, ActivityState::Progress(_))
+                && value.permille() > shown;
+            self.fill = FillEase {
+                from: if rising { shown } else { value.permille() },
+                started_ns: sets_off,
+            };
+        }
+        if Self::busy(state.activity) && !Self::busy(self.state.activity) {
+            self.sweep_from_ns = sets_off;
+        }
         self.state = state;
     }
 
-    /// Advance the indeterminate animation phase (permille around the track).
-    /// The owner calls this from a job-progress event, never an idle loop.
-    pub fn set_phase(&mut self, phase: u16) {
-        self.phase = clamp_permille(phase);
+    /// Report the frame clock, `now_ns`, and the theme's motion: the trace
+    /// moves only once its owner does this, and draws the instant reported.
+    pub fn set_clock(&mut self, now_ns: u64, motion: MotionTheme) {
+        self.fill.started_ns.get_or_insert(now_ns);
+        self.sweep_from_ns.get_or_insert(now_ns);
+        self.clock = Some((now_ns, motion));
+    }
+
+    /// Nanoseconds until the trace next changes on its own, or `None` while
+    /// it is still: an owner arms a one-shot deadline only while a trace it
+    /// shows is moving.
+    #[must_use]
+    pub fn next_frame_in(&self) -> Option<u64> {
+        let (now, motion) = self.clock?;
+        if self.sweep_period_ns().is_some() {
+            return Some(self.sweep_from_ns.map_or(0, |_| Timeline::FRAME_NS));
+        }
+        let ActivityState::Progress(value) = self.state.activity else {
+            return None;
+        };
+        if self.fill.from >= value.permille() {
+            return None;
+        }
+        let Some(started) = self.fill.started_ns else {
+            return Some(0);
+        };
+        let ease = Self::ease(started, motion);
+        (!ease.finished(now))
+            .then(|| ease.next_frame_in(now))
+            .flatten()
+    }
+
+    /// Whether `activity` is work of no known amount.
+    const fn busy(activity: ActivityState) -> bool {
+        matches!(
+            activity,
+            ActivityState::Working | ActivityState::Indeterminate
+        )
+    }
+
+    /// The timeline a fill that set off at `started_ns` eases over.
+    fn ease(started_ns: u64, motion: MotionTheme) -> Timeline {
+        Timeline::start(
+            started_ns,
+            motion.duration(MotionInteraction::JobProgressPulse),
+        )
+    }
+
+    /// The known amount drawn now, in permille.
+    fn shown(&self) -> u16 {
+        let ActivityState::Progress(value) = self.state.activity else {
+            return 0;
+        };
+        let target = value.permille();
+        let Some((now, motion)) = self.clock else {
+            return target;
+        };
+        let from = self.fill.from.min(target);
+        let Some(started) = self.fill.started_ns else {
+            return from;
+        };
+        let eased = u32::from(ease_out(Self::ease(started, motion).progress(now)));
+        let gained = u32::from(target - from) * eased / u32::from(u8::MAX);
+        from.saturating_add(u16::try_from(gained).unwrap_or(target - from))
+    }
+
+    /// One crossing of the sweep, while the trace is busy, unfailed, clocked
+    /// and the theme lets it move.
+    fn sweep_period_ns(&self) -> Option<u64> {
+        let (_, motion) = self.clock?;
+        let millis = motion.duration(MotionInteraction::ProgressSweep);
+        (Self::busy(self.state.activity) && !self.is_failed() && millis > 0)
+            .then(|| u64::from(millis) * tairix_abi::time::NANOS_PER_MILLI)
     }
 
     /// Whether the trace's linked object has failed or needs recovery.
@@ -776,8 +974,8 @@ impl Progress {
     }
 
     /// The thin trace band within `bounds`: the theme's progress thickness,
-    /// never taller than the bounds, centred when the caption cannot fit
-    /// beside it and top-aligned when it can.
+    /// never taller than the bounds, top-aligned when a caption it states fits
+    /// beneath it and centred otherwise.
     ///
     /// The trace is an instrument line, not a filled block: its height comes
     /// from the theme's progress-trace thickness token — a touch broader than a
@@ -785,6 +983,7 @@ impl Progress {
     /// caller that hands it a tall row gets a thin bar and a captioned row
     /// rather than a slab.
     fn band(
+        &self,
         rect: (u32, u32, u32, u32),
         scale: Scale,
         theme: &Theme,
@@ -793,7 +992,7 @@ impl Progress {
         let (_, y, _, h) = rect;
         let band = progress_thickness(theme, scale).min(h).max(1);
         let spare = h - band;
-        if spare >= font.glyph_height() {
+        if self.captioned && spare >= font.glyph_height() {
             (y, band)
         } else {
             (y + spare / 2, band)
@@ -815,7 +1014,7 @@ impl Progress {
         let palette = theme.palette();
         let metrics = theme.metrics();
         let border = plate_border(theme, scale);
-        let (band_y, band_h) = Self::band((x, y, w, h), scale, theme, font);
+        let (band_y, band_h) = self.band((x, y, w, h), scale, theme, font);
         let radius = scale
             .scale_length(metrics.control_corner_radius)
             .min(band_h / 2);
@@ -854,7 +1053,9 @@ impl Progress {
             paint_bead(surface, x + w - border - size, band_y, size, color, shape);
         }
 
-        self.paint_caption(surface, (x, y, w, h), (band_y, band_h), scale, theme, font);
+        if self.captioned {
+            self.paint_caption(surface, (x, y, w, h), (band_y, band_h), scale, theme, font);
+        }
     }
 
     /// Paint the value fill for the current activity within the inner area.
@@ -867,36 +1068,67 @@ impl Progress {
         failed: bool,
     ) {
         let (ix, iy, iw, ih) = inner;
-        if iw == 0 || ih == 0 || failed {
+        if iw == 0 || ih == 0 {
             return;
         }
         let palette = theme.palette();
         let accent = resolve_rail(theme, self.state)
             .unwrap_or_else(|| resolve_mark(theme, self.role, self.state));
+        let recovery = Color::from(palette.recovery);
         match self.state.activity {
-            ActivityState::Progress(v) => {
+            ActivityState::Progress(_) => {
                 let fill_w =
-                    u32::try_from(u64::from(iw) * u64::from(v.permille()) / u64::from(FULL))
+                    u32::try_from(u64::from(iw) * u64::from(self.shown()) / u64::from(FULL))
                         .unwrap_or(iw);
+                let colour = if failed { recovery } else { accent };
                 if fill_w > 0 {
-                    surface.fill_round_rect(ix, iy, fill_w, ih, inner_radius, accent);
+                    surface.fill_round_rect(ix, iy, fill_w, ih, inner_radius, colour);
                 }
             }
-            ActivityState::Working | ActivityState::Indeterminate => {
-                let seg_w = (iw / 4).max(1);
-                let travel = iw.saturating_sub(seg_w);
-                let pos = if theme.motion().reduced_motion() {
-                    travel / 2
-                } else {
-                    u32::try_from(u64::from(travel) * u64::from(self.phase) / u64::from(FULL))
-                        .unwrap_or(travel)
+            ActivityState::Working | ActivityState::Indeterminate if failed => {
+                let wash = Color {
+                    a: div255(u32::from(recovery.a) * u32::from(FAILED_WASH)),
+                    ..recovery
                 };
-                surface.fill_round_rect(ix + pos, iy, seg_w, ih, inner_radius, accent);
+                surface.fill_round_rect(ix, iy, iw, ih, inner_radius, wash);
+            }
+            ActivityState::Working | ActivityState::Indeterminate => {
+                paint_comet(surface, inner, inner_radius, self.comet(), accent);
             }
             ActivityState::Complete => {
-                surface.fill_round_rect(ix, iy, iw, ih, inner_radius, Color::from(palette.success));
+                let colour = if failed {
+                    recovery
+                } else {
+                    Color::from(palette.success)
+                };
+                surface.fill_round_rect(ix, iy, iw, ih, inner_radius, colour);
             }
             ActivityState::Idle => {}
+        }
+    }
+
+    /// Where the busy trace's comet lies along the track, in permille of it:
+    /// its tail, its head, and whether it is moving. A moving comet eases
+    /// across from beyond one end to beyond the other, densest at its head; a
+    /// still one is centred and feathered at both ends.
+    fn comet(&self) -> Comet {
+        let full = u32::from(FULL);
+        let (Some(period), Some((now, _))) = (self.sweep_period_ns(), self.clock) else {
+            return Comet {
+                tail: (full - COMET) / 2,
+                head: u32::midpoint(full, COMET),
+                moving: false,
+            };
+        };
+        let elapsed = now.saturating_sub(self.sweep_from_ns.unwrap_or(now)) % period;
+        let phase = u32::try_from(elapsed * u64::from(FULL) / period).unwrap_or(full);
+        let travelled = mathf::smoothstep(f64::from(phase) / f64::from(full));
+        let head =
+            u32::try_from(mathf::round_i32(travelled * f64::from(full + COMET))).unwrap_or(0);
+        Comet {
+            tail: head.saturating_sub(COMET),
+            head,
+            moving: true,
         }
     }
 

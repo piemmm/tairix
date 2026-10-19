@@ -695,9 +695,6 @@ mod program {
         }
     }
 
-    /// Feed `inputs` — a pointer or wheel event's place and what happened
-    /// there — to the composition in order, returning the last action it
-    /// reported.
     /// Send `request` to the session's Switchboard endpoint and read its
     /// status reply.
     fn call_session(request: &[u8]) -> Result<(), Errno> {
@@ -708,6 +705,9 @@ mod program {
         }
     }
 
+    /// Feed `inputs` — a pointer or wheel event's place and what happened
+    /// there — to the composition in order, returning the last action it
+    /// reported.
     fn route_inputs(
         service: &mut Service,
         host: &RtHost,

@@ -165,7 +165,9 @@ finestra si apre il suo menu: Taglia, Copia, Incolla, Seleziona tutto e
 Deseleziona, poi File, Modifica, Immagine, Livelli, Colori, Regolazioni,
 Sprite o Pagine, Visualizza e Strumenti, ciascuno con il proprio sottomenu.
 La finestra non ha una barra dei menu. Chiudere una finestra o uscire con
-modifiche non salvate chiede prima conferma.
+modifiche non salvate chiede prima conferma. Chiudere una finestra con il
+pulsante secondario (destro) sul suo pulsante di chiusura mostra anche il
+suo file nel gestore dei file, nella cartella che lo contiene.
 
 * `Ctrl+N` — una nuova immagine; `Ctrl+O` — aprire un file
 * `Ctrl+S` — salvare; `Ctrl+Shift+S` — salvare con nome

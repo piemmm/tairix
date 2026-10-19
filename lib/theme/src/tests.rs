@@ -1566,7 +1566,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             drag_move: String::from("c.drag-move"),
         },
         MotionTheme::new([
-            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,
+            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320, 1400,
         ]),
         Density::Normal,
         Contrast::Normal,

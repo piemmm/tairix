@@ -70,7 +70,9 @@ ffenestr.
 Mae'r llinell statws yn dangos llinell a cholofn y cyrchwr, yr hyn a ganfu'r
 gwirio, ac, fel meysydd sy'n agor dewislen o'u clicio: y fformat, testun neu
 hecs, diwedd y llinellau, a'r mewnoliad. Mae cau ffenestr neu adael â
-newidiadau heb eu cadw yn gofyn yn gyntaf.
+newidiadau heb eu cadw yn gofyn yn gyntaf. Mae cau ffenestr â'r ail
+fotwm (de) ar ei botwm cau hefyd yn dangos ei ffeil yn y rheolwr ffeiliau,
+yn y ffolder sy'n ei dal.
 
 * `Ctrl+N` — ffenestr newydd
 * `Ctrl+O` — agor ffeil

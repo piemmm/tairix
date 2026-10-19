@@ -278,13 +278,15 @@ pub enum InputEvent {
         /// The button that came up.
         button: PointerButton,
     },
-    /// The press in flight ended without a release: the desktop took the
-    /// pointer for a surface of its own — the lock, a prompt, a menu, a drag
-    /// it carries — and the button's release will reach that surface instead.
+    /// The pointer is another surface's now: it left this one, or the desktop
+    /// took it for a surface of its own — the lock, a prompt, a menu, a drag
+    /// it carries — while a press was in flight, and the button's release
+    /// will reach that surface instead.
     ///
-    /// Whatever the press began ends where it stands and completes nothing:
-    /// a button does not activate, a held step stops, a drag stays where it
-    /// was last left.
+    /// Nothing here is under the pointer, so nothing stays lit for it, and
+    /// whatever a press began ends where it stands and completes nothing: a
+    /// button does not activate, a held step stops, a drag stays where it was
+    /// last left.
     PointerCancelled,
     /// The scroll wheel turned at the current pointer position, by deltas in
     /// scroll units — [`SCROLL_UNITS_PER_DETENT`] to a detent, already

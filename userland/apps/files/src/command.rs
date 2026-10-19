@@ -13,7 +13,7 @@
 //!
 //! # The grammar
 //!
-//! `files [--desktop] [directory]`, with the argument conventions every other
+//! `files [--desktop] [path]`, with the argument conventions every other
 //! command app follows: `-h`/`-?`/`--help` win immediately, `--` ends option
 //! parsing, and at most one operand is accepted.
 //!
@@ -67,7 +67,7 @@ use crate::operation::device_refusal;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `files`'s own Help tree is unavailable.
-pub const USAGE: &str = "usage: files [--desktop] [directory] [-h | -?]";
+pub const USAGE: &str = "usage: files [--desktop] [path] [-h | -?]";
 
 /// Which of the two things a `files` process is.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -151,16 +151,17 @@ impl fmt::Display for UsageError {
 /// Parse `args` (the program's arguments, excluding the program name) into a
 /// [`Command`].
 ///
-/// The grammar is `files [--desktop] [directory]`:
+/// The grammar is `files [--desktop] [path]`:
 ///
 /// * `-h` / `-?` / `--help` — the reserved short-help switches; they win
 ///   immediately, wherever they appear.
 /// * `--desktop` — the desktop session asking for [`Role::Desktop`].
-/// * `--` — end of options: the next argument is the directory operand even
-///   when it starts with a dash.
-/// * one optional operand — the directory to open at. It is validated here
-///   and, when it does not survive, reported through [`Start::refused`] with
-///   the window still opening among the launching user's own files.
+/// * `--` — end of options: the next argument is the path operand even when
+///   it starts with a dash.
+/// * one optional operand — the folder to open at, or a file to show selected
+///   in the folder holding it. It is validated here and, when it does not
+///   survive, reported through [`Start::refused`] with the window still
+///   opening among the launching user's own files.
 ///
 /// # Errors
 ///
@@ -332,6 +333,9 @@ pub struct Ladder {
     asked: Vec<String>,
     /// Why that place was refused, once it has been.
     asked_why: Option<&'static str>,
+    /// The folder the place asked for turned out to be a file in, and that
+    /// file's name, to be shown selected there.
+    shows: Option<(Vec<String>, String)>,
 }
 
 impl Ladder {
@@ -356,7 +360,42 @@ impl Ladder {
             places,
             asked,
             asked_why: None,
+            shows: None,
         }
+    }
+
+    /// The place asked for turned out, as `err` says, to be a file rather than
+    /// a folder: try the folder holding it next, to show the file selected
+    /// there. Answers whether that is what the ladder now tries — never once
+    /// it has moved past the place asked for.
+    pub fn show_instead(&mut self, err: BrowseError) -> bool {
+        let a_file = matches!(
+            err,
+            BrowseError::Source(Errno::NotADirectory) | BrowseError::NotADirectory
+        );
+        if !a_file || self.shows.is_some() || self.places.front() != Some(&self.asked) {
+            return false;
+        }
+        let Some((name, folder)) = self.asked.split_last() else {
+            return false;
+        };
+        let (name, folder) = (name.clone(), folder.to_vec());
+        self.places.pop_front();
+        self.places.retain(|place| *place != folder);
+        self.places.push_front(folder.clone());
+        self.asked.clone_from(&folder);
+        self.shows = Some((folder, name));
+        true
+    }
+
+    /// The entry a window at `place` shows selected: the file the place asked
+    /// for turned out to be, when `place` is the folder holding it.
+    #[must_use]
+    pub fn shows_in(&self, place: &[String]) -> Option<&str> {
+        self.shows
+            .as_ref()
+            .filter(|(folder, _)| folder.as_slice() == place)
+            .map(|(_, name)| name.as_str())
     }
 
     /// The place being tried, or `None` once every place has been refused.

@@ -37,6 +37,7 @@ its address space and everything that grows with the picture off its loop.
 | PT27 | The grid: spacing, offset, colour, opacity and style; the pixel grid's threshold; snapping to the grid | done |
 | PT28 | Tool windows: a pane dragged out of its dock floats in a tool window — the window manager's mini-titled transient (`plans/APPWIN.md` AW7, `plans/COMPOSITOR-WORK.md` stage M), the document host's tool windows of a document window — and docks again when dragged over a dock | done |
 | PT29 | Help in every locale, the docs page and the README for all of it | done |
+| PT30 | The document host's secondary press on a close button: the window closes and its file is shown in the file manager (`plans/TEXTEDIT.md` TE17) | done |
 
 ## What it is
 
@@ -487,6 +488,10 @@ document windows:
   inside each into that window alone. The view hears it has the keyboard while
   the window or any of its tool windows does, and of its going once the
   round's events are in, so moving between them is no change.
+- **Showing a document's folder** (PT30): a secondary press on a document
+  window's close button closes it and, once closed, has the desktop show its
+  file in the file manager through a location grant on its descriptor, as
+  `plans/TEXTEDIT.md` TE17 sets out; a refusal is stated in an alert.
 
 ## The loop
 

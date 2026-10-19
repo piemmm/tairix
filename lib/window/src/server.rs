@@ -651,6 +651,34 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// A validated `RevealDocument`: attested `caller` asked to have the user
+    /// shown, in the file manager, the document behind its window
+    /// `window_id`, telling where it is through `location` — a
+    /// `fd_grant_location` handle it minted to the session.
+    ///
+    /// The host checks the window is the caller's and the one the user works
+    /// in, learns the path by redeeming `location` bound to `caller`, and
+    /// reaches the file manager through `desk` exactly as its own launches
+    /// do. It consumes `location` whatever it answers, so a refused reveal
+    /// leaves nothing pending for the caller's life.
+    ///
+    /// The default refuses: a host with no file manager to reach shows
+    /// nothing, and saying so beats pretending it did.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host could not show the document with.
+    fn reveal_requested(
+        &mut self,
+        desk: &mut dyn HandOverDesk,
+        caller: ProcId,
+        window_id: u64,
+        location: u64,
+    ) -> Result<(), Errno> {
+        let _ = (desk, caller, window_id, location);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `OpenMenu`: the attested owner of live window
     /// `window_id` (which has no open unanswered) asked for a menu chain,
     /// anchored at `anchor` in that window's own client pixels, over
@@ -1793,18 +1821,8 @@ impl<M: ShmMapper> WindowServer<M> {
                     },
                 )
             }
-            WindowRequest::HandOverLaunch {
-                ref run_path,
-                ref document,
-            } => {
-                let mut desk = EngineDesk { server: self, sink };
-                let outcome = host.hand_over_requested(
-                    &mut desk,
-                    caller,
-                    run_path.as_str(),
-                    document.as_ref(),
-                );
-                hand_over_reply(reply, outcome)
+            WindowRequest::HandOverLaunch { .. } | WindowRequest::RevealDocument { .. } => {
+                self.dispatch_reach(host, sink, caller, decoded, reply)
             }
             WindowRequest::PickFile { .. }
             | WindowRequest::TakePickedName { .. }
@@ -1816,6 +1834,42 @@ impl<M: ShmMapper> WindowServer<M> {
                 self.dispatch_transfer(host, caller, decoded, reply)
             }
             ref other => self.dispatch_status_op(host, &*sink, caller, other, reply),
+        }
+    }
+
+    /// Act on a request that reaches another application's live instance
+    /// through the desk the engine lends the host: a hand-over, or a reveal of
+    /// a document in the file manager.
+    fn dispatch_reach(
+        &mut self,
+        host: &mut dyn WindowHost,
+        sink: &mut dyn EventSink,
+        caller: ProcId,
+        request: &WindowRequest,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        let mut desk = EngineDesk { server: self, sink };
+        match *request {
+            WindowRequest::HandOverLaunch {
+                ref run_path,
+                ref document,
+            } => {
+                let outcome = host.hand_over_requested(
+                    &mut desk,
+                    caller,
+                    run_path.as_str(),
+                    document.as_ref(),
+                );
+                hand_over_reply(reply, outcome)
+            }
+            WindowRequest::RevealDocument {
+                window_id,
+                location,
+            } => status(
+                reply,
+                host.reveal_requested(&mut desk, caller, window_id, location),
+            ),
+            _ => status(reply, Err(Errno::NotSupported)),
         }
     }
 
@@ -2080,7 +2134,8 @@ impl<M: ShmMapper> WindowServer<M> {
             | WindowRequest::BeginDrag { .. }
             | WindowRequest::TakeDropTarget { .. }
             | WindowRequest::DragVerdict { .. }
-            | WindowRequest::QueryDragSpot { .. } => status(reply, Err(Errno::NotSupported)),
+            | WindowRequest::QueryDragSpot { .. }
+            | WindowRequest::RevealDocument { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             WindowRequest::TakePickedName { .. } => {

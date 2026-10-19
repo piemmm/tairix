@@ -49,6 +49,19 @@ pub(super) struct Readout {
 impl Readout {
     /// A readout for a `screen` at `scale`, in `theme`'s caption type.
     pub(super) fn new(theme: &Theme, scale: Scale, screen: (u32, u32)) -> Self {
+        let (font, origin, size) = Self::measure(theme, scale, screen);
+        Self {
+            font,
+            origin,
+            size,
+            window: None,
+            shown: None,
+        }
+    }
+
+    /// The type, place and size of a readout for a `screen` at `scale`: as
+    /// wide as the widest it can read, in the screen's corner.
+    fn measure(theme: &Theme, scale: Scale, screen: (u32, u32)) -> (BitmapFont, Point, (u32, u32)) {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
         let width = [Doing::Generating, Doing::Rendering]
             .into_iter()
@@ -61,12 +74,31 @@ impl Readout {
         let place = |extent: u32, own: u32| {
             i32::try_from(extent.saturating_sub(margin.saturating_add(own))).unwrap_or(0)
         };
-        Self {
-            font,
-            origin: Point::new(place(screen.0, width), place(screen.1, height)),
-            size: (width, height),
-            window: None,
-            shown: None,
+        let origin = Point::new(place(screen.0, width), place(screen.1, height));
+        (font, origin, (width, height))
+    }
+
+    /// Measure the readout again and redraw what it reads: text it was
+    /// measured with provisionally has landed.
+    pub(super) fn refit(
+        &mut self,
+        theme: &Theme,
+        scale: Scale,
+        screen: (u32, u32),
+        compositor: &mut Compositor,
+    ) {
+        (self.font, self.origin, self.size) = Self::measure(theme, scale, screen);
+        let Some(window) = self.window else {
+            return;
+        };
+        let _ = compositor.move_window(window, self.origin);
+        if let Some((doing, percent)) = self.shown.take() {
+            let redrawn = self
+                .lettered(&doing.label(percent))
+                .is_some_and(|surface| compositor.set_surface(window, surface));
+            if redrawn {
+                self.shown = Some((doing, percent));
+            }
         }
     }
 

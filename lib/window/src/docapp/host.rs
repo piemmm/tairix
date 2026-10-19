@@ -46,7 +46,10 @@ use tairix_rt::work::{Desk, Worker, WorkerGuard};
 use tairix_theme::{Theme, ThemeRegistry};
 use tairix_util::defer::JobQueue;
 
-use super::closing::{next_quit_step, save_changes_alert, CloseAnswer, QuitStanding, QuitStep};
+use super::closing::{
+    next_quit_step, reveal_refusal, save_changes_alert, CloseAnswer, QuitStanding, QuitStep,
+};
+use super::headline;
 use super::title::Title;
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
@@ -416,6 +419,10 @@ pub struct DocWindow<A: DocumentApp> {
     /// The quit under way asked it whether to save its changes, so its
     /// keeping them turns the quit down.
     quit_asked: bool,
+    /// Closing it is to show the user where its document lives, as a
+    /// secondary press on its close button asks, for as long as that close is
+    /// under way.
+    reveal_on_close: bool,
 }
 
 /// Whether a window's document is still being read in; input waits until it
@@ -838,6 +845,12 @@ impl<A: DocumentApp> DocWindow<A> {
         self.closing.is_some() || self.view.asking_to_close()
     }
 
+    /// Whether a close of it is under way: one of its questions is up, or a
+    /// save it closes after.
+    fn closing_under_way(&self) -> bool {
+        self.asking_to_close() || self.file.closing()
+    }
+
     /// Where it stands in the quit under way; `leaving` when it is about to
     /// close.
     fn quit_standing(&self, leaving: bool) -> QuitStanding {
@@ -1234,7 +1247,10 @@ impl<A: DocumentApp> Host<A> {
                     self.close_window(index);
                 }
             }
-            CloseAnswer::Keep => self.quitting = false,
+            CloseAnswer::Keep => {
+                self.quitting = false;
+                self.windows[index].reveal_on_close = false;
+            }
         }
     }
 
@@ -1283,7 +1299,7 @@ impl<A: DocumentApp> Host<A> {
     /// would read as an empty file — and a document that is not
     /// [`replaceable`](DocWindow::replaceable) stays as it was.
     pub fn not_opened(&mut self, index: usize, name: &str, why: &dyn Display) {
-        let headline = format!("\u{201c}{name}\u{201d} could not be opened");
+        let headline = headline::not_opened(name);
         let detail = format!("{why}");
         if self.windows[index].reading == Reading::Alone {
             self.close_window(index);
@@ -1377,6 +1393,7 @@ impl<A: DocumentApp> Host<A> {
             focus_told: true,
             closing: None,
             quit_asked: false,
+            reveal_on_close: false,
         };
         window.view.settle(&window.layout, &mut window.damage);
         self.windows.push(window);
@@ -1531,8 +1548,7 @@ impl<A: DocumentApp> Host<A> {
         let mut view = match A::placeholder(self, &name, access) {
             Ok(view) => view,
             Err(why) => {
-                let headline = format!("\u{201c}{name}\u{201d} could not be opened");
-                self.alert(None, &headline, &why);
+                self.alert(None, &headline::not_opened(&name), &why);
                 return;
             }
         };
@@ -1550,8 +1566,7 @@ impl<A: DocumentApp> Host<A> {
             None => match self.open_window(view, Reading::Alone) {
                 Ok(index) => index,
                 Err(why) => {
-                    let headline = format!("\u{201c}{name}\u{201d} could not be opened");
-                    self.alert(None, &headline, &why);
+                    self.alert(None, &headline::not_opened(&name), &why);
                     return;
                 }
             },
@@ -1564,6 +1579,11 @@ impl<A: DocumentApp> Host<A> {
     /// saves asked for behind the one in flight, written now, and the work
     /// the application still wants once the document has gone.
     fn close_window(&mut self, index: usize) {
+        // While the window is still the user's, so the file manager may be
+        // brought forward over it.
+        if self.windows[index].reveal_on_close {
+            self.reveal_document(index);
+        }
         let mut window = self.windows.remove(index);
         let id = window.id();
         let withdrawn = self.withdraw(id);
@@ -1592,7 +1612,8 @@ impl<A: DocumentApp> Host<A> {
                     self.queue.shrink(1);
                 }
                 self.report(format!(
-                    "{target} could not be saved: there is no room for the save"
+                    "{} could not be saved: there is no room for the save",
+                    tairix_util::utf8::shown(&target)
                 ));
             }
         }
@@ -1600,6 +1621,33 @@ impl<A: DocumentApp> Host<A> {
             let _ = pane.chrome.pane.close(&mut self.client);
         }
         let _ = window.chrome.pane.close(&mut self.client);
+    }
+
+    /// Have the desktop show the user, in the file manager, where window
+    /// `index`'s document lives. The window learns nothing of where that is:
+    /// its descriptor tells the desktop. A refusal is said in an alert, since
+    /// the window it would have shown is going.
+    fn reveal_document(&mut self, index: usize) {
+        let window = &self.windows[index];
+        let Some(handle) = window.file.handle() else {
+            return;
+        };
+        let (id, fd) = (window.id(), handle.fd());
+        let name = String::from(window.view.name());
+        let shown = self
+            .client
+            .session()
+            .ok_or(Errno::NotSupported)
+            .and_then(|session| tairix_rt::fd_grant_location(fd, session))
+            .and_then(|location| self.client.reveal_document(id, location));
+        let Err(err) = shown else {
+            return;
+        };
+        self.report(format_args!(
+            "{} was not shown in its folder: {err}",
+            tairix_util::utf8::shown(&name)
+        ));
+        self.alert(None, &headline::not_shown(&name), reveal_refusal(err));
     }
 
     /// Carry out one request of window `index`.
@@ -1636,7 +1684,7 @@ impl<A: DocumentApp> Host<A> {
         };
         if let Some(refusal) = destination.and_then(|name| window.view.refuse_save(name)) {
             self.quitting = false;
-            let headline = format!("\u{201c}{}\u{201d} could not be saved", window.view.name());
+            let headline = headline::not_saved(window.view.name());
             self.alert(Some(index), &headline, &refusal);
             return;
         }
@@ -1674,7 +1722,7 @@ impl<A: DocumentApp> Host<A> {
             SaveStep::Queued => window.state("Saving\u{2026}"),
             SaveStep::AskWhere { then_close } => self.ask_how(index, then_close),
             SaveStep::NoMemory => {
-                let headline = format!("\u{201c}{}\u{201d} could not be saved", window.view.name());
+                let headline = headline::not_saved(window.view.name());
                 self.alert(
                     Some(index),
                     &headline,
@@ -1695,8 +1743,7 @@ impl<A: DocumentApp> Host<A> {
             ..
         } = saved;
         if let Err(err) = &result {
-            let headline = format!("\u{201c}{name}\u{201d} could not be saved");
-            self.alert(Some(index), &headline, &format!("{err}"));
+            self.alert(Some(index), &headline::not_saved(&name), &format!("{err}"));
         }
         let window = &mut self.windows[index];
         let landed = window
@@ -1740,7 +1787,7 @@ impl<A: DocumentApp> Host<A> {
             Ok(endings) => endings,
             Err(why) => {
                 self.quitting = false;
-                let headline = format!("\u{201c}{}\u{201d} could not be saved", window.view.name());
+                let headline = headline::not_saved(window.view.name());
                 self.alert(Some(index), &headline, &why);
                 return;
             }
@@ -1994,20 +2041,31 @@ impl<A: DocumentApp> Host<A> {
         self.act(index, event);
     }
 
+    /// The user asked window `index` to close: `alternate` for a secondary
+    /// press on its close button, which shows where its document lives once
+    /// it has. One still reading its document in has nothing to show yet.
+    fn close_asked(&mut self, index: usize, alternate: bool) {
+        let window = &mut self.windows[index];
+        if window.loading() {
+            self.close_window(index);
+            return;
+        }
+        window.reveal_on_close = alternate;
+        let outcome = window
+            .view
+            .close_requested(&window.layout, &mut window.damage);
+        self.apply(index, outcome);
+    }
+
     /// Route one window-scoped event to window `index`.
     fn act(&mut self, index: usize, event: &WindowEvent) {
         let window = &mut self.windows[index];
+        // A close the user turned back, however, shows nothing when the window
+        // later closes some other way.
+        window.reveal_on_close &= window.closing_under_way();
         match event {
-            WindowEvent::CloseRequested { .. } | WindowEvent::AlternateCloseRequested { .. } => {
-                if window.loading() {
-                    self.close_window(index);
-                    return;
-                }
-                let outcome = window
-                    .view
-                    .close_requested(&window.layout, &mut window.damage);
-                self.apply(index, outcome);
-            }
+            WindowEvent::CloseRequested { .. } => self.close_asked(index, false),
+            WindowEvent::AlternateCloseRequested { .. } => self.close_asked(index, true),
             WindowEvent::Resized {
                 width_px,
                 height_px,
@@ -2571,6 +2629,7 @@ impl<A: DocumentApp> Host<A> {
         self.quitting = true;
         for window in &mut self.windows {
             window.quit_asked = false;
+            window.reveal_on_close &= window.closing_under_way();
         }
         // The first question goes up before the rest come down, while the
         // user's own quit still lets it come forward.
@@ -2643,7 +2702,7 @@ impl<A: DocumentApp> Host<A> {
                     Ok(file) => self.open_document(file, name, writable, None),
                     Err(raw) => self.alert(
                         None,
-                        &format!("\u{201c}{name}\u{201d} could not be opened"),
+                        &headline::not_opened(name.as_str()),
                         &format!(
                             "The document could not be taken over ({}).",
                             Errno::from_syscall(raw)
@@ -2681,7 +2740,10 @@ impl<A: DocumentApp> Host<A> {
                     // save it asked for that failed is still said.
                     self.give_back_room();
                     if let Err(err) = &saved.result {
-                        self.report(format!("{} could not be saved: {err}", saved.name));
+                        self.report(format!(
+                            "{} could not be saved: {err}",
+                            tairix_util::utf8::shown(&saved.name)
+                        ));
                     }
                 }
             }

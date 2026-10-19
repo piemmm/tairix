@@ -362,8 +362,41 @@ mod program {
         }
     }
 
-    /// The event loop: park, apply, repaint. A dead channel ends the app
-    /// fail-loud; a clean close ends it at zero.
+    /// Whether the desktop holds the window's pixels, and whether the window is
+    /// on show: a released one is painted nothing until the redraw that shows
+    /// it again, and a minimised one is still repainted for what changes while
+    /// nothing moves on the clock.
+    #[derive(Copy, Clone)]
+    struct Shown {
+        released: bool,
+        on_show: bool,
+    }
+
+    impl Shown {
+        /// A window just opened.
+        const OPEN: Self = Self {
+            released: false,
+            on_show: true,
+        };
+
+        /// Take what `event` says of the window, letting this side's pixels go
+        /// where the desktop let go of its own: the pages go only when both do.
+        fn observe(&mut self, event: &WindowEvent, surface: &mut GalleryWindow) {
+            match event {
+                WindowEvent::ContentReleased { .. } => {
+                    surface.window.release_frames();
+                    self.released = true;
+                }
+                WindowEvent::RedrawRequested { .. } => self.released = false,
+                _ => {}
+            }
+            self.on_show = event.on_show().unwrap_or(self.on_show);
+        }
+    }
+
+    /// The event loop: park for the first event or a deadline, drain what
+    /// else is queued, step held controls and moving traces, then present once.
+    /// A dead channel ends the app fail-loud; a clean close ends it at zero.
     #[allow(clippy::too_many_arguments)] // The loop's whole mutable state, threaded explicitly.
     fn run_event_loop(
         surface: &mut GalleryWindow,
@@ -377,122 +410,105 @@ mod program {
         mut events: WindowEvents<RtEventSource<'_>>,
     ) -> i32 {
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let mut shown = Shown::OPEN;
+        let mut damage = tairix_controls::damage::sink();
+        let mut next_frame = gallery.animate(
+            tairix_rt::clock_get(),
+            viewport,
+            desktop.scale(),
+            themes.active(),
+            &mut damage,
+        );
         loop {
+            let now_ns = tairix_rt::clock_get();
             let (theme, scale) = (themes.active(), desktop.scale());
-            deadline_ns.set(gallery.repeat_deadline(
-                tairix_rt::clock_get(),
-                viewport,
-                scale,
-                theme,
-            ));
-            let woken = events.wait(surface.window.client());
-            // A held control may be due whether the wait ended on its
-            // deadline or on an event.
-            let mut stepped = tairix_controls::damage::sink();
+            let held = gallery.repeat_deadline(now_ns, viewport, scale, theme);
+            let moves = shown.on_show && !shown.released && surface.window.window_id().is_some();
+            let moving = next_frame.filter(|_| moves);
+            deadline_ns.set(match (held, moving) {
+                (Some(held), Some(moving)) => Some(held.min(moving)),
+                (held, moving) => held.or(moving),
+            });
+            let mut first = true;
+            loop {
+                let next = if first {
+                    events.wait(surface.window.client())
+                } else {
+                    events.try_wait(surface.window.client())
+                };
+                first = false;
+                let event = match next {
+                    Ok(Some(event)) => event,
+                    // A wait that ended without an event — a deadline or the
+                    // desktop notice — or a drained queue; a malformed frame
+                    // from the authenticated session is refused rather than
+                    // guessed at. Either way there is nothing to route.
+                    Ok(None) | Err(EventError::Undecodable(_)) => break,
+                    Err(EventError::Refused(refused)) => {
+                        app::report(APP_NAME, refused);
+                        continue;
+                    }
+                    Err(EventError::Mailbox(_)) => {
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
+                    }
+                };
+                // Every control the event reaches, and the gallery for what it
+                // changes itself, reports into the round's one sink.
+                let acted = apply_event(
+                    gallery,
+                    themes.active(),
+                    desktop.scale(),
+                    mode,
+                    &event,
+                    &mut damage,
+                );
+                match acted {
+                    Acted::Quit => {
+                        surface.close();
+                        return 0;
+                    }
+                    Acted::Close => surface.close(),
+                    Acted::Open => {
+                        shown = Shown::OPEN;
+                        // A refusal is already stated; the slot is still
+                        // there to try again from.
+                        let _ = surface.open(
+                            event_endpoint,
+                            mode,
+                            gallery,
+                            themes.active(),
+                            desktop.scale(),
+                        );
+                    }
+                    Acted::Idle | Acted::Changed => {}
+                }
+                shown.observe(&event, surface);
+            }
+            // A desktop change re-themes and re-densifies every pixel, so no
+            // report could describe it.
+            let whole = adopt_desktop(desktop, themes, desktop_moved);
             let (theme, scale) = (themes.active(), desktop.scale());
-            if gallery.repeat(tairix_rt::clock_get(), viewport, scale, theme, &mut stepped) {
-                if let Some(damage) = present_damage(mode, Repaint::Reported, &stepped) {
-                    if surface
-                        .present(gallery, theme, scale, mode, damage)
-                        .is_err()
-                    {
-                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
-                    }
-                }
-            }
-            let event = match woken {
-                Ok(Some(event)) => event,
-                // A wait that ended without an event is the desktop notice
-                // (the only source this app parks on besides its mailbox);
-                // a malformed frame from the authenticated session is
-                // refused rather than guessed at. Either way there is no
-                // event to route, so the round is the re-theme alone.
-                Ok(None) | Err(EventError::Undecodable(_)) => {
-                    if adopt_desktop(desktop, themes, desktop_moved)
-                        && surface
-                            .present(
-                                gallery,
-                                themes.active(),
-                                desktop.scale(),
-                                mode,
-                                DamageRect::full(mode),
-                            )
-                            .is_err()
-                    {
-                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
-                    }
-                    continue;
-                }
-                Err(EventError::Refused(refused)) => {
-                    app::report(APP_NAME, refused);
-                    continue;
-                }
-                Err(EventError::Mailbox(_)) => {
-                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
-                }
-            };
-
-            // A desktop change may have arrived alongside an event, so it is
-            // adopted before the app-specific logic: the scale and theme
-            // everything below derives from are then already current.
-            let redraw = adopt_desktop(desktop, themes, desktop_moved);
-
-            // One sink per round: every control the event reaches, and the
-            // gallery for what it changes itself, reports into this one.
-            let mut damage = tairix_controls::damage::sink();
-            let acted = apply_event(
-                gallery,
-                themes.active(),
-                desktop.scale(),
-                mode,
-                &event,
-                &mut damage,
-            );
-            match acted {
-                Acted::Quit => {
-                    surface.close();
-                    return 0;
-                }
-                Acted::Close => {
-                    surface.close();
-                    continue;
-                }
-                Acted::Open => {
-                    // A refusal is already stated; the slot is still there
-                    // to try again from.
-                    let _ = surface.open(
-                        event_endpoint,
-                        mode,
-                        gallery,
-                        themes.active(),
-                        desktop.scale(),
-                    );
-                    continue;
-                }
-                Acted::Idle | Acted::Changed => {}
-            }
-            // Nobody can see the window, so the session gave its copy of the
-            // pixels back and unmapped the region. Let go of this side too —
-            // the pages go only when both do — and paint nothing until the
-            // redraw request that follows the window being shown again.
-            if matches!(event, WindowEvent::ContentReleased { .. }) {
-                surface.window.release_frames();
+            let now_ns = tairix_rt::clock_get();
+            gallery.repeat(now_ns, viewport, scale, theme, &mut damage);
+            if shown.released || surface.window.window_id().is_none() {
+                damage.clear();
                 continue;
             }
-            // An adopted desktop change re-themes and re-densifies every pixel,
-            // so no report could describe it.
-            let repaint = match (redraw, acted == Acted::Changed) {
-                (true, _) => Repaint::Whole,
-                (false, true) => Repaint::Reported,
-                (false, false) => Repaint::Nothing,
+            next_frame = shown
+                .on_show
+                .then(|| gallery.animate(now_ns, viewport, scale, theme, &mut damage))
+                .flatten();
+            let repaint = if whole {
+                Repaint::Whole
+            } else {
+                Repaint::Reported
             };
-            let Some(damage) = present_damage(mode, repaint, &damage) else {
+            let presented = present_damage(mode, repaint, &damage);
+            damage.clear();
+            let Some(rect) = presented else {
                 continue;
             };
-            if surface
-                .present(gallery, themes.active(), desktop.scale(), mode, damage)
-                .is_err()
-            {
+            if surface.present(gallery, theme, scale, mode, rect).is_err() {
                 return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
         }

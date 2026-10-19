@@ -4,17 +4,18 @@ files — grafischer Dateisystem-Browser
 
 ## SYNOPSIS
 
-`files [--desktop] [verzeichnis] [-h | -?]`
+`files [--desktop] [pfad] [-h | -?]`
 
 ## DESCRIPTION
 
 Öffnet ein Desktop-Fenster, das das Dateisystem auflistet, beginnend mit dem
-auf der Befehlszeile genannten `verzeichnis` oder, wenn keines genannt ist,
-mit dem Ordner `Home` des startenden Benutzers (seinem
-Heimatverzeichnis, wenn dieser nicht aufgelistet werden kann). Der
-Fenstertitel nennt das aktuelle Verzeichnis; das Fenster listet seine
-Einträge, jeder ausgewählte Eintrag mit der Akzentfarbe des aktiven Themas
-hervorgehoben. Jedes Lesen eines Verzeichnisses ist eine gewöhnliche,
+Ordner, den `pfad` auf der Befehlszeile nennt — oder, wenn er eine Datei
+nennt, mit dem Ordner, der diese Datei enthält, wobei die Datei ausgewählt
+ist — oder, wenn keiner genannt ist, mit dem Ordner `Home` des startenden
+Benutzers (seinem Heimatverzeichnis, wenn dieser nicht aufgelistet werden
+kann). Der Fenstertitel nennt das aktuelle Verzeichnis; das Fenster listet
+seine Einträge, jeder ausgewählte Eintrag mit der Akzentfarbe des aktiven
+Themas hervorgehoben. Jedes Lesen eines Verzeichnisses ist eine gewöhnliche,
 berechtigungsgeprüfte Auflistung unter der Identität des startenden
 Benutzers: ein nicht lesbares Verzeichnis wird abgelehnt, niemals erraten.
 
@@ -41,10 +42,13 @@ selbst in der Leiste. `Ctrl+Shift+N` legt einen neuen Ordner an.
 Eine Auflistung öffnet sich ohne Auswahl. Ein Klick wählt einen Eintrag aus,
 ein Klick mit `Ctrl` fügt einen hinzu oder nimmt ihn heraus, und ein Klick
 mit `Shift` wählt die Folge ab dem zuletzt gewählten Eintrag; ein Klick auf
-eine leere Fläche hebt die Auswahl auf. Ziehen über eine leere Fläche zieht
-einen Rahmen auf, der beim Wachsen alles auswählt, was er berührt; am oberen
-oder unteren Rand der Auflistung gehalten, rollt sie weiter, und `Escape`
-nimmt zurück, was er ausgewählt hat.
+eine leere Fläche hebt die Auswahl auf. Ein Doppelklick öffnet einen
+Eintrag; mit gehaltener `Shift`-Taste listet er den Inhalt einer Anwendung
+auf, statt sie zu starten, und was er anderswo öffnet, bleibt nicht
+ausgewählt. Ziehen über eine leere Fläche zieht einen Rahmen auf, der beim
+Wachsen alles auswählt, was er berührt; am oberen oder unteren Rand der
+Auflistung gehalten, rollt sie weiter, und `Escape` nimmt zurück, was er
+ausgewählt hat.
 
 Der Raum um jedes Symbol und seinen Namen gilt als leere Fläche, sodass ein
 Rahmen überall zwischen den Einträgen beginnen kann. `Ctrl+A` wählt alles in
@@ -112,17 +116,15 @@ Pfeiltasten wechseln zwischen ihnen, `Space` schaltet eine Berechtigung um
 oder öffnet Eigentümer oder Gruppe zum Bearbeiten, und `Tab` oder `Escape`
 kehrt zu den Abschnitten zurück.
 
-Der Operand `verzeichnis` wird als nicht vertrauenswürdige Eingabe
-behandelt: er muss ein absoluter Pfad innerhalb der Pfadlängengrenze
-des Systems sein, und jeder seiner Bestandteile muss ein echter
-Verzeichnisname sein — `.` und `..` sind das nicht, sodass eine
-Schreibweise nie etwas anderes bedeuten kann, als sie zu lesen gibt.
-Ein Verzeichnis, das eine dieser Regeln verletzt oder das der startende
-Benutzer nicht auflisten darf, wird mit dem Grund auf dem
-Standardfehlerstrom abgelehnt, und das Fenster öffnet stattdessen den
-Ordner `Home`, sodass ein falsches Argument den Benutzer nie ohne
-Fenster lässt. Ein zweiter Operand wird rundweg abgelehnt statt
-ignoriert.
+Der Operand `pfad` wird als nicht vertrauenswürdige Eingabe behandelt:
+er muss ein absoluter Pfad innerhalb der Pfadlängengrenze des Systems
+sein, und jeder seiner Bestandteile muss ein echter Name sein — `.` und
+`..` sind das nicht, sodass eine Schreibweise nie etwas anderes bedeuten
+kann, als sie zu lesen gibt. Ein Pfad, der eine dieser Regeln verletzt
+oder den der startende Benutzer nicht auflisten darf, wird mit dem Grund
+auf dem Standardfehlerstrom abgelehnt, und das Fenster öffnet stattdessen
+den Ordner `Home`, sodass ein falsches Argument den Benutzer nie ohne
+Fenster lässt. Ein zweiter Operand wird rundweg abgelehnt statt ignoriert.
 
 ## OPTIONS
 
@@ -130,8 +132,8 @@ ignoriert.
   dauerhafter Platz auf der Symbolleiste, der Ihre Orte und die eingebundenen
   Datenträger anbietet, kein Fenster, bis eines verlangt wird, und keine
   Möglichkeit zu beenden. Die Desktop-Sitzung übergibt dies beim Start; ein
-  zusätzlich genanntes `verzeichnis` wird abgewiesen, denn eine Komponente öffnet
-  kein Fenster, in das es gehören könnte.
+  zusätzlich genannter `pfad` wird abgewiesen, denn eine Komponente öffnet
+  kein Fenster, in das er gehören könnte.
 - `-h, -?` — die kurze Hilfe dieses Befehls anzeigen und beenden.
 
 ## EXIT STATUS

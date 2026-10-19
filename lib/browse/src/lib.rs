@@ -152,6 +152,7 @@ pub mod rowlist;
 pub mod select;
 pub mod sort;
 pub mod source;
+pub mod survey;
 pub mod trash;
 pub mod vfs;
 pub mod watch;
@@ -199,7 +200,7 @@ pub use places::{
     bare_open_places, Place, PlaceKind, Places, Volume, VolumeFacts, FIXED_LABELS, MAX_PLACE_LABEL,
 };
 pub use probes::Probes;
-pub use progress::{ProgressModel, ProgressOp};
+pub use progress::{ProgressModel, ProgressOp, Reading, Subject, Tally};
 pub use properties::{Attribute, Attributes, Properties};
 pub use rename::{rename_selection, validate_new_name, RenameError};
 pub use render::{render_into, ManagerChrome};
@@ -207,6 +208,7 @@ pub use rowlist::RowList;
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{resolve_occupancy, DirectorySource, Listing, Probe};
+pub use survey::{Survey, SurveyStep};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_geometry::Scale;
 /// The pointer button a consumer names when it reports a press. Re-exported

@@ -57,7 +57,9 @@ mod program {
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
-    use tairix_fontd::discovery::{discover, FaceLoad, FontStore};
+    use tairix_fontd::discovery::{
+        discover, read_whole, FaceLoad, FontStore, HandleFace, StoreFile,
+    };
     use tairix_fontd::events::{
         READINESS_REFUSED, SERVICE_READY, SERVICE_READY_MESSAGE, SERVICE_UNAVAILABLE,
     };
@@ -135,61 +137,16 @@ mod program {
         path
     }
 
-    /// Read the whole of already-open `file` into an owned buffer.
-    ///
-    /// Stats for the length, then reads at successive offsets until the file
-    /// is consumed. Used both for the small manifest text (read once, at
-    /// discovery) and for a face's bytes (read once, on first use).
-    ///
-    /// The buffer is reserved fallibly, so a face larger than the heap can
-    /// hold refuses the read rather than aborting the service; the family is
-    /// then skipped or the glyph refused, and the rest of the store still
-    /// serves.
-    fn read_all(file: &File) -> Result<Vec<u8>, Errno> {
-        let size = usize::try_from(file.stat().map_err(Errno::from_syscall)?.size)
-            .map_err(|_| Errno::LengthOutOfRange)?;
-        let mut buf = Vec::new();
-        buf.try_reserve_exact(size)
-            .map_err(|_| Errno::OutOfMemory)?;
-        buf.resize(size, 0);
-        let mut done = 0usize;
-        while done < size {
-            let read = file
-                .read_at(done as u64, &mut buf[done..])
-                .map_err(Errno::from_syscall)?;
-            if read == 0 {
-                break;
-            }
-            done += read;
+    /// The runtime's open file, read as a font-store file.
+    struct RtStoreFile(File);
+
+    impl StoreFile for RtStoreFile {
+        fn size(&self) -> Result<u64, Errno> {
+            Ok(self.0.stat().map_err(Errno::from_syscall)?.size)
         }
-        buf.truncate(done);
-        Ok(buf)
-    }
 
-    /// A face whose bytes are read once, on first use, from the handle
-    /// opened at discovery time — never re-opened, never read early.
-    ///
-    /// The leaked, boxed byte slice this hands back is retained for the
-    /// service's life; the leak is bounded by the store's own size (one
-    /// family's declared faces, read at most once each), not by anything a
-    /// caller can grow, so it never becomes an unbounded-growth surface.
-    struct RealFaceLoad {
-        /// The still-open handle, present until the first successful read.
-        file: Option<File>,
-        /// The leaked bytes, once read.
-        bytes: Option<&'static [u8]>,
-    }
-
-    impl FaceLoad<'static> for RealFaceLoad {
-        fn load(&mut self) -> Result<&'static [u8], Errno> {
-            if let Some(bytes) = self.bytes {
-                return Ok(bytes);
-            }
-            let file = self.file.take().ok_or(Errno::NotFound)?;
-            let bytes = read_all(&file)?;
-            let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-            self.bytes = Some(leaked);
-            Ok(leaked)
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.0.read_at(offset, buf).map_err(Errno::from_syscall)
         }
     }
 
@@ -215,8 +172,8 @@ mod program {
 
         fn read_manifest(&mut self, dir: &str) -> Option<String> {
             let path = family_path(dir, FAMILY_MANIFEST);
-            let file = File::open(&path, OpenFlags::READ).ok()?;
-            let bytes = read_all(&file).ok()?;
+            let file = RtStoreFile(File::open(&path, OpenFlags::READ).ok()?);
+            let bytes = read_whole(&file).ok()?;
             String::from_utf8(bytes).ok()
         }
 
@@ -226,8 +183,8 @@ mod program {
             // failure surfaces from `load()` on first use, exactly as a face
             // that opened but failed to read or parse would, so discovery
             // never has to special-case "opened" versus "will fail".
-            let file = File::open(&path, OpenFlags::READ).ok();
-            Box::new(RealFaceLoad { file, bytes: None })
+            let file = File::open(&path, OpenFlags::READ).ok().map(RtStoreFile);
+            Box::new(HandleFace::new(file))
         }
     }
 

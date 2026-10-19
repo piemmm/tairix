@@ -62,6 +62,9 @@ pub(super) struct Ribbon {
     due_ns: u64,
     damage: Region,
     screen: (u32, u32),
+    /// Whether text it was set in provisionally has landed since it was last
+    /// composed.
+    retext: bool,
 }
 
 impl Ribbon {
@@ -92,6 +95,7 @@ impl Ribbon {
             due_ns: now_ns,
             damage: Region::new(),
             screen,
+            retext: false,
         };
         face.due_ns = face.next_due();
         Some(face)
@@ -123,9 +127,13 @@ impl Ribbon {
         }
         self.damage.clear();
         let mut retold = None;
-        if now_ns >= self.telling.tick_ns() {
+        let turned = now_ns >= self.telling.tick_ns();
+        if turned || self.retext {
             let was = lettered_rect(self.block.as_ref(), self.at);
-            self.telling.read(wall(), now_ns);
+            if turned {
+                self.telling.read(wall(), now_ns);
+            }
+            self.retext = false;
             self.recompose();
             let text = was.union(&lettered_rect(self.block.as_ref(), self.at));
             if !text.is_empty() {
@@ -172,6 +180,16 @@ impl Ribbon {
                 letter(surface, block, at, text);
             }
         });
+    }
+
+    /// Set the lines again in type fitted with the advances now held, for
+    /// the next frame to draw: text they were set in provisionally has
+    /// landed.
+    pub(super) fn refit_text(&mut self, theme: &Theme, scale: Scale) {
+        (self.fonts, self.baselines) = typeset(theme, scale, self.screen);
+        self.figure = self.fonts[0].cell_width();
+        self.retext = true;
+        self.due_ns = 0;
     }
 
     /// The next moment anything is owed: the ribbon's next frame while it
