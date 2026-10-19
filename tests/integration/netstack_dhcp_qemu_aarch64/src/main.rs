@@ -2,7 +2,7 @@
 //! `tairix-kernel` pipeline on the `virt` board against the shared
 //! `dhcp-net-root` whole-disk image — whose read-only `/System` volume
 //! carries the **kernel-signed virtio-net driver bundle** and a planted
-//! `/System/Settings/Network/network.conf` — with a `virtio-net-device`
+//! `/System/Defaults/Network/network.conf` — with a `virtio-net-device`
 //! attached and the harness-side **DHCP-server** link peer on the QEMU
 //! `dgram` netdev, and prove RFC 2131 dynamic IPv4 addressing end to end.
 //!
@@ -23,7 +23,7 @@
 //!   not a tautology.
 //!
 //! The production boot path (all **before** any root unlock — the `/System`
-//! store and its `Settings/` config are on the read-only volume mounted
+//! store and its `Defaults/` config are on the read-only volume mounted
 //! before the passphrase, so the guest needs no console dialogue, exactly
 //! like the static/headless siblings):
 //!

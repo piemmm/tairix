@@ -2,7 +2,7 @@ use tairix_abi::time::Duration64;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_theme::Timeline;
 
-use super::{frame_budget, park_timeout, Cooldown, Idle, ENERGY_SAVING_AFTER_NS, NANOS_PER_SEC};
+use super::{frame_budget, park_timeout, Idle, ENERGY_SAVING_AFTER_NS, NANOS_PER_SEC};
 
 #[test]
 fn a_frame_budget_covers_the_whole_span_and_one_frame_more() {
@@ -64,77 +64,15 @@ fn the_deadline_is_the_nearer_of_the_two() {
 }
 
 #[test]
+fn a_lockout_wakes_when_its_shown_second_turns_over() {
+    let timeout = park_timeout(None, Duration64::from_nanos(2_900_000_000));
+    assert_eq!(timeout, 900_000_000);
+}
+
+#[test]
 fn a_lockout_with_no_clock_still_ticks() {
     let timeout = park_timeout(None, Duration64::from_secs(5));
     assert_eq!(timeout, NANOS_PER_SEC);
-}
-
-/// The account every lockout below is reported for.
-const ANN: Option<&str> = Some("ann");
-
-#[test]
-fn a_lockout_counts_down_against_the_monotonic_clock() {
-    let mut cooldown = Cooldown::default();
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
-
-    cooldown.start(1_000, Duration64::from_secs(2), "ann");
-    assert_eq!(cooldown.remaining(1_000, ANN), Duration64::from_secs(2));
-    assert_eq!(
-        cooldown.remaining(1_000 + NANOS_PER_SEC, ANN),
-        Duration64::from_secs(1)
-    );
-}
-
-#[test]
-fn a_lockout_that_has_run_out_reports_zero() {
-    let mut cooldown = Cooldown::default();
-    cooldown.start(0, Duration64::from_secs(2), "ann");
-    assert_eq!(cooldown.remaining(3 * NANOS_PER_SEC, ANN), Duration64::ZERO);
-}
-
-#[test]
-fn a_zero_or_negative_span_is_not_a_lockout() {
-    let mut cooldown = Cooldown::default();
-    cooldown.start(0, Duration64::from_secs(5), "ann");
-    cooldown.start(0, Duration64::ZERO, "ann");
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
-
-    cooldown.start(0, Duration64::from_secs(5), "ann");
-    cooldown.start(0, Duration64::from_secs(-5), "ann");
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
-}
-
-#[test]
-fn a_clock_that_ran_backwards_never_lengthens_a_lockout() {
-    let mut cooldown = Cooldown::default();
-    cooldown.start(10 * NANOS_PER_SEC, Duration64::from_secs(1), "ann");
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::from_secs(11));
-    assert_eq!(cooldown.remaining(u64::MAX, ANN), Duration64::ZERO);
-}
-
-/// The authority meters each login name on its own, so a lockout on one
-/// account is shown neither on another's prompt nor on the chooser.
-#[test]
-fn a_lockout_holds_back_only_the_account_it_was_reported_for() {
-    let mut cooldown = Cooldown::default();
-    cooldown.start(0, Duration64::from_secs(20), "ann");
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::from_secs(20));
-    assert_eq!(cooldown.remaining(0, Some("bo")), Duration64::ZERO);
-    assert_eq!(cooldown.remaining(0, None), Duration64::ZERO, "the chooser");
-}
-
-/// An answer about another account that carries no lockout leaves this one's
-/// standing; one that carries a lockout of its own replaces it.
-#[test]
-fn an_answer_about_another_account_leaves_a_lockout_standing() {
-    let mut cooldown = Cooldown::default();
-    cooldown.start(0, Duration64::from_secs(20), "ann");
-    cooldown.start(0, Duration64::ZERO, "bo");
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::from_secs(20));
-
-    cooldown.start(0, Duration64::from_secs(5), "bo");
-    assert_eq!(cooldown.remaining(0, Some("bo")), Duration64::from_secs(5));
-    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
 }
 
 #[test]

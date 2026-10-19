@@ -50,8 +50,13 @@
 //! [`answer`](ScreenLock::answer), and until then the lock says it is
 //! checking and takes no keystroke.
 
+use alloc::string::{String, ToString};
+
+use tairix_abi::time::Duration64;
 use tairix_controls::damage::{self, Repaint};
-use tairix_greeter::{AuthSurface, Backdrop, EventContext, Outcome, Ticket, Verdict, Verifier};
+use tairix_greeter::{
+    AuthSurface, Backdrop, Cooldown, EventContext, Outcome, Ticket, Verdict, Verifier,
+};
 use tairix_util::secret::WipedBuf;
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Scale, Surface, WindowId};
 
@@ -99,6 +104,30 @@ impl UnlockAsk {
     }
 }
 
+/// The broker's answer to one offer at the lock.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct UnlockAnswer {
+    /// The offer it is about.
+    pub ticket: Ticket,
+    /// What the broker said of it.
+    pub verdict: Verdict,
+    /// How long the account must wait before another password is checked;
+    /// zero for none.
+    pub retry_after: Duration64,
+}
+
+impl UnlockAnswer {
+    /// `verdict` on the offer `ticket` names, with no wait.
+    #[must_use]
+    pub const fn of(ticket: Ticket, verdict: Verdict) -> Self {
+        Self {
+            ticket,
+            verdict,
+            retry_after: Duration64::ZERO,
+        }
+    }
+}
+
 /// What one input event did to the lock.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum LockOutcome {
@@ -115,6 +144,10 @@ pub enum LockOutcome {
 struct Engaged {
     wm: WindowId,
     surface: AuthSurface,
+    /// The account the lock asks about, which its lockout is metered under.
+    login: String,
+    /// The broker's lockout on that account, counted down for the surface.
+    cooldown: Cooldown,
     screen: Rect,
     style: u64,
     owed: Repaint,
@@ -122,6 +155,17 @@ struct Engaged {
 }
 
 impl Engaged {
+    /// What is left of the account's lockout at `now_ns`.
+    fn lockout(&self, now_ns: u64) -> Duration64 {
+        self.cooldown.remaining(now_ns, Some(&self.login))
+    }
+
+    /// Show what is left of the lockout at `now_ns`, owing what that changed.
+    fn show_lockout(&mut self, now_ns: u64) {
+        let shown = self.surface.set_cooldown(self.lockout(now_ns));
+        self.owe(shown);
+    }
+
     /// Fold what `outcome` changed into what the frame owes. A step that
     /// moves only the strength a surface is blitted at owes nothing here:
     /// the lock is always shown at full strength.
@@ -196,6 +240,8 @@ impl ScreenLock {
         self.engaged = Some(Engaged {
             wm,
             surface,
+            login: login.to_string(),
+            cooldown: Cooldown::default(),
             screen,
             style: shell.style_generation(),
             owed: Repaint::clean(),
@@ -269,16 +315,17 @@ impl ScreenLock {
         engaged.owe(outcome);
     }
 
-    /// Adopt the broker's `verdict` on the offer `ticket` names, at monotonic
-    /// `now_ns`.
+    /// Adopt the broker's `answer`, at monotonic `now_ns`.
     ///
     /// Returns [`LockOutcome::Unlocked`] only for a verified answer to the
     /// offer the lock is waiting on, by which time the lock is already down.
     /// An answer to an offer a lock since abandoned asked, or to none at all,
-    /// changes nothing.
+    /// changes nothing on the field. A lockout it reports counts down from
+    /// now whichever offer it answered, since it is the account's: the field
+    /// says how long is left and submits nothing until it has run out.
     pub fn answer(
         &mut self,
-        (ticket, verdict): (Ticket, Verdict),
+        answer: UnlockAnswer,
         now_ns: u64,
         shell: &DesktopShell,
         compositor: &mut Compositor,
@@ -287,12 +334,18 @@ impl ScreenLock {
         let Some(engaged) = self.engaged.as_mut() else {
             return LockOutcome::Pending;
         };
-        let outcome = engaged.surface.answer(ticket, verdict, now_ns, theme);
+        let outcome = engaged
+            .surface
+            .answer(answer.ticket, answer.verdict, now_ns, theme);
         if outcome.verified() {
             self.release(compositor);
             return LockOutcome::Unlocked;
         }
         engaged.owe(outcome);
+        engaged
+            .cooldown
+            .start(now_ns, answer.retry_after, &engaged.login);
+        engaged.show_lockout(now_ns);
         LockOutcome::Pending
     }
 
@@ -309,16 +362,17 @@ impl ScreenLock {
         let Some(engaged) = self.engaged.as_mut() else {
             return;
         };
+        engaged.show_lockout(now_ns);
         let stepped = engaged.surface.advance(now_ns);
         engaged.owe(stepped);
         self.draw(shell, compositor);
     }
 
-    /// `park_ns` shortened to the locked surface's next animation frame, or
-    /// to now while an event's change is still owed — the frame pacer then
-    /// holds the wake to the next frame — or left exactly as it is when the
-    /// screen is unlocked and nothing is in flight: an idle lock screen arms
-    /// no timer.
+    /// `park_ns` shortened to the locked surface's next animation frame or
+    /// the next second of a lockout's countdown, or to now while an event's
+    /// change is still owed — the frame pacer then holds the wake to the next
+    /// frame — or left exactly as it is when the screen is unlocked and
+    /// nothing is in flight: an idle lock screen arms no timer.
     ///
     /// A frame the compositor refused to give back is owed too, but arms
     /// nothing: nothing is presented while it stands, so a wake of its own
@@ -330,7 +384,13 @@ impl ScreenLock {
             park_ns,
             self.engaged.as_ref().and_then(|engaged| {
                 if engaged.owed.is_clean() || engaged.refused {
-                    engaged.surface.motion_due(now_ns)
+                    let tick = Cooldown::tick_of(engaged.lockout(now_ns));
+                    engaged
+                        .surface
+                        .motion_due(now_ns)
+                        .into_iter()
+                        .chain(tick)
+                        .min()
                 } else {
                     Some(0)
                 }

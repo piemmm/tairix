@@ -72,10 +72,10 @@
 //! of neither rather than holding a press it is never told is over. A window
 //! holds one press at a time, so the only end left without its press is the
 //! one ending a press already delivered. Folding therefore leaves a window
-//! owing at most six state edges, at most one pick conclusion (a second is
-//! refused before it reaches the sink), at most one move's end and at most
-//! one such press's end, and a queue at capacity always holds an input event
-//! to shed.
+//! owing at most six state edges, at most one pick conclusion and one
+//! authorisation's (a second of either is refused before it reaches the
+//! sink), at most one move's end and at most one such press's end, and a
+//! queue at capacity always holds an input event to shed.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -92,7 +92,7 @@ use crate::shell::continues;
 ///
 /// A security bound rather than a scalable capacity: it is the ceiling on
 /// what a client that stops draining can make the session hold. Comfortably
-/// above the nine slots folding can leave un-shed, and above the input a
+/// above the ten slots folding can leave un-shed, and above the input a
 /// user produces in the seconds before the owner is declared unresponsive.
 pub const HOLD_BACK_CAPACITY: usize = 64;
 

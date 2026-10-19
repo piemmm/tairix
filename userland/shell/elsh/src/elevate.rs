@@ -30,6 +30,7 @@ use tairix_abi::account::MAX_PASSWORD_LEN;
 use tairix_util::secret::wipe;
 
 use crate::builtin::BuiltinContext;
+use crate::host::Denied;
 
 /// Status returned when the builtin is used incorrectly or refused.
 const USAGE_ERROR: i32 = 1;
@@ -62,15 +63,22 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
             Ok(password) => ctx.elevator.elevate(username, password, program, &operands),
             // Refuse malformed input locally without ever sending it — the
             // same errno the wire decoder gives a bad encoding.
-            Err(_) => Err(tairix_abi::Errno::LengthOutOfRange),
+            Err(_) => Err(Denied::Refused(tairix_abi::Errno::LengthOutOfRange)),
         },
-        Err(err) => Err(err),
+        Err(err) => Err(Denied::Refused(err)),
     };
     wipe(&mut secret);
 
     match result {
         Ok(exit_code) => exit_code,
-        Err(err) => {
+        Err(Denied::Cooling(retry_after)) => {
+            ctx.console.write_stderr(&format!(
+                "elevate: too many attempts for {username}; try again in {} s\n",
+                retry_after.secs_rounded_up()
+            ));
+            USAGE_ERROR
+        }
+        Err(Denied::Refused(err)) => {
             ctx.console.write_stderr(&format!("elevate: {err}\n"));
             USAGE_ERROR
         }
@@ -79,7 +87,7 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::host::Elevator;
+    use crate::host::{Denied, Elevator};
     use crate::test_support::Fixture;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -95,12 +103,12 @@ mod tests {
     struct ScriptedElevator {
         secret: &'static str,
         secret_result: Result<(), Errno>,
-        outcome: Result<i32, Errno>,
+        outcome: Result<i32, Denied>,
         calls: RefCell<Vec<Posted>>,
     }
 
     impl ScriptedElevator {
-        fn new(secret: &'static str, outcome: Result<i32, Errno>) -> Self {
+        fn new(secret: &'static str, outcome: Result<i32, Denied>) -> Self {
             Self {
                 secret,
                 secret_result: Ok(()),
@@ -133,7 +141,7 @@ mod tests {
             password: &str,
             program: &str,
             args: &[&str],
-        ) -> Result<i32, Errno> {
+        ) -> Result<i32, Denied> {
             self.calls.borrow_mut().push((
                 username.to_string(),
                 password.to_string(),
@@ -191,7 +199,8 @@ mod tests {
     fn a_vector_past_the_protocols_bounds_is_reported_not_truncated() {
         // The seam refuses it; the builtin states the refusal and changes
         // nothing, rather than posting a shortened command.
-        let elevator = ScriptedElevator::new("hunter2", Err(Errno::LengthOutOfRange));
+        let elevator =
+            ScriptedElevator::new("hunter2", Err(Denied::Refused(Errno::LengthOutOfRange)));
         let mut fixture = Fixture::with_elevator(&elevator);
         assert_eq!(fixture.run(&["elevate", "root", "/p", "a", "b"]), Some(1));
         assert!(fixture.console.stderr().contains("elevate:"));
@@ -199,11 +208,33 @@ mod tests {
 
     #[test]
     fn a_refusal_is_reported_and_fails_the_builtin() {
-        let elevator = ScriptedElevator::new("wrong", Err(Errno::PermissionDenied));
+        let elevator =
+            ScriptedElevator::new("wrong", Err(Denied::Refused(Errno::PermissionDenied)));
         let mut fixture = Fixture::with_elevator(&elevator);
         let status = fixture.run(&["elevate", "root", "/System/Applications/Tool.app/Run"]);
         assert_eq!(status, Some(1));
         assert!(fixture.console.stderr().contains("elevate:"));
+    }
+
+    #[test]
+    fn a_cooling_account_is_told_how_long_to_wait() {
+        let elevator = ScriptedElevator::new(
+            "hunter2",
+            Err(Denied::Cooling(tairix_abi::time::Duration64::from_nanos(
+                11_000_000_001,
+            ))),
+        );
+        let mut fixture = Fixture::with_elevator(&elevator);
+        let status = fixture.run(&["elevate", "root", "/System/Applications/Tool.app/Run"]);
+        assert_eq!(status, Some(1));
+        assert!(
+            fixture
+                .console
+                .stderr()
+                .contains("elevate: too many attempts for root; try again in 12 s"),
+            "{}",
+            fixture.console.stderr()
+        );
     }
 
     #[test]

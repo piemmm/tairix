@@ -26,11 +26,12 @@ use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DialogModality, DragItems,
     DropOperation, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose,
-    PointerAction, TerrainPlate, ToolOver, WindowEvent, WindowRegion,
+    PointerAction, SystemTask, TerrainPlate, ToolOver, WindowEvent, WindowRegion,
 };
+use tairix_abi::zone::ZoneName;
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
-use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
+use tairix_controls::{ChainModel, PlatePlacement, RowIcon, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::{EventId, Field, FieldValue};
@@ -47,7 +48,7 @@ use crate::launch::{
 use tairix_taskbar::menu::about_sheet;
 use tairix_window::WindowSizing;
 use tairix_wm::{
-    Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Scale, Surface, Window,
+    Color, Compositor, InputResponse, Pixel, Placement, Point, Rect, Surface, Window,
     WindowControlKind, WindowFrame, WindowId,
 };
 
@@ -55,7 +56,7 @@ use crate::alert::{alert_title, app_speaker, dialog_title, Alerts, Speaker, ALER
 use crate::apps::{AppBarBridge, BundleIndex};
 use crate::clipboard::ClipboardService;
 use crate::confirm::ConfirmPrompt;
-use crate::elevate::ElevatePrompt;
+use crate::elevate::{AuthoriseDesk, AuthorisePrompt};
 use crate::hold::{is_press, reaches_held_window, Holds};
 use crate::layer::{
     apply_participation, clamped_origin, fits_layer_bound, stack_at_depth, terrain_into,
@@ -1093,7 +1094,11 @@ pub fn resolve_window_identities<F>(
 /// decodes, leaving the slot on its built-in glyph.
 /// The second half of the answer is whether the decode is still in flight, so
 /// the caller knows to ask again rather than leaving the slot on its glyph.
-fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> (Option<Surface>, bool) {
+pub(crate) fn bundle_artwork(
+    shell: &mut DesktopShell,
+    bundle: &str,
+    side: u32,
+) -> (Option<Surface>, bool) {
     let (cache, resolver) = shell.artwork_parts();
     let request = IconRequest::bundle(IconKind::AppBundle, bundle);
     match cache.owned_artwork(resolver, request, side) {
@@ -1101,19 +1106,6 @@ fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> (Option<
         ArtworkOutcome::Refused => (None, false),
         ArtworkOutcome::Pending => (None, true),
     }
-}
-
-/// The picture an *Info* sheet about the application launched from `bundle`
-/// shows: its artwork rasterised at the sheet's own side at `scale`, so it
-/// fills the sheet's slot whatever size the icon bar draws it at. `None` while
-/// it is not yet decoded, or when nothing decodes, leaving the built-in glyph.
-pub fn sheet_artwork(shell: &mut DesktopShell, bundle: &str, scale: Scale) -> Option<Surface> {
-    bundle_artwork(
-        shell,
-        bundle,
-        scale.scale_length(tairix_controls::ABOUT_ICON_SIDE),
-    )
-    .0
 }
 
 /// What a screensaver preview needs from the session that serves it: the
@@ -1180,6 +1172,10 @@ pub struct ShellWindowHost<'a> {
     /// The session's one clipboard, which only the window holding the
     /// keyboard may set or read.
     pub clipboard: &'a mut dyn ClipboardService,
+    /// The system authorisation prompt a validated `Authorise` puts up, for a
+    /// bridge that serves requests; `None` for one that only tears windows
+    /// down, which asks nothing.
+    pub authorise: Option<AuthoriseDesk<'a>>,
 }
 
 /// The [`LaunchHost`] a hand-over resolves through: the engine's own routes,
@@ -1346,12 +1342,12 @@ pub fn seat_menu_refusal(screen: Rect, seat_held: bool) -> Option<MenuRefusal> {
 pub fn seat_held<S: DirectorySource, F: FnMut() -> S>(
     lock: &ScreenLock,
     picker: &SessionPicker<S, F>,
-    (confirm, elevate, resolution): (&ConfirmPrompt, &ElevatePrompt, &ResolutionPrompt),
+    (confirm, elevate, resolution): (&ConfirmPrompt, &AuthorisePrompt, &ResolutionPrompt),
 ) -> bool {
     lock.is_locked()
         || picker.wm_id().is_some()
         || confirm.wm_id().is_some()
-        || elevate.wm_id().is_some()
+        || elevate.is_up()
         || resolution.is_open()
 }
 
@@ -2146,13 +2142,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let sheet = self.windows.owner_of(window_id).and_then(|owner| {
             let identity = self.apps.attested_identity(owner)?;
             let mut sheet = about_sheet(&identity);
-            let scale = self.compositor.scale();
-            let art = self
-                .apps
-                .attested_bundle(owner)
-                .and_then(|bundle| sheet_artwork(self.shell, &bundle, scale));
-            if let Some(art) = art {
-                sheet.set_artwork(art);
+            if let Some(bundle) = self.apps.attested_bundle(owner) {
+                sheet.set_source(RowIcon::Bundle(bundle));
             }
             Some(sheet)
         });
@@ -2370,7 +2361,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
-        desktop_info(self.compositor)
+        desktop_info(self.compositor, self.shell.machine_zone())
     }
 
     fn wallpaper_catalog(&mut self) -> &[WallpaperName] {
@@ -2392,6 +2383,36 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn zone_store(&mut self, to: ProcId, caller: Option<&AttestedApp>) -> Result<u64, Errno> {
         let fd = self.shell.zone_store_descriptor(caller)?;
         self.relay.relay(DocumentAuthority::Held { fd }, false, to)
+    }
+
+    fn authorise_requested(
+        &mut self,
+        caller: Option<&AttestedApp>,
+        window_id: u64,
+        task: &SystemTask,
+    ) -> Result<(), Errno> {
+        if !self.shell.settings_only(caller, "authorise") {
+            return Err(Errno::PermissionDenied);
+        }
+        let Some(desk) = self.authorise.as_mut() else {
+            return Err(Errno::NotSupported);
+        };
+        // The prompt takes the seat as it opens, so none opens over the lock,
+        // the picker, or another prompt.
+        if self.seat_held || desk.prompt.is_up() {
+            return Err(Errno::SeatBusy);
+        }
+        let request = crate::systask::request_for(task, window_id)?;
+        // The seat was free, so the only prompt that cannot come up is one the
+        // compositor had no room for.
+        if desk
+            .prompt
+            .ask(request, desk.elevator, self.shell, self.compositor)
+        {
+            Ok(())
+        } else {
+            Err(Errno::OutOfMemory)
+        }
     }
 
     fn preview_render_requested(
@@ -2431,7 +2452,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 /// scans out to, that output's density, and the theme the desktop is
 /// actually drawn with, accessibility axes and text all — so an application
 /// reads the very values the desktop draws itself with rather than a copy
-/// that could drift.
+/// that could drift; `machine_zone` is the machine's own, which the session
+/// holds.
 ///
 /// # Errors
 ///
@@ -2440,7 +2462,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
 /// carries. The query is refused rather than answered with a plausible
 /// guess, so an application never lays itself out to a screen that is not
 /// there.
-pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
+pub fn desktop_info(
+    compositor: &Compositor,
+    machine_zone: Option<ZoneName>,
+) -> Result<DesktopInfo, Errno> {
     let screen = compositor.screen_rect();
     let output = compositor.mode();
     let scale = u16::try_from(compositor.scale().percent()).map_err(|_| Errno::OutOfRange)?;
@@ -2455,7 +2480,8 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
                 Motion::from_reduced(theme.motion().reduced_motion()),
             )
             .with_double_click(compositor.double_click())?
-            .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok()),
+            .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok())
+            .with_machine_zone(machine_zone),
     )
 }
 
@@ -2719,6 +2745,144 @@ mod tests {
         }
     }
 
+    /// A broker stand-in recording which programs it was asked about; the
+    /// prompt's own suite answers it.
+    #[derive(Default)]
+    struct CountingElevator {
+        asked: alloc::vec::Vec<String>,
+        tickets: tairix_greeter::Tickets,
+    }
+
+    impl crate::elevate::Elevator for CountingElevator {
+        fn authorisers(&mut self, program: &str) -> tairix_greeter::Ticket {
+            self.asked.push(String::from(program));
+            self.tickets.issue()
+        }
+
+        fn offer(
+            &mut self,
+            _username: &str,
+            _password: &str,
+            _request: &crate::elevate::Request,
+        ) -> tairix_greeter::Ticket {
+            self.tickets.issue()
+        }
+    }
+
+    /// A system task asked by `caller` for window 12, through a bridge that
+    /// carries `prompt` when it is given one.
+    fn ask_task(
+        bench: &mut HandOverBench,
+        prompt: Option<(&mut AuthorisePrompt, &mut CountingElevator)>,
+        caller: Option<&AttestedApp>,
+        task: &SystemTask,
+    ) -> Result<(), Errno> {
+        let mut host = ShellWindowHost {
+            shell: &mut bench.shell,
+            compositor: &mut bench.compositor,
+            windows: &mut bench.windows,
+            picker: &mut bench.picker,
+            apps: &mut bench.bar,
+            menu: &mut bench.menu,
+            seat_held: bench.seat_held,
+            screensaver: None,
+            relay: &mut bench.relay,
+            wallpapers: &mut bench.gallery,
+            cursor_sets: &[],
+            clipboard: &mut bench.clipboard,
+            authorise: prompt.map(|(prompt, elevator)| AuthoriseDesk { prompt, elevator }),
+        };
+        host.authorise_requested(caller, 12, task)
+    }
+
+    /// Only the desktop's own Settings may ask for a system task, only with
+    /// the words its program takes, and only while nothing holds the seat;
+    /// then the system's prompt asks who may, for Settings' window.
+    #[test]
+    fn a_system_task_is_asked_for_settings_alone_on_a_free_seat() {
+        let mut bench = HandOverBench::new();
+        let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+        let own = AttestedApp::new("os.tairix.desktop", publisher).expect("identity");
+        bench.shell.set_own_app(Some(own));
+        let settings =
+            AttestedApp::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher).expect("identity");
+        let files = AttestedApp::new("os.tairix.files", publisher).expect("identity");
+        let mut prompt = AuthorisePrompt::new();
+        let mut elevator = CountingElevator::default();
+        let task = SystemTask::ShowAccounts;
+
+        for (caller, refusal) in [
+            (Some(&files), Errno::PermissionDenied),
+            (None, Errno::PermissionDenied),
+        ] {
+            assert_eq!(
+                ask_task(
+                    &mut bench,
+                    Some((&mut prompt, &mut elevator)),
+                    caller,
+                    &task
+                ),
+                Err(refusal)
+            );
+        }
+        assert_eq!(
+            ask_task(&mut bench, None, Some(&settings), &task),
+            Err(Errno::NotSupported),
+            "a bridge that serves nothing asks nothing"
+        );
+        bench.seat_held = true;
+        assert_eq!(
+            ask_task(
+                &mut bench,
+                Some((&mut prompt, &mut elevator)),
+                Some(&settings),
+                &task
+            ),
+            Err(Errno::SeatBusy)
+        );
+        bench.seat_held = false;
+        let malformed = SystemTask::ChangeAccount(
+            tairix_abi::elevate::ElevateWords::new(&["--lock", "ada"]).expect("within bounds"),
+        );
+        assert_eq!(
+            ask_task(
+                &mut bench,
+                Some((&mut prompt, &mut elevator)),
+                Some(&settings),
+                &malformed
+            ),
+            Err(Errno::OutOfRange)
+        );
+        assert!(
+            !prompt.is_up() && elevator.asked.is_empty(),
+            "nothing was asked"
+        );
+
+        assert_eq!(
+            ask_task(
+                &mut bench,
+                Some((&mut prompt, &mut elevator)),
+                Some(&settings),
+                &task
+            ),
+            Ok(())
+        );
+        let pending = prompt.pending().expect("the prompt is up");
+        assert_eq!(pending.requester, crate::config::SETTINGS_LABEL);
+        assert_eq!(pending.window, Some(12));
+        assert_eq!(elevator.asked, core::slice::from_ref(&pending.program));
+        assert_eq!(
+            ask_task(
+                &mut bench,
+                Some((&mut prompt, &mut elevator)),
+                Some(&settings),
+                &task
+            ),
+            Err(Errno::SeatBusy),
+            "one question at a time"
+        );
+    }
+
     /// A session serving hand-overs: its engine takes every one and its relay
     /// mints handle 77 unless a test says otherwise.
     struct HandOverBench {
@@ -2783,6 +2947,7 @@ mod tests {
                 wallpapers: &mut self.gallery,
                 cursor_sets: &[],
                 clipboard: &mut self.clipboard,
+                authorise: None,
             }
         }
 
@@ -2802,6 +2967,7 @@ mod tests {
                 wallpapers: &mut self.gallery,
                 cursor_sets: &[],
                 clipboard: &mut self.clipboard,
+                authorise: None,
             };
             host.hand_over_requested(&mut self.desk, caller(), &run_path, document)
         }
@@ -3040,6 +3206,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(
                 window_owner(1),
@@ -3102,6 +3269,7 @@ mod tests {
                     wallpapers: &mut RecordingGallery::default(),
                     cursor_sets: &[],
                     clipboard: &mut crate::clipboard::NoClipboard,
+                    authorise: None,
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -3172,6 +3340,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -3207,6 +3376,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
@@ -3240,6 +3410,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_full(&mut host, 7, 64, 48, WindowSizing::default())
         };
@@ -3262,6 +3433,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
@@ -3294,6 +3466,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -3315,6 +3488,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
@@ -3337,6 +3511,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents again");
@@ -3363,6 +3538,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("re-attached and presents");
@@ -3398,6 +3574,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(owner, 1, &m, "one", WindowSizing::default())
                 .expect("opens");
@@ -3422,6 +3599,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(2, &m, &[0u8; 4 * 4 * 4], &whole(&m))
                 .expect("presents");
@@ -3453,6 +3631,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             act(&mut host);
         };
@@ -3588,6 +3767,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -3647,6 +3827,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         act(&mut host)
     }
@@ -3854,6 +4035,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -3919,6 +4101,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -3956,6 +4139,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -4003,6 +4187,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -4026,6 +4211,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(1, &m, &frame, &full)
                 .expect("the repeat present is accepted");
@@ -4061,6 +4247,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -4087,6 +4274,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(1, &m, &frame, &full)
                 .expect("the second present lands");
@@ -4126,6 +4314,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -4169,6 +4358,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -4202,6 +4392,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         for id in [1, 2] {
@@ -4242,6 +4433,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         if host.windows.wm_id(1).is_none() {
             let owner = mode(400, 300, DisplayFormat::Rgba8888);
@@ -4592,6 +4784,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(
                 window_owner(1),
@@ -4641,6 +4834,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -4692,6 +4886,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
 
@@ -4748,6 +4943,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let wm = open_one_sized(&mut host, 3, WindowSizing::Fixed);
         let before = host.compositor.window(wm).expect("live").bounds();
@@ -4786,6 +4982,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_full(&mut host, 7, 480, 320, WindowSizing::default())
         };
@@ -5006,6 +5203,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             // A client wide and tall enough that even the first cascade slot
             // overhangs the 640x480 work area.
@@ -5148,6 +5346,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             (
                 open_one_full(&mut host, 7, 200, 120, RESIZABLE),
@@ -5187,6 +5386,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             (
                 open_one_sized(
@@ -5250,6 +5450,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
         assert_eq!(
@@ -5314,6 +5515,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -5368,6 +5570,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one(&mut host, 7)
         };
@@ -5430,6 +5633,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -5491,6 +5695,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one(&mut host, 7)
         };
@@ -5531,6 +5736,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -5578,6 +5784,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one(&mut host, 7)
         };
@@ -5659,6 +5866,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one(&mut host, 7)
         };
@@ -5771,6 +5979,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -5810,6 +6019,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -5850,6 +6060,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
                 .expect("accepted");
@@ -5882,6 +6093,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
                 .expect("resizes");
@@ -5924,6 +6136,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             let wm = open_one_full(&mut host, 7, 200, 120, RESIZABLE);
             host.windows.take_owed_events();
@@ -5993,6 +6206,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -6015,6 +6229,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.windows.take_owed_events();
             assert_eq!(host.window_sizing_changed(7, height_ceiling(60)), Ok(()));
@@ -6074,6 +6289,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             let wm = open_one_full(&mut host, 7, 200, 120, RESIZABLE);
             assert_eq!(host.window_sizing_changed(7, height_ceiling(120)), Ok(()));
@@ -6099,6 +6315,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.windows.take_owed_events();
             assert_eq!(host.window_sizing_changed(7, height_ceiling(200)), Ok(()));
@@ -6199,6 +6416,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -6261,6 +6479,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         host.window_opened(window_owner(1), 1, &m, "opened", WindowSizing::default())
             .expect("opens");
@@ -6328,6 +6547,7 @@ mod tests {
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -6367,6 +6587,7 @@ mod tests {
             wallpapers: &mut gallery,
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         assert_eq!(host.wallpaper_catalog().len(), 1);
         assert_eq!(host.wallpaper_catalog()[0].file, "a.jpg");
@@ -6401,6 +6622,7 @@ mod tests {
             wallpapers: &mut NoStore,
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         assert!(host.wallpaper_catalog().is_empty());
         let request = PreviewSize {
@@ -6447,6 +6669,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),
@@ -6569,6 +6792,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -6602,6 +6826,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], &whole(&m))
                 .expect("presents");
@@ -6643,6 +6868,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };
@@ -6703,6 +6929,7 @@ mod tests {
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
                 clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };

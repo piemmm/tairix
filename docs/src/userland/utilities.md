@@ -816,12 +816,13 @@ document with its usage-banner fallback, and the switch-drift pin that
 every locale's `OPTIONS` section documents exactly the parser's switches
 (`plans/APPS.md` §3.1).
 
-## `configure` — read and set the boot-time system configuration (`userland/apps/configure`)
+## `configure` — read and set the machine's settings (`userland/apps/configure`)
 
-The `sysctl`-shaped settings command over the boot-time configuration store
-at `/System/Settings/Configuration/system.conf`. With no operand it lists
-every setting of the closed registry with its current value; with a key it
-shows that setting; with a key and a value it changes it:
+The `sysctl`-shaped settings command over the machine configuration,
+`system.conf`, and each interface's network configuration, `network.conf`.
+With no operand it lists every setting of the closed registry with its
+current value; with a key it shows that setting; with a key and a value it
+changes it:
 
 ```text
 configure                          # list every setting
@@ -832,38 +833,42 @@ configure cache.filesystem off     # disable only the filesystem cache
 configure wan.ipv4.address         # show an interface's configured address
 ```
 
-The store's grammar, closed key registry, fail-closed parse, and canonical
-render are the shared `lib/sysconfig` engine (`docs/src/lib/sysconfig.md`)
-— the same engine every boot-time consumer reads through, so this writer
-and those readers can never diverge. An unknown key, a value outside its
-key's closed set, or a store document the engine cannot fully parse is
-refused with the reason (and the valid choices) stated, and changes
-nothing; a set rewrites the whole document in canonical form, never a
-partial patch. The store lives on the root volume, so a change takes
-effect when its consumer next parses it — `os.loginType` at the next login
-prompt, and the `cache.*` caching switches at the next boot's root unlock
-(the kernel applies them into its cache-admission control). The `cache.*`
+The document's grammar, closed key registry, fail-closed parse, and canonical
+render are the shared `lib/sysconfig` engine (`docs/src/lib/sysconfig.md`) —
+the same engine every consumer reads through, so the tool and those readers
+can never diverge. Each document has the image's default and the
+administrator's layer, which replaces it whole once it exists; the tool reads
+the machine configuration's layers itself, and the settings service
+(`docs/src/userland/settingsd.md`) reads the network configuration and makes
+every change, to the document as it stands, for a caller holding
+`CAP_SETTINGS_WRITE`. An unknown key, a value outside its key's closed set, or
+a document the engine cannot fully parse is refused with the reason (and the
+valid choices) stated, and changes nothing — every pair is checked before the
+service is asked. A change takes effect when its consumer next reads it —
+`os.loginType` at the next login prompt, the `cache.*` caching switches at the
+next boot's root unlock (the kernel applies them into its cache-admission
+control), `time.network` and `time.zone` at once. The `cache.*`
 keys are a dedicated caching domain: a master `cache.all` (`on`/`off`)
 ceiling over the per-class `cache.filesystem` / `cache.block` /
 `cache.transform` / `cache.semantic` (`auto`/`off`) switches — see
 `docs/src/lib/sysconfig.md`.
 
 A key that is not in that registry is read against a second one: the
-per-interface `<interface>.<setting>` keys of the network store at
-`/System/Settings/Network/network.conf`, whose grammar and closed key
-registry are the shared `lib/netconfig` engine
+per-interface `<interface>.<setting>` keys of the network configuration,
+whose grammar and closed key registry are the shared `lib/netconfig` engine
 (`docs/src/lib/netconfig.md`). The machine registry is searched first, so an
 interface alias can never take a machine setting's name over — a test pins
 the two name sets disjoint over both registries rather than resting on the
-accident that none collides today. That document has no defaults, so a
-listing shows only the settings it carries and showing one it does not
-carry answers with an empty line rather than inventing a value; reading or
-changing it needs an account that may, since it names each interface's
-hardware identity and this machine's addressing.
+accident that none collides today. That registry has no defaults, so a
+listing shows only the settings that are set and showing one that is not
+answers with an empty line rather than inventing a value; reading or changing
+it needs an elevated administrator, since it names each interface's hardware
+and this machine's addresses, and anyone else's listing shows the machine
+settings and says the network ones are not shown.
 
-Both registries are settable. Every pair is resolved against one working
-copy of each document before a byte is written, and only a document the
-invocation actually names is rewritten. Because the per-interface registry
+Both registries are settable. Every pair is checked against each document as
+it stands before anything is changed, and only a document the invocation
+actually names is changed. Because the per-interface registry
 has no defaults, a setting is *removed* rather than reset, and the **empty
 value** is that spelling (`configure wan.ipv4.address ""`): no key in that
 registry accepts an empty value, so it cannot be mistaken for setting one.
@@ -873,7 +878,8 @@ on its own — and the whole edited document is checked at the commit, so a
 change that would leave it inconsistent is refused rather than written.
 
 A saved change is then handed to the running network stack over its
-capability-gated admin surface, so it takes effect without a reboot. Only
+capability-gated admin surface, from the document the service wrote, so it
+takes effect without a reboot. Only
 the interfaces the edit actually changed are delivered: `configure` compares
 the plan the document implies either side of the edit, which is the same
 `lib/netconfig` projection the device manager delivers at boot, so the two
@@ -885,16 +891,16 @@ interface removed from the document keeps running until the next boot
 interface saved with neither `match.mac` nor `match.node` can never be bound
 to a device.
 
-The pure grammar/engine core is host-tested against in-memory seams; the
-`Run` binary wires the syscall-backed store files, the shared own-bundle
-help source, and the inherited standard output. Manifest:
-`CAP_CONSOLE_WRITE` (the listing and short help) and `CAP_FS_ACCESS` (the
-store and the bundle's own `Help/` tree) — write authority is the
-`/System/Settings` per-inode policy under the caller's attested identity,
-so an ordinary account can read settings but a change is refused with its
-reason (fail closed, nothing applied). Exit status: `0` success, `1` a
-store/output failure, `2` a usage error (unknown key / out-of-set value
-included).
+The pure grammar/engine core is host-tested with the settings service's own
+engine driven in-process over an in-memory volume; the `Run` binary wires the
+VFS, the service, the shared own-bundle help source, and the inherited
+standard output. Manifest: `CAP_CONSOLE_WRITE` (the listing and short help),
+`CAP_FS_ACCESS` (the machine configuration and the bundle's own `Help/` tree),
+`CAP_SETTINGS_WRITE` (the settings service) and `CAP_NET_ADMIN` (the running
+stack) — so an ordinary account lists the machine settings, and a change from
+anyone but an elevated administrator is refused with its reason (fail closed,
+nothing applied). Exit status: `0` success, `1` a read, change or output
+failure, `2` a usage error (unknown key / out-of-set value included).
 
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 

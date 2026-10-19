@@ -128,13 +128,19 @@
 extern crate alloc;
 
 mod asking;
+mod authorise;
 mod chooser;
+mod cooldown;
 mod layout;
 mod motion;
 mod surface;
 
 pub use asking::{Asking, Courier};
+pub use authorise::{
+    AuthoriseAction, AuthoriseSheet, AUTHORISE_TITLE, AUTHORISE_WIDTH, REQUESTER_SIDE, TRUSTED_PATH,
+};
 pub use chooser::AccountTile;
+pub use cooldown::Cooldown;
 pub use surface::{
     panel_rect, AuthSurface, Backdrop, Chrome, EventContext, Outcome, Ticket, Tickets, Verdict,
     Verifier, MAX_CHROME, UNNAMED_ACCOUNT,

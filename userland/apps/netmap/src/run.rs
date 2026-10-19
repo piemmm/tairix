@@ -1035,6 +1035,7 @@ mod program {
                 | WindowEvent::AppBarMenu { .. }
                 | WindowEvent::TerrainChanged { .. }
                 | WindowEvent::AlertClosed { .. }
+                | WindowEvent::Authorised { .. }
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::ToolMoved { .. }
                 | WindowEvent::Focus { .. }

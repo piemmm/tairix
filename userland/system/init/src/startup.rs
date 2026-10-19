@@ -158,50 +158,24 @@ pub const REGISTERED_SERVICES: usize = MAX_SERVICES + MAX_ENROLLED_SERVICES + MA
 /// `/System/Settings` once a filesystem is mounted; the parser does not
 /// change.
 pub const DEFAULT_CONFIG: &str = "\
-# TAIRiX PID 1 startup configuration (plans/PI.md P6b / P11).
-# Open the system console, launch the System Information, network-stack,
-# audio, sound, device-manager, seat-manager, app-data, time, and discovery
-# services,
-# register the font service, and start the login service as the session — each
-# under its own compiled-in service account (plans/USERS.md). `sysinfod`
-# starts first so the introspection endpoint is published before any client
-# queries it; `netstack` (plans/NETWORK.md) owns the network interfaces and is
-# launched before `devmgr` so it is ready to receive the NIC device channels
-# `devmgr` binds to it. It provides `network-up` once its endpoints answer. It
-# is the floor's one watchdog holder, because a wedged stack is still a live
-# process nothing else notices, and so its one `on-failure` entry: detecting a
-# wedge and then leaving the machine without a stack would be worse. Thirty
-# seconds is far longer than any turn of its loop and far shorter than a
-# user's patience. `seatmgr` (plans/DISPLAY.md D3) holds the seat-multiplexing
-# authority; `confd` (plans/APPDATA.md) owns every application's settings
-# store and is a boot-floor service because a headless machine needs it as
-# much as a desktop does — it binds its endpoint straight away and answers a
-# typed refusal until the root is mounted. `audiod`
-# (plans/SOUND.md) is the one mixer and the sole holder of CAP_AUDIO_DEVICE,
-# launched before `devmgr` for the reason `netstack` is: it must be ready to
-# adopt the sound-device channels `devmgr` hands it. `soundd` (plans/SOUND.md)
-# plays the desktop's sounds through it, and restarts on failure: a crash must
-# not leave the machine silent for the rest of the boot. It and `devmgr`
-# announce readiness — its endpoint bound, the boot hardware settled — which
-# the start sound waits on. `timed`
-# (plans/TIMESYNC.md) is last, and is the one entry the enrolment record
-# governs rather than the bootstrap floor: a machine with no RTC boots knowing
-# nothing about the time, and every audit-log hash chain, filesystem timestamp,
-# and certificate lifetime rests on the clock it establishes, but automatic
-# time-setting is a thing a user may turn off, so it is `enrolled` and an
-# administrator's `disable` survives a reboot. It starts after `netstack` so
-# the interfaces exist by the time its first query is due, and needs no
-# readiness gate of its own — a query it cannot send simply fails and its
-# bounded backoff paces the retry. `discoveryd` (plans/ZEROCONF.md) is enrolled
-# for the same reason, and starts at boot because what a segment volunteers
-# arrives over time. Its sockets live in the stack, so it requires
-# `network-up`: a stack relaunch takes it down and brings it back against the
-# new stack. It restarts on failure, since a machine left without it loses
-# every `.local` name without a word. `fontd` (plans/FONT-SERVICE.md) is the one
-# `ondemand` entry: nothing but a graphical consumer ever wants glyphs, so it
-# is registered here and started only when one asks the manager to connect to
-# it — which is what keeps it off a headless machine entirely, and what parks
-# that consumer until the endpoint is answerable instead of racing the bind.
+# TAIRiX PID 1 startup configuration (plans/PI.md P6b / P11): the console,
+# the boot-floor services, the enrolled and on-demand ones, and the login
+# session, each under its own service account (plans/USERS.md).
+# `sysinfod` starts first so its endpoint is published before any client asks.
+# `netstack` and `audiod` start before `devmgr`, which hands them the NIC and
+# sound-device channels it binds. `netstack` provides `network-up` once its
+# endpoints answer, and is the floor's one watchdog holder: a wedged stack is a
+# live process nothing else notices, and thirty seconds is far longer than any
+# turn of its loop. `soundd` and `devmgr` announce readiness, which the start
+# sound waits on. `confd` and `settingsd` bind straight away and answer a typed
+# refusal until the root is mounted, since a headless machine needs both.
+# Those whose crash would leave the machine silent, unconfigurable or without
+# its `.local` names restart on failure. `timed` and `discoveryd` are
+# `enrolled`, so an administrator's `disable` survives a reboot: `timed` starts
+# after `netstack` and paces its own retries, and `discoveryd` requires
+# `network-up`, so a stack relaunch takes it down and brings it back. `fontd`
+# is `ondemand`: only a graphical consumer wants glyphs, so it starts when one
+# asks the manager to connect to it.
 console
 service /System/Services/sysinfod.app/Run sysinfod
 service /System/Services/netstack.app/Run netstack watchdog=30s restart=on-failure provides=network-up
@@ -210,6 +184,7 @@ service /System/Services/soundd.app/Run soundd restart=on-failure ready=notify
 service /System/Services/devmgr.app/Run devmgr ready=notify
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
+service /System/Services/settingsd.app/Run settingsd restart=on-failure ready=notify
 enrolled /System/Services/timed.app/Run timed
 enrolled /System/Services/discoveryd.app/Run discoveryd restart=on-failure requires=network-up
 ondemand /System/Services/fontd.app/Run fontd
@@ -895,6 +870,14 @@ mod tests {
                     tairix_users::SEATMGR_UID.0
                 ),
                 Launch::plain("/System/Services/confd.app/Run", tairix_users::CONFD_UID.0),
+                Launch {
+                    restart: RestartPolicy::OnFailure,
+                    readiness: ReadinessKind::Notify,
+                    ..Launch::plain(
+                        "/System/Services/settingsd.app/Run",
+                        tairix_users::SETTINGSD_UID.0,
+                    )
+                },
             ],
         );
         // The enrolment-governed tier, so a user who turns automatic
@@ -1232,9 +1215,9 @@ mod tests {
         let floor = StartupConfig::parse(DEFAULT_CONFIG).expect("the boot floor parses");
         assert_eq!(floor.services().len(), MAX_SERVICES);
         // The current floor is sysinfod, netstack, audiod, soundd, devmgr,
-        // seatmgr, confd; this pins the derived value so a change to the
-        // floor is a conscious one.
-        assert_eq!(MAX_SERVICES, 7);
+        // seatmgr, confd, settingsd; this pins the derived value so a change
+        // to the floor is a conscious one.
+        assert_eq!(MAX_SERVICES, 8);
         // The same derivation over the `enrolled` keyword: `timed` and
         // `discoveryd`.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);

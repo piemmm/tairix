@@ -191,9 +191,9 @@ The policy is enforced, not advisory:
 ## Per-interface configuration (`network.conf`)
 
 Each managed interface's addressing is declared in one document,
-`/System/Settings/Network/network.conf`, whose grammar, closed key
-registry, typed values, bounded fail-closed parser, and canonical render
-are the one `lib/netconfig` engine (`plans/NETWORK.md` §6.1). As with the
+`network.conf`, whose grammar, closed key registry, typed values, bounded
+fail-closed parser, and canonical render are the one `lib/netconfig` engine
+(`plans/NETWORK.md` §6.1). As with the
 stack-wide policy, `netstack` never reads it: the device manager does, maps
 each managed interface that carries a stable hardware identity — its
 `match.mac` (MAC) or `match.node` (bus location) — into a
@@ -202,18 +202,17 @@ endpoint. A managed interface carrying neither selector cannot be bound to
 hardware by identity and is surfaced loud (`devmgr` event `13_016`), never
 silently ignored.
 
-The read happens **before the root is mounted**, over the
-always-mounted read-only `/System` store endpoint
-(`StoreRequest::ReadConfig`), because NIC drivers autoload from that same
-volume and their interfaces must be addressed as they come up — headless,
-with nobody at a passphrase prompt. So the document lives on the read-only
-`/System` volume, at the volume-relative path the closed
-`SystemConfigFile` set names (`SystemConfigFile::volume_path`), which is
-also where the image builder plants it: writer and reader derive that path
-from the one definition, so they cannot land on different volumes. It is
-**not** planted through the `/System/Settings` view path — at runtime that
-is the writable sub-mount backed by the root volume, which no bootstrap
-client can reach, so a document written there is read by nothing.
+The document has two layers (`docs/src/lib/netconfig.md`): the image's
+default on the read-only `/System` volume, and the administrator's on the
+root. NIC drivers autoload from the read-only volume and their interfaces
+must be addressed as they come up — headless, with nobody at a passphrase
+prompt — so before the root is mounted the device manager reads the image's
+layer over the always-mounted `/System` store endpoint
+(`StoreRequest::ReadConfig`), at the volume-relative path the closed
+`SystemConfigFile` set names (`SystemConfigFile::volume_path`), which is also
+where the image builder plants it: writer and reader derive that path from
+the one definition, so they cannot land on different volumes. Once the root
+is readable, the administrator's layer, where one exists, is what it reads.
 
 `netstack` locates the interface by its **stable hardware identity** — the
 device MAC it holds from the driver's facts, or the hardware location the

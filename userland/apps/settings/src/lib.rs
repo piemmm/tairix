@@ -36,6 +36,7 @@ mod notices;
 mod pictures;
 mod registry;
 mod renders;
+mod round;
 mod saver;
 mod shell;
 mod sound;
@@ -58,8 +59,9 @@ pub use registry::{
     StripRow, CATEGORIES,
 };
 pub use renders::Renders;
+pub use round::Round;
 pub use saver::SaverOption;
-pub use shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
+pub use shell::{Authorised, Shell, ShellOutcome};
 pub use sound::SoundReading;
 pub use volumes::{Readings, VolumeReading};
 

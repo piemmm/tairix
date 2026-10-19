@@ -1,0 +1,50 @@
+[package]
+name = "tairix-settingsd"
+description = "TAIRiX machine-settings service: the one writer of the administrator's machine and network configuration, serving `settings-v1` to callers holding CAP_SETTINGS_WRITE."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional, on-by-default
+# build feature, so host tooling builds only the engine library and the host
+# test build never pulls the runtime's `_start` / `#[global_allocator]` /
+# `panic_impl`.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-caps"]
+
+# The package is both the host-testable engine library and the `Run` entry
+# point installed at `/System/Services/settingsd.app/Run`: a freestanding
+# program on the native Tier-1 targets and an inert host stub elsewhere.
+[[bin]]
+name = "tairix-settingsd-run"
+path = "src/run.rs"
+
+[dependencies]
+# The protocol, the closed set of documents, and the `Errno` table every
+# refusal fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The machine configuration's engine: the registry a change names and the
+# canonical render the document is replaced with.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
+# The network configuration's engine.
+tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0" }
+# The audit records every read and change is written through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# `tairix-rt` provides `_start`, the stack canary, the panic handler, the
+# `#[global_allocator]`, the call-endpoint server syscalls and the `fs_*` reads
+# and atomic replace; `tairix-caps` spells the rendezvous's send gate. Both are
+# pulled in only for the bare-metal targets the program is built for.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

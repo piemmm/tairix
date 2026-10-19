@@ -98,3 +98,22 @@ pub const RTC_WRITEBACK: EventId = EventId(23_016);
 /// clock is still correct; only the next boot loses the head start. A board
 /// with no clock chip records nothing.
 pub const RTC_WRITEBACK_REFUSED: EventId = EventId(23_017);
+
+/// What the service asks the network changed while it ran: network time was
+/// switched on or off, the servers in use were replaced, or the refresh
+/// cadence moved. Carries the state it now has, as [`SERVICE_READY`] does.
+pub const NETWORK_TIME_CHANGED: EventId = EventId(23_018);
+
+/// The persisted record, read only once the settings store became reachable,
+/// gave a reason to distrust a clock the service had believed, so the first
+/// query was brought forward. Carries the reason.
+pub const CLOCK_DOUBTED: EventId = EventId(23_019);
+
+/// The machine configuration could not be read or fully understood, so the
+/// network-time settings already in use stand rather than a guess at a partial
+/// intent.
+pub const CONFIG_REFUSED: EventId = EventId(23_020);
+
+/// The machine configuration is there but cannot be watched, so a change to it
+/// applies only when the service restarts. Carries the refusal.
+pub const CONFIG_NOT_FOLLOWED: EventId = EventId(23_021);

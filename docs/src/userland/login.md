@@ -42,10 +42,14 @@ is not registered fails closed with `NotImplemented` and never falls back
 to another volume, so that refusal — and only that one — means "ask again
 later". Every other refusal came from a live volume: an absent document,
 a denied read, a fault. Absence is deliberately **not** inferred from the
-store's *directory*, because `configure` creates that directory on its
-first write; a machine nobody has configured has none, so probing for it
-read every fresh installation as an offline volume and pinned it to the
-text prompt however capable of a graphical login it was.
+document's *directory*: one read of the document as it stands — the
+administrator's layer, else the image's (`docs/src/lib/sysconfig.md`) — is the
+whole answer, so nothing about the directory can pin a fresh installation to
+the text prompt however capable of a graphical login it is.
+
+The same read gives the login screen the machine's zone: login hands it the
+configuration's `time.zone` as `TZ`, so a screen that reads no file still tells
+the time in the machine's zone.
 
 The crate is `no_std` (with `alloc`), has no `unsafe`, and depends only on
 the audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-log`,
@@ -215,10 +219,18 @@ out of the handler. The secret is never logged, never placed in an
 
 ## The attempt budget
 
-Guessing at a login screen costs nothing but keystrokes, so the authority
-meters it. The budget lives here rather than in the greeter deliberately: a
+Guessing at a password costs nothing but keystrokes, so the authority
+meters it. The budget lives here rather than in a surface deliberately: a
 client-side limit would be duplicated in every surface and trivially
 bypassed by a caller that simply does not implement it.
+
+There is **one** budget, kept for the life of the process, and every
+surface that checks a password charges it: the login screen, the text
+prompt, and every elevation form, the screen lock's own-password check
+included. Guesses at one account therefore cannot be spread across
+surfaces to buy more of them. The text prompt checks it as soon as a name
+is typed, so a cooling account is told how long to wait before its password
+is even asked for, and another account can log in meanwhile.
 
 - **Three free attempts** per account, matching the text prompt's per-round
   budget — mistyping a password is ordinary human behaviour and must not
@@ -297,9 +309,12 @@ unreachable behind a relaunched authority.
 
 1. **Prompt** for a username (echoed in the login box) and a password
    (never rendered, via the `LoginView::read_password` seam).
-2. **Authenticate** the `Credentials` through the `Authenticator`. A
-   rejected attempt is audited and consumes one try; the bounded budget
-   means a stuck or hostile console can never spin forever.
+2. **Authenticate** the `Credentials` through the `Authenticator`, unless
+   the account is still cooling down (`GuessMeter`), in which case the
+   prompt says how long is left and asks for no password (`AUTH_COOLING`).
+   Every decided attempt is charged to the shared budget; a rejected one is
+   audited and consumes one try, and the bounded round means a stuck or
+   hostile console can never spin forever.
 3. On success, **decide the session** — pure policy, no prompt — and hand
    the authenticated identity to the `SessionLauncher`: the desktop when
    the effective session type is graphical and a graphical session is
@@ -574,10 +589,27 @@ program PID 1 `init`'s `session` directive launches and supervises
   The broker drains the pipe to end of stream *before* it reaps, because a
   child that fills the pipe blocks until it is emptied and a reaper that
   waited first would never empty it.
-  Elevation serialises per console (endpoint capacity 1) and a
-  login that cannot bind a rendezvous audits `ELEVATE_UNAVAILABLE` and
-  runs broker-less sessions — requests then fail closed at the missing
-  endpoint.
+  **Who may allow a program.** An account may allow one only when every
+  capability the program's signed manifest requests lies within the
+  account's ceiling; the broker reads the manifest itself (bounded, under
+  login's own identity) through the same request reader the load gate
+  uses. A `Run`, `Capture` or `Launch` for an account that may not is
+  refused exactly as a wrong password is — the same `PermissionDenied`, and
+  the same charge to the budget — so the reply never says the password was
+  right; the audit records the true cause. A program with no readable
+  manifest is refused before any attempt is spent. An account still
+  cooling down is answered `Cooling` and nothing about it is checked.
+  **Who is told.** `Authorisers` lists the accounts that may allow a
+  program to one caller only: the desktop session presenting on this
+  console, recognised by the presenting session's uid *and* the desktop
+  bundle's identity under login's own publisher, and only for a program in
+  a read-only system store. It answers whether the caller's own account may
+  (that account then leads the page) and pages the others by shown and
+  login name, never by ceiling; every answer is audited
+  (`AUTHORISERS_SENT`, `AUTHORISERS_REFUSED`). Elevation serialises per
+  console (endpoint capacity 1) and a login that cannot bind a rendezvous
+  audits `ELEVATE_UNAVAILABLE` and runs broker-less sessions — requests
+  then fail closed at the missing endpoint.
 
 Each finished session or exhausted attempt budget loops back to a fresh
 prompt; a dead console exits fail-closed and `init` relaunches login. The
@@ -627,12 +659,16 @@ because external audit-log consumers key off them.
 | 10030 | `TEXT_ROUND_SUPERSEDED` | Info  | an untouched text prompt gave way to the graphical login that became available |
 | 10031 | `TEXT_ROUND_UNWATCHED`  | Warn  | the text prompt could not watch for a graphical login; only the next round offers one |
 | 10032 | `ZONE_STORE_WITHHELD`   | Warn  | the login screen asked for the zone store and none was delegated; the record names the error |
+| 10033 | `AUTHORISERS_SENT`      | Info  | the presenting desktop was told which accounts may allow a system program: the program, whether its own account may, and how many may |
+| 10034 | `AUTHORISERS_REFUSED`   | Warn  | a listing of who may allow a program was withheld: another caller, a program outside the system stores, or an unreadable manifest |
+| 10035 | `AUTH_COOLING`          | Warn  | a text-prompt name was still cooling down; its password was neither asked for nor checked |
 
 A refusal record names the account offered and the attested uid, never the
 offered secret, and never *which* credential fault it was: refusals stay
-indistinguishable even to a reader comparing audit entries. Only the
-`SESSION_AUTH_REFUSED` record distinguishes a live cooldown from an
-adjudicated failure.
+indistinguishable even to a reader comparing audit entries. A cooldown is
+recorded as one (`cause` of `cooling down`, `retry_after_s`), and an account
+that authenticated but may not allow the program as that, because both are
+decisions an administrator needs to see.
 
 ## Tests
 

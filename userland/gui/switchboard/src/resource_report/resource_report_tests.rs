@@ -28,18 +28,19 @@ use tairix_abi::{CapabilityId, CapabilityQuery, MemoryClass, MEMORY_CLASS_COUNT}
 use tairix_controls::{CompositionBar, CompositionError, CompositionSegment, PressureKind};
 use tairix_theme::SignalRole;
 
-/// One trace's series lengths: the inbound count, and the outbound count for a
-/// duplex trace.
+/// One trace's series lengths: the first series' count, and the second's for
+/// a trace that draws two.
 fn series_lengths(trace: &Trace) -> (usize, Option<usize>) {
     match trace {
         Trace::Absent => (0, None),
         Trace::Single { samples, .. } => (samples.len(), None),
         Trace::Duplex { into, out, .. } => (into.len(), Some(out.len())),
+        Trace::Within { totals, parts, .. } => (totals.len(), Some(parts.len())),
     }
 }
 
-/// The roles a trace tints with: the inbound role, and the outbound role for a
-/// duplex trace.
+/// The roles a trace tints with: the first series' role, and the second's for
+/// a trace that draws two.
 fn series_roles(trace: &Trace) -> (Option<SignalRole>, Option<SignalRole>) {
     match trace {
         Trace::Absent => (None, None),
@@ -47,6 +48,7 @@ fn series_roles(trace: &Trace) -> (Option<SignalRole>, Option<SignalRole>) {
         Trace::Duplex {
             inbound, outbound, ..
         } => (Some(*inbound), Some(*outbound)),
+        Trace::Within { whole, part, .. } => (Some(*whole), Some(*part)),
     }
 }
 
@@ -1966,6 +1968,22 @@ fn context_switches_and_preemptions_are_rates_graphed_in_the_cpu_pane() {
     assert_eq!(
         series_roles(trend),
         (Some(SignalRole::Cpu), Some(SignalRole::Workload))
+    );
+    assert!(
+        matches!(trend, Trace::Within { .. }),
+        "a preemption is a switch, so it is drawn within the switches rather than mirrored"
+    );
+    let caption = cpu
+        .blocks
+        .iter()
+        .find_map(|block| match &block.body {
+            BlockBody::Trend { caption, .. } => Some(caption.as_str()),
+            _ => None,
+        })
+        .expect("a caption");
+    assert!(
+        caption.starts_with("4096 /s full scale"),
+        "the scale leads, since the axis row cuts the caption short: {caption}"
     );
 }
 

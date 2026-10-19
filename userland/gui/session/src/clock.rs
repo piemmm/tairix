@@ -16,11 +16,65 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::driver_store::SystemConfigFile;
+use tairix_abi::fs::DirChangeBatch;
 use tairix_abi::time::{WallClockReading, NANOS_PER_SEC, SECS_PER_MINUTE};
+use tairix_abi::zone::ZoneName;
+use tairix_abi::Errno;
 use tairix_taskbar::clock::{ClockLines, UNSET_LABEL};
 use tairix_tz::{CivilClock, Decided, LocalTime, ZoneInfo, ZoneOffset, WIDEST};
 
+use crate::assets::SessionFileReader;
 use crate::switchuser::park_within;
+
+/// The directory the administrator's machine configuration is kept in, and
+/// its own name there: where a change to the machine's zone lands.
+#[must_use]
+pub fn machine_zone_place() -> (&'static str, &'static str) {
+    let path = SystemConfigFile::System.path();
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+/// The machine's own zone, `time.zone` of the machine configuration as it
+/// stands, read through `reader`: `None` where it is the default.
+///
+/// # Errors
+///
+/// Why the configuration could not be read or understood, in words.
+pub fn read_machine_zone(reader: &mut dyn SessionFileReader) -> Result<Option<ZoneName>, String> {
+    let read = SystemConfigFile::System.read_effective(|path| {
+        match reader.read(path, tairix_sysconfig::MAX_CONFIG_LEN) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(Errno::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        }
+    });
+    let bytes = match read {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(None),
+        Err(err) => return Err(format!("the machine's settings could not be read ({err})")),
+    };
+    let config = core::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| tairix_sysconfig::SystemConfig::parse(text).ok())
+        .ok_or_else(|| String::from("the machine's settings are not understood"))?;
+    Ok(config.time_zone)
+}
+
+/// Whether the change batch `bytes` drained from the watched configuration
+/// directory may have moved the machine's zone — a change naming the
+/// configuration, or one the watch could not itemise — and whether more
+/// changes wait.
+#[must_use]
+pub fn moves_machine_zone(bytes: &[u8]) -> (bool, bool) {
+    let Ok(batch) = DirChangeBatch::decode(bytes) else {
+        return (true, false);
+    };
+    (
+        batch.concerns(machine_zone_place().1.as_bytes()),
+        batch.more,
+    )
+}
 
 /// A minute in nanoseconds: how long a tick waits when its next minute
 /// cannot be had.

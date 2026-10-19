@@ -2,7 +2,7 @@
 //! (QEMU `virt` / SiFive) `tairix-kernel` pipeline against the shared
 //! `dhcp6-net-root` whole-disk image — whose always-readable `/System` volume
 //! carries the **kernel-signed virtio-net driver bundle** (cross-compiled for
-//! riscv64) and a planted `/System/Settings/Network/network.conf` — with a
+//! riscv64) and a planted `/System/Defaults/Network/network.conf` — with a
 //! `virtio-net-device` attached on the `virtio,mmio` transport and the
 //! harness-side **DHCPv6-server** link peer on the QEMU `dgram` netdev, and
 //! prove RFC 8415 dynamic IPv6 addressing end to end over the riscv64

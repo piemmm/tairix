@@ -17,6 +17,9 @@ workspace = true
 write = []
 # The loader of the planted store, for a program on TAIRiX.
 rt = ["dep:tairix-rt"]
+# The store's places as a reader looks one up, for a surface that lists them;
+# it allocates, so a reader that only reads a clock leaves it off.
+listing = []
 # A small store of real zones and regions for other crates' tests.
 test-support = ["write"]
 

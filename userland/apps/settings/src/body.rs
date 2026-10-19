@@ -28,6 +28,7 @@ use crate::registry::{PaneContent, PaneRow};
 use crate::sound::SoundReading;
 use crate::statement;
 use crate::volumes::{Readings, VolumeReading};
+use tairix_abi::zone::ZoneName;
 
 /// Everything a body is built from: what the shell has been answered so
 /// far, and the document every settable row reads.
@@ -47,6 +48,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) output: Option<(u32, u32)>,
     /// The delegated zone store's regions and places, once it has arrived.
     pub(crate) civil: Option<&'static CivilChoices>,
+    /// The machine's own time zone, as the desktop states it.
+    pub(crate) machine_zone: Option<ZoneName>,
     /// The mounted volumes the mount-table walk answered with.
     pub(crate) volumes: &'a [VolumeReading],
     /// The machine's boot-time configuration, or `None` while the read has
@@ -88,6 +91,7 @@ impl<'a> Answered<'a> {
             text: self.text,
             output: self.output,
             civil: self.civil,
+            machine_zone: self.machine_zone,
             config: self.config,
             addressing: &self.network.addressing,
             staged: self.staged,
@@ -132,7 +136,8 @@ impl Body {
             Some(PaneContent::About) => Self::Facts(Facts::about(answered.machine)),
             Some(PaneContent::Clock) => {
                 let zones = answered.civil.map(|civil| civil.zones);
-                let (clock, _) = tairix_wallpaper::civil_clock(zones, answered.settings);
+                let machine = answered.machine_zone.as_ref().map(ZoneName::as_str);
+                let (clock, _) = tairix_wallpaper::civil_clock(zones, answered.settings, machine);
                 Self::Facts(Facts::clock(answered.machine, &clock, zones))
             }
         }

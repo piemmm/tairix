@@ -267,6 +267,15 @@ impl AppIdentity {
     pub const fn publisher(&self) -> PublisherId {
         self.publisher
     }
+
+    /// Whether this is the bundle `bundle_id` under `publisher`.
+    ///
+    /// The identifier alone names nothing: any developer may sign a bundle
+    /// claiming it, so recognising a particular program takes both.
+    #[must_use]
+    pub fn is_bundle(&self, bundle_id: &str, publisher: PublisherId) -> bool {
+        self.bundle_id() == bundle_id && self.publisher == publisher
+    }
 }
 
 /// Length, in bytes, of the [`Origin`] wire encoding.
@@ -753,6 +762,19 @@ mod tests {
                 "`{hostile}` must never name a store"
             );
         }
+    }
+
+    #[test]
+    fn a_bundle_is_recognised_by_its_identifier_and_its_publisher_together() {
+        let publisher = PublisherId::from_raw([0x5A; 32]);
+        let other = PublisherId::from_raw([0xA5; 32]);
+        let identity = AppIdentity::new("os.tairix.desktop", publisher).expect("well formed");
+        assert!(identity.is_bundle("os.tairix.desktop", publisher));
+        assert!(
+            !identity.is_bundle("os.tairix.desktop", other),
+            "another developer may sign a bundle claiming the identifier"
+        );
+        assert!(!identity.is_bundle("os.tairix.settings", publisher));
     }
 
     #[test]

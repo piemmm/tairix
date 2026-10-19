@@ -8,6 +8,7 @@ use tairix_abi::time::Time64;
 use crate::pattern::{Pattern, ISO_DATE, ISO_TIME};
 use crate::store::{Region, ZoneInfo};
 use crate::zone::{LocalTime, Zone};
+use crate::Weekday;
 
 /// What decided a resolution.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -62,22 +63,34 @@ pub fn resolve_region<'a>(
         .unwrap_or_else(|| (store.default_region(), Decided::StoreDefault))
 }
 
+/// How a time of day counts its hours.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HourCycle {
+    /// `0` to `23`.
+    TwentyFour,
+    /// `12`, then `1` to `11`, twice a day, each half named `AM` or `PM`.
+    Twelve,
+}
+
 /// A zone read with a region's conventions: the one renderer of a reading's
-/// date and time every clock on the desktop draws through.
+/// date and time every clock on the desktop draws through, and the one answer
+/// to how a person there counts hours and weeks.
 #[derive(Copy, Clone, Debug)]
 pub struct CivilClock<'a> {
     zone: Zone<'a>,
     date: Pattern<'a>,
     time: Pattern<'a>,
+    first_weekday: Weekday,
 }
 
 impl<'a> CivilClock<'a> {
-    /// UTC, with ISO 8601's date and a 24-hour clock: what a machine with no
-    /// store shows.
+    /// UTC, with ISO 8601's date, a 24-hour clock and weeks from Monday: what
+    /// a machine with no store shows.
     pub const UTC: CivilClock<'static> = CivilClock {
         zone: Zone::UTC,
         date: ISO_DATE,
         time: ISO_TIME,
+        first_weekday: Weekday::Monday,
     };
 
     /// `zone` read with `region`'s conventions, or ISO 8601's where there is
@@ -88,6 +101,7 @@ impl<'a> CivilClock<'a> {
             zone,
             date: region.map_or(ISO_DATE, |region| region.date),
             time: region.map_or(ISO_TIME, |region| region.time),
+            first_weekday: region.map_or(Weekday::Monday, |region| region.first_weekday),
         }
     }
 
@@ -95,6 +109,22 @@ impl<'a> CivilClock<'a> {
     #[must_use]
     pub const fn zone(&self) -> Zone<'a> {
         self.zone
+    }
+
+    /// How its time of day counts hours.
+    #[must_use]
+    pub fn hour_cycle(&self) -> HourCycle {
+        if self.time.twelve_hour() {
+            HourCycle::Twelve
+        } else {
+            HourCycle::TwentyFour
+        }
+    }
+
+    /// The day its calendar week begins on.
+    #[must_use]
+    pub const fn first_weekday(&self) -> Weekday {
+        self.first_weekday
     }
 
     /// `time` as this clock reads it.
@@ -119,6 +149,19 @@ impl<'a> CivilClock<'a> {
     /// The writer's own failure.
     pub fn write_time(&self, local: &LocalTime<'_>, out: &mut dyn Write) -> fmt::Result {
         self.time.write(&local.civil, out)
+    }
+
+    /// Write `local`'s time of day to the second.
+    ///
+    /// # Errors
+    ///
+    /// The writer's own failure.
+    pub fn write_time_with_seconds(
+        &self,
+        local: &LocalTime<'_>,
+        out: &mut dyn Write,
+    ) -> fmt::Result {
+        self.time.write_with_seconds(&local.civil, out)
     }
 }
 

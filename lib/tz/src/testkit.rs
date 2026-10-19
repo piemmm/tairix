@@ -13,6 +13,7 @@ use crate::write::{
     build, PhaseInput, PlaceInput, RegionInput, StoreInput, TrailingInput, TransitionInput,
     ZoneInput,
 };
+use crate::Weekday;
 
 /// Seconds in an hour.
 pub const HOUR: i32 = 3600;
@@ -56,10 +57,11 @@ fn phase(save: i32, abbreviation: &str, moment: Moment) -> PhaseInput {
     }
 }
 
-fn region(code: &str, name: &str, date: &str, time: &str) -> RegionInput {
+fn region(code: &str, name: &str, first_weekday: Weekday, date: &str, time: &str) -> RegionInput {
     RegionInput {
         code: String::from(code),
         name: String::from(name),
+        first_weekday,
         date: String::from(date),
         time: String::from(time),
     }
@@ -141,10 +143,10 @@ pub fn store_input() -> StoreInput {
             String::from("Europe/London"),
         )],
         regions: vec![
-            region("US", "United States", "M/d/y", "h:mm a"),
-            region("GB", "United Kingdom", "dd/MM/y", "HH:mm"),
-            region("IN", "India", "d/M/y", "h:mm a"),
-            region("IE", "Ireland", "dd/MM/y", "HH:mm"),
+            region("US", "United States", Weekday::Sunday, "M/d/y", "h:mm a"),
+            region("GB", "United Kingdom", Weekday::Monday, "dd/MM/y", "HH:mm"),
+            region("IN", "India", Weekday::Sunday, "d/M/y", "h:mm a"),
+            region("IE", "Ireland", Weekday::Monday, "dd/MM/y", "HH:mm"),
         ],
         places: vec![
             place("Europe/London", "GB", ""),

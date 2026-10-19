@@ -173,9 +173,10 @@ pub struct Palette {
     pub scroll_track: Rgba,
     /// The scrollbar thumb.
     pub scroll_thumb: Rgba,
-    /// The scrollbar thumb and end buttons while hovered, pressed or dragged:
-    /// a neutral step from [`scroll_thumb`](Self::scroll_thumb), never the
-    /// accent, so a bar in use reads as handled rather than as selected.
+    /// The scrollbar thumb while hovered, pressed or dragged, and an end
+    /// button while its press is live: a neutral step from
+    /// [`scroll_thumb`](Self::scroll_thumb), never the accent, so a bar in use
+    /// reads as handled rather than as selected.
     pub scroll_thumb_active: Rgba,
     /// The Frame Rim every window wears: one quiet neutral, a step lighter
     /// than [`surface`](Self::surface) on a dark appearance and a step deeper

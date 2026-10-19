@@ -1,35 +1,44 @@
-//! TAIRiX `configure` — read and set the boot-time system-configuration
-//! store (`plans/APPS.md`).
+//! TAIRiX `configure` — read and set the machine's settings (`plans/APPS.md`).
 //!
 //! The `sysctl`-shaped settings command: with no operand it lists every
 //! setting of the closed registry with its current value; with a key it
-//! shows that setting; with a key and a value it updates the store at
-//! `/System/Settings/Configuration/system.conf`
-//! (`tairix_sysconfig::CONFIG_PATH`). The store's grammar, key registry,
-//! fail-closed parse, and canonical render are the shared `lib/sysconfig`
-//! engine — the same engine every boot-time consumer reads through, so this
-//! writer and those readers can never diverge.
+//! shows that setting; with a key and a value it changes it. The machine
+//! configuration (`system.conf`) is the shared `lib/sysconfig` engine's
+//! document — its grammar, key registry, fail-closed parse, and canonical
+//! render — and every reader reads it through the same engine, so this tool
+//! and those readers can never diverge.
+//!
+//! Each document has two layers, the image's default and the
+//! administrator's, which replaces it whole once it exists
+//! (`tairix_abi::driver_store::SystemConfigFile::layers`). A change is made
+//! by the settings service, the documents' one writer, to the document as it
+//! stands; the kernel admits only a caller holding `CAP_SETTINGS_WRITE`, so
+//! only an elevated administrator changes a setting.
 //!
 //! # Two registries, one command line
 //!
 //! A key name resolves against the flat `lib/sysconfig` registry first and,
 //! failing that, against the per-interface `<iface>.<suffix>` registry of
-//! the network store at `/System/Settings/Network/network.conf`
-//! (`tairix_netconfig::CONFIG_PATH`). The flat registry always wins, so no
-//! interface alias can ever shadow a machine setting — and the two name
-//! sets are pinned disjoint by a test over both registries rather than left
-//! to the accident that none collides today.
+//! the network configuration (`network.conf`, `lib/netconfig`). The flat
+//! registry always wins, so no interface alias can ever shadow a machine
+//! setting — and the two name sets are pinned disjoint by a test over both
+//! registries rather than left to the accident that none collides today.
 //!
-//! Both registries are settable. An invocation names keys from either, they
-//! are resolved against one working copy of each document before a byte is
-//! written, and only a document the invocation actually names is rewritten.
-//! The per-interface registry has no defaults to fall back to, so it needs a
-//! spelling for **unset**: the empty value. No key in that registry accepts
-//! an empty value — the engine pins that — which is what makes the spelling
-//! unambiguous, and it is what lets one invocation move an interface from a
-//! static address to DHCP (`configure wan.ipv4.method dhcp wan.ipv4.address
-//! "" wan.ipv4.gateway ""`), a change neither half of which is a consistent
-//! document on its own.
+//! Both registries are settable. An invocation names keys from either; every
+//! pair is checked against the documents as they stand before the service is
+//! asked for anything, and only a document the invocation actually names is
+//! changed. The per-interface registry has no defaults to fall back to, so
+//! it needs a spelling for **unset**: the empty value. No key in that
+//! registry accepts an empty value — the engine pins that — which is what
+//! makes the spelling unambiguous, and it is what lets one invocation move an
+//! interface from a static address to DHCP (`configure wan.ipv4.method dhcp
+//! wan.ipv4.address "" wan.ipv4.gateway ""`), a change neither half of which
+//! is a consistent document on its own.
+//!
+//! The network configuration names the machine's hardware and its
+//! addresses, so it is read through the service too, and only by an elevated
+//! administrator; any other caller's listing shows the machine settings and
+//! says why the network ones are missing.
 //!
 //! # What this crate is
 //!
@@ -37,9 +46,10 @@
 //! command line to a [`Command`], and the [`run`] engine that executes it
 //! against injected seams:
 //!
-//! * [`Store`] — read and replace the store document (the `Run` binary
-//!   wires the syscall-backed file at `CONFIG_PATH`; tests wire an
-//!   in-memory fixture).
+//! * [`Documents`] — read a document, or ask the settings service to change
+//!   one (the `Run` binary wires the VFS and the service; tests wire the
+//!   service's own engine over an in-memory volume).
+//! * [`NetPolicy`] — hand a saved change to the running network stack.
 //! * [`Output`] — write listings and values to the terminal.
 //! * `HelpSource` (from `lib/help`) — the tool's own bundle `Help/` tree,
 //!   rendered by the `-h`/`-?`/`--help` switches through the one shared
@@ -49,20 +59,19 @@
 //!
 //! An unknown option or an extra operand is a usage error that changes
 //! nothing; an unknown key or a value outside its key's closed set is
-//! refused with the valid choices stated; a store document the shared
-//! engine cannot fully parse refuses a *set* outright (never a guessed
-//! merge) while a *list*/*show* reports the malformation honestly. A
-//! refused store read or write surfaces the underlying
-//! [`Errno`] — a permission denial changes nothing and
-//! states its reason. No panic, no partial application.
+//! refused with the valid choices stated; a document the shared engine
+//! cannot fully parse refuses a *set* outright (never a guessed merge) while
+//! a *list*/*show* reports the malformation honestly. A refused read or
+//! change surfaces the underlying [`Errno`] — a permission denial changes
+//! nothing and states its reason. No panic, no partial application.
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
-//! crate, the shared `lib/help` engine, and the shared `lib/sysconfig`
-//! engine, so this userland tool never links a kernel or driver crate. No
-//! `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths; nothing
-//! writes to fd 3 (`stdinfo`).
+//! `no_std` (with `alloc`); the dependencies are the audited `lib/abi` crate,
+//! the shared `lib/help` engine, and the two configuration engines, so this
+//! userland tool never links a kernel or driver crate. No `unsafe`, and no
+//! `unwrap`/`expect`/`panic!` in production paths; nothing writes to fd 3
+//! (`stdinfo`).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -75,6 +84,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::net_ipc::{if_name_str, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings};
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
@@ -105,9 +115,9 @@ pub enum Command<'a> {
     Show(&'a str),
     /// Set each named setting to the value beside it, together.
     ///
-    /// Several pairs rather than one, because the store is rendered and
-    /// replaced whole: applying a group of changes one invocation at a time
-    /// could leave it holding half of them if a later one were refused.
+    /// Several pairs rather than one, because each document is changed all
+    /// or none: applying a group of changes one invocation at a time could
+    /// leave it holding half of them if a later one were refused.
     Set(Vec<(&'a str, &'a str)>),
     /// Render `configure`'s own short help (`-h`/`-?`/`--help`) through
     /// the same engine as any other command's short help (plans/APPS.md).
@@ -135,22 +145,21 @@ pub enum ConfigureError {
     /// with no address, a bond with too few members, a document that would
     /// outgrow the store bound). Nothing was written.
     NetworkInconsistent(tairix_netconfig::ConfigError),
-    /// The store document on disk could not be fully parsed by the shared
-    /// engine (a hand edit outside the grammar); a set refuses rather than
-    /// guess at a merge.
+    /// The machine configuration could not be fully parsed by the shared
+    /// engine; a set refuses rather than guess at a merge.
     Malformed(tairix_sysconfig::ParseError),
-    /// The store could not be read.
+    /// The machine configuration could not be read.
     Read(Errno),
-    /// The network store could not be read.
+    /// The network configuration could not be read.
     NetworkRead(Errno),
-    /// The network store document could not be fully parsed by the shared
+    /// The network configuration could not be fully parsed by the shared
     /// engine; a listing reports the malformation rather than showing a
     /// document it did not understand.
     NetworkMalformed(tairix_netconfig::ParseError),
-    /// The store could not be written (e.g. the caller may not change
-    /// system settings).
+    /// The settings service did not change the machine configuration (e.g.
+    /// the caller may not change the machine's settings).
     Write(Errno),
-    /// The network store could not be written.
+    /// The settings service did not change the network configuration.
     NetworkWrite(Errno),
     /// The terminal output could not be delivered.
     Output(Errno),
@@ -192,79 +201,49 @@ impl fmt::Display for ConfigureError {
                     "the network configuration would not hold together: {err}"
                 )
             }
-            Self::Malformed(err) => write!(f, "store not understood: {err}"),
-            Self::Read(err) => write!(f, "cannot read the store: {err}"),
-            Self::NetworkRead(err) => write!(f, "cannot read the network store: {err}"),
+            Self::Malformed(err) => write!(f, "the machine settings are not understood: {err}"),
+            Self::Read(err) => write!(f, "cannot read the machine settings: {err}"),
+            Self::NetworkRead(err) => write!(f, "cannot read the network settings: {err}"),
             Self::NetworkMalformed(err) => {
-                write!(f, "network store not understood: {err}")
+                write!(f, "the network settings are not understood: {err}")
             }
-            Self::Write(err) => write!(f, "cannot write the store: {err}"),
-            Self::NetworkWrite(err) => write!(f, "cannot write the network store: {err}"),
+            Self::Write(err) => write!(f, "the machine settings were not changed: {err}"),
+            Self::NetworkWrite(err) => write!(f, "the network settings were not changed: {err}"),
             Self::Output(err) => write!(f, "cannot write output: {err}"),
         }
     }
 }
 
-/// Reads and replaces the configuration-store document.
+/// The machine's two settings documents, as `configure` reaches them.
 ///
-/// The `Run` binary wires the syscall-backed file at
-/// `tairix_sysconfig::CONFIG_PATH`; tests wire an in-memory fixture. The
-/// document travels whole in both directions: the engine's canonical render
-/// replaces the file, never a partial patch.
-pub trait Store {
-    /// Read the whole store document, or `None` when no store exists yet
-    /// (a fresh installation — the defaults apply).
+/// The `Run` binary reads the machine configuration's layers itself and asks
+/// the settings service for the network one and for every change; tests wire
+/// the service's own engine over an in-memory volume.
+pub trait Documents {
+    /// `which` as it stands, empty where neither of its layers exists.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises other than absence.
-    fn read(&self) -> Result<Option<String>, Errno>;
+    /// Any refusal — notably [`Errno::PermissionDenied`] for the network
+    /// configuration, which names this machine's hardware and addresses and
+    /// only an elevated administrator reads.
+    fn read(&self, which: SystemConfigFile) -> Result<String, Errno>;
 
-    /// Replace the store document with `text` (creating it, and its
-    /// directory, when absent).
+    /// Ask the settings service to set each of `settings` in `which`, all or
+    /// none, answering the document as the change left it.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the filesystem raises — notably
-    /// [`Errno::PermissionDenied`] when the caller may not change system
-    /// settings.
-    fn write(&self, text: &str) -> Result<(), Errno>;
-}
-
-/// Reads and replaces the per-interface network-configuration document.
-///
-/// Separate from [`Store`] because it is a different document with a
-/// different engine (`lib/netconfig`), not a second view of the same one.
-/// The `Run` binary wires the syscall-backed file at
-/// `tairix_netconfig::CONFIG_PATH`; tests wire an in-memory fixture.
-pub trait NetworkStore {
-    /// Read the whole network document, or `None` when none exists yet (no
-    /// managed interfaces — the engine's own default).
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises other than absence — notably
-    /// [`Errno::PermissionDenied`], since the document carries each
-    /// interface's hardware identity and this machine's static addressing
-    /// and is not world-readable.
-    fn read(&self) -> Result<Option<String>, Errno>;
-
-    /// Replace the network document with `text` (creating it, and its
-    /// directory, when absent).
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the filesystem raises — notably
-    /// [`Errno::PermissionDenied`] when the caller may not change the
-    /// machine's network configuration.
-    fn write(&self, text: &str) -> Result<(), Errno>;
+    /// The service's refusal — notably [`Errno::PermissionDenied`] when the
+    /// caller may not change the machine's settings. Nothing was written.
+    fn change(&self, which: SystemConfigFile, settings: &[(&str, &str)]) -> Result<String, Errno>;
 }
 
 /// Applies the stack-wide `net.*` policy to the running network stack.
 ///
-/// Writing the store persists a change for the next boot; the running stack
-/// only learns of it when the policy is delivered over its capability-gated
-/// admin endpoint. The `Run` binary backs this with that call; tests wire a
+/// A saved change takes effect at the next boot; the running stack only
+/// learns of it when the policy is delivered over its capability-gated admin
+/// endpoint. The `Run` binary backs this with that call; tests wire a
 /// recorder. It is a seam rather than a direct call so the tool stays
 /// host-testable, and it grants nothing: the kernel gates the endpoint on the
 /// caller's `CAP_NET_ADMIN`.
@@ -276,7 +255,7 @@ pub trait NetPolicy {
     /// Any [`Errno`] the endpoint raises — notably
     /// [`Errno::PermissionDenied`] when the caller does not hold
     /// `CAP_NET_ADMIN`, or [`Errno::NotFound`] when no network stack is
-    /// running. The store write has already succeeded either way.
+    /// running. The change has already been saved either way.
     fn apply(&self, settings: NetworkSettings) -> Result<(), Errno>;
 
     /// The machine's usable physical RAM in bytes, or zero when the
@@ -360,12 +339,10 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, ConfigureError> {
 ///
 /// The [`ConfigureError`] naming the refusal; nothing was changed and
 /// nothing partial was written.
-#[allow(clippy::too_many_arguments)] // Each seam is injected separately so every branch stays host-testable.
 pub fn run(
     command: Command<'_>,
     locale: Option<&str>,
-    store: &dyn Store,
-    netstore: &dyn NetworkStore,
+    documents: &dyn Documents,
     policy: &dyn NetPolicy,
     help: &dyn HelpSource,
     output: &dyn Output,
@@ -380,19 +357,58 @@ pub fn run(
                 .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
             output.write_all(&bytes).map_err(ConfigureError::Output)
         }
-        Command::List => {
-            let config = load(store)?;
-            let mut text = String::new();
-            for key in Key::ALL {
-                text.push_str(key.name());
-                text.push(' ');
-                text.push_str(&config.render_value(*key));
-                text.push('\n');
-            }
-            // Then every per-interface key the network store actually
-            // holds. Only the set ones: that document has no defaults to
-            // print, and a wall of unset keys would say nothing.
-            for iface in load_network(netstore)?.interfaces() {
+        Command::List => list(documents, output, diagnostics),
+        Command::Show(name) => {
+            let text = match resolve(name)? {
+                Named::System(key) => format!("{}\n", load(documents)?.render_value(key)),
+                // An unset per-interface key has no value to show: the
+                // document holds only what was written, so the answer is
+                // the empty one rather than a default this registry does
+                // not have.
+                Named::Interface(iface, key) => format!(
+                    "{}\n",
+                    load_network(documents)?
+                        .interface(iface)
+                        .and_then(|found| found.render_value(key))
+                        .unwrap_or_default()
+                ),
+            };
+            output
+                .write_all(text.as_bytes())
+                .map_err(ConfigureError::Output)
+        }
+        Command::Set(pairs) => set(&pairs, documents, policy, diagnostics),
+    }
+}
+
+/// What a listing says in place of the network settings when the caller may
+/// not read them.
+const NETWORK_NOT_SHOWN: &str =
+    "the network settings are not shown: only an elevated administrator reads them\n";
+
+/// List every flat-registry setting, then every per-interface one the network
+/// configuration holds.
+///
+/// A caller that may not read the network configuration still gets the
+/// machine's settings, and is told why the rest are missing.
+fn list(
+    documents: &dyn Documents,
+    output: &dyn Output,
+    diagnostics: &dyn Output,
+) -> Result<(), ConfigureError> {
+    let config = load(documents)?;
+    let mut text = String::new();
+    for key in Key::ALL {
+        text.push_str(key.name());
+        text.push(' ');
+        text.push_str(&config.render_value(*key));
+        text.push('\n');
+    }
+    // Only the per-interface keys the document actually holds: that registry
+    // has no defaults to print, and a wall of unset keys would say nothing.
+    let refused = match load_network(documents) {
+        Ok(network) => {
+            for iface in network.interfaces() {
                 for key in IfaceKey::ALL {
                     if let Some(value) = iface.render_value(*key) {
                         text.push_str(&iface.name);
@@ -404,91 +420,112 @@ pub fn run(
                     }
                 }
             }
-            output
-                .write_all(text.as_bytes())
-                .map_err(ConfigureError::Output)
+            false
         }
-        Command::Show(name) => {
-            let text = match resolve(name)? {
-                Named::System(key) => format!("{}\n", load(store)?.render_value(key)),
-                // An unset per-interface key has no value to show: the
-                // document holds only what was written, so the answer is
-                // the empty one rather than a default this registry does
-                // not have.
-                Named::Interface(iface, key) => format!(
-                    "{}\n",
-                    load_network(netstore)?
-                        .interface(iface)
-                        .and_then(|found| found.render_value(key))
-                        .unwrap_or_default()
-                ),
-            };
-            output
-                .write_all(text.as_bytes())
-                .map_err(ConfigureError::Output)
-        }
-        Command::Set(pairs) => {
-            // Every pair is resolved and applied to one working copy of each
-            // document before a byte is written, so a command line that
-            // names an unknown key or an invalid value changes nothing at
-            // all rather than applying the pairs that came before it.
-            let named = resolve_all(&pairs)?;
-            let machine = apply_machine(&named, store)?;
-            let network = apply_network(&named, netstore)?;
+        Err(ConfigureError::NetworkRead(Errno::PermissionDenied)) => true,
+        Err(err) => return Err(err),
+    };
+    output
+        .write_all(text.as_bytes())
+        .map_err(ConfigureError::Output)?;
+    if refused {
+        diagnostics
+            .write_all(NETWORK_NOT_SHOWN.as_bytes())
+            .map_err(ConfigureError::Output)?;
+    }
+    Ok(())
+}
 
-            // Only a document this invocation actually names is rewritten;
-            // each is rendered and replaced whole. The two are separate
-            // files with no transaction between them, so a command naming
-            // both writes them in order and reports the first refusal —
-            // having already validated both, so a refusal here is the
-            // filesystem's answer and not a half-understood intent.
-            if let Some(config) = machine.as_ref() {
-                store
-                    .write(&config.render())
-                    .map_err(ConfigureError::Write)?;
-            }
-            if let Some((_, edited)) = network.as_ref() {
-                if let Err(err) = netstore.write(&edited.render()) {
-                    // Two files, no transaction between them: if the machine
-                    // document already landed, saying only that the network
-                    // one did not would leave the reader believing nothing
-                    // was written.
-                    if machine.is_some() {
-                        let _ = diagnostics.write_all(SAVED_MACHINE_ONLY.as_bytes());
-                    }
-                    return Err(ConfigureError::NetworkWrite(err));
-                }
-            }
+/// Change each named setting, then hand what was saved to the running stack.
+fn set(
+    pairs: &[(&str, &str)],
+    documents: &dyn Documents,
+    policy: &dyn NetPolicy,
+    diagnostics: &dyn Output,
+) -> Result<(), ConfigureError> {
+    // Every pair is resolved and checked against the documents as they stand
+    // before the service is asked for anything, so a command line naming an
+    // unknown key or an invalid value changes nothing at all, and the refusal
+    // says exactly which.
+    let named = resolve_all(pairs)?;
+    let (machine_pairs, network_pairs): (Vec<_>, Vec<_>) = pairs
+        .iter()
+        .zip(&named)
+        .partition(|(_, (key, _))| matches!(key, Named::System(_)));
+    let machine_pairs: Vec<(&str, &str)> =
+        machine_pairs.into_iter().map(|(pair, _)| *pair).collect();
+    let network_pairs: Vec<(&str, &str)> =
+        network_pairs.into_iter().map(|(pair, _)| *pair).collect();
+    if !machine_pairs.is_empty() {
+        check_machine(&named, documents)?;
+    }
+    let current = if network_pairs.is_empty() {
+        None
+    } else {
+        Some(check_network(&named, documents)?)
+    };
 
-            // Persisting a change is only half of it: the running stack
-            // learns of it over its own admin surface. Applying is a
-            // separate, refusable action — a refusal (no stack running, or
-            // no `CAP_NET_ADMIN`) leaves the saved setting standing for the
-            // next boot and is reported rather than fatal.
-            let mut notice = String::new();
-            if let Some(config) = machine.as_ref() {
-                let keys = machine_network_keys(&named);
-                if !keys.is_empty() {
-                    if let Err(err) =
-                        policy.apply(config.network_settings(policy.machine_ram_bytes()))
-                    {
-                        notice.push_str(&deferred_notice(&keys, err));
-                    }
+    // The two documents are changed by two requests with no transaction
+    // between them, so a command naming both changes them in order and
+    // reports the first refusal — both having been checked, a refusal here
+    // is the service's answer and not a half-understood intent.
+    let machine = if machine_pairs.is_empty() {
+        None
+    } else {
+        Some(
+            documents
+                .change(SystemConfigFile::System, &machine_pairs)
+                .map_err(ConfigureError::Write)?,
+        )
+    };
+    let network = match current {
+        None => None,
+        Some(current) => match documents.change(SystemConfigFile::Network, &network_pairs) {
+            Ok(written) => Some((current, written)),
+            Err(err) => {
+                // Saying only that the network half failed would leave the
+                // reader believing nothing was written.
+                if machine.is_some() {
+                    let _ = diagnostics.write_all(SAVED_MACHINE_ONLY.as_bytes());
                 }
+                return Err(ConfigureError::NetworkWrite(err));
             }
-            if let Some((current, edited)) = network.as_ref() {
-                notice.push_str(&apply_interfaces(current, edited, policy));
+        },
+    };
+
+    // Saving a change is half of it: the running stack learns of it over its
+    // own admin surface, from the document the service wrote. Applying is a
+    // separate, refusable action — a refusal (no stack running, or no
+    // `CAP_NET_ADMIN`) leaves the saved setting standing for the next boot
+    // and is reported rather than fatal.
+    let mut notice = String::new();
+    if let Some(written) = machine.as_deref() {
+        let keys = machine_network_keys(&named);
+        if !keys.is_empty() {
+            let delivered = SystemConfig::parse(written)
+                .map_err(|_| Errno::OutOfRange)
+                .and_then(|config| {
+                    policy.apply(config.network_settings(policy.machine_ram_bytes()))
+                });
+            if let Err(err) = delivered {
+                notice.push_str(&deferred_notice(&keys, err));
             }
-            notice.push_str(&audio_notice(&named));
-            if notice.is_empty() {
-                return Ok(());
-            }
-            // A diagnostic, so it never lands in the stdout a script parses.
-            diagnostics
-                .write_all(notice.as_bytes())
-                .map_err(ConfigureError::Output)
         }
     }
+    if let Some((current, written)) = network {
+        match NetworkConfig::parse(&written) {
+            Ok(after) => notice.push_str(&apply_interfaces(&current, &after, policy)),
+            Err(_) => notice.push_str(NETWORK_NOT_TOLD),
+        }
+    }
+    notice.push_str(&audio_notice(&named));
+    if notice.is_empty() {
+        return Ok(());
+    }
+    // A diagnostic, so it never lands in the stdout a script parses.
+    diagnostics
+        .write_all(notice.as_bytes())
+        .map_err(ConfigureError::Output)
 }
 
 /// Resolve every `<key> <value>` pair against the two registries, refusing a
@@ -511,17 +548,13 @@ fn resolve_all<'a>(
     Ok(named)
 }
 
-/// The machine document with every flat-registry pair applied, or [`None`]
-/// when the invocation names none of them — a command that changes only an
-/// interface must not rewrite the machine's store.
-fn apply_machine(
+/// Check every flat-registry pair against the machine configuration as it
+/// stands.
+fn check_machine(
     named: &[(Named<'_>, &str)],
-    store: &dyn Store,
-) -> Result<Option<SystemConfig>, ConfigureError> {
-    if !named.iter().any(|(key, _)| matches!(key, Named::System(_))) {
-        return Ok(None);
-    }
-    let mut config = load(store)?;
+    documents: &dyn Documents,
+) -> Result<(), ConfigureError> {
+    let mut config = load(documents)?;
     for (key, value) in named {
         let Named::System(key) = key else {
             continue;
@@ -530,48 +563,34 @@ fn apply_machine(
             .set(*key, value)
             .map_err(|_| ConfigureError::InvalidValue(*key))?;
     }
-    Ok(Some(config))
+    Ok(())
 }
 
-/// The network document as it stands and as the per-interface pairs would
-/// leave it, or [`None`] when the invocation names none of them.
+/// Check every per-interface pair against the network configuration as it
+/// stands, answering that configuration.
 ///
 /// The edits accumulate on one draft and are checked whole at the commit,
 /// because a consistency rule spanning keys — moving an interface from a
 /// static address to DHCP — has no ordering in which each half alone is a
 /// document the parser would accept.
-fn apply_network(
+fn check_network(
     named: &[(Named<'_>, &str)],
-    store: &dyn NetworkStore,
-) -> Result<Option<(NetworkConfig, NetworkConfig)>, ConfigureError> {
-    if !named
-        .iter()
-        .any(|(key, _)| matches!(key, Named::Interface(..)))
-    {
-        return Ok(None);
-    }
-    let current = load_network(store)?;
+    documents: &dyn Documents,
+) -> Result<NetworkConfig, ConfigureError> {
+    let current = load_network(documents)?;
     let mut draft = current.edit();
     for (key, value) in named {
         let Named::Interface(iface, key) = key else {
             continue;
         };
-        // The empty value is the registry's spelling for *unset*: it has no
-        // defaults, so removing a key is the only way to move an interface
-        // off a method that requires one. No key accepts an empty value, so
-        // the spelling can never be mistaken for setting one.
-        if value.is_empty() {
-            draft.unset(iface, *key);
-            continue;
-        }
         draft
-            .set(iface, *key, value)
+            .apply(iface, *key, value)
             .map_err(|err| ConfigureError::InterfaceRefused(*key, err))?;
     }
-    let edited = draft
+    draft
         .commit()
         .map_err(ConfigureError::NetworkInconsistent)?;
-    Ok(Some((current, edited)))
+    Ok(current)
 }
 
 /// The `net.*` keys this invocation set, which is what a refused live apply
@@ -665,9 +684,14 @@ fn rejected_notice(alias: &[u8; tairix_abi::net_ipc::IF_NAME_LEN]) -> String {
 }
 
 /// What a run reports when the machine document was written and the network
-/// one was then refused: the two are separate files with nothing spanning
+/// one was then refused: the two are separate documents with nothing spanning
 /// them, so which half stands has to be said rather than inferred.
 const SAVED_MACHINE_ONLY: &str = "the machine settings were saved; the network settings were not\n";
+
+/// What a run reports when the service's answer to a network change cannot be
+/// read back, so the running stack cannot be told what was saved.
+const NETWORK_NOT_TOLD: &str =
+    "the network settings were saved; the running network stack was not told, and takes them at next boot\n";
 
 /// The notice a saved-but-not-applied `net.*` change reports: the settings
 /// are persisted, the running stack did not take them, and why.
@@ -729,39 +753,35 @@ fn resolve(name: &str) -> Result<Named<'_>, ConfigureError> {
     if let Some(key) = Key::from_name(name) {
         return Ok(Named::System(key));
     }
-    let (iface, suffix) = name.split_once('.').ok_or(ConfigureError::UnknownKey)?;
-    // The alias grammar is the engine's, not a second copy of it here.
-    if !tairix_netconfig::valid_iface_name(iface) {
-        return Err(ConfigureError::UnknownKey);
-    }
-    let key = IfaceKey::from_name(suffix).ok_or(ConfigureError::UnknownKey)?;
+    // The key grammar is the engine's, not a second copy of it here.
+    let (iface, key) =
+        tairix_netconfig::resolve_name(name).map_err(|_| ConfigureError::UnknownKey)?;
     Ok(Named::Interface(iface, key))
 }
 
-/// Read and parse the current network store, or the empty configuration
-/// when none exists.
+/// The network configuration as it stands.
 ///
 /// A document the shared engine cannot fully parse is a
 /// [`ConfigureError::NetworkMalformed`] refusal, for the same reason the
-/// machine store's is: this tool never guesses at a partial intent.
-fn load_network(store: &dyn NetworkStore) -> Result<NetworkConfig, ConfigureError> {
-    match store.read().map_err(ConfigureError::NetworkRead)? {
-        Some(text) => NetworkConfig::parse(&text).map_err(ConfigureError::NetworkMalformed),
-        None => Ok(NetworkConfig::default()),
-    }
+/// machine configuration's is: this tool never guesses at a partial intent.
+fn load_network(documents: &dyn Documents) -> Result<NetworkConfig, ConfigureError> {
+    let text = documents
+        .read(SystemConfigFile::Network)
+        .map_err(ConfigureError::NetworkRead)?;
+    NetworkConfig::parse(&text).map_err(ConfigureError::NetworkMalformed)
 }
 
-/// Read and parse the current store, or the defaults when none exists.
+/// The machine configuration as it stands.
 ///
 /// A document the shared engine cannot fully parse is a
 /// [`ConfigureError::Malformed`] refusal: the tool never guesses at a
 /// partial intent, and a later set never merges into a document it did not
 /// understand.
-fn load(store: &dyn Store) -> Result<SystemConfig, ConfigureError> {
-    match store.read().map_err(ConfigureError::Read)? {
-        Some(text) => SystemConfig::parse(&text).map_err(ConfigureError::Malformed),
-        None => Ok(SystemConfig::default()),
-    }
+fn load(documents: &dyn Documents) -> Result<SystemConfig, ConfigureError> {
+    let text = documents
+        .read(SystemConfigFile::System)
+        .map_err(ConfigureError::Read)?;
+    SystemConfig::parse(&text).map_err(ConfigureError::Malformed)
 }
 
 #[cfg(test)]
@@ -770,112 +790,133 @@ mod tests {
 
     use alloc::format;
     use alloc::string::{String, ToString};
+    use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
+    use tairix_abi::driver_store::SystemConfigFile;
     use tairix_abi::net_ipc::{
         if_name_str, NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings,
     };
-    use tairix_abi::Errno;
+    use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
+    use tairix_abi::settings_ipc::{
+        decode_reply, encode_set, SETTINGS_REPLY_MAX, SETTINGS_REQUEST_MAX,
+    };
+    use tairix_abi::{CapabilityId, Errno};
     use tairix_help::HelpSource;
     use tairix_netconfig::IfaceKey;
+    use tairix_settingsd::{DocumentStore, SettingsService};
     use tairix_sysconfig::{Key, SystemConfig};
 
-    use super::{
-        parse, run, Command, ConfigureError, NetPolicy, NetworkStore, Output, Store, USAGE,
-    };
+    use super::{parse, run, Command, ConfigureError, Documents, NetPolicy, Output, USAGE};
 
-    /// An in-memory store fixture: `None` models the fresh installation.
-    struct MemStore {
-        text: RefCell<Option<String>>,
-        read_err: Option<Errno>,
-        write_err: Option<Errno>,
+    const fn slot(which: SystemConfigFile) -> usize {
+        which.as_u8() as usize
     }
 
-    impl MemStore {
-        fn new(text: Option<&str>) -> Self {
-            Self {
-                text: RefCell::new(text.map(String::from)),
-                read_err: None,
-                write_err: None,
-            }
+    /// Both layers of both documents.
+    #[derive(Default)]
+    struct Layers {
+        administrator: [Option<String>; 2],
+        image: [Option<String>; 2],
+    }
+
+    impl Layers {
+        fn effective(&self, which: SystemConfigFile) -> Option<String> {
+            self.administrator[slot(which)]
+                .clone()
+                .or_else(|| self.image[slot(which)].clone())
         }
     }
 
-    impl Store for MemStore {
-        fn read(&self) -> Result<Option<String>, Errno> {
-            match self.read_err {
-                Some(err) => Err(err),
-                None => Ok(self.text.borrow().clone()),
-            }
+    /// The layers as the settings service reaches them.
+    struct Volume<'a>(&'a RefCell<Layers>);
+
+    impl DocumentStore for Volume<'_> {
+        fn read(&mut self, which: SystemConfigFile) -> Result<Option<String>, Errno> {
+            Ok(self.0.borrow().effective(which))
         }
 
-        fn write(&self, text: &str) -> Result<(), Errno> {
-            if let Some(err) = self.write_err {
-                return Err(err);
-            }
-            *self.text.borrow_mut() = Some(text.to_string());
+        fn replace(&mut self, which: SystemConfigFile, text: &str) -> Result<(), Errno> {
+            self.0.borrow_mut().administrator[slot(which)] = Some(text.to_string());
             Ok(())
         }
     }
 
-    /// An in-memory network store fixture: `None` models "no managed
-    /// interfaces", which is what an absent document means.
-    struct MemNetStore {
-        text: RefCell<Option<String>>,
-        read_err: Option<Errno>,
-        write_err: Option<Errno>,
+    /// The machine: its documents, and the real settings service changing
+    /// them for an elevated administrator. `None` models the fresh
+    /// installation.
+    #[derive(Default)]
+    struct Machine {
+        layers: RefCell<Layers>,
+        read_refusal: [Option<Errno>; 2],
+        change_refusal: [Option<Errno>; 2],
     }
 
-    impl MemNetStore {
-        fn empty() -> Self {
-            Self {
-                text: RefCell::new(None),
-                read_err: None,
-                write_err: None,
+    impl Machine {
+        fn holding(machine: Option<&str>, network: Option<&str>) -> Self {
+            let fresh = Self::default();
+            {
+                let mut layers = fresh.layers.borrow_mut();
+                layers.administrator[slot(SystemConfigFile::System)] = machine.map(String::from);
+                layers.administrator[slot(SystemConfigFile::Network)] = network.map(String::from);
             }
+            fresh
         }
 
-        fn holding(text: &str) -> Self {
-            Self {
-                text: RefCell::new(Some(String::from(text))),
-                ..Self::empty()
-            }
+        fn network(text: &str) -> Self {
+            Self::holding(None, Some(text))
         }
 
-        fn refusing(err: Errno) -> Self {
-            Self {
-                read_err: Some(err),
-                ..Self::empty()
-            }
+        /// The administrator's layer of `which`.
+        fn stored(&self, which: SystemConfigFile) -> Option<String> {
+            self.layers.borrow().administrator[slot(which)].clone()
         }
 
-        fn refusing_writes(err: Errno) -> Self {
-            Self {
-                write_err: Some(err),
-                ..Self::empty()
-            }
-        }
-
-        fn stored(&self) -> String {
-            self.text.borrow().clone().unwrap_or_default()
+        fn stored_network(&self) -> String {
+            self.stored(SystemConfigFile::Network).unwrap_or_default()
         }
     }
 
-    impl NetworkStore for MemNetStore {
-        fn read(&self) -> Result<Option<String>, Errno> {
-            match self.read_err {
+    fn administrator() -> Origin {
+        let mut capabilities = CapabilitySummary::EMPTY;
+        capabilities.insert(CapabilityId::SETTINGS_WRITE);
+        Origin::new(
+            TrustDomain::User,
+            1000,
+            1000,
+            7,
+            ProcId::from_raw([7; 16]),
+            capabilities,
+            0,
+        )
+    }
+
+    impl Documents for Machine {
+        fn read(&self, which: SystemConfigFile) -> Result<String, Errno> {
+            match self.read_refusal[slot(which)] {
                 Some(err) => Err(err),
-                None => Ok(self.text.borrow().clone()),
+                None => Ok(self.layers.borrow().effective(which).unwrap_or_default()),
             }
         }
 
-        fn write(&self, text: &str) -> Result<(), Errno> {
-            if let Some(err) = self.write_err {
+        fn change(
+            &self,
+            which: SystemConfigFile,
+            settings: &[(&str, &str)],
+        ) -> Result<String, Errno> {
+            if let Some(err) = self.change_refusal[slot(which)] {
                 return Err(err);
             }
-            *self.text.borrow_mut() = Some(text.to_string());
-            Ok(())
+            let mut request = vec![0u8; SETTINGS_REQUEST_MAX];
+            let len = encode_set(which, settings, &mut request)?;
+            let mut reply = vec![0u8; SETTINGS_REPLY_MAX];
+            let len = SettingsService::new(Volume(&self.layers), tairix_log::DiscardSink).serve(
+                &administrator(),
+                &request[..len],
+                &mut reply,
+            );
+            decode_reply(&reply[..len]).map(String::from)
         }
     }
 
@@ -973,6 +1014,38 @@ mod tests {
         }
     }
 
+    /// Run `command` on `machine`, giving back the outcome, stdout and the
+    /// diagnostic stream.
+    fn run_on(
+        command: Command<'_>,
+        machine: &Machine,
+        policy: &MemPolicy,
+    ) -> (Result<(), ConfigureError>, String, String) {
+        let output = MemOutput::default();
+        let diagnostics = MemOutput::default();
+        let outcome = run(
+            command,
+            None,
+            machine,
+            policy,
+            &NoHelp,
+            &output,
+            &diagnostics,
+        );
+        (outcome, output.text(), diagnostics.text())
+    }
+
+    /// Run a set of `<key> <value>` pairs on `machine`, giving back the
+    /// run's outcome and the diagnostic stream it wrote.
+    fn set_pairs(
+        pairs: &[(&str, &str)],
+        machine: &Machine,
+        policy: &MemPolicy,
+    ) -> (Result<(), ConfigureError>, String) {
+        let (outcome, _, diagnostics) = run_on(Command::Set(pairs.to_vec()), machine, policy);
+        (outcome, diagnostics)
+    }
+
     #[test]
     fn parse_maps_the_grammar() {
         assert_eq!(parse(&[]), Ok(Command::List));
@@ -997,22 +1070,11 @@ mod tests {
 
     #[test]
     fn list_shows_defaults_for_a_fresh_installation() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        run(
-            Command::List,
-            None,
-            &store,
-            &MemNetStore::empty(),
-            &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("lists");
+        let (outcome, output, _) =
+            run_on(Command::List, &Machine::default(), &MemPolicy::accepting());
+        outcome.expect("lists");
         assert_eq!(
-            output.text(),
+            output,
             "os.loginType graphical\n\
              cache.all on\n\
              cache.filesystem auto\n\
@@ -1028,6 +1090,8 @@ mod tests {
              net.sockets.mem auto\n\
              time.servers none\n\
              time.refresh 1d\n\
+             time.network on\n\
+             time.zone default\n\
              input.mouse.debounce 25\n\
              audio.output auto\n\
              audio.input auto\n\
@@ -1037,93 +1101,95 @@ mod tests {
 
     #[test]
     fn show_reports_the_stored_value() {
-        let store = MemStore::new(Some("os.loginType graphical\n"));
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        run(
+        let machine = Machine::holding(Some("os.loginType graphical\n"), None);
+        let (outcome, output, _) = run_on(
             Command::Show("os.loginType"),
-            None,
-            &store,
-            &MemNetStore::empty(),
+            &machine,
             &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("shows");
-        assert_eq!(output.text(), "graphical\n");
+        );
+        outcome.expect("shows");
+        assert_eq!(output, "graphical\n");
     }
 
     #[test]
-    fn set_writes_the_canonical_render_and_round_trips() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        run(
-            Command::Set(alloc::vec![("os.loginType", "graphical")]),
-            None,
-            &store,
-            &MemNetStore::empty(),
+    fn the_image_s_settings_stand_until_the_administrator_s_replace_them() {
+        let machine = Machine::default();
+        machine.layers.borrow_mut().image[slot(SystemConfigFile::System)] =
+            Some(String::from("os.loginType text\n"));
+        let (outcome, output, _) = run_on(
+            Command::Show("os.loginType"),
+            &machine,
             &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("sets");
-        let text = store.text.borrow().clone().expect("store written");
+        );
+        outcome.expect("shows");
+        assert_eq!(output, "text\n");
+    }
+
+    #[test]
+    fn set_asks_the_service_and_its_canonical_render_is_what_stands() {
+        let machine = Machine::default();
+        let (outcome, output, _) = run_on(
+            Command::Set(alloc::vec![("os.loginType", "graphical")]),
+            &machine,
+            &MemPolicy::accepting(),
+        );
+        outcome.expect("sets");
+        let text = machine
+            .stored(SystemConfigFile::System)
+            .expect("the administrator's layer was written");
         let config = SystemConfig::parse(&text).expect("canonical render parses");
         assert_eq!(config.render_value(Key::LoginType), "graphical");
+        assert_eq!(text, config.render(), "rendered by the engine, whole");
         // Nothing goes to stdout on a successful set (the GNU quiet
         // convention).
-        assert_eq!(output.text(), "");
+        assert_eq!(output, "");
     }
 
     #[test]
     fn setting_a_net_key_applies_it_to_the_running_stack() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
         let policy = MemPolicy::accepting();
-        run(
+        let (outcome, output, errors) = run_on(
             Command::Set(alloc::vec![("net.tcp.ecn", "true")]),
-            None,
-            &store,
-            &MemNetStore::empty(),
+            &Machine::default(),
             &policy,
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("sets");
-        // Persisting alone would only take effect at the next boot, and the
-        // stack holds no filesystem capability to read the store itself.
+        );
+        outcome.expect("sets");
+        // Saving alone would only take effect at the next boot, and the stack
+        // holds no filesystem capability to read the document itself.
         let applied = policy.applied.borrow();
         assert_eq!(applied.len(), 1);
         assert!(applied[0].tcp_ecn);
         // The whole policy travels, not just the changed key, so the stack's
         // view can never drift from the document.
         assert!(applied[0].ipv4_enabled && applied[0].ipv6_enabled);
-        assert_eq!(output.text(), "", "a delivered change says nothing");
-        assert_eq!(errors.text(), "", "and reports no diagnostic");
+        assert_eq!(output, "", "a delivered change says nothing");
+        assert_eq!(errors, "", "and reports no diagnostic");
+    }
+
+    #[test]
+    fn the_running_stack_is_told_the_document_the_service_wrote() {
+        // The image shipped ECN on; the administrator's first change starts
+        // from that document, so what reaches the stack carries it too.
+        let machine = Machine::default();
+        machine.layers.borrow_mut().image[slot(SystemConfigFile::System)] =
+            Some(String::from("net.tcp.ecn true\n"));
+        let policy = MemPolicy::accepting();
+        let (outcome, _) = set_pairs(&[("net.ipv6.privacy", "true")], &machine, &policy);
+        outcome.expect("sets");
+        let applied = policy.applied.borrow();
+        assert_eq!(applied.len(), 1);
+        assert!(
+            applied[0].tcp_ecn,
+            "the image's setting stands in what was written"
+        );
+        assert!(applied[0].ipv6_privacy);
     }
 
     #[test]
     fn setting_a_non_net_key_leaves_the_stack_alone() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
         let policy = MemPolicy::accepting();
-        run(
-            Command::Set(alloc::vec![("os.loginType", "text")]),
-            None,
-            &store,
-            &MemNetStore::empty(),
-            &policy,
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("sets");
+        let (outcome, _) = set_pairs(&[("os.loginType", "text")], &Machine::default(), &policy);
+        outcome.expect("sets");
         assert!(
             policy.applied.borrow().is_empty(),
             "an os.* key is no business of the network stack"
@@ -1132,25 +1198,17 @@ mod tests {
 
     #[test]
     fn a_refused_live_apply_keeps_the_saved_setting_and_says_so() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
+        let machine = Machine::default();
         // No network stack running (or no CAP_NET_ADMIN): the refusal is an
         // answer about one action, not a failure of the command.
-        let policy = MemPolicy::refusing(Errno::NotFound);
-        run(
+        let (outcome, output, errors) = run_on(
             Command::Set(alloc::vec![("net.ipv6.privacy", "true")]),
-            None,
-            &store,
-            &MemNetStore::empty(),
-            &policy,
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("the setting is still saved");
+            &machine,
+            &MemPolicy::refusing(Errno::NotFound),
+        );
+        outcome.expect("the setting is still saved");
         assert_eq!(
-            store.text.borrow().as_deref(),
+            machine.stored(SystemConfigFile::System).as_deref(),
             Some(
                 &*SystemConfig::parse("net.ipv6.privacy true\n")
                     .expect("parses")
@@ -1160,32 +1218,18 @@ mod tests {
         // Loud, not silent: the operator is told the running stack did not
         // take it and when it will — on the diagnostic stream, so a script
         // parsing stdout is unaffected.
-        assert_eq!(output.text(), "", "stdout carries no diagnostic");
-        let text = errors.text();
-        assert!(text.contains("net.ipv6.privacy"), "{text}");
-        assert!(text.contains("next boot"), "{text}");
+        assert_eq!(output, "", "stdout carries no diagnostic");
+        assert!(errors.contains("net.ipv6.privacy"), "{errors}");
+        assert!(errors.contains("next boot"), "{errors}");
     }
 
     #[test]
     fn unknown_key_fails_closed_without_touching_the_store() {
-        let store = MemStore::new(Some("os.loginType text\n"));
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
+        let machine = Machine::holding(Some("os.loginType text\n"), None);
+        let (outcome, _) = set_pairs(&[("os.frob", "on")], &machine, &MemPolicy::accepting());
+        assert_eq!(outcome, Err(ConfigureError::UnknownKey));
         assert_eq!(
-            run(
-                Command::Set(alloc::vec![("os.frob", "on")]),
-                None,
-                &store,
-                &MemNetStore::empty(),
-                &MemPolicy::accepting(),
-                &NoHelp,
-                &output,
-                &errors
-            ),
-            Err(ConfigureError::UnknownKey),
-        );
-        assert_eq!(
-            store.text.borrow().as_deref(),
+            machine.stored(SystemConfigFile::System).as_deref(),
             Some("os.loginType text\n"),
             "a refused set changes nothing"
         );
@@ -1193,50 +1237,39 @@ mod tests {
 
     #[test]
     fn invalid_value_names_the_valid_choices() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        let err = run(
-            Command::Set(alloc::vec![("os.loginType", "desktop")]),
-            None,
-            &store,
-            &MemNetStore::empty(),
+        let machine = Machine::default();
+        let (outcome, _) = set_pairs(
+            &[("os.loginType", "desktop")],
+            &machine,
             &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect_err("refused");
+        );
+        let err = outcome.expect_err("refused");
         assert_eq!(err, ConfigureError::InvalidValue(Key::LoginType));
         assert_eq!(
             format!("{err}"),
             "invalid value for os.loginType; valid: text graphical",
         );
-        assert!(store.text.borrow().is_none(), "nothing was written");
+        assert!(
+            machine.stored(SystemConfigFile::System).is_none(),
+            "nothing was written"
+        );
     }
 
     #[test]
     fn a_malformed_store_refuses_a_set_rather_than_merging() {
-        let store = MemStore::new(Some("os.unknownKey what\n"));
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        let err = run(
-            Command::Set(alloc::vec![("os.loginType", "text")]),
-            None,
-            &store,
-            &MemNetStore::empty(),
+        let machine = Machine::holding(Some("os.unknownKey what\n"), None);
+        let (outcome, _) = set_pairs(
+            &[("os.loginType", "text")],
+            &machine,
             &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect_err("refused");
+        );
+        let err = outcome.expect_err("refused");
         assert!(
             matches!(err, ConfigureError::Malformed(refusal) if refusal.line == Some(1)),
             "the refusal names the line it was raised at: {err:?}"
         );
         assert_eq!(
-            store.text.borrow().as_deref(),
+            machine.stored(SystemConfigFile::System).as_deref(),
             Some("os.unknownKey what\n"),
             "the malformed document is left untouched"
         );
@@ -1244,58 +1277,31 @@ mod tests {
 
     #[test]
     fn store_errors_surface_with_their_errno() {
-        let mut store = MemStore::new(None);
-        store.read_err = Some(Errno::PermissionDenied);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        assert_eq!(
-            run(
-                Command::List,
-                None,
-                &store,
-                &MemNetStore::empty(),
-                &MemPolicy::accepting(),
-                &NoHelp,
-                &output,
-                &errors
-            ),
-            Err(ConfigureError::Read(Errno::PermissionDenied)),
-        );
+        let mut machine = Machine::default();
+        machine.read_refusal[slot(SystemConfigFile::System)] = Some(Errno::MediumError);
+        let (outcome, _, _) = run_on(Command::List, &machine, &MemPolicy::accepting());
+        assert_eq!(outcome, Err(ConfigureError::Read(Errno::MediumError)));
 
-        let mut store = MemStore::new(None);
-        store.write_err = Some(Errno::PermissionDenied);
+        let mut machine = Machine::default();
+        machine.change_refusal[slot(SystemConfigFile::System)] = Some(Errno::PermissionDenied);
+        let (outcome, _) = set_pairs(
+            &[("os.loginType", "graphical")],
+            &machine,
+            &MemPolicy::accepting(),
+        );
+        assert_eq!(outcome, Err(ConfigureError::Write(Errno::PermissionDenied)));
         assert_eq!(
-            run(
-                Command::Set(alloc::vec![("os.loginType", "graphical")]),
-                None,
-                &store,
-                &MemNetStore::empty(),
-                &MemPolicy::accepting(),
-                &NoHelp,
-                &output,
-                &errors,
-            ),
-            Err(ConfigureError::Write(Errno::PermissionDenied)),
+            format!("{}", ConfigureError::Write(Errno::PermissionDenied)),
+            "the machine settings were not changed: permission denied"
         );
     }
 
     #[test]
     fn help_falls_back_to_the_usage_banner_without_documents() {
-        let store = MemStore::new(None);
-        let output = MemOutput::default();
-        let errors = MemOutput::default();
-        run(
-            Command::Help,
-            None,
-            &store,
-            &MemNetStore::empty(),
-            &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &errors,
-        )
-        .expect("help renders");
-        assert_eq!(output.text(), format!("{USAGE}\n"));
+        let (outcome, output, _) =
+            run_on(Command::Help, &Machine::default(), &MemPolicy::accepting());
+        outcome.expect("help renders");
+        assert_eq!(output, format!("{USAGE}\n"));
     }
 
     /// Every locale's Help document names the settings this registry
@@ -1331,53 +1337,38 @@ mod tests {
     #[test]
     fn several_pairs_are_applied_to_one_rendered_document() {
         // What makes a settings surface's Apply atomic: the whole change is
-        // one invocation, so the store is never left holding half of it.
-        let store = MemStore::new(None);
-        let out = MemOutput::default();
-        run(
-            Command::Set(alloc::vec![
+        // one request, so the document is never left holding half of it.
+        let machine = Machine::default();
+        let (outcome, _) = set_pairs(
+            &[
                 ("os.loginType", "text"),
                 ("cache.all", "off"),
                 ("cache.block", "off"),
-            ]),
-            None,
-            &store,
-            &MemNetStore::empty(),
+            ],
+            &machine,
             &MemPolicy::accepting(),
-            &NoHelp,
-            &out,
-            &MemOutput::default(),
-        )
-        .expect("sets");
-        let text = store.text.borrow().clone().expect("a store");
+        );
+        outcome.expect("sets");
+        let text = machine.stored(SystemConfigFile::System).expect("written");
         let config = SystemConfig::parse(&text).expect("parses");
         assert_eq!(config.login_type, tairix_sysconfig::LoginType::Text);
-        assert_eq!(config.cache_all, tairix_sysconfig::CacheSwitch::Off);
+        assert_eq!(config.cache_all, tairix_sysconfig::Switch::Off);
         assert_eq!(config.cache_block, tairix_sysconfig::CacheMode::Off);
     }
 
     #[test]
     fn a_refused_pair_changes_nothing_at_all() {
-        // Resolved and applied to a working copy before a byte is written,
-        // so a later bad pair cannot leave the earlier ones standing.
-        let store = MemStore::new(Some("os.loginType graphical\n"));
-        for command in [
-            Command::Set(alloc::vec![("cache.all", "off"), ("no.such.key", "x")]),
-            Command::Set(alloc::vec![("cache.all", "off"), ("cache.block", "wat")]),
+        // Checked against the documents before the service is asked, so a
+        // later bad pair cannot leave the earlier ones standing.
+        let machine = Machine::holding(Some("os.loginType graphical\n"), None);
+        for pairs in [
+            [("cache.all", "off"), ("no.such.key", "x")],
+            [("cache.all", "off"), ("cache.block", "wat")],
         ] {
-            let refused = run(
-                command,
-                None,
-                &store,
-                &MemNetStore::empty(),
-                &MemPolicy::accepting(),
-                &NoHelp,
-                &MemOutput::default(),
-                &MemOutput::default(),
-            );
+            let (refused, _) = set_pairs(&pairs, &machine, &MemPolicy::accepting());
             assert!(refused.is_err());
             assert_eq!(
-                store.text.borrow().as_deref(),
+                machine.stored(SystemConfigFile::System).as_deref(),
                 Some("os.loginType graphical\n")
             );
         }
@@ -1392,19 +1383,12 @@ mod tests {
 
     #[test]
     fn list_states_both_registries_flat_first() {
-        let output = MemOutput::default();
-        run(
+        let (outcome, text, _) = run_on(
             Command::List,
-            None,
-            &MemStore::new(None),
-            &MemNetStore::holding(ONE_INTERFACE),
+            &Machine::network(ONE_INTERFACE),
             &MemPolicy::accepting(),
-            &NoHelp,
-            &output,
-            &MemOutput::default(),
-        )
-        .expect("lists");
-        let text = output.text();
+        );
+        outcome.expect("lists");
         let (flat, interfaces) = text
             .split_once("wan.kind")
             .expect("the per-interface lines follow the flat registry");
@@ -1424,6 +1408,30 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_by_a_caller_who_may_not_read_the_addressing_says_what_is_missing() {
+        // An unelevated caller's listing: the machine settings, and the
+        // refusal stated rather than the run failing over it.
+        let mut machine = Machine::network(ONE_INTERFACE);
+        machine.read_refusal[slot(SystemConfigFile::Network)] = Some(Errno::PermissionDenied);
+        let (outcome, text, diagnostics) = run_on(Command::List, &machine, &MemPolicy::accepting());
+        outcome.expect("the machine settings still list");
+        assert!(text.contains("os.loginType graphical"), "{text}");
+        assert!(!text.contains("wan."), "{text}");
+        assert!(
+            diagnostics.contains("network settings are not shown"),
+            "{diagnostics}"
+        );
+
+        // Any other refusal is the listing's own failure.
+        machine.read_refusal[slot(SystemConfigFile::Network)] = Some(Errno::MediumError);
+        let (outcome, _, _) = run_on(Command::List, &machine, &MemPolicy::accepting());
+        assert_eq!(
+            outcome,
+            Err(ConfigureError::NetworkRead(Errno::MediumError))
+        );
+    }
+
+    #[test]
     fn show_reads_a_per_interface_key_and_answers_nothing_for_an_unset_one() {
         for (key, want) in [
             ("wan.ipv4.address", "10.0.0.7/24\n"),
@@ -1434,39 +1442,25 @@ mod tests {
             // An interface the document never declared, likewise.
             ("lan0.ipv4.address", "\n"),
         ] {
-            let output = MemOutput::default();
-            run(
+            let (outcome, output, _) = run_on(
                 Command::Show(key),
-                None,
-                &MemStore::new(None),
-                &MemNetStore::holding(ONE_INTERFACE),
+                &Machine::network(ONE_INTERFACE),
                 &MemPolicy::accepting(),
-                &NoHelp,
-                &output,
-                &MemOutput::default(),
-            )
-            .expect("shows");
-            assert_eq!(output.text(), want, "{key}");
+            );
+            outcome.expect("shows");
+            assert_eq!(output, want, "{key}");
         }
     }
 
     #[test]
     fn a_name_in_neither_registry_is_refused() {
         for key in ["wan.nonsense", "nonsense", "wan..kind", ".kind"] {
-            assert_eq!(
-                run(
-                    Command::Show(key),
-                    None,
-                    &MemStore::new(None),
-                    &MemNetStore::holding(ONE_INTERFACE),
-                    &MemPolicy::accepting(),
-                    &NoHelp,
-                    &MemOutput::default(),
-                    &MemOutput::default(),
-                ),
-                Err(ConfigureError::UnknownKey),
-                "{key}"
+            let (outcome, _, _) = run_on(
+                Command::Show(key),
+                &Machine::network(ONE_INTERFACE),
+                &MemPolicy::accepting(),
             );
+            assert_eq!(outcome, Err(ConfigureError::UnknownKey), "{key}");
         }
     }
 
@@ -1478,12 +1472,8 @@ mod tests {
         // today: a new key on either side that collided would be resolved
         // by the flat registry and the interface key made unreachable.
         for key in Key::ALL {
-            let Some((iface, suffix)) = key.name().split_once('.') else {
-                continue;
-            };
             assert!(
-                tairix_netconfig::IfaceKey::from_name(suffix).is_none()
-                    || !tairix_netconfig::valid_iface_name(iface),
+                tairix_netconfig::resolve_name(key.name()).is_err(),
                 "{} reads as an interface key too",
                 key.name()
             );
@@ -1492,34 +1482,22 @@ mod tests {
 
     #[test]
     fn a_refused_or_malformed_network_store_fails_closed_and_says_which() {
-        let refused = run(
-            Command::List,
-            None,
-            &MemStore::new(None),
-            &MemNetStore::refusing(Errno::PermissionDenied),
-            &MemPolicy::accepting(),
-            &NoHelp,
-            &MemOutput::default(),
-            &MemOutput::default(),
-        );
+        let mut machine = Machine::network(ONE_INTERFACE);
+        machine.read_refusal[slot(SystemConfigFile::Network)] = Some(Errno::PermissionDenied);
+        let (refused, _, _) = run_on(Command::Show("wan.mtu"), &machine, &MemPolicy::accepting());
         assert_eq!(
             refused,
             Err(ConfigureError::NetworkRead(Errno::PermissionDenied))
         );
         assert_eq!(
             format!("{}", refused.expect_err("refused")),
-            "cannot read the network store: permission denied"
+            "cannot read the network settings: permission denied"
         );
 
-        let malformed = run(
+        let (malformed, _, _) = run_on(
             Command::Show("wan.mtu"),
-            None,
-            &MemStore::new(None),
-            &MemNetStore::holding("wan.nonsense 1\n"),
+            &Machine::network("wan.nonsense 1\n"),
             &MemPolicy::accepting(),
-            &NoHelp,
-            &MemOutput::default(),
-            &MemOutput::default(),
         );
         assert!(matches!(
             malformed,
@@ -1527,49 +1505,44 @@ mod tests {
         ));
     }
 
-    /// Run a set of `<key> <value>` pairs against the two fixtures, giving
-    /// back the run's outcome and the diagnostic stream it wrote.
-    fn set_pairs(
-        pairs: &[(&str, &str)],
-        store: &MemStore,
-        netstore: &MemNetStore,
-        policy: &MemPolicy,
-    ) -> (Result<(), ConfigureError>, String) {
-        let diagnostics = MemOutput::default();
-        let outcome = run(
-            Command::Set(pairs.to_vec()),
-            None,
-            store,
-            netstore,
-            policy,
-            &NoHelp,
-            &MemOutput::default(),
-            &diagnostics,
-        );
-        (outcome, diagnostics.text())
-    }
-
     #[test]
     fn setting_a_per_interface_key_writes_the_network_store_and_applies_it() {
-        let store = MemStore::new(None);
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let policy = MemPolicy::accepting();
-        let (outcome, notice) = set_pairs(&[("wan.mtu", "9000")], &store, &netstore, &policy);
+        let (outcome, notice) = set_pairs(&[("wan.mtu", "9000")], &machine, &policy);
         outcome.expect("sets");
         assert!(notice.is_empty(), "nothing was deferred: {notice}");
 
-        let stored = netstore.stored();
+        let stored = machine.stored_network();
         assert!(stored.contains("wan.mtu 9000"), "{stored}");
         // The document is rendered whole, so what was already there stays.
         assert!(stored.contains("wan.ipv4.address 10.0.0.7/24"), "{stored}");
-        // The machine store names nothing this invocation set, so it is not
-        // rewritten at all.
+        // The machine configuration names nothing this invocation set, so it
+        // is not changed at all.
         assert!(
-            store.text.borrow().is_none(),
+            machine.stored(SystemConfigFile::System).is_none(),
             "an untouched document was rewritten"
         );
         assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
         assert!(policy.applied.borrow().is_empty(), "no net.* policy pushed");
+    }
+
+    #[test]
+    fn the_first_change_keeps_every_interface_the_image_shipped() {
+        // The administrator's layer replaces the image's whole, so a change
+        // made to anything but the image's document would drop the rest.
+        let machine = Machine::default();
+        machine.layers.borrow_mut().image[slot(SystemConfigFile::Network)] = Some(String::from(
+            "wan.match.mac 02:00:00:00:00:01\nwan.ipv4.method dhcp\n\
+             vwan.match.mac 02:00:00:00:00:02\nvwan.ipv4.method dhcp\n",
+        ));
+        let policy = MemPolicy::accepting();
+        let (outcome, _) = set_pairs(&[("wan.mtu", "1400")], &machine, &policy);
+        outcome.expect("sets");
+        let stored = machine.stored_network();
+        assert!(stored.contains("wan.mtu 1400"), "{stored}");
+        assert!(stored.contains("vwan.ipv4.method dhcp"), "{stored}");
+        assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
     }
 
     /// The audio service holds no filesystem capability, so a saved
@@ -1577,19 +1550,16 @@ mod tests {
     /// the running machine is changed instead.
     #[test]
     fn a_saved_audio_key_says_when_it_applies() {
-        let store = MemStore::new(None);
+        let machine = Machine::network(ONE_INTERFACE);
         let (outcome, notice) = set_pairs(
             &[("audio.level", "-6dB")],
-            &store,
-            &MemNetStore::holding(ONE_INTERFACE),
+            &machine,
             &MemPolicy::accepting(),
         );
         outcome.expect("sets");
         assert!(
-            store
-                .text
-                .borrow()
-                .as_deref()
+            machine
+                .stored(SystemConfigFile::System)
                 .is_some_and(|text| text.contains("audio.level -6dB")),
             "saved"
         );
@@ -1600,8 +1570,7 @@ mod tests {
         );
         let (_, quiet) = set_pairs(
             &[("cache.all", "off")],
-            &MemStore::new(None),
-            &MemNetStore::holding(ONE_INTERFACE),
+            &Machine::network(ONE_INTERFACE),
             &MemPolicy::accepting(),
         );
         assert!(quiet.is_empty(), "{quiet}");
@@ -1609,22 +1578,21 @@ mod tests {
 
     #[test]
     fn the_empty_value_unsets_a_key_and_moves_an_interface_to_dhcp() {
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let policy = MemPolicy::accepting();
         // Neither half of this is a consistent document on its own, in
-        // either order, which is why the whole invocation is one commit.
+        // either order, which is why the whole invocation is one change.
         let (outcome, _) = set_pairs(
             &[
                 ("wan.ipv4.method", "dhcp"),
                 ("wan.ipv4.address", ""),
                 ("wan.ipv4.gateway", ""),
             ],
-            &MemStore::new(None),
-            &netstore,
+            &machine,
             &policy,
         );
         outcome.expect("sets");
-        let stored = netstore.stored();
+        let stored = machine.stored_network();
         assert!(stored.contains("wan.ipv4.method dhcp"), "{stored}");
         assert!(!stored.contains("wan.ipv4.address"), "{stored}");
         assert!(!stored.contains("wan.ipv4.gateway"), "{stored}");
@@ -1633,13 +1601,12 @@ mod tests {
 
     #[test]
     fn a_set_that_would_leave_the_network_document_inconsistent_writes_nothing() {
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         // Static addressing with the address taken away is exactly what the
         // parser refuses, so it is refused here rather than written.
         let (outcome, _) = set_pairs(
             &[("wan.ipv4.address", "")],
-            &MemStore::new(None),
-            &netstore,
+            &machine,
             &MemPolicy::accepting(),
         );
         assert_eq!(
@@ -1648,32 +1615,37 @@ mod tests {
                 tairix_netconfig::ConfigError::InconsistentInterface
             ))
         );
-        assert_eq!(netstore.stored(), ONE_INTERFACE, "the store is untouched");
+        assert_eq!(
+            machine.stored_network(),
+            ONE_INTERFACE,
+            "the store is untouched"
+        );
     }
 
     #[test]
     fn an_invalid_per_interface_value_names_the_choices_and_changes_nothing() {
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let (outcome, _) = set_pairs(
             &[("wan.ipv4.method", "sometimes")],
-            &MemStore::new(None),
-            &netstore,
+            &machine,
             &MemPolicy::accepting(),
         );
-        let err = outcome.expect_err("refused");
-        let text = err.to_string();
+        let text = outcome.expect_err("refused").to_string();
         for value in tairix_netconfig::Ipv4Method::VALUES {
             assert!(text.contains(value), "{text}");
         }
-        assert_eq!(netstore.stored(), ONE_INTERFACE, "the store is untouched");
+        assert_eq!(
+            machine.stored_network(),
+            ONE_INTERFACE,
+            "the store is untouched"
+        );
     }
 
     #[test]
     fn a_malformed_alias_states_the_engine_refusal_rather_than_a_value_one() {
         let (outcome, _) = set_pairs(
             &[("wan.bond.primary", "0bad")],
-            &MemStore::new(None),
-            &MemNetStore::empty(),
+            &Machine::default(),
             &MemPolicy::accepting(),
         );
         assert_eq!(
@@ -1687,26 +1659,22 @@ mod tests {
 
     #[test]
     fn one_invocation_may_set_both_registries() {
-        let store = MemStore::new(None);
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let policy = MemPolicy::accepting();
         let (outcome, _) = set_pairs(
             &[("net.ipv6.enabled", "false"), ("wan.mtu", "1400")],
-            &store,
-            &netstore,
+            &machine,
             &policy,
         );
         outcome.expect("sets");
         assert!(
-            store
-                .text
-                .borrow()
-                .as_deref()
+            machine
+                .stored(SystemConfigFile::System)
                 .unwrap_or_default()
                 .contains("net.ipv6.enabled false"),
-            "the machine store was not written"
+            "the machine configuration was not written"
         );
-        assert!(netstore.stored().contains("wan.mtu 1400"));
+        assert!(machine.stored_network().contains("wan.mtu 1400"));
         // Both halves reach the running stack, each over its own message.
         assert_eq!(policy.applied.borrow().len(), 1);
         assert_eq!(policy.pushed(), alloc::vec![String::from("wan")]);
@@ -1719,12 +1687,7 @@ mod tests {
                    lan.match.mac 02:00:00:00:00:02\n\
                    lan.mtu 1500\n";
         let policy = MemPolicy::accepting();
-        let (outcome, _) = set_pairs(
-            &[("wan.mtu", "9000")],
-            &MemStore::new(None),
-            &MemNetStore::holding(two),
-            &policy,
-        );
+        let (outcome, _) = set_pairs(&[("wan.mtu", "9000")], &Machine::network(two), &policy);
         outcome.expect("sets");
         assert_eq!(
             policy.pushed(),
@@ -1735,22 +1698,24 @@ mod tests {
 
     #[test]
     fn a_refused_interface_apply_keeps_the_saved_setting_and_says_so() {
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let (outcome, notice) = set_pairs(
             &[("wan.mtu", "9000")],
-            &MemStore::new(None),
-            &netstore,
+            &machine,
             &MemPolicy::refusing(Errno::PermissionDenied),
         );
-        outcome.expect("the store write succeeded");
-        assert!(netstore.stored().contains("wan.mtu 9000"), "still saved");
+        outcome.expect("the change was saved");
+        assert!(
+            machine.stored_network().contains("wan.mtu 9000"),
+            "still saved"
+        );
         assert!(notice.contains("wan"), "{notice}");
         assert!(notice.contains("next boot"), "{notice}");
     }
 
     #[test]
     fn an_interface_the_edit_removed_is_reported_as_still_running() {
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let policy = MemPolicy::accepting();
         // Clearing every key drops the interface from the document. The
         // stack's admin surface carries no message that retires one, so the
@@ -1763,40 +1728,35 @@ mod tests {
                 ("wan.ipv4.address", ""),
                 ("wan.ipv4.gateway", ""),
             ],
-            &MemStore::new(None),
-            &netstore,
+            &machine,
             &policy,
         );
         outcome.expect("sets");
-        assert!(!netstore.stored().contains("wan."), "{}", netstore.stored());
+        assert!(
+            !machine.stored_network().contains("wan."),
+            "{}",
+            machine.stored_network()
+        );
         assert!(notice.contains("wan: removed"), "{notice}");
         assert!(policy.pushed().is_empty(), "nothing to push");
     }
 
     #[test]
     fn an_interface_with_no_hardware_identity_is_saved_and_the_refusal_stated() {
-        let netstore = MemNetStore::empty();
-        let (outcome, notice) = set_pairs(
-            &[("lan.mtu", "1400")],
-            &MemStore::new(None),
-            &netstore,
-            &MemPolicy::accepting(),
-        );
+        let machine = Machine::default();
+        let (outcome, notice) =
+            set_pairs(&[("lan.mtu", "1400")], &machine, &MemPolicy::accepting());
         outcome.expect("sets");
-        assert!(netstore.stored().contains("lan.mtu 1400"));
+        assert!(machine.stored_network().contains("lan.mtu 1400"));
         assert!(notice.contains("match.mac"), "{notice}");
     }
 
     #[test]
     fn a_refused_network_write_surfaces_and_leaves_the_stack_alone() {
-        let netstore = MemNetStore::refusing_writes(Errno::PermissionDenied);
+        let mut machine = Machine::default();
+        machine.change_refusal[slot(SystemConfigFile::Network)] = Some(Errno::PermissionDenied);
         let policy = MemPolicy::accepting();
-        let (outcome, _) = set_pairs(
-            &[("lan.mtu", "1400")],
-            &MemStore::new(None),
-            &netstore,
-            &policy,
-        );
+        let (outcome, _) = set_pairs(&[("lan.mtu", "1400")], &machine, &policy);
         assert_eq!(
             outcome,
             Err(ConfigureError::NetworkWrite(Errno::PermissionDenied))
@@ -1812,54 +1772,50 @@ mod tests {
         // `lan` was already saved without a hardware identity. An edit to a
         // different interface has not touched it, so calling it "saved"
         // would claim the run had.
-        let netstore = MemNetStore::holding("lan.mtu 1400\nwan.match.mac 02:00:00:00:00:01\n");
-        let (outcome, notice) = set_pairs(
-            &[("wan.mtu", "9000")],
-            &MemStore::new(None),
-            &netstore,
-            &MemPolicy::accepting(),
-        );
+        let machine = Machine::network("lan.mtu 1400\nwan.match.mac 02:00:00:00:00:01\n");
+        let (outcome, notice) =
+            set_pairs(&[("wan.mtu", "9000")], &machine, &MemPolicy::accepting());
         outcome.expect("sets");
         assert!(!notice.contains("lan"), "{notice}");
     }
 
     #[test]
     fn a_half_landed_cross_store_write_says_which_half_stands() {
-        let store = MemStore::new(None);
-        let netstore = MemNetStore::refusing_writes(Errno::PermissionDenied);
+        let mut machine = Machine::default();
+        machine.change_refusal[slot(SystemConfigFile::Network)] = Some(Errno::PermissionDenied);
         let (outcome, notice) = set_pairs(
             &[
                 ("net.ipv6.enabled", "false"),
                 ("wan.match.mac", "02:00:00:00:00:01"),
             ],
-            &store,
-            &netstore,
+            &machine,
             &MemPolicy::accepting(),
         );
         assert_eq!(
             outcome,
             Err(ConfigureError::NetworkWrite(Errno::PermissionDenied))
         );
-        assert!(store.text.borrow().is_some(), "the machine half landed");
+        assert!(
+            machine.stored(SystemConfigFile::System).is_some(),
+            "the machine half landed"
+        );
         assert!(notice.contains("machine settings were saved"), "{notice}");
     }
 
     #[test]
     fn the_same_interface_key_named_twice_is_a_usage_error() {
-        let netstore = MemNetStore::holding(ONE_INTERFACE);
+        let machine = Machine::network(ONE_INTERFACE);
         let (outcome, _) = set_pairs(
             &[("wan.mtu", "1400"), ("wan.mtu", "9000")],
-            &MemStore::new(None),
-            &netstore,
+            &machine,
             &MemPolicy::accepting(),
         );
         assert_eq!(outcome, Err(ConfigureError::Usage));
-        assert_eq!(netstore.stored(), ONE_INTERFACE);
+        assert_eq!(machine.stored_network(), ONE_INTERFACE);
         // The same key on two interfaces is two settings, not a repeat.
         let (outcome, _) = set_pairs(
             &[("wan.mtu", "1400"), ("lan.mtu", "9000")],
-            &MemStore::new(None),
-            &MemNetStore::holding(ONE_INTERFACE),
+            &Machine::network(ONE_INTERFACE),
             &MemPolicy::accepting(),
         );
         outcome.expect("two interfaces, two settings");
@@ -1881,16 +1837,12 @@ mod tests {
         );
         // And a key named twice has two intents for one setting.
         assert_eq!(
-            parse(&["cache.all", "on", "cache.all", "off"]).map(|command| run(
+            parse(&["cache.all", "on", "cache.all", "off"]).map(|command| run_on(
                 command,
-                None,
-                &MemStore::new(None),
-                &MemNetStore::empty(),
-                &MemPolicy::accepting(),
-                &NoHelp,
-                &MemOutput::default(),
-                &MemOutput::default(),
-            )),
+                &Machine::default(),
+                &MemPolicy::accepting()
+            )
+            .0),
             Ok(Err(ConfigureError::Usage))
         );
     }

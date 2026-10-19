@@ -19,11 +19,12 @@ use tairix_wallpaper::DesktopSettings;
 
 use crate::form::Composition;
 use crate::registry::{strip_rows, Pane, PaneBacking, PaneContent, StripRow};
-use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell};
+use crate::shell::{Authorised, Shell};
 use crate::test_support::{
-    band_line, captions, damage, labels, offer_account, press_band, row_at, row_for, showing,
-    stated, theme, WIDE,
+    asked_task, band_line, captions, damage, labels, press_band, row_at, row_for, showing, stated,
+    task_words, theme, WIDE,
 };
+use tairix_abi::window_ipc::SystemTask;
 
 /// A shell showing `pane` with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
@@ -54,7 +55,7 @@ const LISTING: &[u8] = b"os.loginType graphical\n\
 fn showing_addressing(pane: &str) -> Shell {
     let mut shell = showing(pane);
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(0, LISTING.to_vec()));
+    shell.adopt_authorisation(Authorised::Printed(0, LISTING.to_vec()));
     shell.lay_out(WIDE, Scale::ONE, &theme());
     shell
 }
@@ -93,7 +94,7 @@ fn staged(key: Key, value: &str) -> (String, String) {
 fn tcp_ip_states_what_the_store_holds_and_stages_a_change() {
     let mut shell = showing_with("tcp-ip", SystemConfig::default());
     // Nothing is written by looking, and nothing by choosing either.
-    assert!(!shell.asking(), "opening the pane asks for no account");
+    assert!(!shell.authorising(), "opening the pane asks for nothing");
     assert!(
         shell
             .form_for_test()
@@ -105,7 +106,7 @@ fn tcp_ip_states_what_the_store_holds_and_stages_a_change() {
 
     // The second choice of the first row turns IPv4 off.
     assert!(shell.choose_for_test(0, 0, 1), "the row stages its change");
-    assert!(!shell.asking(), "a choice is not a write");
+    assert!(!shell.authorising(), "a choice is not a write");
     assert_eq!(
         shell.form_for_test().expect("a form").pending(),
         alloc::vec![staged(Key::NetIpv4Enabled, "false")]
@@ -339,18 +340,16 @@ fn the_dns_pane_offers_the_same_reading_the_ethernet_pane_does() {
     assert_eq!(row_for(Pane::Dns).action(), Some("Show Addressing…"));
 }
 
-// --- Ethernet: the reading an authenticated run answers -----------------
+// --- Ethernet: the reading an authorised task answers ------------------
 
-/// Press the reading band's one command and offer an account for it.
-fn ask_for_addressing(shell: &mut Shell) -> Elevation {
-    press_band(shell, 0);
-    offer_account(shell)
+/// Press the reading band's one command, answering the task it asked for.
+fn ask_for_addressing(shell: &mut Shell) -> SystemTask {
+    asked_task(shell, 0)
 }
 
-/// Press the staged band's Apply and offer an account for it.
-fn apply_addressing(shell: &mut Shell) -> Elevation {
-    press_band(shell, 1);
-    offer_account(shell)
+/// Press the staged band's Apply, answering the task it asked for.
+fn apply_addressing(shell: &mut Shell) -> SystemTask {
+    asked_task(shell, 1)
 }
 
 #[test]
@@ -379,14 +378,10 @@ fn ethernet_states_that_its_reading_is_not_public_until_it_is_asked_for() {
 }
 
 #[test]
-fn the_pane_asks_for_a_capture_of_the_tool_that_owns_the_store() {
+fn the_pane_asks_the_desktop_for_the_addressing_listing() {
     let mut shell = showing("ethernet");
-    let asked = ask_for_addressing(&mut shell);
-    assert_eq!(asked.program, "/System/Commands/configure.app/Run");
-    assert!(asked.argv.is_empty(), "the listing takes no operand");
-    // A read, so the caller waits for what it printed rather than for an
-    // exit code alone.
-    assert_eq!(asked.mode, RunMode::Capture);
+    assert_eq!(ask_for_addressing(&mut shell), SystemTask::ShowAddressing);
+    assert!(shell.authorising());
 }
 
 #[test]
@@ -522,9 +517,12 @@ fn a_value_the_store_would_refuse_is_marked_and_blocks_the_apply() {
     assert!(stated(&shell).iter().any(|value| value == "10.0.0"));
     // And the change does not go part-way: Apply is not offered at all
     // while a row holds a value the store would not take.
-    assert!(!shell.asking());
+    assert!(!shell.authorising());
     press_band(&mut shell, 1);
-    assert!(!shell.asking(), "no account is asked for a refused change");
+    assert!(
+        !shell.authorising(),
+        "nothing is asked for a refused change"
+    );
 
     // Correcting it clears both.
     shell.type_for_test(group, row, "10.0.0.9/24");
@@ -550,17 +548,19 @@ fn moving_an_interface_off_a_static_address_takes_both_halves_together() {
     assert!(shell.choose_for_test(group, row, dhcp));
 
     let asked = apply_addressing(&mut shell);
-    assert_eq!(asked.program, "/System/Commands/configure.app/Run");
-    assert_eq!(asked.mode, RunMode::Wait, "a write, not a read");
+    assert!(
+        matches!(asked, SystemTask::Configure(_)),
+        "a write, not a read"
+    );
     assert_eq!(
-        asked.argv,
-        alloc::vec![
-            "wan.ipv4.method".to_string(),
-            "dhcp".to_string(),
-            "wan.ipv4.address".to_string(),
-            String::new(),
-            "wan.ipv4.gateway".to_string(),
-            String::new(),
+        task_words(&asked),
+        [
+            "wan.ipv4.method",
+            "dhcp",
+            "wan.ipv4.address",
+            "",
+            "wan.ipv4.gateway",
+            "",
         ],
         "one invocation carrying every key, in registry order"
     );
@@ -570,14 +570,14 @@ fn moving_an_interface_off_a_static_address_takes_both_halves_together() {
 fn a_half_made_change_is_refused_here_rather_than_by_the_run() {
     // Dropping the address without moving the method leaves a document
     // the store would not take. The pane checks the whole before asking
-    // for a password, so the reader is told what is wrong.
+    // the desktop, so the reader is told what is wrong.
     let mut shell = showing_addressing("ethernet");
     let (group, row) = row_at(&shell, "wan", "IPv4 address");
     shell.type_for_test(group, row, "");
     press_band(&mut shell, 1);
     assert!(
-        !shell.asking(),
-        "no account is asked for a refused document"
+        !shell.authorising(),
+        "nothing is asked for a refused document"
     );
     assert!(
         band_line(&shell).to_lowercase().contains("interface"),
@@ -587,11 +587,11 @@ fn a_half_made_change_is_refused_here_rather_than_by_the_run() {
 }
 
 #[test]
-fn a_change_larger_than_one_request_is_refused_before_a_password_is_typed() {
+fn a_change_larger_than_one_task_is_refused_before_anything_is_asked() {
     // The seam bounds what an unprivileged caller may hand a privileged
     // run, and the change goes in one invocation or not at all — so the
     // pane says so where it costs nothing rather than after the reader
-    // has authenticated.
+    // has been asked for a password.
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
     let mut listing = String::new();
@@ -601,7 +601,7 @@ fn a_change_larger_than_one_request_is_refused_before_a_password_is_typed() {
             "if{index}.match.node 0x3f20{index}000\nif{index}.ipv4.method dhcp\n"
         );
     }
-    shell.adopt_elevation(Elevated::Printed(0, listing.into_bytes()));
+    shell.adopt_authorisation(Authorised::Printed(0, listing.into_bytes()));
     shell.lay_out(WIDE, Scale::ONE, &theme());
     for index in 0..9 {
         let (group, row) = row_at(&shell, &alloc::format!("if{index}"), "MTU");
@@ -613,8 +613,8 @@ fn a_change_larger_than_one_request_is_refused_before_a_password_is_typed() {
     );
     press_band(&mut shell, 1);
     assert!(
-        !shell.asking(),
-        "no account is asked for a change that cannot go"
+        !shell.authorising(),
+        "nothing is asked for a change that cannot go"
     );
     assert!(
         band_line(&shell).contains("one interface at a time"),
@@ -630,8 +630,8 @@ fn an_applied_change_is_recorded_rather_than_re_read_or_forgotten() {
     shell.type_for_test(group, row, "10.0.0.9/24");
     let _ = apply_addressing(&mut shell);
 
-    shell.adopt_elevation(Elevated::Finished(0));
-    assert!(!shell.asking(), "the question is answered");
+    shell.adopt_authorisation(Authorised::Ran(0));
+    assert!(!shell.authorising(), "the task is over");
     let form = shell.form_for_test().expect("a form");
     assert!(
         form.pending().is_empty(),
@@ -659,10 +659,10 @@ fn a_refused_apply_keeps_the_working_copy_and_says_why() {
     shell.type_for_test(group, row, "10.0.0.9/24");
     let _ = apply_addressing(&mut shell);
 
-    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::NotRun(String::from(
-        "The account was accepted, but nothing ran.",
-    ))));
-    assert!(shell.asking(), "the reader can correct and try again");
+    shell.adopt_authorisation(Authorised::Refused(String::from(
+        "The desktop could not be asked.",
+    )));
+    assert!(band_line(&shell).contains("could not be asked"));
     assert_eq!(
         shell.form_for_test().expect("a form").pending(),
         alloc::vec![("wan.ipv4.address".to_string(), "10.0.0.9/24".to_string())],
@@ -709,7 +709,7 @@ fn leaving_the_networking_panes_drops_the_capture_but_moving_between_them_does_n
 fn a_listing_that_names_no_interface_says_so_rather_than_drawing_nothing() {
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(0, b"os.loginType text\n".to_vec()));
+    shell.adopt_authorisation(Authorised::Printed(0, b"os.loginType text\n".to_vec()));
     let stated = stated(&shell).join(" | ");
     assert!(stated.contains("no interface is configured"), "{stated}");
 }
@@ -721,7 +721,7 @@ fn an_interface_no_device_can_bind_to_says_so_on_its_own_plate() {
     // see it in the document it is editing, so it says so first.
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(
+    shell.adopt_authorisation(Authorised::Printed(
         0,
         b"free.ipv4.method dhcp\nwan.match.mac 52:54:00:12:34:56\n".to_vec(),
     ));
@@ -743,37 +743,38 @@ fn an_interface_no_device_can_bind_to_says_so_on_its_own_plate() {
 fn a_run_that_printed_past_the_bound_states_that_and_shows_no_part_of_it() {
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Overran);
+    shell.adopt_authorisation(Authorised::Overran);
     let stated = stated(&shell).join(" | ");
     assert!(stated.contains("too large"), "{stated}");
-    assert!(
-        !shell.asking(),
-        "the question is answered, not left standing"
-    );
+    assert!(!shell.authorising(), "the task is over");
 }
 
 #[test]
 fn a_refused_read_states_the_refusal_and_shows_nothing() {
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::NotRun(String::from(
-        "The account was accepted, but nothing ran.",
-    ))));
-    // The question stays up with the reason on it, and the pane still
-    // states that nothing has been read — never a half answer.
-    assert!(shell.asking(), "the reader can correct and try again");
+    shell.adopt_authorisation(Authorised::Refused(String::from(
+        "The desktop could not be asked.",
+    )));
+    // The pane still states that nothing has been read — never a half
+    // answer — and the reader may ask again.
+    assert!(!shell.authorising());
     let stated = stated(&shell).join(" | ");
     assert!(stated.contains("not read"), "{stated}");
+    assert_eq!(ask_for_addressing(&mut shell), SystemTask::ShowAddressing);
 }
 
 #[test]
 fn a_run_that_failed_is_not_read_as_an_empty_configuration() {
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(2, Vec::new()));
+    shell.adopt_authorisation(Authorised::Printed(2, Vec::new()));
     let stated = stated(&shell).join(" | ");
     assert!(!stated.contains("no interface is configured"), "{stated}");
-    assert!(shell.asking(), "a failed run is a refusal, not an answer");
+    assert!(
+        band_line(&shell).contains("could not read"),
+        "a failed run is a refusal, not an answer"
+    );
 }
 
 #[test]
@@ -796,7 +797,7 @@ fn a_listing_shaped_like_anything_at_all_is_read_or_refused_and_never_believed()
     ] {
         let mut shell = showing("ethernet");
         let _ = ask_for_addressing(&mut shell);
-        shell.adopt_elevation(Elevated::Printed(0, output.to_vec()));
+        shell.adopt_authorisation(Authorised::Printed(0, output.to_vec()));
         let stated = stated(&shell).join(" | ");
         assert!(
             stated.contains("no interface is configured") || stated.contains("could not read"),
@@ -812,7 +813,7 @@ fn a_listing_the_engine_will_not_take_whole_is_no_document_at_all() {
     // rather than the part that happened to parse.
     let mut shell = showing("ethernet");
     let _ = ask_for_addressing(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(0, b"wan.mtu 3\n".to_vec()));
+    shell.adopt_authorisation(Authorised::Printed(0, b"wan.mtu 3\n".to_vec()));
     let stated = stated(&shell).join(" | ");
     assert!(stated.contains("could not read"), "{stated}");
 }

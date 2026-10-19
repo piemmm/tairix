@@ -1259,6 +1259,9 @@ pub struct FieldGroup {
     /// The picture choice beneath the rows, which the keyboard reaches after
     /// the last of them.
     pictures: Option<PictureChoice>,
+    /// The height of the band its owner draws in beneath the rows; zero for
+    /// none.
+    band: u32,
     footnote: Option<String>,
     focus: Option<usize>,
     /// The last pointer position — hit-testing input, never drawn.
@@ -1284,6 +1287,7 @@ impl FieldGroup {
             badge: None,
             rows,
             pictures: None,
+            band: 0,
             footnote: None,
             focus: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -1335,6 +1339,26 @@ impl FieldGroup {
         self.footnote = Some(footnote.into());
         self.footnote_height = Measured::default();
         self
+    }
+
+    /// Replace the footnote, answering whether it changed; the owner re-lays
+    /// the group out and reports the repaint.
+    pub fn set_footnote(&mut self, footnote: Option<String>) -> bool {
+        if self.footnote == footnote {
+            return false;
+        }
+        self.footnote = footnote;
+        self.footnote_height = Measured::default();
+        true
+    }
+
+    /// Give the group a band `height` pixels tall beneath its rows and its
+    /// picture choice, which its owner draws in: content no row carries, such
+    /// as a calendar, kept inside the plate and above the footnote. Zero takes
+    /// the band away. Answers whether it changed; the owner re-lays the group
+    /// out.
+    pub fn set_band(&mut self, height: u32) -> bool {
+        core::mem::replace(&mut self.band, height) != height
     }
 
     /// This group with `pictures` beneath its rows: a setting chosen by its
@@ -1577,7 +1601,55 @@ impl FieldGroup {
             .saturating_add(gap)
             .saturating_add(rows)
             .saturating_add(self.pictures_band(width, scale, theme))
+            .saturating_add(self.owner_band(scale, theme))
             .saturating_add(self.footnote_height(width, scale, theme))
+    }
+
+    /// The height the owner's band takes beneath whatever stands above it —
+    /// the gap that parts them, and the band — or nothing without one.
+    fn owner_band(&self, scale: Scale, theme: &Theme) -> u32 {
+        if self.band == 0 {
+            return 0;
+        }
+        let (_, gap) = Self::insets(scale, theme);
+        let above = if self.rows.is_empty() && self.pictures.is_none() {
+            0
+        } else {
+            gap
+        };
+        above.saturating_add(self.band)
+    }
+
+    /// Where the owner's band is laid out in `layout`: beneath the rows drawn
+    /// and the picture choice, across the span a row's label begins at; `None`
+    /// for a group with no band, or none drawable.
+    #[must_use]
+    pub fn band_rect(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> Option<Rect> {
+        if self.band == 0 {
+            return None;
+        }
+        let inner = Self::inner(layout.bounds, scale, theme)?;
+        let (inner_x, _, inner_w, _) = inner;
+        let row_band = text_plate_height(theme, scale, TextRole::Body);
+        let (left, span) = row_content_span(scale, theme, inner_x, inner_w, row_band)?;
+        let (_, gap) = Self::insets(scale, theme);
+        let top = if let Some(pictures) = self.pictures_rect(layout, scale, theme) {
+            u32::try_from(pictures.bottom())
+                .unwrap_or(0)
+                .saturating_add(gap)
+        } else {
+            let drawn = self
+                .row_rects(layout, scale, theme)
+                .iter()
+                .map(|rect| rect.height)
+                .fold(0, u32::saturating_add);
+            let above = if self.rows.is_empty() { 0 } else { gap };
+            self.rows_span(inner, layout.bounds.width, scale, theme)
+                .0
+                .saturating_add(drawn)
+                .saturating_add(above)
+        };
+        Some(Rect::new(to_i32(left), to_i32(top), span, self.band))
     }
 
     /// The height the picture choice takes beneath the rows in a plate
@@ -1740,7 +1812,8 @@ impl FieldGroup {
             .saturating_add(ih)
             .saturating_sub(pad)
             .saturating_sub(self.footnote_height(width, scale, theme))
-            .saturating_sub(self.pictures_band(width, scale, theme));
+            .saturating_sub(self.pictures_band(width, scale, theme))
+            .saturating_sub(self.owner_band(scale, theme));
         (top, bottom)
     }
 
@@ -1967,14 +2040,17 @@ impl FieldGroup {
                 .iter()
                 .map(|rect| rect.height)
                 .fold(0, u32::saturating_add);
-            let above = pictures.map_or_else(
-                || {
-                    self.rows_span(inner, layout.bounds.width, scale, theme)
-                        .0
-                        .saturating_add(drawn)
-                },
-                |rect| u32::try_from(rect.bottom()).unwrap_or(0),
-            );
+            let above = self
+                .band_rect(layout, scale, theme)
+                .or(pictures)
+                .map_or_else(
+                    || {
+                        self.rows_span(inner, layout.bounds.width, scale, theme)
+                            .0
+                            .saturating_add(drawn)
+                    },
+                    |rect| u32::try_from(rect.bottom()).unwrap_or(0),
+                );
             let top = above.saturating_add(gap);
             let room = y.saturating_add(h).saturating_sub(top);
             if let Some((text_x, _)) =

@@ -279,8 +279,11 @@ fn dialog_height_for_content_round_trips_through_the_band_it_sizes() {
     // the room it asked for.
     for message in [None, Some("The machine's clock, in UTC.")] {
         for reason in [None, Some("refused: no capability")] {
-            for actions in 0..=2usize {
+            for (actions, windowed) in (0..=2usize).flat_map(|n| [(n, false), (n, true)]) {
                 let mut dialog = Dialog::new("Date & Time");
+                if windowed {
+                    dialog = dialog.in_window();
+                }
                 if let Some(message) = message {
                     dialog = dialog.with_message(message);
                 }
@@ -303,7 +306,7 @@ fn dialog_height_for_content_round_trips_through_the_band_it_sizes() {
                                 .map(|band| band.height),
                             Some(want),
                             "message {message:?} reason {reason:?} actions {actions} \
-                             under {} at {}%",
+                             windowed {windowed} under {} at {}%",
                             theme.name(),
                             scale.percent()
                         );
@@ -334,6 +337,59 @@ fn dialog_content_rect_makes_room_for_a_message_only_when_there_is_one() {
         messaged_top > bare_top,
         "a message pushes the content band down"
     );
+}
+
+#[test]
+fn a_replaced_reason_keeps_the_actions_and_moves_the_band() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, DW, DH);
+    let mut dialog = Dialog::new("Date & Time")
+        .in_window()
+        .with_actions(vec![Button::labelled("Close")]);
+    dialog.actions_mut()[0].set_focused(true);
+    let band = |dialog: &Dialog| dialog.content_rect(bounds, Scale::ONE, &theme);
+    let before = band(&dialog).expect("a band");
+    assert!(dialog.set_reason(Some(String::from("That time does not happen."))));
+    assert!(!dialog.set_reason(Some(String::from("That time does not happen."))));
+    assert_eq!(dialog.reason(), Some("That time does not happen."));
+    assert!(
+        band(&dialog).expect("a band").bottom() < before.bottom(),
+        "the reason takes its lines above the actions"
+    );
+    assert!(dialog.actions()[0].state().focus.focused, "the focus stays");
+    assert!(dialog.set_reason(None));
+    assert_eq!(band(&dialog), Some(before));
+}
+
+#[test]
+fn a_dialog_in_a_window_stands_on_its_ground_with_no_title_or_rim() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, DW, DH);
+    let plated = Dialog::new("Time Zone").with_actions(vec![Button::labelled("Cancel")]);
+    let windowed = plated.clone().in_window();
+    let band = |dialog: &Dialog| {
+        dialog
+            .content_rect(bounds, Scale::ONE, &theme)
+            .expect("a band")
+    };
+    assert!(
+        band(&windowed).top() < band(&plated).top(),
+        "the window's frame carries the title, so no title line is reserved"
+    );
+    assert_eq!(
+        windowed.content_width(DW, Scale::ONE, &theme),
+        band(&windowed).width,
+        "the measured width is the band's own"
+    );
+    assert!(
+        windowed.content_width(DW, Scale::ONE, &theme)
+            > plated.content_width(DW, Scale::ONE, &theme),
+        "a window's client has no rim to inset"
+    );
+    let s = dialog_surface(&windowed, &theme);
+    let ground = premul(theme.palette().surface);
+    assert_eq!(s.get(0, 0), Some(ground), "the corner is ground, not a cut");
+    assert_eq!(s.get(DW - 1, DH - 1), Some(ground));
 }
 
 #[test]

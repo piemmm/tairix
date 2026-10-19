@@ -2,7 +2,7 @@
 //! `tairix-kernel` pipeline on the `virt` board against the shared
 //! `dhcp-net-root` whole-disk image — whose read-only `/System` volume carries
 //! the **kernel-signed virtio-net driver bundle** and a planted
-//! `/System/Settings/Network/network.conf` selecting `ipv4.method dhcp`, and
+//! `/System/Defaults/Network/network.conf` selecting `ipv4.method dhcp`, and
 //! which carries **no configured time server at all** — with a
 //! `virtio-net-device` attached and the harness-side
 //! **DHCP-server-plus-NTP-server** link peer on the QEMU `dgram` netdev, and
@@ -34,7 +34,7 @@
 //!   same lease.
 //!
 //! The production boot path (all **before** any root unlock — the `/System`
-//! store and its `Settings/` config are on the read-only volume mounted before
+//! store and its `Defaults/` config are on the read-only volume mounted before
 //! the passphrase, so the guest needs no console dialogue):
 //!
 //! 1. **Discovers** the virtio-block root *and* the virtio-net node

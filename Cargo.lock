@@ -1337,9 +1337,11 @@ dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
  "tairix-help",
+ "tairix-log",
  "tairix-netconfig",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-settingsd",
  "tairix-sysconfig",
  "tairix-util",
 ]
@@ -1368,6 +1370,7 @@ dependencies = [
  "tairix-parallel",
  "tairix-raster",
  "tairix-theme",
+ "tairix-tz",
  "tairix-util",
  "tairix-vt",
 ]
@@ -1488,10 +1491,16 @@ dependencies = [
  "tairix-font",
  "tairix-fsmeta",
  "tairix-geometry",
+ "tairix-icon",
  "tairix-input",
+ "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
+ "tairix-sysconfig",
  "tairix-theme",
+ "tairix-timesync",
+ "tairix-tz",
+ "tairix-util",
  "tairix-window",
 ]
 
@@ -1538,10 +1547,12 @@ dependencies = [
  "tairix-sandbox",
  "tairix-soundtheme",
  "tairix-svg",
+ "tairix-sysconfig",
  "tairix-taskbar",
  "tairix-theme",
  "tairix-touch",
  "tairix-tz",
+ "tairix-users",
  "tairix-util",
  "tairix-vt",
  "tairix-wallpaper",
@@ -3257,6 +3268,8 @@ name = "tairix-login"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appload",
+ "tairix-appstore",
  "tairix-buildcfg",
  "tairix-caps",
  "tairix-curses",
@@ -3390,7 +3403,6 @@ dependencies = [
  "tairix-partition",
  "tairix-proglib",
  "tairix-syshelp",
- "tairix-timesync",
  "tairix-users",
  "tairix-util",
 ]
@@ -4028,6 +4040,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-settingsd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-caps",
+ "tairix-log",
+ "tairix-netconfig",
+ "tairix-rt",
+ "tairix-sysconfig",
+]
+
+[[package]]
 name = "tairix-signkeys"
 version = "0.0.0"
 dependencies = [
@@ -4479,7 +4504,6 @@ dependencies = [
  "tairix-kernel-core",
  "tairix-kernel-sec",
  "tairix-log",
- "tairix-timesync",
  "tairix-users",
 ]
 
@@ -5035,6 +5059,7 @@ dependencies = [
  "tairix-partition",
  "tairix-syshelp",
  "tairix-test-arxfs-image",
+ "tairix-users",
 ]
 
 [[package]]
@@ -7413,6 +7438,20 @@ dependencies = [
 
 [[package]]
 name = "tairix-test-timed-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-test-netstack-wire",
+ "tairix-timesync",
+]
+
+[[package]]
+name = "tairix-test-timed-switch-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",

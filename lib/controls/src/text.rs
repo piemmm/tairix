@@ -1512,7 +1512,7 @@ impl SecretField {
 
     /// Record that the owner offered the secret, as Enter does: the field
     /// reads `[input complete]`, and its next edit begins a new secret.
-    pub(crate) fn submit(&mut self) {
+    pub fn submit(&mut self) {
         let _ = self.marker.submit();
     }
 

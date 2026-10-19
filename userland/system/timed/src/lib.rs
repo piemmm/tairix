@@ -1,11 +1,20 @@
 //! TAIRiX time-synchronisation service (`timed`) — the orchestration half.
 //!
 //! `timed` is the only holder of `CAP_TIME_SET` on a running machine. It reads
-//! the clock, decides whether to believe it (`tairix_timesync`), queries the
-//! network time servers that crate's source policy selected
-//! (`tairix_net::ntp`), and applies a validated sample. This crate is that orchestration over **injected seams**,
-//! so all of it is host-tested; `src/run.rs` wires the real clock, sockets,
-//! resolver, and files.
+//! the board's clock chip, decides whether to believe the clock
+//! (`tairix_timesync`), queries the network time servers that crate's source
+//! policy selected (`tairix_net::ntp`), and applies a validated sample. This
+//! crate is that orchestration over **injected seams**, so all of it is
+//! host-tested; `src/run.rs` wires the real clock, sockets, resolver, and
+//! files.
+//!
+//! # Network time is a switch, the clock chip is not
+//!
+//! `time.network = off` drops the half that asks the network ([`NetworkTime`])
+//! and keeps the chip, so a machine with network time off still boots with
+//! the time its chip vouches for. The reactor follows the machine
+//! configuration while it runs and hands [`retune`]'s answer to
+//! [`Timed::replace_network`] or [`Timed::set_refresh`].
 //!
 //! # The authority split
 //!
@@ -32,18 +41,21 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::fs::{DirChangeBatch, DirWatchStatus};
 use tairix_abi::rtc_ipc::RtcReading;
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, FieldValue, WallClockReading, WallTimeState};
 use tairix_log::{Event, Field, Level, Sink};
-use tairix_net::ntp::Query;
+use tairix_net::addr::IpAddr;
+use tairix_net::ntp::{Query, MIN_POLL};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::timesync::evaluate_datagram;
 use tairix_timesync::{
-    events, ClockUpdate, Event as SyncEvent, ServerSelection, ServerSource, SyncReason, SyncRecord,
-    TimeServer, TimeSync,
+    events, select_servers, ClockUpdate, Event as SyncEvent, ServerSelection, ServerSource,
+    SyncReason, SyncRecord, TimeServer, TimeSync,
 };
 use tairix_util::retry::RetryLadder;
 
@@ -155,20 +167,31 @@ pub enum Step {
     Idle,
 }
 
-/// The time-synchronisation service: the clock policy, the NTP engine, the
-/// sandboxed evaluation, and the persisted record, over injected seams.
+/// The time-synchronisation service: the clock chip, and — while network time
+/// is switched on — the clock policy, the NTP engine, and the sandboxed
+/// evaluation, over injected seams.
 pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K: RtcSource> {
     clock: C,
     store: R,
-    transport: T,
     sandbox: ParserSandbox<L, S>,
     sink: S,
     rtc: K,
-    sync: TimeSync,
-    record: SyncRecord,
     /// The ladder for re-reading the RTC while its driver is not up yet, or
     /// `None` once the chip answered or the ladder is spent.
     rtc_retry: Option<RetryLadder>,
+    /// The persisted record as this boot knows it.
+    record: SyncRecord,
+    /// When the last request left, so a replacement network half asks no
+    /// sooner after it than the poll floor allows.
+    last_query: Option<Duration64>,
+    /// The network half, or `None` while network time is switched off.
+    network: Option<Network<T>>,
+}
+
+/// The half of the service that asks the network.
+struct Network<T> {
+    transport: T,
+    sync: TimeSync,
     /// The servers in use, held only so an audit record can name the one a
     /// decision was about; the engine itself addresses them by index.
     servers: Vec<TimeServer>,
@@ -182,21 +205,27 @@ pub struct Timed<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K
     exhaustion_reported: bool,
 }
 
-/// Everything [`Timed::new`] needs, so the constructor does not grow a
-/// six-argument signature.
-pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K: RtcSource> {
-    /// The wall and monotonic clocks.
-    pub clock: C,
-    /// The persisted last-seen record's backing document.
-    pub store: R,
-    /// The datagram transport to the servers in use.
+impl<T> Network<T> {
+    /// The audit field naming a server by index.
+    ///
+    /// An index the list does not hold cannot come from the engine (its
+    /// rotation is bounded by the count it was built with), so the field
+    /// states the index rather than inventing a name.
+    fn server_field(&self, index: u8) -> Field<'_> {
+        Field {
+            key: "server",
+            value: match self.servers.get(usize::from(index)) {
+                Some(server) => FieldValue::Str(&server.name),
+                None => FieldValue::UnsignedInt(u64::from(index)),
+            },
+        }
+    }
+}
+
+/// What the network half is built from.
+pub struct NetworkTime<T: Transport> {
+    /// The datagram transport to the selected servers.
     pub transport: T,
-    /// The sandbox the response evaluation runs in.
-    pub sandbox: ParserSandbox<L, S>,
-    /// The audit sink.
-    pub sink: S,
-    /// The board's real-time clock.
-    pub rtc: K,
     /// The servers to query and the tier they came from.
     pub selection: ServerSelection,
     /// The steady-state refresh cadence, measured in uptime.
@@ -206,11 +235,30 @@ pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: S
     pub entropy: u64,
 }
 
+/// Everything [`Timed::new`] needs, so the constructor does not grow a
+/// six-argument signature.
+pub struct TimedConfig<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink, K: RtcSource> {
+    /// The wall and monotonic clocks.
+    pub clock: C,
+    /// The persisted last-seen record's backing document.
+    pub store: R,
+    /// The sandbox the response evaluation runs in.
+    pub sandbox: ParserSandbox<L, S>,
+    /// The audit sink.
+    pub sink: S,
+    /// The board's real-time clock.
+    pub rtc: K,
+    /// The network half to start with, or `None` where network time is
+    /// switched off.
+    pub network: Option<NetworkTime<T>>,
+}
+
 impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: RtcSource>
     Timed<C, R, T, L, S, K>
 {
-    /// Build the service, deciding from the clock's reading and the persisted
-    /// record when the first query of this boot is due.
+    /// Build the service: read the clock chip, and decide from the clock's
+    /// reading and the persisted record when the first query of this boot is
+    /// due.
     ///
     /// A clock that cannot be read is treated as unset: correcting a clock we
     /// could not see beats believing a reading we never got.
@@ -219,13 +267,10 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         let TimedConfig {
             clock,
             store,
-            transport,
             sandbox,
             sink,
             mut rtc,
-            selection,
-            refresh,
-            entropy,
+            network,
         } = config;
         let record = read_record(&store);
         // The RTC first, so a board that has one enters the decision matrix
@@ -237,48 +282,130 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
             RTC_RETRY_ATTEMPTS,
             seed_clock_from_rtc(&mut rtc, &clock, &sink),
         );
-        let reading = clock
-            .wall()
-            .unwrap_or_else(|_| WallClockReading::new(Time64::from_secs(0), WallTimeState::Unset));
-        let ServerSelection { source, servers } = selection;
-        let count = u8::try_from(servers.len()).unwrap_or(u8::MAX);
-        let sync = TimeSync::new(count, refresh, reading, record, clock.monotonic(), entropy);
-        let service = Self {
+        let mut service = Self {
             clock,
             store,
-            transport,
             sandbox,
             sink,
             rtc,
-            sync,
-            record,
             rtc_retry,
-            servers,
-            source,
-            exhaustion_reported: false,
+            record,
+            last_query: None,
+            network: None,
         };
-        service.audit_startup();
+        service.network = network.map(|network| service.build(network, false));
+        service.audit_network(events::SERVICE_READY, "timed: running");
         service
+    }
+
+    /// Replace the network half with `network`, or switch network time off
+    /// with `None`, keeping the clock chip and the record as they are.
+    ///
+    /// A half switched on queries as promptly as an unset clock would; one
+    /// replacing another decides from the clock and the record as a start
+    /// does. Either way its first request waits out the poll floor after the
+    /// last one sent.
+    pub fn replace_network(&mut self, network: Option<NetworkTime<T>>) {
+        let was_on = self.network.is_some();
+        let built = network.map(|network| self.build(network, !was_on));
+        if built.is_none() {
+            // Nothing is left to evaluate, so no worker is kept waiting.
+            self.sandbox.release();
+        }
+        let message = match (was_on, built.is_some()) {
+            (_, false) => "timed: network time was switched off",
+            (false, true) => "timed: network time was switched on",
+            (true, true) => "timed: the time servers in use changed",
+        };
+        self.network = built;
+        self.audit_network(events::NETWORK_TIME_CHANGED, message);
+    }
+
+    /// Change the refresh cadence of the network half in place, keeping its
+    /// servers and what it learned of them.
+    pub fn set_refresh(&mut self, refresh: Duration64) {
+        let now = self.clock.monotonic();
+        if let Some(network) = self.network.as_mut() {
+            network.sync.set_refresh(refresh, now);
+            self.audit_network(
+                events::NETWORK_TIME_CHANGED,
+                "timed: the refresh cadence changed",
+            );
+        }
+    }
+
+    /// The settings store has become reachable: read the record it holds,
+    /// keep what this boot learned beside it, and decide again from it.
+    ///
+    /// The service starts before the root holding the record is mounted, so
+    /// without this its went-backwards and stale-boot rules would
+    /// never see a record at all. `entropy` must be a fresh CSPRNG word.
+    pub fn store_reachable(&mut self, entropy: u64) {
+        let stored = read_record(&self.store);
+        let merged = match self.record.last_sync {
+            Some(sync) => stored.synced_at(sync),
+            None => stored,
+        };
+        self.record = merged;
+        if merged != stored {
+            self.write_record();
+        }
+        let now = self.clock.monotonic();
+        let reading = self.reading();
+        let Some(network) = self.network.as_mut() else {
+            return;
+        };
+        if let Some(reason) = network.sync.reconsider(reading, merged, now, entropy) {
+            emit(
+                &self.sink,
+                events::CLOCK_DOUBTED,
+                Level::Info,
+                "timed: the last-seen record gives a reason to distrust the clock; it is queried now",
+                &[Field {
+                    key: "urgency",
+                    value: FieldValue::Str(reason_name(reason)),
+                }],
+            );
+        }
+    }
+
+    /// Where the servers in use came from, or `None` while network time is
+    /// switched off.
+    #[must_use]
+    pub fn source(&self) -> Option<ServerSource> {
+        self.network.as_ref().map(|network| network.source)
     }
 
     /// The single monotonic instant the reactor should wake at, or `None` when
     /// there is nothing left to wait for.
     ///
-    /// Folds the RTC ladder in, so a service with no server configured still
-    /// wakes to re-read a clock chip whose driver was not up yet.
+    /// Folds the RTC ladder in, so a service asking no server still wakes to
+    /// re-read a clock chip whose driver was not up yet.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Duration64> {
         let rtc_at = self.rtc_retry.map(|rung| Duration64::from_nanos(rung.at));
-        match (self.sync.next_deadline(), rtc_at) {
+        let engine_at = self
+            .network
+            .as_ref()
+            .and_then(|network| network.sync.next_deadline());
+        match (engine_at, rtc_at) {
             (Some(engine), Some(rtc)) => Some(engine.min(rtc)),
             (only, None) | (None, only) => only,
         }
     }
 
+    /// Whether an evaluation worker is running.
+    #[cfg(test)]
+    fn evaluating(&self) -> bool {
+        self.sandbox.is_live()
+    }
+
     /// Whether every server in use has refused further queries.
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
-        self.sync.is_exhausted()
+        self.network
+            .as_ref()
+            .is_some_and(|network| network.sync.is_exhausted())
     }
 
     /// The persisted record as it now stands.
@@ -293,11 +420,15 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
     /// nonce that authenticates the reply.
     pub fn poll(&mut self, now: Duration64, entropy: u64) -> Step {
         self.poll_rtc(now);
-        let Some(Query { server, packet }) = self.sync.poll(now, entropy) else {
-            if self.sync.is_exhausted() {
-                if !self.exhaustion_reported {
-                    self.exhaustion_reported = true;
-                    self.record_event(
+        let Some(network) = self.network.as_mut() else {
+            return Step::Idle;
+        };
+        let Some(Query { server, packet }) = network.sync.poll(now, entropy) else {
+            if network.sync.is_exhausted() {
+                if !network.exhaustion_reported {
+                    network.exhaustion_reported = true;
+                    emit(
+                        &self.sink,
                         events::SERVERS_EXHAUSTED,
                         Level::Warn,
                         "timed: every time server in use has refused further queries",
@@ -305,26 +436,28 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
                     );
                 }
             } else {
-                self.exhaustion_reported = false;
+                network.exhaustion_reported = false;
             }
             return Step::Idle;
         };
         // A query is due, so the engine is not exhausted: a later exhaustion
         // is a fresh transition and is reported again.
-        self.exhaustion_reported = false;
-        match self.transport.send(server, &packet) {
+        network.exhaustion_reported = false;
+        self.last_query = Some(now);
+        match network.transport.send(server, &packet) {
             Ok(()) => Step::Queried(server),
             Err(err) => {
                 // No packet left the machine. The engine's response timeout
                 // ends the transaction and its backoff schedules the retry, so
                 // a network that is not up yet costs one silent attempt per
                 // backoff step rather than a spin.
-                self.record_event(
+                emit(
+                    &self.sink,
                     events::QUERY_NOT_SENT,
                     Level::Info,
                     "timed: no request could be sent to the time server",
                     &[
-                        self.server_field(server),
+                        network.server_field(server),
                         Field {
                             key: "error",
                             value: FieldValue::Error(err),
@@ -343,13 +476,18 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
     /// every bit of state alone, so an injected flood cannot cancel the real
     /// answer.
     pub fn on_datagram(&mut self, now: Duration64, bytes: &[u8]) -> Step {
-        let Some(txn) = self.sync.outstanding() else {
+        let reading = self.reading();
+        let Some(network) = self.network.as_mut() else {
+            return Step::Idle;
+        };
+        let Some(txn) = network.sync.outstanding() else {
             return Step::Idle;
         };
         let verdict = match evaluate_datagram(&mut self.sandbox, &txn, now, bytes) {
             Ok(verdict) => verdict,
             Err(failure) => {
-                self.record_event(
+                emit(
+                    &self.sink,
                     events::EVALUATION_FAILED,
                     Level::Warn,
                     "timed: the sandboxed response evaluation produced no usable verdict",
@@ -361,14 +499,11 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
                 return Step::NoSample;
             }
         };
-        let reading = self
-            .clock
-            .wall()
-            .unwrap_or_else(|_| WallClockReading::new(Time64::from_secs(0), WallTimeState::Unset));
-        match self.sync.on_reply(now, reading, verdict) {
+        match network.sync.on_reply(now, reading, verdict) {
             SyncEvent::Apply(update) => self.apply(update),
             SyncEvent::Refused(reason) => {
-                self.record_event(
+                emit(
+                    &self.sink,
                     events::SAMPLE_REFUSED,
                     Level::Info,
                     "timed: the server answered with a sample that could not be used",
@@ -380,12 +515,13 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
                 Step::NoSample
             }
             SyncEvent::ServerRetired { server, code } => {
-                self.record_event(
+                emit(
+                    &self.sink,
                     events::SERVER_RETIRED,
                     Level::Warn,
                     "timed: the time server refused further queries and has been retired",
                     &[
-                        self.server_field(server),
+                        network.server_field(server),
                         Field {
                             key: "kiss",
                             value: FieldValue::Str(kiss_name(code)),
@@ -395,16 +531,58 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
                 Step::NoSample
             }
             SyncEvent::RateLimited { server } => {
-                self.record_event(
+                emit(
+                    &self.sink,
                     events::SERVER_RATE_LIMITED,
                     Level::Info,
                     "timed: the time server asked for a slower rate; its interval is widened",
-                    &[self.server_field(server)],
+                    &[network.server_field(server)],
                 );
                 Step::NoSample
             }
             SyncEvent::Ignored => Step::Idle,
         }
+    }
+
+    /// Build the network half from `network`, its first query held past the
+    /// poll floor after the last request; `switched_on` makes it prompt.
+    fn build(&self, network: NetworkTime<T>, switched_on: bool) -> Network<T> {
+        let NetworkTime {
+            transport,
+            selection: ServerSelection { source, servers },
+            refresh,
+            entropy,
+        } = network;
+        let count = u8::try_from(servers.len()).unwrap_or(u8::MAX);
+        let now = self.clock.monotonic();
+        let sync = if switched_on {
+            TimeSync::switched_on(count, refresh, now, entropy)
+        } else {
+            TimeSync::new(count, refresh, self.reading(), self.record, now, entropy)
+        };
+        let floor = self.last_query.map(|sent| {
+            Duration64::from_nanos(
+                sent.saturating_total_nanos()
+                    .saturating_add(MIN_POLL.saturating_total_nanos()),
+            )
+        });
+        Network {
+            transport,
+            sync: match floor {
+                Some(floor) => sync.not_before(floor),
+                None => sync,
+            },
+            servers,
+            source,
+            exhaustion_reported: false,
+        }
+    }
+
+    /// The wall clock's reading, or an unset one where it cannot be read.
+    fn reading(&self) -> WallClockReading {
+        self.clock
+            .wall()
+            .unwrap_or_else(|_| WallClockReading::new(Time64::from_secs(0), WallTimeState::Unset))
     }
 
     /// Apply a validated clock update and persist the record.
@@ -454,17 +632,7 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         // The record is what lets a future boot tell a short power-off from a
         // long one. Losing it costs that distinction, never the clock.
         self.record = self.record.synced_at(update.wall);
-        if let Err(err) = self.store.write(&self.record.to_bytes()) {
-            self.record_event(
-                events::RECORD_NOT_WRITTEN,
-                Level::Warn,
-                "timed: the clock was set but the last-seen record could not be written",
-                &[Field {
-                    key: "error",
-                    value: FieldValue::Error(err),
-                }],
-            );
-        }
+        self.write_record();
         // Write the validated instant back to the board's clock chip, so a
         // machine that syncs once then boots offline still starts from a good
         // time. A refusal costs the next boot its head start and nothing
@@ -493,6 +661,21 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
             ),
         }
         Step::ClockSet(update)
+    }
+
+    /// Persist the record, stating a refusal.
+    fn write_record(&self) {
+        if let Err(err) = self.store.write(&self.record.to_bytes()) {
+            self.record_event(
+                events::RECORD_NOT_WRITTEN,
+                Level::Warn,
+                "timed: the last-seen record could not be written",
+                &[Field {
+                    key: "error",
+                    value: FieldValue::Error(err),
+                }],
+            );
+        }
     }
 
     /// Climb the RTC ladder if a rung is due, and stop climbing once the chip
@@ -530,51 +713,58 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         }
     }
 
-    /// Record what the service decided about the clock at startup, and where
-    /// the servers it will ask came from.
+    /// Record what the service now asks the network: nothing while network
+    /// time is off; otherwise why its next query is urgent, where its servers
+    /// came from and how many there are, and its refresh cadence.
     ///
-    /// The set is never empty — the selection's lowest tier is the built-in
-    /// fallback — so this is the one start-up record, and `source` is what
-    /// tells an operator whether the machine is asking their server, their
-    /// network's, or the public pool.
-    fn audit_startup(&self) {
+    /// While on, the set is never empty — the selection's lowest tier is the
+    /// built-in fallback — so `source` is what tells an operator whether the
+    /// machine is asking their server, their network's, or the public pool.
+    fn audit_network(&self, id: tairix_log::EventId, message: &str) {
+        let Some(network) = self.network.as_ref() else {
+            self.record_event(
+                id,
+                Level::Info,
+                message,
+                &[Field {
+                    key: "network",
+                    value: FieldValue::Str("off"),
+                }],
+            );
+            return;
+        };
         self.record_event(
-            events::SERVICE_READY,
+            id,
             Level::Info,
-            "timed: running",
+            message,
             &[
                 Field {
+                    key: "network",
+                    value: FieldValue::Str("on"),
+                },
+                Field {
                     key: "urgency",
-                    value: match self.sync.urgency() {
+                    value: match network.sync.urgency() {
                         Some(reason) => FieldValue::Str(reason_name(reason)),
                         None => FieldValue::Str("refresh"),
                     },
                 },
                 Field {
                     key: "source",
-                    value: FieldValue::Str(self.source.as_str()),
+                    value: FieldValue::Str(network.source.as_str()),
                 },
                 Field {
                     key: "servers",
-                    value: FieldValue::UnsignedInt(u64::try_from(self.servers.len()).unwrap_or(0)),
+                    value: FieldValue::UnsignedInt(
+                        u64::try_from(network.servers.len()).unwrap_or(0),
+                    ),
+                },
+                Field {
+                    key: "refresh_secs",
+                    value: FieldValue::SignedInt(network.sync.refresh().secs()),
                 },
             ],
         );
-    }
-
-    /// The audit field naming a server by index.
-    ///
-    /// An index the list does not hold cannot come from the engine (its
-    /// rotation is bounded by the count it was built with), so the field
-    /// states the index rather than inventing a name.
-    fn server_field(&self, index: u8) -> Field<'_> {
-        Field {
-            key: "server",
-            value: match self.servers.get(usize::from(index)) {
-                Some(server) => FieldValue::Str(&server.name),
-                None => FieldValue::UnsignedInt(u64::from(index)),
-            },
-        }
     }
 
     /// Emit one audit record.
@@ -587,6 +777,116 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
     ) {
         emit(&self.sink, id, level, message, fields);
     }
+}
+
+/// The network-time half of the machine configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetworkSettings {
+    /// Whether the clock is kept from the network at all.
+    pub on: bool,
+    /// The servers the operator named, in their order.
+    pub configured: Vec<String>,
+    /// The steady-state refresh cadence, measured in uptime.
+    pub refresh: Duration64,
+}
+
+/// What a fresh reading of the configuration asks of the network half.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Retune {
+    /// Nothing it depends on changed.
+    Keep,
+    /// Network time was switched off.
+    Off,
+    /// Ask these servers: network time was switched on, the operator's
+    /// servers changed, or a better tier appeared.
+    Select(ServerSelection),
+    /// Only the refresh cadence changed.
+    Refresh(Duration64),
+}
+
+/// What `next` asks of a service that last applied `held` and is asking
+/// servers from `source` (`None` while network time is off).
+///
+/// `learned` reads the servers the network offers; it is asked only when no
+/// operator's server would outrank them. A strictly better tier replaces the
+/// servers in use, and an equal one does not: a renewed lease naming a
+/// different server would otherwise reset the rotation and the backoff, and
+/// forget which servers had refused. An operator's own change always applies.
+pub fn retune(
+    held: &NetworkSettings,
+    source: Option<ServerSource>,
+    next: &NetworkSettings,
+    learned: impl FnOnce() -> Vec<IpAddr>,
+) -> Retune {
+    if !next.on {
+        return if source.is_some() {
+            Retune::Off
+        } else {
+            Retune::Keep
+        };
+    }
+    let selection = selection_for(next, learned);
+    let replace =
+        source.is_none_or(|source| next.configured != held.configured || selection.source > source);
+    if replace {
+        Retune::Select(selection)
+    } else if next.refresh != held.refresh {
+        Retune::Refresh(next.refresh)
+    } else {
+        Retune::Keep
+    }
+}
+
+/// The servers `settings` asks, with `learned` read only when no operator's
+/// server outranks what the network offers.
+pub fn selection_for(
+    settings: &NetworkSettings,
+    learned: impl FnOnce() -> Vec<IpAddr>,
+) -> ServerSelection {
+    let learned = if settings.configured.is_empty() {
+        learned()
+    } else {
+        Vec::new()
+    };
+    select_servers(&settings.configured, &learned)
+}
+
+/// What a drained batch from the configuration watch asks for, least first.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum WatchVerdict {
+    /// Nothing the configuration lives in changed.
+    Unconcerned,
+    /// The configuration may have changed: read it again.
+    Reread,
+    /// The watched directory went away, or the configuration's own directory
+    /// came or went: watch again, then read.
+    Rewatch,
+}
+
+/// The verdict on change batch `bytes` from a watch on a directory holding
+/// the entry `name`, and whether more changes wait.
+///
+/// `exact` is a watch on the configuration's own directory, where `name` is
+/// the file; otherwise it is on that directory's parent, waiting for the
+/// directory `name` to appear. A batch that cannot be decoded is taken as the
+/// worst case.
+#[must_use]
+pub fn watch_verdict(bytes: &[u8], exact: bool, name: &[u8]) -> (WatchVerdict, bool) {
+    let Ok(batch) = DirChangeBatch::decode(bytes) else {
+        return (WatchVerdict::Rewatch, false);
+    };
+    if batch.status == DirWatchStatus::Gone {
+        return (WatchVerdict::Rewatch, false);
+    }
+    if !batch.concerns(name) {
+        return (WatchVerdict::Unconcerned, batch.more);
+    }
+    let verdict = if exact {
+        WatchVerdict::Reread
+    } else {
+        WatchVerdict::Rewatch
+    };
+    (verdict, batch.more)
 }
 
 /// Emit one audit record through `sink`.
@@ -686,6 +986,7 @@ const fn reason_name(reason: SyncReason) -> &'static str {
         SyncReason::Implausible => "implausible",
         SyncReason::WentBackwards => "went_backwards",
         SyncReason::StaleBoot => "stale_boot",
+        SyncReason::SwitchedOn => "switched_on",
     }
 }
 
@@ -729,27 +1030,26 @@ const fn failure_name(failure: tairix_sandbox::timesync::TimeSyncFailure) -> &'s
 
 /// First delay before re-reading the configuration store, in nanoseconds.
 ///
-/// `timed` is a boot-floor service and starts *before* the root
-/// holding the store is mounted, so its first read normally finds nothing.
-/// There is no userland event for "the root is mounted", so the store is
-/// re-read on this bounded, doubling schedule folded into the reactor's own
-/// deadline — the tickless fallback, never a spin, and never a wait on the
-/// start-up path, which would hold the boot up behind a service nothing else
-/// is waiting for.
+/// `timed` starts *before* the root holding the store is mounted, so its first
+/// read normally finds nothing. There is no userland event for "the root is
+/// mounted", so the store is looked for again on this bounded, doubling
+/// schedule folded into the reactor's own deadline — the tickless fallback,
+/// never a spin, and never a wait on the start-up path, which would hold the
+/// boot up behind a service nothing else is waiting for.
 pub const CONFIG_RETRY_BASE_NANOS: u64 = 4_000_000_000;
 
 /// How many rungs the configuration ladder climbs before giving up.
 ///
 /// Eight doublings from four seconds span about seventeen minutes: far longer
-/// than any unlock takes, and finite, so a machine that genuinely has no
-/// server configured stops reading rather than re-reading a file for the rest
-/// of the boot. Configuring a server later means restarting the service.
+/// than any unlock takes, and finite, so a machine whose network never offers
+/// a server stops asking rather than asking for the rest of the boot. A change
+/// to the configuration itself arrives through its watch, not the ladder.
 pub const CONFIG_RETRY_ATTEMPTS: u32 = 8;
 
 /// First delay before re-reading the board's real-time clock, in nanoseconds.
 ///
-/// The RTC is served by an autoloaded user-space driver, so on a boot-floor
-/// service the endpoint is usually not bound yet at start-up. There is no
+/// The RTC is served by an autoloaded user-space driver, so the endpoint is
+/// usually not bound yet when this service starts. There is no
 /// userland event for "that driver bound", so the read climbs the same
 /// bounded ladder the configuration read does — a one-shot timer folded into
 /// the reactor's own deadline, never a spin.

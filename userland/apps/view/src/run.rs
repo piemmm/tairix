@@ -1503,6 +1503,7 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
+            | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::DragOver { .. }

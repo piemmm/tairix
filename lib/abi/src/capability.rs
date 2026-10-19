@@ -776,6 +776,26 @@ impl CapabilityId {
     /// without the other is what splits it off.
     pub const NET_DISCOVER_ALL: Self = Self(50);
 
+    /// Change the machine's settings: ask the settings service to write the
+    /// machine configuration and the per-interface network configuration, and
+    /// to read the network configuration, which is not open.
+    ///
+    /// The service binds [`crate::settings_ipc::SETTINGS_ENDPOINT`] as a
+    /// restricted-sender call endpoint requiring this capability, so the kernel
+    /// refuses a call from a task that does not hold it. It guards the whole
+    /// machine-settings store, every key of every document the service owns,
+    /// and it is granted to the configuration tools an administrator runs
+    /// elevated — never to a session or an application, so only an elevated
+    /// administrator changes the machine's settings or reads its addressing.
+    /// The store's own files are the service's, so no other principal, however
+    /// its identity is set, writes them.
+    ///
+    /// Not covered by an existing capability: `CAP_SYSTEM_UPDATE` remounts the
+    /// read-only system volume, which a settings change must not need, and
+    /// `CAP_NET_ADMIN` reconfigures the running network stack, which a change
+    /// to the login policy or the clock must not be able to.
+    pub const SETTINGS_WRITE: Self = Self(51);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -836,6 +856,7 @@ impl CapabilityId {
         (Self::AUDIO_DEVICE, "CAP_AUDIO_DEVICE"),
         (Self::AUDIO_CAPTURE, "CAP_AUDIO_CAPTURE"),
         (Self::NET_DISCOVER_ALL, "CAP_NET_DISCOVER_ALL"),
+        (Self::SETTINGS_WRITE, "CAP_SETTINGS_WRITE"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -982,6 +1003,7 @@ mod tests {
         assert_eq!(CapabilityId::AUDIO_DEVICE.as_u16(), 48);
         assert_eq!(CapabilityId::AUDIO_CAPTURE.as_u16(), 49);
         assert_eq!(CapabilityId::NET_DISCOVER_ALL.as_u16(), 50);
+        assert_eq!(CapabilityId::SETTINGS_WRITE.as_u16(), 51);
     }
 
     #[test]
@@ -1029,6 +1051,10 @@ mod tests {
             CapabilityId::NET_DISCOVER_ALL.name(),
             Some("CAP_NET_DISCOVER_ALL")
         );
+        assert_eq!(
+            CapabilityId::SETTINGS_WRITE.name(),
+            Some("CAP_SETTINGS_WRITE")
+        );
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -1039,15 +1065,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=50 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=51 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=50 {
+        for raw in 1..=51 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(51).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(52).expect("in range").name(), None);
     }
 
     #[test]

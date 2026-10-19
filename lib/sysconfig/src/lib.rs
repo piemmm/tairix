@@ -1,18 +1,19 @@
 //! The boot-time system-configuration store engine.
 //!
-//! TAIRiX keeps its administrator-settable boot-time configuration in one
-//! text document on the root volume,
-//! [`CONFIG_PATH`](`/System/Settings/Configuration/system.conf`). This crate
-//! is the **single definition** of that document: the line grammar, the
-//! closed key registry, each key's typed value set, the fail-closed parser,
-//! and the canonical render. The `configure` command app writes the store
-//! through this engine and every boot-time consumer (the login service's
-//! `os.loginType`, today) reads it through the same engine, so the two can
-//! never diverge.
+//! TAIRiX keeps its machine-wide boot-time configuration in one text
+//! document, `system.conf`, in two layers ([`LAYERS`]): the image's own
+//! default, read-only on the `/System` volume, and the administrator's at
+//! [`CONFIG_PATH`](`/System/Settings/Configuration/system.conf`), which
+//! replaces the default whole once it exists. This crate is the **single
+//! definition** of that document: the line grammar, the closed key registry,
+//! each key's typed value set, the fail-closed parser, and the canonical
+//! render. The settings service writes the administrator's layer through this
+//! engine and every consumer reads through it, so the writer and the readers
+//! can never diverge.
 //!
-//! The store is parsed only **after** the root is mounted — it lives inside
-//! `/System/Settings`, which does not exist before the mount — so a
-//! pre-unlock consumer simply runs on defaults ([`SystemConfig::default`]).
+//! The administrator's layer is on the root volume, so a consumer that runs
+//! before the root is mounted has only the image's, and one that can reach
+//! neither runs on defaults ([`SystemConfig::default`]).
 //!
 //! # Grammar
 //!
@@ -80,6 +81,18 @@
 //!   none, not that the machine never queries — the clock service then
 //!   prefers what DHCP offered, and failing that its own built-in
 //!   public-pool fallback.
+//! * `time.refresh` — `6h`, `12h`, `1d` (default), `2d`, or `7d`: how much
+//!   *uptime* passes between steady-state re-queries. A closed set rather
+//!   than a free-form span, so no configuration can ask for a cadence that
+//!   abuses a public server; the client's own hard floor applies on top.
+//! * `time.network` — `on` (default) or `off`: whether the clock is kept from
+//!   the network at all. Off, the clock service queries no server but still
+//!   sets the clock from the board's clock chip at boot.
+//! * `time.zone` — `default` or a zone's IANA name (`Europe/London`): the
+//!   civil time zone the machine keeps, which a reader who has chosen none
+//!   reads and the login screen shows. `default` is the zone store's own; a
+//!   name only needs a zone name's shape here, and a reader passes over one
+//!   its store does not hold.
 //! * `input.mouse.debounce` — whole milliseconds, `25` by default, `0` to
 //!   disable: how long after a pointer button is released the *same* button's
 //!   next press is treated as switch chatter rather than a distinct click. A
@@ -89,10 +102,6 @@
 //!   whose rapid-fire mode deliberately emits click pairs at ~10 ms: that is
 //!   real user intent and must not be suppressed. Motion and scroll are never
 //!   debounced.
-//! * `time.refresh` — `6h`, `12h`, `1d` (default), `2d`, or `7d`: how much
-//!   *uptime* passes between steady-state re-queries. A closed set rather
-//!   than a free-form span, so no configuration can ask for a cadence that
-//!   abuses a public server; the client's own hard floor applies on top.
 //! * `audio.output`, `audio.input` — `auto` (default) or an endpoint's
 //!   location (`<16 hex digits>.<index>`, as `audioctl` lists it): the sink
 //!   and the source the machine prefers as defaults beneath any session's
@@ -132,16 +141,29 @@ use tairix_abi::net_ipc::{
     socket_budget_for_ram, NetworkSettings, SOCKET_BUDGET_MAX_SETTABLE, SOCKET_BUDGET_MIN_SETTABLE,
 };
 use tairix_abi::time::Duration64;
+use tairix_abi::zone::ZoneName;
 use tairix_abi::MAX_TIME_SERVERS;
 use tairix_util::conf::{setting_line, Located, ValueShape};
 
-/// The configuration store document, named by the closed
-/// `/System/Settings/` file set so this engine and the pre-unlock reader that
-/// serves it cannot name different files.
+/// The administrator's layer of the document.
 pub const CONFIG_PATH: &str = SystemConfigFile::System.path();
 
-/// Longest single `time.servers` entry, in bytes.
-///
+/// Where a reader takes the document from, first to last
+/// ([`SystemConfigFile::layers`]).
+pub const LAYERS: [&str; 2] = SystemConfigFile::System.layers();
+
+// A settings change can name every key at once, and carry any document this
+// engine accepts.
+const _: () = {
+    assert!(Key::ALL.len() <= tairix_abi::settings_ipc::MAX_SETTINGS);
+    assert!(MAX_CONFIG_LEN <= tairix_abi::settings_ipc::DOCUMENT_MAX);
+    let mut i = 0;
+    while i < Key::ALL.len() {
+        assert!(Key::ALL[i].name().len() <= tairix_abi::settings_ipc::NAME_MAX);
+        i += 1;
+    }
+};
+
 /// Default pointer-button chatter window in milliseconds
 /// (`input.mouse.debounce`).
 ///
@@ -159,9 +181,10 @@ pub const DEFAULT_CLICK_DEBOUNCE_MS: u16 = 25;
 /// unbounded one could make the pointer appear dead.
 pub const MAX_CLICK_DEBOUNCE_MS: u16 = 100;
 
-/// The longest dotted DNS name RFC 1035 §2.3.4 allows (255 wire bytes, so
-/// 253 in dotted form), which also comfortably admits any address literal.
-/// A longer entry is refused rather than truncated.
+/// Longest single `time.servers` entry, in bytes: the longest dotted DNS name
+/// RFC 1035 §2.3.4 allows (255 wire bytes, so 253 in dotted form), which also
+/// comfortably admits any address literal. A longer entry is refused rather
+/// than truncated.
 pub const MAX_TIME_SERVER_LEN: usize = 253;
 
 /// The `time.servers` spelling for "the operator named none", so an empty list
@@ -213,20 +236,22 @@ impl LoginType {
     }
 }
 
-/// The master caching switch (`cache.all`): a pure kill switch and ceiling
-/// over every per-class caching mode.
+/// An on/off machine setting: the master caching switch (`cache.all`), a
+/// kill switch and ceiling over every per-class caching mode, and network
+/// time (`time.network`).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum CacheSwitch {
-    /// Caching is permitted; each class follows its own [`CacheMode`]. The
-    /// default, and the value an absent store implies.
+pub enum Switch {
+    /// On: caching follows each class's own [`CacheMode`], and the clock is
+    /// kept from the network. The default, and the value an absent store
+    /// implies.
     #[default]
     On,
-    /// Caching is disabled system-wide: every SMARTRAM cache is off
-    /// regardless of its per-class setting.
+    /// Off: every SMARTRAM cache is off regardless of its per-class setting,
+    /// or the clock is never set from the network.
     Off,
 }
 
-impl CacheSwitch {
+impl Switch {
     /// The canonical value spelling (`on` / `off`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -590,6 +615,10 @@ pub enum Key {
     TimeServers,
     /// `time.refresh` — the steady-state clock re-query cadence.
     TimeRefresh,
+    /// `time.network` — whether the clock is kept from the network at all.
+    TimeNetwork,
+    /// `time.zone` — the civil time zone the machine keeps.
+    TimeZone,
     /// `input.mouse.debounce` — the pointer-button chatter window, in whole
     /// milliseconds.
     InputMouseDebounce,
@@ -619,6 +648,8 @@ impl Key {
         Self::NetSocketsMem,
         Self::TimeServers,
         Self::TimeRefresh,
+        Self::TimeNetwork,
+        Self::TimeZone,
         Self::InputMouseDebounce,
         Self::AudioOutput,
         Self::AudioInput,
@@ -649,6 +680,8 @@ impl Key {
             | Self::CacheSemantic
             | Self::TimeServers
             | Self::TimeRefresh
+            | Self::TimeNetwork
+            | Self::TimeZone
             | Self::InputMouseDebounce
             | Self::AudioOutput
             | Self::AudioInput
@@ -686,6 +719,8 @@ impl Key {
             Self::InputMouseDebounce => "input.mouse.debounce",
             Self::TimeServers => "time.servers",
             Self::TimeRefresh => "time.refresh",
+            Self::TimeNetwork => "time.network",
+            Self::TimeZone => "time.zone",
             Self::AudioOutput => "audio.output",
             Self::AudioInput => "audio.input",
             Self::AudioLevel => "audio.level",
@@ -704,7 +739,7 @@ impl Key {
     pub const fn shape(self) -> ValueShape {
         ValueShape::Closed(match self {
             Self::LoginType => &["text", "graphical"],
-            Self::CacheAll => &["on", "off"],
+            Self::CacheAll | Self::TimeNetwork => &["on", "off"],
             Self::CacheFilesystem
             | Self::CacheBlock
             | Self::CacheTransform
@@ -718,6 +753,9 @@ impl Key {
             Self::NetSocketsMem => return ValueShape::Free("`auto`, or a byte size such as `64M`"),
             Self::TimeServers => {
                 return ValueShape::Free("`none`, or a comma-separated list of host names")
+            }
+            Self::TimeZone => {
+                return ValueShape::Free("`default`, or a zone's IANA name such as `Europe/London`")
             }
             Self::InputMouseDebounce => {
                 return ValueShape::Free("whole milliseconds, `0` to disable, at most 100")
@@ -746,6 +784,9 @@ fn render_byte_size(bytes: u64) -> String {
     }
     String::from(tairix_util::fmt::format_u64(bytes, &mut buf))
 }
+
+/// The spelling of `time.zone` naming no zone: the zone store's default.
+pub const DEFAULT_ZONE: &str = "default";
 
 /// The spelling of "no preference" for an `audio.*` device key.
 const AUTO: &str = "auto";
@@ -831,7 +872,7 @@ pub struct SystemConfig {
     pub login_type: LoginType,
     /// The master caching switch (`cache.all`): a ceiling over every
     /// per-class mode below.
-    pub cache_all: CacheSwitch,
+    pub cache_all: Switch,
     /// The filesystem cache's per-class switch (`cache.filesystem`).
     pub cache_filesystem: CacheMode,
     /// The block cache's per-class switch (`cache.block`).
@@ -879,6 +920,12 @@ pub struct SystemConfig {
     pub input_mouse_debounce_ms: u16,
     /// The steady-state clock re-query cadence (`time.refresh`).
     pub time_refresh: RefreshCadence,
+    /// Whether the clock is kept from the network (`time.network`). On by
+    /// default; off, the clock service still reads the board's clock chip.
+    pub time_network: Switch,
+    /// The civil time zone the machine keeps (`time.zone`), or `None` for the
+    /// zone store's own default.
+    pub time_zone: Option<ZoneName>,
     /// The sink the machine prefers as the default (`audio.output`), or
     /// [`None`] for the first bound.
     pub audio_output: Option<AudioLocation>,
@@ -899,7 +946,7 @@ impl Default for SystemConfig {
     fn default() -> Self {
         Self {
             login_type: LoginType::default(),
-            cache_all: CacheSwitch::default(),
+            cache_all: Switch::default(),
             cache_filesystem: CacheMode::default(),
             cache_block: CacheMode::default(),
             cache_transform: CacheMode::default(),
@@ -913,6 +960,8 @@ impl Default for SystemConfig {
             net_sockets_mem: SocketBudget::default(),
             time_servers: Vec::new(),
             time_refresh: RefreshCadence::default(),
+            time_network: Switch::default(),
+            time_zone: None,
             input_mouse_debounce_ms: DEFAULT_CLICK_DEBOUNCE_MS,
             audio_output: None,
             audio_input: None,
@@ -1006,6 +1055,11 @@ impl SystemConfig {
     pub fn render_value(&self, key: Key) -> String {
         match key {
             Key::TimeServers => render_time_servers(&self.time_servers),
+            Key::TimeZone => String::from(
+                self.time_zone
+                    .as_ref()
+                    .map_or(DEFAULT_ZONE, ZoneName::as_str),
+            ),
             Key::InputMouseDebounce => {
                 let mut buf = [0u8; 12];
                 String::from(tairix_util::fmt::format_usize(
@@ -1032,12 +1086,14 @@ impl SystemConfig {
     const fn closed_value(&self, key: Key) -> &'static str {
         match key {
             Key::TimeServers => NO_TIME_SERVERS,
+            Key::TimeZone => DEFAULT_ZONE,
             // Rendered numerically by `render_value`; no fixed spelling exists.
             Key::InputMouseDebounce | Key::AudioLevel => "",
             // `auto` has a spelling; an explicit budget is rendered as a
             // byte size by `render_value`.
             Key::NetSocketsMem => "auto",
             Key::TimeRefresh => self.time_refresh.as_str(),
+            Key::TimeNetwork => self.time_network.as_str(),
             Key::LoginType => self.login_type.as_str(),
             Key::CacheAll => self.cache_all.as_str(),
             Key::CacheFilesystem => self.cache_filesystem.as_str(),
@@ -1058,7 +1114,7 @@ impl SystemConfig {
 
     /// The **effective** caching mode for `class`, applying the master
     /// ceiling: [`CacheMode::Off`] whenever `cache.all` is
-    /// [`CacheSwitch::Off`], otherwise the class's own configured mode.
+    /// [`Switch::Off`], otherwise the class's own configured mode.
     ///
     /// This is the one canonical interpretation of the two persisted keys —
     /// deterministic and fail-closed: the master `off` disables everything,
@@ -1066,7 +1122,7 @@ impl SystemConfig {
     /// contradict ambiguously.
     #[must_use]
     pub const fn effective_cache(&self, class: CacheClass) -> CacheMode {
-        if matches!(self.cache_all, CacheSwitch::Off) {
+        if matches!(self.cache_all, Switch::Off) {
             return CacheMode::Off;
         }
         match class {
@@ -1090,7 +1146,7 @@ impl SystemConfig {
                 self.login_type = LoginType::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
             Key::CacheAll => {
-                self.cache_all = CacheSwitch::from_value(value).ok_or(ConfigError::InvalidValue)?;
+                self.cache_all = Switch::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
             Key::CacheFilesystem => {
                 self.cache_filesystem =
@@ -1137,6 +1193,16 @@ impl SystemConfig {
                 self.time_refresh =
                     RefreshCadence::from_value(value).ok_or(ConfigError::InvalidValue)?;
             }
+            Key::TimeNetwork => {
+                self.time_network = Switch::from_value(value).ok_or(ConfigError::InvalidValue)?;
+            }
+            Key::TimeZone => {
+                self.time_zone = if value == DEFAULT_ZONE {
+                    None
+                } else {
+                    Some(ZoneName::new(value).ok_or(ConfigError::InvalidValue)?)
+                };
+            }
             Key::NetSocketsMem => {
                 self.net_sockets_mem =
                     SocketBudget::from_value(value).ok_or(ConfigError::InvalidValue)?;
@@ -1164,8 +1230,8 @@ impl SystemConfig {
     pub fn render(&self) -> String {
         let mut out = String::from(
             "# TAIRiX boot-time system configuration.\n\
-             # Managed by the `configure` command; parsed after the root\n\
-             # filesystem is unlocked. One `key value` setting per line.\n",
+             # Written by the settings service. One `key value` setting per\n\
+             # line.\n",
         );
         for key in Key::ALL {
             out.push_str(key.name());
@@ -1241,10 +1307,10 @@ mod tests {
     use std::string::String;
 
     use super::{
-        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, ParseError,
-        RefreshCadence, SocketBudget, SynCookies, SystemConfig, ValueShape, CONFIG_PATH,
-        DEFAULT_CLICK_DEBOUNCE_MS, MAX_CLICK_DEBOUNCE_MS, MAX_CONFIG_LEN, MAX_TIME_SERVERS,
-        MAX_TIME_SERVER_LEN, NO_TIME_SERVERS,
+        CacheClass, CacheMode, ConfigError, Key, LoginType, NetToggle, ParseError, RefreshCadence,
+        SocketBudget, Switch, SynCookies, SystemConfig, ValueShape, ZoneName, CONFIG_PATH,
+        DEFAULT_CLICK_DEBOUNCE_MS, DEFAULT_ZONE, MAX_CLICK_DEBOUNCE_MS, MAX_CONFIG_LEN,
+        MAX_TIME_SERVERS, MAX_TIME_SERVER_LEN, NO_TIME_SERVERS,
     };
     use std::string::ToString;
     use std::vec;
@@ -1494,7 +1560,7 @@ mod tests {
     #[test]
     fn render_parse_round_trips_exactly() {
         for login_type in [LoginType::Text, LoginType::Graphical] {
-            for cache_all in [CacheSwitch::On, CacheSwitch::Off] {
+            for cache_all in [Switch::On, Switch::Off] {
                 for cache_filesystem in [CacheMode::Auto, CacheMode::Off] {
                     for net_ipv4_enabled in [NetToggle::Enabled, NetToggle::Disabled] {
                         for syncookies in [SynCookies::Auto, SynCookies::Always] {
@@ -1521,6 +1587,8 @@ mod tests {
                                         String::from("2001:db8::1"),
                                     ],
                                     time_refresh: RefreshCadence::TwoDays,
+                                    time_network: cache_all,
+                                    time_zone: ZoneName::new("Asia/Kolkata"),
                                     input_mouse_debounce_ms: 40,
                                     audio_output: AudioLocation::new(0x9f3a, 1).ok(),
                                     audio_input: None,
@@ -1597,7 +1665,7 @@ mod tests {
     fn cache_defaults_are_all_enabled() {
         // An absent store reproduces today's behaviour: every cache on.
         let config = SystemConfig::default();
-        assert_eq!(config.cache_all, CacheSwitch::On);
+        assert_eq!(config.cache_all, Switch::On);
         for class in CacheClass::ALL {
             assert_eq!(config.effective_cache(*class), CacheMode::Auto);
             assert!(config.effective_cache(*class).admits());
@@ -1614,7 +1682,7 @@ mod tests {
              cache.semantic auto\n",
         )
         .expect("parses");
-        assert_eq!(config.cache_all, CacheSwitch::Off);
+        assert_eq!(config.cache_all, Switch::Off);
         assert_eq!(config.cache_filesystem, CacheMode::Off);
         assert_eq!(config.cache_block, CacheMode::Auto);
         assert_eq!(config.cache_transform, CacheMode::Off);
@@ -1790,6 +1858,45 @@ mod tests {
         // stack-wide policy update.
         assert!(!Key::TimeServers.is_network());
         assert!(!Key::TimeRefresh.is_network());
+        assert!(!Key::TimeNetwork.is_network());
+    }
+
+    #[test]
+    fn the_machine_zone_is_the_stores_default_unless_one_is_named() {
+        assert_eq!(SystemConfig::default().time_zone, None);
+        assert_eq!(
+            SystemConfig::default().render_value(Key::TimeZone),
+            "default"
+        );
+        let paris = parse_kind("time.zone Europe/Paris\n").expect("parses");
+        assert_eq!(paris.time_zone, ZoneName::new("Europe/Paris"));
+        assert_eq!(paris.render_value(Key::TimeZone), "Europe/Paris");
+        let mut config = paris;
+        assert_eq!(config.set(Key::TimeZone, DEFAULT_ZONE), Ok(()));
+        assert_eq!(config.time_zone, None);
+        for refused in ["Europe/Lon don", "/London", "Europe//Paris", "Ü"] {
+            assert_eq!(
+                config.set(Key::TimeZone, refused),
+                Err(ConfigError::InvalidValue),
+                "{refused}"
+            );
+        }
+        assert!(!Key::TimeZone.is_network());
+    }
+
+    #[test]
+    fn network_time_is_on_unless_it_is_switched_off() {
+        assert_eq!(SystemConfig::default().time_network, Switch::On);
+        let off = parse_kind("time.network off\n").expect("parses");
+        assert_eq!(off.time_network, Switch::Off);
+        assert_eq!(off.render_value(Key::TimeNetwork), "off");
+        for value in ["true", "OFF", "no"] {
+            assert_eq!(
+                parse_kind(&format!("time.network {value}\n")),
+                Err(ConfigError::InvalidValue),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

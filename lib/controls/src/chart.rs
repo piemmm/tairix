@@ -19,7 +19,10 @@
 //! ([`with_opposing`](Chart::with_opposing)): the box splits at a drawn axis,
 //! the primary series rises above it and the opposing one mirrors below,
 //! tinted by its own role. Two stacked charts would lose the comparison that
-//! matters.
+//! matters. A reading and a part of it — context switches and the preemptions
+//! among them — are one direction on one scale, so the part is drawn within
+//! the whole instead ([`with_within`](Chart::with_within)) and both use the
+//! box's whole height.
 //!
 //! A series is tinted by a [`SignalRole`] rather than the accent, so a CPU
 //! trace reads as the compute colour whether it is showing 5% or 95%, and the
@@ -72,11 +75,28 @@ const AREA_ALPHA: u8 = 128;
 /// Full strength of the area fill's vertical ramp.
 const AREA_RAMP_FULL: u32 = 255;
 
-/// A chart's second, mirrored series and the role it reads as.
+/// A chart's second series and the role it reads as.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Opposing {
+struct Series {
     role: SignalRole,
     samples: Vec<u16>,
+}
+
+/// Where a chart's second series is drawn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Second {
+    /// Mirrored below a drawn axis: the other direction of one reading.
+    Opposing(Series),
+    /// In the same box, direction and scale: a part of what the first counts.
+    Within(Series),
+}
+
+impl Second {
+    const fn series(&self) -> &Series {
+        match self {
+            Self::Opposing(series) | Self::Within(series) => series,
+        }
+    }
 }
 
 /// One bounded, oldest-to-newest history series, plotted as a line with a
@@ -96,7 +116,7 @@ struct Opposing {
 pub struct Chart {
     role: SignalRole,
     samples: Vec<u16>,
-    opposing: Option<Opposing>,
+    second: Option<Second>,
     full_scale: u16,
 }
 
@@ -113,7 +133,7 @@ impl Chart {
         Self {
             role,
             samples: Vec::new(),
-            opposing: None,
+            second: None,
             full_scale: FULL,
         }
     }
@@ -164,10 +184,25 @@ impl Chart {
         role: SignalRole,
         samples: impl IntoIterator<Item = u16>,
     ) -> Self {
-        self.opposing = Some(Opposing {
+        self.second = Some(Second::Opposing(Series {
             role,
             samples: bounded(samples),
-        });
+        }));
+        self
+    }
+
+    /// This chart with a second series reading as `role` drawn within the
+    /// first: in the same box and direction and on the same scale, for a part
+    /// of what the first counts, so both rise over the whole height and the
+    /// part's share of the whole reads at a glance.
+    ///
+    /// Bounded and clamped exactly as [`with_samples`](Self::with_samples).
+    #[must_use]
+    pub fn with_within(mut self, role: SignalRole, samples: impl IntoIterator<Item = u16>) -> Self {
+        self.second = Some(Second::Within(Series {
+            role,
+            samples: bounded(samples),
+        }));
         self
     }
 
@@ -177,9 +212,9 @@ impl Chart {
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
             && self
-                .opposing
+                .second
                 .as_ref()
-                .is_none_or(|opposing| opposing.samples.is_empty())
+                .is_none_or(|second| second.series().samples.is_empty())
     }
 
     /// Paint the chart into `surface` at `bounds` for the active theme.
@@ -188,7 +223,8 @@ impl Chart {
     /// zero sits on the floor and a reading of full capacity on the ceiling,
     /// both inset by half the line's weight so the stroke stays inside its own
     /// box. A chart with an opposing series splits that height at its axis and
-    /// each series claims one half, mirrored.
+    /// each series claims one half, mirrored; a series within the first shares
+    /// its whole box, drawn over it.
     ///
     /// The chart lays down no ground of its own: it draws its trace onto
     /// whatever surface it was given, so the box reads as part of the plate it
@@ -208,22 +244,31 @@ impl Chart {
             return;
         }
 
-        let Some(opposing) = &self.opposing else {
-            let weight = trace_weight(theme, scale, height);
-            let band = Band {
-                box_px: plot_box,
-                rising_up: true,
-            };
-            paint_series(
-                surface,
-                &self.samples,
-                &band,
-                weight,
-                self.role,
-                theme,
-                self.full_scale,
-            );
-            return;
+        let opposing = match &self.second {
+            Some(Second::Opposing(opposing)) => opposing,
+            within => {
+                let weight = trace_weight(theme, scale, height);
+                let band = Band {
+                    box_px: plot_box,
+                    rising_up: true,
+                };
+                let paint = |surface: &mut Surface, samples: &[u16], role| {
+                    paint_series(
+                        surface,
+                        samples,
+                        &band,
+                        weight,
+                        role,
+                        theme,
+                        self.full_scale,
+                    );
+                };
+                paint(surface, &self.samples, self.role);
+                if let Some(Second::Within(part)) = within {
+                    paint(surface, &part.samples, part.role);
+                }
+                return;
+            }
         };
 
         // Nothing recorded in either direction: no axis, so a rule across the

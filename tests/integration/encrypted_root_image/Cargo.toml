@@ -36,3 +36,6 @@ tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=
 tairix-syshelp = { path = "../../../tools/syshelp", version = "=0.0.0" }
 tairix-partition = { path = "../../../lib/partition", version = "=0.0.0" }
 tairix-test-arxfs-image = { path = "../arxfs_image", version = "=0.0.0" }
+# The settings defaults' directory layout, laid out exactly as `tools/mkimage`
+# lays it out on a shipped image.
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }

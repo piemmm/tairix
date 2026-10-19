@@ -71,6 +71,7 @@ pub mod seat;
 pub mod service;
 pub mod service_control;
 pub mod session_ipc;
+pub mod settings_ipc;
 pub mod sound_cue;
 pub mod stdinfo;
 pub mod switchboard_ipc;
@@ -85,6 +86,7 @@ pub mod users_admin;
 pub mod volume;
 pub mod waitset;
 pub mod window_ipc;
+pub mod zone;
 
 #[cfg(feature = "test-util")]
 pub use appinfo::manifest_header;

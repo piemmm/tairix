@@ -788,6 +788,99 @@ fn a_server_count_beyond_the_bound_is_clamped_not_trusted() {
 }
 
 #[test]
+fn a_held_query_waits_and_a_hold_never_brings_one_forward() {
+    let mut client = NtpClient::new(1, MIN_POLL, Duration64::from_secs(10));
+    client.hold_until(Duration64::from_secs(70));
+    assert_eq!(client.next_deadline(), Some(Duration64::from_secs(70)));
+    client.hold_until(Duration64::from_secs(20));
+    assert_eq!(client.next_deadline(), Some(Duration64::from_secs(70)));
+    assert!(client.poll(Duration64::from_secs(69), NONCE).is_none());
+    assert!(client.poll(Duration64::from_secs(70), NONCE).is_some());
+    // A request in flight keeps its response deadline.
+    client.hold_until(Duration64::from_secs(1000));
+    assert_eq!(
+        client.next_deadline(),
+        Some(Duration64::from_nanos(
+            Duration64::from_secs(70).saturating_total_nanos()
+                + RESPONSE_TIMEOUT.saturating_total_nanos()
+        ))
+    );
+}
+
+#[test]
+fn only_a_first_query_not_yet_sent_is_brought_forward() {
+    let mut client = NtpClient::new(1, MIN_POLL, Duration64::from_secs(86_400));
+    assert!(client.expedite_first(Duration64::from_secs(5)));
+    assert_eq!(client.next_deadline(), Some(Duration64::from_secs(5)));
+    // Never later than it already was.
+    assert!(client.expedite_first(Duration64::from_secs(50)));
+    assert_eq!(client.next_deadline(), Some(Duration64::from_secs(5)));
+
+    let q = client
+        .poll(Duration64::from_secs(5), NONCE)
+        .expect("the first query is due");
+    let reply = ReplyBuilder::good(NtpTimestamp::from_raw(NONCE)).encode();
+    let at = Duration64::from_secs(6);
+    assert!(matches!(client.on_datagram(at, &reply), Outcome::Sample(_)));
+    assert_eq!(q.server, 0);
+    let steady = client.next_deadline();
+    // Once a request has left, the cadence decides alone.
+    assert!(!client.expedite_first(Duration64::from_secs(7)));
+    assert_eq!(client.next_deadline(), steady);
+    // An empty client has no first query to bring forward.
+    assert!(!NtpClient::new(0, MIN_POLL, Duration64::ZERO).expedite_first(Duration64::ZERO));
+}
+
+#[test]
+fn a_new_cadence_brings_a_waiting_query_within_it_and_never_later() {
+    let day = Duration64::from_secs(86_400);
+    let mut client = NtpClient::new(1, day, Duration64::from_secs(7 * 86_400));
+    let now = Duration64::from_secs(100);
+    client.set_poll_interval(Duration64::from_secs(6 * 3600), now);
+    assert_eq!(client.poll_interval(), Duration64::from_secs(6 * 3600));
+    assert_eq!(
+        client.next_deadline(),
+        Some(Duration64::from_secs(100 + 6 * 3600))
+    );
+    // A longer cadence leaves the waiting query where it was.
+    client.set_poll_interval(Duration64::from_secs(7 * 86_400), now);
+    assert_eq!(
+        client.next_deadline(),
+        Some(Duration64::from_secs(100 + 6 * 3600))
+    );
+    // The floor still holds.
+    client.set_poll_interval(Duration64::from_secs(1), now);
+    assert_eq!(client.poll_interval(), MIN_POLL);
+}
+
+#[test]
+fn a_new_cadence_leaves_a_failures_backoff_alone() {
+    let mut client = NtpClient::new(2, MIN_POLL, Duration64::ZERO);
+    // Fail until the backoff outlasts the poll floor, so bringing the query
+    // within the new cadence would visibly move it.
+    let mut now;
+    loop {
+        now = client.next_deadline().expect("a query is scheduled");
+        assert!(client.poll(now, NONCE).is_some());
+        now = Duration64::from_nanos(
+            now.saturating_total_nanos() + RESPONSE_TIMEOUT.saturating_total_nanos(),
+        );
+        assert!(client.poll(now, NONCE).is_none());
+        let wait = client
+            .next_deadline()
+            .expect("backed off")
+            .saturating_total_nanos()
+            - now.saturating_total_nanos();
+        if wait > MIN_POLL.saturating_total_nanos() {
+            break;
+        }
+    }
+    let backoff_due = client.next_deadline();
+    client.set_poll_interval(MIN_POLL, now);
+    assert_eq!(client.next_deadline(), backoff_due);
+}
+
+#[test]
 fn the_first_query_can_be_deferred_past_zero() {
     let mut client = NtpClient::new(1, MIN_POLL, Duration64::from_secs(3600));
     assert_eq!(client.next_deadline(), Some(Duration64::from_secs(3600)));

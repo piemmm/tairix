@@ -54,34 +54,33 @@ const OP_CATALOGUE: u8 = 1;
 const OP_LOAD: u8 = 2;
 /// Request opcode: unload the driver instance named by `handle`.
 const OP_UNLOAD: u8 = 3;
-/// Request opcode: read one whitelisted `/System/Settings/` configuration
-/// file (a [`SystemConfigFile`]) off the read-only `/System` volume.
+/// Request opcode: read the image's default of one settings document (a
+/// [`SystemConfigFile`]) off the read-only `/System` volume.
 const OP_READ_CONFIG: u8 = 4;
 
 /// Encoded length of a [`StoreRequest::ReadConfig`]: opcode + `which` (u8).
 pub const READ_CONFIG_REQUEST_LEN: usize = 1 + 1;
 
-/// One of the closed set of `/System/Settings/` configuration files the
-/// read-only `/System` store service will read on a bootstrap client's
-/// behalf.
+/// Where the read-only `/System` volume's own root is seen.
+const SYSTEM_VIEW: &str = "/System";
+
+/// One of the machine's settings documents.
 ///
-/// A bootstrap client needs these *before the root is mounted*
-/// (the device manager needs the network configuration), so it cannot reach
-/// them through the general VFS (which is not mounted until unlock); the
-/// store service already owns
-/// the `/System` volume and serves them from there. The set is **closed and
-/// whitelisted** — the service reads exactly these files and nothing else,
-/// so the endpoint never becomes a general `/System` file-read primitive
-/// (fail closed, no arbitrary path).
+/// Each has two layers. The image's own default ships read-only on the
+/// `/System` volume ([`Self::default_path`]); the administrator's document,
+/// written only by the settings service ([`crate::settings_ipc`]), lives on
+/// the writable root ([`Self::path`]) and replaces the default whole once it
+/// exists ([`Self::layers`]). The set is closed: before the root is mounted
+/// the store service reads exactly these defaults for a bootstrap client
+/// ([`StoreRequest::ReadConfig`]), so its endpoint never becomes a general
+/// `/System` read.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SystemConfigFile {
-    /// `/System/Settings/Configuration/system.conf` — the machine-wide
-    /// system configuration (the stack-wide `net.*` policy the device
-    /// manager delivers to the network stack).
+    /// `system.conf` — the machine-wide system configuration.
     System = 0,
-    /// `/System/Settings/Network/network.conf` — the per-interface network
-    /// configuration (`match.*` binding, static addressing, bonds).
+    /// `network.conf` — the per-interface network configuration (`match.*`
+    /// binding, static addressing, bonds).
     Network = 1,
 }
 
@@ -103,8 +102,7 @@ impl SystemConfigFile {
         }
     }
 
-    /// The file's canonical absolute path (the single source both the
-    /// service and any VFS consumer agree on).
+    /// The administrator's document, on the writable root.
     #[must_use]
     pub const fn path(self) -> &'static str {
         match self {
@@ -113,22 +111,71 @@ impl SystemConfigFile {
         }
     }
 
-    /// The file's path relative to the read-only `/System` **volume's own
-    /// root** (`Settings/Network/network.conf`) — [`Self::path`] with the
-    /// `/System/` view prefix removed.
+    /// The directory holding [`Self::path`], which the settings service owns.
+    #[must_use]
+    pub const fn dir(self) -> &'static str {
+        match self {
+            Self::System => "/System/Settings/Configuration",
+            Self::Network => "/System/Settings/Network",
+        }
+    }
+
+    /// The image's own default, read-only on the `/System` volume.
+    #[must_use]
+    pub const fn default_path(self) -> &'static str {
+        match self {
+            Self::System => "/System/Defaults/Configuration/system.conf",
+            Self::Network => "/System/Defaults/Network/network.conf",
+        }
+    }
+
+    /// Where a reader takes the document from, first to last: the
+    /// administrator's layer, then the image's.
     ///
-    /// This is the one location the pre-unlock store endpoint reads and the
-    /// one an image builder plants, so the writer and the reader cannot
-    /// drift onto different volumes: at runtime `/System/Settings` is the
-    /// *writable* sub-mount backed by the root volume, which no
-    /// bootstrap client can reach, so a document planted at [`Self::path`]
-    /// through the VFS is invisible to every reader of this set.
+    /// The first layer that exists is the document, whole. One that exists
+    /// but cannot be read is the answer, never a reason to read the next: a
+    /// reader that fell back would act on the image's settings while the
+    /// administrator's stood.
+    #[must_use]
+    pub const fn layers(self) -> [&'static str; 2] {
+        [self.path(), self.default_path()]
+    }
+
+    /// The document from the first of its [`Self::layers`] that exists, or
+    /// `None` when neither does.
+    ///
+    /// `read` answers one layer's path: `Ok(None)` for a layer that does not
+    /// exist, and an error for one that exists but cannot be read, which
+    /// ends the search.
+    ///
+    /// # Errors
+    ///
+    /// The first error `read` answers.
+    pub fn read_effective<T, E>(
+        self,
+        mut read: impl FnMut(&'static str) -> Result<Option<T>, E>,
+    ) -> Result<Option<T>, E> {
+        for path in self.layers() {
+            if let Some(document) = read(path)? {
+                return Ok(Some(document));
+            }
+        }
+        Ok(None)
+    }
+
+    /// [`Self::default_path`] relative to the `/System` volume's own root:
+    /// where an image builder plants the default.
     #[must_use]
     pub const fn volume_path(self) -> &'static str {
-        match self {
-            Self::System => "Settings/Configuration/system.conf",
-            Self::Network => "Settings/Network/network.conf",
-        }
+        self.default_path().split_at(SYSTEM_VIEW.len() + 1).1
+    }
+
+    /// [`Self::default_path`] as an absolute path within the `/System`
+    /// volume's own tree: where a reader holding the volume itself, before
+    /// the root is mounted, finds the default.
+    #[must_use]
+    pub const fn on_volume_path(self) -> &'static str {
+        self.default_path().split_at(SYSTEM_VIEW.len()).1
     }
 }
 
@@ -196,17 +243,16 @@ pub enum StoreRequest {
         /// [`StoreRequest::Load`] reply carried ([`decode_load_reply`]).
         handle: u64,
     },
-    /// Read one whitelisted `/System/Settings/` configuration file off the
-    /// read-only `/System` volume the store service owns.
+    /// Read the image's default of one settings document off the read-only
+    /// `/System` volume the store service owns.
     ///
-    /// The device manager needs the network configuration before the
-    /// root is mounted (so it can bring interfaces up on the
-    /// same read-only volume the drivers autoload from), but the general
-    /// VFS path is not mounted until unlock. The store service already
-    /// holds the `/System` volume, so it reads the file and returns its
-    /// bytes. The reply is capability-gated exactly as every other request
-    /// (`CAP_DRV_LOAD`); the file set is closed ([`SystemConfigFile`]), so
-    /// this never becomes a general file-read primitive.
+    /// The device manager needs the network configuration before the root
+    /// is mounted, so it can bring interfaces up, but the general VFS is not
+    /// mounted until unlock. The store service already holds the `/System`
+    /// volume, so it reads the default and returns its bytes. The reply is
+    /// capability-gated exactly as every other request (`CAP_DRV_LOAD`); the
+    /// file set is closed ([`SystemConfigFile`]), so this never becomes a
+    /// general file-read primitive.
     ReadConfig {
         /// Which whitelisted configuration file to read.
         which: SystemConfigFile,
@@ -859,20 +905,110 @@ mod tests {
             SystemConfigFile::Network.path(),
             "/System/Settings/Network/network.conf"
         );
+        assert_eq!(
+            SystemConfigFile::System.default_path(),
+            "/System/Defaults/Configuration/system.conf"
+        );
+        assert_eq!(
+            SystemConfigFile::Network.default_path(),
+            "/System/Defaults/Network/network.conf"
+        );
     }
 
     #[test]
-    fn every_volume_path_is_its_view_path_without_the_system_prefix() {
+    fn each_document_is_directly_inside_its_directory() {
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+            let name = which
+                .path()
+                .strip_prefix(which.dir())
+                .and_then(|rest| rest.strip_prefix('/'));
+            assert!(
+                name.is_some_and(|name| !name.is_empty() && !name.contains('/')),
+                "{which:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_volume_path_is_its_default_without_the_system_prefix() {
         // The pre-unlock reader resolves `volume_path` on the `/System`
-        // volume while a VFS consumer resolves `path`; if the two ever named
-        // different files, an image would plant its configuration where
-        // nothing reads it.
+        // volume while a VFS reader resolves `default_path`; if the two ever
+        // named different files, an image would plant its default where one
+        // of them never looks.
         for which in [SystemConfigFile::System, SystemConfigFile::Network] {
             assert_eq!(
-                which.path().strip_prefix("/System/"),
+                which.default_path().strip_prefix("/System/"),
                 Some(which.volume_path()),
                 "{which:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_effective_document_is_the_first_layer_that_exists() {
+        let mut asked = [""; 2];
+        let mut count = 0;
+        let found = SystemConfigFile::Network.read_effective(|path| {
+            asked[count] = path;
+            count += 1;
+            Ok::<_, Errno>((path == SystemConfigFile::Network.default_path()).then_some(path))
+        });
+        assert_eq!(found, Ok(Some(SystemConfigFile::Network.default_path())));
+        assert_eq!(asked, SystemConfigFile::Network.layers());
+
+        let administrator =
+            SystemConfigFile::System.read_effective(|path| Ok::<_, Errno>(Some(path)));
+        assert_eq!(administrator, Ok(Some(SystemConfigFile::System.path())));
+        let neither = SystemConfigFile::System.read_effective(|_| Ok::<Option<()>, Errno>(None));
+        assert_eq!(neither, Ok(None));
+    }
+
+    #[test]
+    fn a_layer_that_cannot_be_read_ends_the_search() {
+        let mut asked = 0;
+        let refused = SystemConfigFile::System.read_effective(|_| {
+            asked += 1;
+            Err::<Option<()>, _>(Errno::PermissionDenied)
+        });
+        assert_eq!(refused, Err(Errno::PermissionDenied));
+        assert_eq!(
+            asked, 1,
+            "the image's layer stands in only for an absent one"
+        );
+    }
+
+    #[test]
+    fn each_volume_form_is_the_default_seen_from_the_volume_root() {
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+            assert_eq!(
+                which.on_volume_path().strip_prefix('/'),
+                Some(which.volume_path()),
+                "{which:?}"
+            );
+            assert_eq!(
+                which.default_path().strip_prefix(SYSTEM_VIEW),
+                Some(which.on_volume_path()),
+                "{which:?}"
+            );
+        }
+        assert_eq!(
+            SystemConfigFile::Network.volume_path(),
+            "Defaults/Network/network.conf"
+        );
+    }
+
+    #[test]
+    fn a_default_is_never_beneath_a_writable_mount() {
+        // `/System/Logs` and `/System/Settings` are the root volume grafted
+        // over the read-only one, so a default planted beneath either would
+        // be hidden from every reader once the root is mounted.
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+            let default = which.default_path();
+            assert!(
+                !default.starts_with("/System/Settings/") && !default.starts_with("/System/Logs/"),
+                "{which:?}"
+            );
+            assert_eq!(which.layers(), [which.path(), default], "{which:?}");
         }
     }
 

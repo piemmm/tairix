@@ -1,6 +1,6 @@
 ## NAME
 
-datetime — ajustar la fecha y la hora de la máquina
+datetime — fecha, hora y zona horaria de la máquina
 
 ## SYNOPSIS
 
@@ -8,54 +8,79 @@ datetime — ajustar la fecha y la hora de la máquina
 
 ## DESCRIPTION
 
-Abre una ventana de escritorio que muestra el reloj de la máquina en seis
-campos editables — año, mes y día en la primera fila, hora, minuto y
-segundo en la segunda — y ajusta el reloj a lo que indican. Nada cambia
-hasta que se pulsa **Set**.
+Abre la ventana **Date & Time** (Fecha y hora): lo que marca el reloj de
+la máquina, de dónde procede esa hora y los controles que la ajustan. Se
+llega a ella desde el propio menú del reloj del escritorio: haga clic con
+el botón derecho en el reloj de la barra de iconos y elija **Set Date &
+Time…** (Ajustar fecha y hora…). Antes de que se abra, el escritorio
+pide la contraseña de una cuenta que pueda cambiar estos ajustes.
 
-La lectura es UTC. TAIRiX no mantiene ningún desplazamiento de zona
-horaria, así que no hay hora local que mostrar ni que introducir.
+La parte superior de la ventana muestra la hora al segundo, la fecha y
+la zona horaria con su abreviatura y su diferencia respecto a UTC, todo
+ello en la zona propia de la máquina.
 
-Normalmente se llega a la ventana desde el propio menú del reloj del
-escritorio: pulsar el reloj en la barra de iconos y elegir **Set Date &
-Time…**. Ajustar el reloj requiere una autoridad que una sesión de
-escritorio no tiene, de modo que el escritorio pide una cuenta que sí la
-tenga, y esta aplicación se inicia como esa cuenta una vez aceptada la
-contraseña.
+**Date and Time** (Fecha y hora) contiene el reloj propiamente dicho.
 
-Pulsar un campo para escribir en él, o `Tab` para pasar al siguiente.
-Solo se aceptan dígitos, con un `-` inicial permitido en el año para una
-fecha anterior al año 1. `Enter` ajusta el reloj; `Escape` cierra la
-ventana.
+- **Set date and time automatically** (Ajustar fecha y hora
+  automáticamente) mantiene el reloj en hora mediante los servidores de
+  hora de la red. Debajo, la ventana indica de dónde procede la hora del
+  reloj: ajustada desde la red, y cuándo; ajustada a mano; leída del chip
+  de reloj de la placa al arrancar la máquina; o sin ajustar en absoluto.
+  Activar o desactivar el interruptor surte efecto al momento.
+- Mientras el interruptor está activado, el calendario y la hora se
+  muestran, pero no se pueden cambiar. Desactívelo para ajustar el reloj
+  a mano.
+- Elija un día en el calendario y escriba la hora o cámbiela paso a
+  paso; después pulse **Set**. Las teclas de flecha mueven el día elegido
+  un día o una semana, `Page Up` y `Page Down` lo mueven un mes, y con
+  `Shift`, un año; los botones junto al mes y al año recorren los meses y
+  los años sin cambiar el día. En el campo de la hora, `Tab` o `:` pasa
+  de las horas a los minutos y de ahí a los segundos, y `Up` y `Down`
+  cambian paso a paso la parte en la que está el cursor. Con el formato
+  de doce horas, la última parte es **AM** o **PM**: haga clic en ella o
+  pulse `A` o `P`. `Enter` ajusta el reloj.
+- Hasta que elija un día o cambie la hora, el calendario y la hora siguen
+  al reloj en marcha. Una vez que lo haga, conservan lo que eligió hasta
+  que ajuste el reloj o cierre la ventana.
 
-Todos los campos se comprueban antes de ajustar nada, y el primer fallo
-se indica en la ventana en lugar de corregirse en silencio: un mes fuera
-de 1 a 12, una hora fuera de 0 a 23, un minuto o segundo fuera de 0 a 59,
-o un día que no existe en el mes y el año introducidos — el 31 de abril,
-o el 29 de febrero fuera de un año bisiesto. No se ajusta nada cuando un
-campo se rechaza.
+La fecha y la hora que ajuste se interpretan en la zona horaria de la
+máquina. Una hora que los relojes se saltan al adelantarse se rechaza, y
+la ventana indica cuándo cambian los relojes. Si se trata de una hora
+por la que los relojes pasan dos veces al atrasarse, la ventana
+pregunta: elija si se refiere a la de antes del cambio o a la de
+después. Una fecha anterior a la creación de este sistema, o posterior a
+ella en más de un siglo, solo se ajusta después de que usted la confirme,
+porque los certificados no se considerarían de confianza y los archivos
+parecerían más antiguos, o más recientes, de lo que son.
 
-Las fechas anteriores a 1970 y muy posteriores a 2038 son entradas
-ordinarias. El reloj es un valor de 64 bits con signo, así que ninguna de
-las dos es un límite.
+Tras ajustar el reloj, el chip de reloj de la placa se pone a la misma
+hora, para que la máquina la conserve al reiniciarse. Si la máquina no
+tiene chip de reloj, la ventana avisa de que la hora se perderá en el
+próximo reinicio, a menos que la hora de red esté activada.
 
-Si el reloj de la máquina no se ha ajustado nunca desde que arrancó, los
-campos se abren **vacíos** y la ventana lo dice. No se rellenan con la
-época Unix, que sería una fecha que la máquina nunca afirmó.
+**Time Zone** (Zona horaria) nombra la zona que sigue la máquina, indica
+cuándo se adelantarán o atrasarán sus relojes la próxima vez y cuánto, y
+ofrece el botón **Change…**, que abre una lista de todos los lugares que
+conoce el sistema: escriba parte del nombre de una ciudad, una región o
+una zona para acotarla y elija después con `Enter` o con un doble clic.
+Cada lugar muestra la hora que es allí en ese momento. Una zona nueva
+surte efecto al momento.
 
-Si la cuenta con la que se ejecuta esta aplicación no puede ajustar el
-reloj, el intento se rechaza, la ventana lo dice y el reloj queda
-exactamente como estaba. La razón se escribe además en el flujo de error
-estándar. La aplicación sigue funcionando: un ajuste rechazado es una
-respuesta, no un fallo del programa.
+La zona de la máquina es la que muestra la pantalla de inicio de sesión
+y la que usa toda cuenta que no haya elegido una zona propia en
+**Settings** (Ajustes).
+
+Si la cuenta con la que se ejecuta la ventana no puede hacer un cambio,
+este se rechaza, un aviso explica el motivo y la ventana muestra lo que
+realmente está en vigor. `Escape` o **Close** cierra la ventana.
 
 ## EXIT STATUS
 
-Cero tras un cierre limpio, incluso cuando un ajuste fue rechazado. No
-cero cuando no se pudo abrir la ventana, se rechazó la región de trama
-compartida o se perdió el canal de la ventana; la razón se indica en el
-flujo de error estándar.
+Cero cuando se cierra la ventana, incluso después de un cambio
+rechazado. Distinto de cero cuando no se pudo abrir la ventana o se
+perdió su conexión con el escritorio; el motivo se indica en el flujo de
+error estándar.
 
 ## SEE ALSO
 
-`sysinfo`, `uptime`
+`configure`

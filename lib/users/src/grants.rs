@@ -206,6 +206,11 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
 ///   Listing what every host on a segment offers is the reconnaissance
 ///   class `CAP_SYSINFO_GLOBAL` guards for processes; an ordinary program
 ///   browses only the types its bundle is granted.
+/// * `CAP_SETTINGS_WRITE` — change the machine's settings, and read its
+///   network addressing, through the settings service. The login policy,
+///   the clock's sources and the interfaces' addresses reach every principal
+///   on the machine; an ordinary session reads the settings that are open and
+///   changes none.
 pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::USER_ADMIN,
     CapabilityId::FS_CHOWN,
@@ -226,6 +231,7 @@ pub const ADMINISTRATIVE_SET: &[CapabilityId] = &[
     CapabilityId::STORAGE_ADMIN,
     CapabilityId::SERVICE_CONTROL,
     CapabilityId::NET_DISCOVER_ALL,
+    CapabilityId::SETTINGS_WRITE,
 ];
 
 /// The `devmgr` service account's grant ceiling: read the hardware tree,
@@ -330,6 +336,22 @@ pub const TIMED_CEILING: &[CapabilityId] = &[
     CapabilityId::TIME_SET,
     CapabilityId::NET,
     CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::FS_ACCESS,
+    CapabilityId::LOG_EMIT,
+];
+
+/// The `settingsd` machine-settings service account's grant ceiling: serve
+/// the reserved settings rendezvous, read and replace the documents it owns,
+/// and emit its audit records — nothing more.
+///
+/// It enforces `CAP_SETTINGS_WRITE` against its callers and never holds it.
+/// Its whole reach is the per-inode ownership of its two directories under
+/// `/System/Settings`: no `CAP_FS_CHOWN`, no `CAP_NET_ADMIN` (the running
+/// stack learns of a change from the tool that asked for it), and no spawn
+/// authority, so compromising it yields the machine's settings files and
+/// nothing they do not say.
+pub const SETTINGSD_CEILING: &[CapabilityId] = &[
+    CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::FS_ACCESS,
     CapabilityId::LOG_EMIT,
 ];
@@ -497,7 +519,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 30);
+        assert_eq!(set.len(), 31);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
@@ -521,6 +543,7 @@ mod tests {
             CapabilityId::STORAGE_ADMIN,
             CapabilityId::SERVICE_CONTROL,
             CapabilityId::NET_DISCOVER_ALL,
+            CapabilityId::SETTINGS_WRITE,
         ] {
             assert!(set.contains(cap), "{cap:?} missing from the ceiling");
         }
@@ -539,6 +562,24 @@ mod tests {
         assert_eq!(GREETER_CEILING.len(), 5);
         assert_eq!(DISCOVERYD_CEILING.len(), 5);
         assert_eq!(SOUNDD_CEILING.len(), 5);
+        assert_eq!(SETTINGSD_CEILING.len(), 3);
+        // The settings service enforces the settings capability; holding it,
+        // or any authority beyond its own files, would make it a way round
+        // the gate it keeps.
+        let settingsd = capability_set(SETTINGSD_CEILING);
+        for cap in [
+            CapabilityId::SETTINGS_WRITE,
+            CapabilityId::FS_CHOWN,
+            CapabilityId::NET_ADMIN,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::SANDBOX_SPAWN,
+            CapabilityId::USERS_READ,
+        ] {
+            assert!(
+                !settingsd.contains(cap),
+                "{cap:?} must stay off the settings service"
+            );
+        }
         // The cue authority plays through the audio service; it neither
         // drives a device, records, nor reaches another app's data.
         let soundd = capability_set(SOUNDD_CEILING);

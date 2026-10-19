@@ -1,20 +1,18 @@
 //! The network interface-configuration store engine.
 //!
-//! TAIRiX keeps its administrator-settable per-interface network
-//! configuration in one text document on the root volume,
-//! [`CONFIG_PATH`](`/System/Settings/Network/network.conf`). This crate is
-//! the **single definition** of that document: the per-interface line
-//! grammar, the closed key registry, each key's typed value set, the
-//! bounded fail-closed parser, and the canonical render. The `configure`
-//! command app and the installer write the store through this engine and
-//! the one reader — the `netstack` service, at start and on a typed
-//! `CAP_NET_ADMIN` reload — reads it through the same engine, so the two
-//! can never diverge.
+//! TAIRiX keeps its per-interface network configuration in one text
+//! document, `network.conf`, in two layers ([`LAYERS`]): the image's own
+//! default, read-only on the `/System` volume, and the administrator's at
+//! [`CONFIG_PATH`](`/System/Settings/Network/network.conf`), which replaces
+//! the default whole once it exists. This crate is the **single definition**
+//! of that document: the per-interface line grammar, the closed key registry,
+//! each key's typed value set, the bounded fail-closed parser, and the
+//! canonical render. The settings service writes the administrator's layer
+//! through this engine and the device manager reads it through the same
+//! engine, so the two can never diverge.
 //!
-//! The store is parsed only **after** the root is mounted — it lives inside
-//! `/System/Settings`, which does not exist before the mount — so an absent
-//! store simply means "no managed interfaces beyond loopback"
-//! ([`NetworkConfig::default`]), never an error.
+//! Neither layer existing simply means "no managed interfaces beyond
+//! loopback" ([`NetworkConfig::default`]), never an error.
 //!
 //! # Grammar
 //!
@@ -39,9 +37,7 @@
 //! parse the store keeps its running configuration untouched rather than
 //! guessing at a partial intent; the write path (`configure`) refuses the
 //! edit outright. The engine itself performs no I/O and holds no authority:
-//! reading and writing the file go through the secured VFS under the
-//! caller's own kernel-attested identity, and the per-inode policy on
-//! `/System/Settings` decides who may write.
+//! who may change the document is the settings service's gate.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -60,10 +56,25 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_util::conf::{setting_line, Located, ValueShape};
 
-/// The configuration store document, named by the closed
-/// `/System/Settings/` file set so this engine and the pre-unlock reader that
-/// serves it cannot name different files.
+/// The administrator's layer of the document.
 pub const CONFIG_PATH: &str = SystemConfigFile::Network.path();
+
+/// Where a reader takes the document from, first to last
+/// ([`SystemConfigFile::layers`]).
+pub const LAYERS: [&str; 2] = SystemConfigFile::Network.layers();
+
+// A settings change can name every key of every interface at once, and carry
+// any document this engine accepts.
+const _: () = {
+    assert!(MAX_INTERFACES * IfaceKey::ALL.len() <= tairix_abi::settings_ipc::MAX_SETTINGS);
+    assert!(MAX_CONFIG_LEN <= tairix_abi::settings_ipc::DOCUMENT_MAX);
+    let mut i = 0;
+    while i < IfaceKey::ALL.len() {
+        let name = MAX_IFACE_NAME_LEN + 1 + IfaceKey::ALL[i].name().len();
+        assert!(name <= tairix_abi::settings_ipc::NAME_MAX);
+        i += 1;
+    }
+};
 
 /// The name of the Settings pane that edits this store's interfaces: what the
 /// bar's network menu hands over as its launch target.
@@ -963,6 +974,21 @@ pub fn valid_iface_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
 }
 
+/// Split a `<iface>.<suffix>` setting name into its interface alias and its
+/// key, by the rule the parser reads a line's key with.
+///
+/// # Errors
+///
+/// [`ConfigError::UnknownKey`] for a name with no `.` or a suffix outside the
+/// registry, and [`ConfigError::InvalidInterfaceName`] for an alias outside
+/// the grammar.
+pub fn resolve_name(name: &str) -> Result<(&str, IfaceKey), ConfigError> {
+    let (iface, suffix) = name.split_once('.').ok_or(ConfigError::UnknownKey)?;
+    validate_iface_name(iface)?;
+    let key = IfaceKey::from_name(suffix).ok_or(ConfigError::UnknownKey)?;
+    Ok((iface, key))
+}
+
 /// [`valid_iface_name`] as the parser's fail-closed refusal.
 fn validate_iface_name(name: &str) -> Result<(), ConfigError> {
     if valid_iface_name(name) {
@@ -1158,13 +1184,8 @@ impl NetworkConfig {
             };
             let value = setting.value;
 
-            let (iface_name, suffix) = setting
-                .key
-                .split_once('.')
-                .ok_or(ParseError::at(lineno, ConfigError::UnknownKey))?;
-            validate_iface_name(iface_name).map_err(|kind| ParseError::at(lineno, kind))?;
-            let key = IfaceKey::from_name(suffix)
-                .ok_or(ParseError::at(lineno, ConfigError::UnknownKey))?;
+            let (iface_name, key) =
+                resolve_name(setting.key).map_err(|kind| ParseError::at(lineno, kind))?;
             let value = value.ok_or(ParseError::at(lineno, ConfigError::MissingValue))?;
 
             let index = config
@@ -1341,9 +1362,8 @@ impl NetworkConfig {
     pub fn render(&self) -> String {
         let mut out = String::from(
             "# TAIRiX network interface configuration.\n\
-             # Managed by the `configure` command and the installer; parsed\n\
-             # by netstack after the root filesystem is unlocked. One\n\
-             # `<interface>.<key> value` setting per line.\n",
+             # Written by the settings service and read by the device\n\
+             # manager. One `<interface>.<key> value` setting per line.\n",
         );
         for iface in &self.interfaces {
             for key in IfaceKey::ALL {
@@ -1398,6 +1418,23 @@ impl ConfigDraft {
             return Err(ConfigError::InvalidInterfaceName);
         };
         entry.set_key(key, value)
+    }
+
+    /// Apply one edit as a command line or a settings change spells it:
+    /// `value` is the key's new store value, and the empty value clears it.
+    ///
+    /// The empty spelling cannot be mistaken for a value, because no key
+    /// accepts one.
+    ///
+    /// # Errors
+    ///
+    /// As [`set`](Self::set); clearing cannot fail.
+    pub fn apply(&mut self, iface: &str, key: IfaceKey, value: &str) -> Result<(), ConfigError> {
+        if value.is_empty() {
+            self.unset(iface, key);
+            return Ok(());
+        }
+        self.set(iface, key, value)
     }
 
     /// Clear `iface`'s `key`, so the document no longer declares it.
@@ -2251,6 +2288,68 @@ wan.ipv4.gateway 192.168.1.1
                 .expect_err("must fail"),
             ConfigError::TooManyInterfaces
         );
+    }
+
+    #[test]
+    fn a_name_resolves_by_the_rule_the_parser_reads_a_line_with() {
+        assert_eq!(
+            resolve_name("wan.ipv4.method"),
+            Ok(("wan", IfaceKey::Ipv4Method))
+        );
+        assert_eq!(
+            resolve_name("lan-2.bond.monitor-interval"),
+            Ok(("lan-2", IfaceKey::BondMonitorInterval))
+        );
+        for unknown in ["wan", "wan.", "wan.ipv4", "wan.Kind", ".kind"] {
+            let expected = if unknown.starts_with('.') {
+                ConfigError::InvalidInterfaceName
+            } else {
+                ConfigError::UnknownKey
+            };
+            assert_eq!(resolve_name(unknown), Err(expected), "{unknown:?}");
+        }
+        assert_eq!(
+            resolve_name("2wan.kind"),
+            Err(ConfigError::InvalidInterfaceName)
+        );
+        for key in IfaceKey::ALL {
+            let name = alloc::format!("wan.{}", key.name());
+            assert_eq!(resolve_name(&name), Ok(("wan", *key)), "{name}");
+            assert_eq!(
+                NetworkConfig::parse(&alloc::format!("{name}\n"))
+                    .expect_err("a key with no value")
+                    .kind,
+                ConfigError::MissingValue,
+                "the parser resolved {name} the same way"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_sets_a_value_and_the_empty_value_clears_it() {
+        let config = NetworkConfig::parse(STATIC_WAN).expect("parses");
+        let mut draft = config.edit();
+        draft
+            .apply("wan", IfaceKey::Ipv4Method, "dhcp")
+            .expect("dhcp is a method");
+        draft
+            .apply("wan", IfaceKey::Ipv4Address, "")
+            .expect("clearing cannot fail");
+        draft
+            .apply("wan", IfaceKey::Ipv4Gateway, "")
+            .expect("clearing cannot fail");
+        let edited = draft.commit().expect("a dhcp interface needs no address");
+        let wan = edited.interface("wan").expect("wan stays declared");
+        assert_eq!(wan.ipv4_method(), Ipv4Method::Dhcp);
+        assert_eq!(wan.render_value(IfaceKey::Ipv4Address), None);
+        assert_eq!(wan.render_value(IfaceKey::Ipv4Gateway), None);
+
+        let mut refused = config.edit();
+        assert_eq!(
+            refused.apply("wan", IfaceKey::Ipv4Method, "sometimes"),
+            Err(ConfigError::InvalidValue)
+        );
+        assert_eq!(refused.commit().expect("unchanged"), config);
     }
 
     #[test]

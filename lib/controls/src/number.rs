@@ -55,6 +55,11 @@ pub struct NumberField {
     /// The decimal places the value is spelled with: a value of `150` at two
     /// places reads `1.50`.
     places: u8,
+    /// The fewest whole digits it is spelled with: a minute of `5` at two
+    /// reads `05`.
+    digits: u8,
+    /// Whether a step past either bound carries round to the other.
+    wraps: bool,
     line: i32,
     page: i32,
     /// The value the last interaction settled on, which Escape returns to.
@@ -72,12 +77,14 @@ impl NumberField {
         let mut spelt = [0; SPELT];
         Self {
             field: TextField::new()
-                .with_max_len(longest(min, max, 0))
-                .with_text(spell(value, 0, &mut spelt)),
+                .with_max_len(longest(min, max, 0, 1))
+                .with_text(spell(value, 0, 1, &mut spelt)),
             value,
             min,
             max,
             places: 0,
+            digits: 1,
+            wraps: false,
             line: 1,
             page: 10,
             settled: value,
@@ -100,10 +107,31 @@ impl NumberField {
     #[must_use]
     pub fn with_decimals(mut self, places: u8) -> Self {
         self.places = places.min(MOST_PLACES);
+        self.respelled()
+    }
+
+    /// This field spelling its value with at least `digits` whole digits, at
+    /// most [`MOST_DIGITS`], padded with zeros: the minutes of a time.
+    #[must_use]
+    pub fn with_digits(mut self, digits: u8) -> Self {
+        self.digits = digits.clamp(1, MOST_DIGITS);
+        self.respelled()
+    }
+
+    /// This field carrying a step past either bound round to the other, as a
+    /// clock's minutes go from 59 to 0. Typing past a bound is still refused.
+    #[must_use]
+    pub const fn with_wrap(mut self) -> Self {
+        self.wraps = true;
+        self
+    }
+
+    /// This field's text field rebuilt for its spelling.
+    fn respelled(mut self) -> Self {
         let mut spelt = [0; SPELT];
         self.field = TextField::new()
-            .with_max_len(longest(self.min, self.max, self.places))
-            .with_text(spell(self.value, self.places, &mut spelt));
+            .with_max_len(longest(self.min, self.max, self.places, self.digits))
+            .with_text(spell(self.value, self.places, self.digits, &mut spelt));
         self
     }
 
@@ -159,8 +187,8 @@ impl NumberField {
         let font = role_font(theme, scale, TextRole::Body);
         let mut spelt = [0; SPELT];
         let widest = font
-            .text_width(spell(self.min, self.places, &mut spelt))
-            .max(font.text_width(spell(self.max, self.places, &mut spelt)))
+            .text_width(spell(self.min, self.places, self.digits, &mut spelt))
+            .max(font.text_width(spell(self.max, self.places, self.digits, &mut spelt)))
             .max(font.text_width("0"));
         let edge = plate_border(theme, scale)
             .saturating_add(scale.scale_length(theme.metrics().control_inset));
@@ -259,7 +287,7 @@ impl NumberField {
             .text()
             .len()
             .saturating_sub(self.field.selected_text().map_or(0, str::len));
-        if kept.saturating_add(text.len()) > longest(self.min, self.max, self.places) {
+        if kept.saturating_add(text.len()) > longest(self.min, self.max, self.places, self.digits) {
             return None;
         }
         let action = self.field.insert_text(text, bounds, damage);
@@ -293,14 +321,18 @@ impl NumberField {
             || (character == '.' && self.places > 0)
     }
 
-    /// Move the value `delta` and settle there, held to the bounds; nothing
-    /// for a step that moves nothing.
+    /// Move the value `delta` and settle there, held to the bounds or carried
+    /// round them; nothing for a step that moves nothing.
     fn step(&mut self, delta: i64, bounds: Rect, damage: &mut Region) -> Option<NumberAction> {
         if delta == 0 {
             return None;
         }
-        let stepped =
-            (i64::from(self.value) + delta).clamp(i64::from(self.min), i64::from(self.max));
+        let (min, max) = (i64::from(self.min), i64::from(self.max));
+        let stepped = if self.wraps {
+            min + (i64::from(self.value) - min + delta).rem_euclid(max - min + 1)
+        } else {
+            (i64::from(self.value) + delta).clamp(min, max)
+        };
         let stepped = i32::try_from(stepped).unwrap_or(self.value);
         let typing = self.field.state().validation != ValidationState::Valid;
         if stepped == self.value && !typing {
@@ -319,7 +351,7 @@ impl NumberField {
     fn take_back(&mut self, bounds: Rect, damage: &mut Region) -> Option<NumberAction> {
         let mut spelt = [0; SPELT];
         let pending = self.value != self.settled
-            || self.field.text() != spell(self.settled, self.places, &mut spelt);
+            || self.field.text() != spell(self.settled, self.places, self.digits, &mut spelt);
         if !pending {
             return None;
         }
@@ -361,7 +393,7 @@ impl NumberField {
     /// changed what the field draws.
     fn show_value(&mut self) -> bool {
         let mut spelt = [0; SPELT];
-        let text = spell(self.value, self.places, &mut spelt);
+        let text = spell(self.value, self.places, self.digits, &mut spelt);
         let state = self.field.state();
         let changed = self.field.text() != text || state.validation != ValidationState::Valid;
         if self.field.text() != text {
@@ -386,25 +418,30 @@ impl NumberField {
 /// The most decimal places a field spells.
 pub const MOST_PLACES: u8 = 4;
 
+/// The most whole digits a field pads its value to.
+pub const MOST_DIGITS: u8 = 9;
+
 /// The room a spelt value takes: a sign, ten digits, the point and the
 /// leading zero a value smaller than one place's unit needs.
 const SPELT: usize = 16;
 
 /// The most characters a number between `min` and `max` is spelled in.
-fn longest(min: i32, max: i32, places: u8) -> usize {
+fn longest(min: i32, max: i32, places: u8, digits: u8) -> usize {
     let mut spelt = [0; SPELT];
-    spell(min, places, &mut spelt)
+    spell(min, places, digits, &mut spelt)
         .len()
-        .max(spell(max, places, &mut spelt).len())
+        .max(spell(max, places, digits, &mut spelt).len())
 }
 
-/// `value`, a whole number of `10^-places`, spelled with that many decimals.
-pub(crate) fn spell(value: i32, places: u8, out: &mut [u8; SPELT]) -> &str {
-    let mut digits = [0; 12];
-    let spelt = format_i32(value, &mut digits);
+/// `value`, a whole number of `10^-places`, spelled with that many decimals
+/// and at least `digits` whole digits.
+pub(crate) fn spell(value: i32, places: u8, digits: u8, out: &mut [u8; SPELT]) -> &str {
+    let mut figures = [0; 12];
+    let spelt = format_i32(value, &mut figures);
     let magnitude = spelt.trim_start_matches('-').as_bytes();
     let places = usize::from(places);
-    let pad = (places + 1).saturating_sub(magnitude.len());
+    let whole_digits = usize::from(digits.clamp(1, MOST_DIGITS));
+    let pad = (places + whole_digits).saturating_sub(magnitude.len());
     let whole = magnitude.len() + pad - places;
     let mut len = 0;
     if value < 0 {

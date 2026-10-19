@@ -7,10 +7,12 @@
 //! per-login prompt: the graphical desktop by default when a graphical
 //! session is available, otherwise the account's text shell.
 
+use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 use tairix_util::secret::wipe;
 
+use crate::budget::GuessMeter;
 use crate::decfmt::DecBuf;
 use crate::error::LoginError;
 use crate::events;
@@ -50,6 +52,9 @@ pub struct LoginConfig<'a> {
     pub view: &'a dyn LoginView,
     /// Seam that verifies credentials against `kernel/sec`.
     pub authenticator: &'a dyn Authenticator,
+    /// The per-account guess meter every surface that checks a password
+    /// charges.
+    pub meter: &'a dyn GuessMeter,
     /// Seam that launches the chosen session.
     pub launcher: &'a dyn SessionLauncher,
     /// Structured audit log sink.
@@ -59,6 +64,16 @@ pub struct LoginConfig<'a> {
 /// The text-login state machine (Stage 6).
 pub struct Login<'a> {
     cfg: LoginConfig<'a>,
+}
+
+/// How one prompt ended, short of a fail-closed error.
+enum Attempt {
+    /// A session ran, and ended so.
+    Ran(SessionOutcome),
+    /// The password was refused.
+    Refused,
+    /// The account is cooling down for this long; nothing was checked.
+    Cooling(Duration64),
 }
 
 impl<'a> Login<'a> {
@@ -99,8 +114,9 @@ impl<'a> Login<'a> {
             let attempt = self.attempt(&mut username_buf, &mut password_buf);
             wipe(&mut password_buf);
             match attempt {
-                Ok(Some(outcome)) => return Ok(outcome),
-                Ok(None) => self.cfg.view.note_failure(),
+                Ok(Attempt::Ran(outcome)) => return Ok(outcome),
+                Ok(Attempt::Refused) => self.cfg.view.note_failure(),
+                Ok(Attempt::Cooling(retry_after)) => self.cfg.view.note_cooling(retry_after),
                 Err(LoginError::Superseded) => {
                     self.cfg.view.round_abandoned();
                     return Err(LoginError::Superseded);
@@ -114,23 +130,29 @@ impl<'a> Login<'a> {
 
     /// Run one prompt → authenticate → launch attempt.
     ///
-    /// Returns `Ok(Some(outcome))` when a session ran, `Ok(None)` when the
-    /// credentials were rejected (the caller consumes one attempt and
-    /// re-prompts), and `Err` for the fail-closed outcomes (console
-    /// failure, session-launch failure).
+    /// An account still cooling down is told so before its password is
+    /// asked for, and nothing about it is checked. `Err` is a fail-closed
+    /// outcome (console failure, session-launch failure).
     fn attempt(
         &self,
         username_buf: &mut [u8],
         password_buf: &mut [u8],
-    ) -> Result<Option<SessionOutcome>, LoginError> {
+    ) -> Result<Attempt, LoginError> {
         let username = self.read("username", username_buf, |v, buf| v.read_username(buf))?;
+        let retry_after = self.cfg.meter.retry_after(username);
+        if retry_after > Duration64::ZERO {
+            self.audit_cooling(username, retry_after);
+            return Ok(Attempt::Cooling(retry_after));
+        }
         let password = self.read("password", password_buf, |v, buf| v.read_password(buf))?;
         let credentials = Credentials { username, password };
-        if let Ok(user) = self.cfg.authenticator.authenticate(&credentials) {
-            return self.start_session(credentials.username, &user).map(Some);
+        let authenticated = self.cfg.authenticator.authenticate(&credentials);
+        self.cfg.meter.charge(username, authenticated.is_ok());
+        if let Ok(user) = authenticated {
+            return self.start_session(username, &user).map(Attempt::Ran);
         }
-        self.audit_auth_failed(credentials.username);
-        Ok(None)
+        self.audit_auth_failed(username);
+        Ok(Attempt::Refused)
     }
 
     /// Run one terminal read into `buf`, auditing and surfacing a console
@@ -234,6 +256,26 @@ impl<'a> Login<'a> {
                 key: "user",
                 value: tairix_log::FieldValue::Str(username),
             }],
+        );
+    }
+
+    fn audit_cooling(&self, username: &str, retry_after: Duration64) {
+        let mut retry = DecBuf::new();
+        self.emit(
+            Level::Warn,
+            events::AUTH_COOLING,
+            &[
+                Field {
+                    key: "user",
+                    value: tairix_log::FieldValue::Str(username),
+                },
+                Field {
+                    key: "retry_after_s",
+                    value: tairix_log::FieldValue::Str(
+                        retry.format(i128::from(retry_after.secs())),
+                    ),
+                },
+            ],
         );
     }
 
@@ -393,6 +435,7 @@ fn event_message(id: EventId) -> &'static str {
         events::SESSION_ENDED => "session ended",
         events::SESSION_LAUNCH_FAILED => "session launch failed",
         events::CONSOLE_ERROR => "console error",
+        events::AUTH_COOLING => "authentication withheld: the account is cooling down",
         _ => "login event",
     }
 }
@@ -400,6 +443,7 @@ fn event_message(id: EventId) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{event_message, Login, LoginConfig};
+    use crate::budget::GuessMeter;
     use crate::error::LoginError;
     use crate::events;
     use crate::session::{
@@ -411,6 +455,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::Cell;
     use core::cell::RefCell;
+    use tairix_abi::time::Duration64;
     use tairix_abi::{CapabilityId, Errno};
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -429,6 +474,8 @@ mod tests {
         secrets: RefCell<VecDeque<Result<Vec<u8>, Errno>>>,
         rounds: Cell<u32>,
         failures: Cell<u32>,
+        /// Every cooldown the view was told to state.
+        cooled: RefCell<Vec<Duration64>>,
         handoffs: Cell<u32>,
         purges: Cell<u32>,
         abandoned: Cell<u32>,
@@ -468,6 +515,7 @@ mod tests {
                 secrets: RefCell::new(secrets.into_iter().collect()),
                 rounds: Cell::new(0),
                 failures: Cell::new(0),
+                cooled: RefCell::new(Vec::new()),
                 handoffs: Cell::new(0),
                 purges: Cell::new(0),
                 abandoned: Cell::new(0),
@@ -504,6 +552,9 @@ mod tests {
         fn note_failure(&self) {
             self.failures.set(self.failures.get() + 1);
         }
+        fn note_cooling(&self, retry_after: Duration64) {
+            self.cooled.borrow_mut().push(retry_after);
+        }
         fn session_handoff(&self) {
             self.handoffs.set(self.handoffs.get() + 1);
             self.trace.borrow_mut().push("handoff");
@@ -514,6 +565,35 @@ mod tests {
         }
         fn round_abandoned(&self) {
             self.abandoned.set(self.abandoned.get() + 1);
+        }
+    }
+
+    /// A meter that never cools an account.
+    struct Unmetered;
+    impl GuessMeter for Unmetered {
+        fn retry_after(&self, _account: &str) -> Duration64 {
+            Duration64::ZERO
+        }
+        fn charge(&self, _account: &str, _accepted: bool) {}
+    }
+
+    /// A meter cooling the accounts it lists, recording every charge.
+    #[derive(Default)]
+    struct Recording {
+        cooling: Vec<(&'static str, Duration64)>,
+        charges: RefCell<Vec<(alloc::string::String, bool)>>,
+    }
+    impl GuessMeter for Recording {
+        fn retry_after(&self, account: &str) -> Duration64 {
+            self.cooling
+                .iter()
+                .find(|(name, _)| *name == account)
+                .map_or(Duration64::ZERO, |(_, wait)| *wait)
+        }
+        fn charge(&self, account: &str, accepted: bool) {
+            self.charges
+                .borrow_mut()
+                .push((account.to_string(), accepted));
         }
     }
 
@@ -672,6 +752,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -704,6 +785,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -728,6 +810,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -752,6 +835,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -775,6 +859,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -800,6 +885,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -831,6 +917,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -857,6 +944,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -883,6 +971,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -908,6 +997,7 @@ mod tests {
             may_give_way: true,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -937,6 +1027,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -965,6 +1056,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -990,6 +1082,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -1014,6 +1107,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -1042,6 +1136,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -1067,6 +1162,7 @@ mod tests {
             may_give_way: false,
             view: &view,
             authenticator: &auth,
+            meter: &Unmetered,
             launcher: &launcher,
             sink: &sink,
         });
@@ -1074,6 +1170,68 @@ mod tests {
         assert_eq!(login.run(), Err(LoginError::TooManyAttempts));
         assert_eq!(sink.count(events::LOCKED_OUT), 1);
         assert!(launcher.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_cooling_account_is_told_to_wait_and_its_password_is_never_asked_for() {
+        // Ada is cooling; Grace types next and is checked as usual.
+        let view = MockView::new(&["ada", "grace"], &["byron"]);
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let meter = Recording {
+            cooling: alloc::vec![("ada", Duration64::from_secs(20))],
+            ..Recording::default()
+        };
+        let login = Login::new(LoginConfig {
+            max_attempts: 2,
+            graphical_available: false,
+            session_default: SessionKind::Text,
+            may_give_way: false,
+            view: &view,
+            authenticator: &auth,
+            meter: &meter,
+            launcher: &launcher,
+            sink: &sink,
+        });
+        assert_eq!(login.run(), Err(LoginError::TooManyAttempts));
+        assert_eq!(
+            view.cooled.borrow().as_slice(),
+            &[Duration64::from_secs(20)]
+        );
+        assert_eq!(view.failures.get(), 1, "only Grace's attempt was decided");
+        assert_eq!(sink.count(events::AUTH_COOLING), 1);
+        assert_eq!(
+            meter.charges.borrow().as_slice(),
+            &[("grace".to_string(), false)],
+            "the cooling account was neither checked nor charged"
+        );
+        assert!(launcher.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn every_decided_attempt_is_charged_to_the_account_it_named() {
+        let view = MockView::new(&["ada", "ada"], &["wrong", "byron"]);
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let meter = Recording::default();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            session_default: SessionKind::Text,
+            may_give_way: false,
+            view: &view,
+            authenticator: &auth,
+            meter: &meter,
+            launcher: &launcher,
+            sink: &sink,
+        });
+        assert!(login.run().is_ok());
+        assert_eq!(
+            meter.charges.borrow().as_slice(),
+            &[("ada".to_string(), false), ("ada".to_string(), true)]
+        );
     }
 
     #[test]

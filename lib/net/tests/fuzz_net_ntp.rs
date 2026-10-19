@@ -15,7 +15,10 @@
 //! 4. Driving [`NtpClient`] with arbitrary datagrams at arbitrary instants
 //!    never panics, never emits a request while one is outstanding, never
 //!    exceeds the poll floor's politeness, and always yields a coherent
-//!    next-deadline decision.
+//!    next-deadline decision — however a caller holds, brings forward, or
+//!    re-paces it in between: a hold never brings a query forward, nothing
+//!    brings one forward once a request has left, and a new cadence never
+//!    schedules a query sooner than the poll floor after a sample.
 //! 5. Timestamp conversion is total over every 64-bit value, and the era
 //!    placement always lands within one era of the release-epoch anchor.
 //!
@@ -90,6 +93,7 @@ fn exercise_client(rng: &mut Prng, buf: &mut [u8]) {
     let servers = u8::try_from(1 + rng.below(MAX_SERVERS)).unwrap_or(1);
     let mut client = NtpClient::new(servers, MIN_POLL, Duration64::ZERO);
     let mut now = Duration64::ZERO;
+    let mut sent = false;
 
     for _ in 0..12 {
         // Advance time by an arbitrary but non-negative amount.
@@ -99,6 +103,7 @@ fn exercise_client(rng: &mut Prng, buf: &mut [u8]) {
         );
         let outstanding_before = client.outstanding().is_some();
         if let Some(query) = client.poll(now, rng.next_u64()) {
+            sent = true;
             assert!(
                 !outstanding_before,
                 "a request was emitted while one was outstanding"
@@ -125,11 +130,39 @@ fn exercise_client(rng: &mut Prng, buf: &mut [u8]) {
             Outcome::Sample(sample) => {
                 assert!(is_plausible_wall_time(sample.true_time));
                 assert!(client.outstanding().is_none());
+                let interval = Duration64::from_nanos(rng.next_u64() % 1_000_000_000_000);
+                client.set_poll_interval(interval, now);
+                let floor = now
+                    .saturating_total_nanos()
+                    .saturating_add(MIN_POLL.saturating_total_nanos());
+                assert!(client
+                    .next_deadline()
+                    .is_none_or(|due| due.saturating_total_nanos() >= floor));
             }
             Outcome::Unsolicited => {}
             Outcome::Rejected(_) | Outcome::ServerRetired { .. } | Outcome::RateLimited { .. } => {
                 assert!(client.outstanding().is_none());
             }
+        }
+
+        let before = client.next_deadline();
+        let at = Duration64::from_nanos(rng.next_u64() % 400_000_000_000);
+        match rng.below(4) {
+            0 => {
+                client.hold_until(at);
+                assert!(
+                    client.next_deadline() >= before,
+                    "a hold brought a query forward"
+                );
+            }
+            1 if sent => {
+                assert!(!client.expedite_first(at));
+                assert_eq!(client.next_deadline(), before);
+            }
+            1 => {
+                let _ = client.expedite_first(at);
+            }
+            _ => {}
         }
 
         // Rule 4: the deadline decision is always coherent — a client with

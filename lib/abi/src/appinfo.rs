@@ -644,13 +644,22 @@ impl ProgramKind {
     /// a user's own stores, or a directory on `PATH`.
     #[must_use]
     pub fn launchable_from(self, bundle: &str) -> bool {
-        match Self::ALL
-            .into_iter()
-            .find(|kind| is_within(bundle, kind.store()))
-        {
+        match Self::of_system_store(bundle) {
             Some(store) => store == self,
             None => self.is_searched(),
         }
+    }
+
+    /// The kind whose system store `path` lies inside, or `None` outside
+    /// every system store.
+    ///
+    /// A spelling test: a `..` component is taken at its word, so a caller
+    /// deciding trust on the answer checks the path is plain first.
+    #[must_use]
+    pub fn of_system_store(path: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| is_within(path, kind.store()))
     }
 }
 

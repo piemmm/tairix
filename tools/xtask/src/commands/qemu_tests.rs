@@ -560,7 +560,7 @@ enum FsDisk {
     /// ([`sound_plant`]), because each holds its capture to one signal.
     LifecycleAudioRootDisk,
     /// The [`Self::StreamRootDisk`] layout **plus** a planted
-    /// `/System/Settings/Configuration/system.conf`
+    /// `/System/Defaults/Configuration/system.conf`
     /// ([`tairix_test_netstack_wire::ECN_SYSTEM_CONF`]) that turns
     /// `net.tcp.ecn` on stack-wide — the ECN vertical's backing
     /// (`plans/NETWORK.md` N13). `devmgr` reads the planted store pre-unlock
@@ -597,7 +597,7 @@ enum FsDisk {
     /// The net-only-driver encrypted-root layout carrying the **standard**
     /// signed application store (the `netstack`/`devmgr` service bundles, no
     /// test-only fixture) **plus** a planted
-    /// `/System/Settings/Network/network.conf`
+    /// `/System/Defaults/Network/network.conf`
     /// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64`]) — the
     /// static-addressing (`match.node`) vertical's backing
     /// (`plans/NETWORK.md` N9b-3-2-β-2-ii-b). `devmgr` autoloads the NIC
@@ -627,7 +627,7 @@ enum FsDisk {
     TimeNetRootDisk,
     /// The net-only-driver encrypted-root layout carrying the **standard**
     /// signed application store **plus** a planted
-    /// `/System/Settings/Network/network.conf`
+    /// `/System/Defaults/Network/network.conf`
     /// ([`tairix_test_netstack_wire::BOND_NETWORK_CONF`]) that binds two NICs
     /// by `match.mac` as the members of one active-backup bond carrying a
     /// static IPv6 address — the bond-failover vertical's backing
@@ -639,7 +639,7 @@ enum FsDisk {
     BondNetRootDisk,
     /// The net-only-driver encrypted-root layout carrying the **standard**
     /// signed application store **plus** a planted
-    /// `/System/Settings/Network/network.conf`
+    /// `/System/Defaults/Network/network.conf`
     /// ([`tairix_test_netstack_wire::DHCP_NETWORK_CONF_AARCH64`]) that binds
     /// the NIC by `match.node`, selects `ipv4.method dhcp`, and disables IPv6
     /// — the DHCPv4 vertical's backing (`plans/DHCP.md` D3). `devmgr`
@@ -651,7 +651,7 @@ enum FsDisk {
     DhcpNetRootDisk,
     /// The net-only-driver encrypted-root layout carrying the **standard**
     /// signed application store **plus** a planted
-    /// `/System/Settings/Network/network.conf`
+    /// `/System/Defaults/Network/network.conf`
     /// ([`tairix_test_netstack_wire::DHCP6_NETWORK_CONF_AARCH64`]) that binds
     /// the NIC by `match.node`, selects `ipv6.method dhcp`, and disables IPv4
     /// — the DHCPv6 vertical's backing (`plans/DHCP.md` D4c). `devmgr`
@@ -1116,8 +1116,8 @@ const APPBAR_SETTLED_MARKER: &str = tairix_desktop_session::APP_BAR_SETTLED_MESS
 const FILEPICK_PICKER_MARKER: &str = tairix_desktop_session::PICKER_SHOWN_MESSAGE;
 
 /// Serial marker the elevated Date & Time vertical waits for before typing
-/// credentials into the session's credential prompt — the prompt's own
-/// announcement that it is on screen and holding the keyboard.
+/// the password into the session's authorisation prompt — the prompt's own
+/// announcement that its question is drawn and holding the seat.
 const ELEVATE_PROMPT_SHOWN_MARKER: &str = tairix_desktop_session::ELEVATE_PROMPT_SHOWN_MESSAGE;
 
 /// `true` if `text` begins with `prefix`.
@@ -1173,6 +1173,15 @@ const OVERLONG_USERNAME: &str = match core::str::from_utf8(&OVERLONG_USERNAME_BY
 /// The password line the session-ceiling vertical types at the login
 /// view's `Password` field.
 const SESSION_PASSWORD_LINE: &str = "root\n";
+
+/// The time-switch vertical's change switching network time off, run as the
+/// session's own administrator through `elevate`.
+const TIME_NETWORK_OFF_LINE: &str =
+    "elevate root /System/Commands/configure.app/Run time.network off\n";
+
+/// The time-switch vertical's change switching network time back on.
+const TIME_NETWORK_ON_LINE: &str =
+    "elevate root /System/Commands/configure.app/Run time.network on\n";
 
 /// Serial marker for a value-pipe read of `info:system/machine-id`: the
 /// unprovisioned machine id, sixteen zero bytes until an installer mints one,
@@ -8209,14 +8218,14 @@ static TESTS: &[QemuTest] = &[
     // (`match.node`) live-boot vertical.
     // `tairix-test-netstack-static-qemu-aarch64` boots the *production*
     // aarch64 pipeline with the `static-net-root` disk: the net-only signed
-    // driver set **plus** a planted `/System/Settings/Network/network.conf`
+    // driver set **plus** a planted `/System/Defaults/Network/network.conf`
     // that binds the NIC to the `wan` alias by its stable bus location
     // (`<iface>.match.node` = the QEMU-virt virtio-net register base) and
     // assigns it a static IPv6 address (`FsDisk::StaticNetRootDisk`), with a
     // `virtio-net-device` attached and the harness-side static-addressing
     // peer on its `dgram` netdev (`NetPeerMode::V6StaticEcho`). Everything
     // runs **before** any root unlock — the `/System` store and its
-    // `Settings/` config are on the read-only volume mounted before the
+    // `Defaults/` config are on the read-only volume mounted before the
     // passphrase — so the guest needs no console dialogue (headless, no
     // serial script), exactly like the riscv64 autoload sibling. `devmgr`
     // autoloads the virtio-net driver into its own process (it publishes a
@@ -8260,7 +8269,7 @@ static TESTS: &[QemuTest] = &[
     // `plans/DHCP.md` D3: the live DHCPv4 vertical.
     // `tairix-test-netstack-dhcp-qemu-aarch64` boots the *production* aarch64
     // pipeline with the `dhcp-net-root` disk: the net-only signed driver set
-    // **plus** a planted `/System/Settings/Network/network.conf` that binds
+    // **plus** a planted `/System/Defaults/Network/network.conf` that binds
     // the NIC to the `wan` alias by its stable bus location
     // (`<iface>.match.node`), selects `ipv4.method dhcp`, and disables IPv6
     // (`FsDisk::DhcpNetRootDisk`), with a `virtio-net-device` attached and the
@@ -8368,6 +8377,51 @@ static TESTS: &[QemuTest] = &[
             // gated on that record would still be pending when it does and
             // the run would fail as an unfinished script.
             ("root@tairix ~% ", Duration::ZERO, ""),
+        ],
+        expect: Expect::Pass,
+    },
+    // `plans/TIMESYNC.md` TS-6: network time switched off and back on while
+    // `timed` runs, through the settings service. The `time-net-root` disk and
+    // the NTP-server peer of the TS-2 vertical; at the session prompt the
+    // script asks for `time.network off` with `elevate`, the one way an
+    // administrator's shell holds `CAP_SETTINGS_WRITE`, and, on `timed`'s record
+    // of network time switched off, for `time.network on`. The settings
+    // service writes each change and the service follows its configuration's
+    // directory, so neither waits for a boot. The guest exits on a clock set
+    // from the peer only once network time was switched off, so a service that
+    // ignored either change never earns it. A 420-second budget covers the
+    // TS-2 run and the two elevated changes on QEMU TCG.
+    QemuTest {
+        package: "tairix-test-timed-switch-qemu-aarch64",
+        binary: "tairix-test-timed-switch-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(420),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::NtpServer,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::TimeNetRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, TIME_NETWORK_OFF_LINE),
+            ("Password for root: ", Duration::ZERO, SESSION_PASSWORD_LINE),
+            (
+                "network time was switched off",
+                Duration::ZERO,
+                TIME_NETWORK_ON_LINE,
+            ),
+            ("Password for root: ", Duration::ZERO, SESSION_PASSWORD_LINE),
         ],
         expect: Expect::Pass,
     },
@@ -8704,7 +8758,7 @@ static TESTS: &[QemuTest] = &[
     // vertical. `tairix-test-netstack-bond-qemu-aarch64` boots the
     // *production* aarch64 pipeline with the `bond-net-root` disk: the
     // net-only signed driver set **plus** a planted
-    // `/System/Settings/Network/network.conf` that binds two NICs by
+    // `/System/Defaults/Network/network.conf` that binds two NICs by
     // `match.mac` as the members of one active-backup bond (`wan`) carrying
     // a static IPv6 address (`FsDisk::BondNetRootDisk`), with **two**
     // `virtio-net-device`s attached and the harness-side bond peer serving
@@ -8761,7 +8815,7 @@ static TESTS: &[QemuTest] = &[
     // device is attached and the harness-side static-addressing peer
     // (`NetPeerMode::V6StaticEcho`) campaigns to the guest's *static* address.
     // Everything runs **before** any root unlock — the `/System` store and its
-    // `Settings/` config are on the always-readable volume — so the guest
+    // `Defaults/` config are on the always-readable volume — so the guest
     // needs no console dialogue (headless, no serial script). `devmgr`
     // autoloads the virtio-net driver into its own process (it publishes a
     // `netchan` node), reads the planted config, and binds the NIC to `wan` by
@@ -8809,7 +8863,7 @@ static TESTS: &[QemuTest] = &[
     // interface forms no address of its own. A `virtio-net-pci` device is
     // attached and the harness-side DHCP-server peer (`NetPeerMode::V4DhcpEcho`)
     // leases the guest its only address and campaigns to it. Everything runs
-    // **before** any root unlock — the `/System` store and its `Settings/`
+    // **before** any root unlock — the `/System` store and its `Defaults/`
     // config are on the always-readable volume — so the guest needs no console
     // dialogue (headless, no serial script). `devmgr` autoloads the virtio-net
     // driver into its own process (it publishes a `netchan` node), reads the
@@ -8905,7 +8959,7 @@ static TESTS: &[QemuTest] = &[
     // `virtio-net-device` is attached and the harness-side static-addressing
     // peer (`NetPeerMode::V6StaticEcho`) campaigns to the guest's *static*
     // address. Everything runs **before** any root unlock — the `/System`
-    // store and its `Settings/` config are on the always-readable volume — so
+    // store and its `Defaults/` config are on the always-readable volume — so
     // the guest needs no console dialogue (headless, no serial script).
     // `devmgr` autoloads the virtio-net driver into its own process (it
     // publishes a `netchan` node), reads the planted config, and binds the NIC
@@ -8954,7 +9008,7 @@ static TESTS: &[QemuTest] = &[
     // the interface forms no address of its own. A `virtio-net-device` is
     // attached and the harness-side DHCP-server peer (`NetPeerMode::V4DhcpEcho`)
     // leases the guest its only address and campaigns to it. Everything runs
-    // **before** any root unlock — the `/System` store and its `Settings/`
+    // **before** any root unlock — the `/System` store and its `Defaults/`
     // config are on the always-readable volume — so the guest needs no console
     // dialogue (headless, no serial script). `devmgr` autoloads the virtio-net
     // driver into its own process (it publishes a `netchan` node), reads the
@@ -9011,7 +9065,7 @@ static TESTS: &[QemuTest] = &[
     // IPv6 peer of the D3 DHCPv4 verticals. Each boots the *production*
     // pipeline for its arch with the `dhcp6-net-root` disk: the net-only
     // signed driver set **plus** a planted
-    // `/System/Settings/Network/network.conf` that binds the NIC to the `wan`
+    // `/System/Defaults/Network/network.conf` that binds the NIC to the `wan`
     // alias by its stable bus location (`<iface>.match.node`), selects
     // `ipv6.method dhcp`, and disables IPv4 (`FsDisk::Dhcp6NetRootDisk`), with
     // a `virtio-net` device attached and the harness-side DHCPv6-server peer
@@ -9834,11 +9888,11 @@ static TESTS: &[QemuTest] = &[
         expect: Expect::Pass,
     },
     // Elevated Date & Time launch: right-click the taskbar clock, choose
-    // *Set Date & Time…*, authenticate as the fixture root account through
-    // the session's credential prompt, and witness the Date & Time window.
-    // The guest latches APP_LOADED for datetime.app plus one window create
-    // after that load; the host types credentials once the prompt announces
-    // itself on serial. Single CPU, same inactivity budget as the icon-bar
+    // *Set Date & Time…*, allow it with the signed-in fixture account's
+    // password at the session's authorisation prompt, and witness the Date &
+    // Time window. The guest latches APP_LOADED for datetime.app plus one
+    // window create after that load; the host types the password once the
+    // prompt announces its question on serial. Single CPU, same inactivity budget as the icon-bar
     // sibling so co-scheduling cannot turn a merely slow guest into a timeout.
     QemuTest {
         package: "tairix-test-datetime-elevate-qemu-aarch64",
@@ -9861,10 +9915,10 @@ static TESTS: &[QemuTest] = &[
                 UNLOCK_PASSPHRASE_LINE,
             ),
             TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
-            // The credential prompt is up and focused: offer the fixture
-            // account. Tab moves from the account field to the password;
-            // Enter submits. The broker starts datetime.app as that account.
-            TypedStep::text(ELEVATE_PROMPT_SHOWN_MARKER, 1, "root\troot\n"),
+            // The authorisation prompt is asking: the signed-in fixture
+            // account may set the clock, so only its password is asked for.
+            // Enter offers it, and the broker starts datetime.app as it.
+            TypedStep::text(ELEVATE_PROMPT_SHOWN_MARKER, 1, "root\n"),
         ],
         screendumps: &[],
         pointer_script: Some(datetime_elevate_pointer_script),
@@ -14212,7 +14266,7 @@ impl PointerPen {
 }
 
 /// Right-click the taskbar clock, then click the *Set Date & Time…* row of the
-/// menu that opens, so the session opens its credential prompt.
+/// menu that opens, so the session opens its authorisation prompt.
 fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
 

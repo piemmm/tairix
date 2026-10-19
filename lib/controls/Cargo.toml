@@ -51,6 +51,9 @@ tairix-vt = { path = "../vt", version = "=0.0.0" }
 # renders is built as, and the wire model decodes into it here rather than in
 # whichever process happens to hold the chain.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The place listing the time-zone dialog's rows are read from (`zone`): every
+# place a zone store holds, by city, with the local time there.
+tairix-tz = { path = "../tz", version = "=0.0.0", features = ["listing"] }
 
 # The controls' host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).
@@ -59,6 +62,8 @@ tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
 # The metered allocator a pointer event or a layout is held to allocating
 # nothing by.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The fixture zone store the time-zone dialog's tests list.
+tairix-tz = { path = "../tz", version = "=0.0.0", features = ["listing", "test-support"] }
 
 [features]
 # Exposes `testkit`'s shared theme fixtures (e.g. the heavy-contrast theme

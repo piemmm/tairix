@@ -1301,6 +1301,13 @@ impl<'a> DirChangeBatch<'a> {
     pub const fn changes(&self) -> DirChanges<'a> {
         DirChanges { rest: self.records }
     }
+
+    /// Whether the entry `name` may have changed: the batch names it, or it
+    /// itemises nothing because it is a rescan or the watch is spent.
+    #[must_use]
+    pub fn concerns(&self, name: &[u8]) -> bool {
+        self.status != DirWatchStatus::Changes || self.changes().any(|change| change.name() == name)
+    }
 }
 
 /// The records of a validated [`DirChangeBatch`].
@@ -1972,6 +1979,27 @@ mod tests {
             .expect("header fits");
         assert_eq!(longest.encode_into(&mut buf[off..]), Ok(DirChange::MAX_LEN));
         assert_eq!(off + DirChange::MAX_LEN, DirChangeBatch::MIN_BUFFER);
+    }
+
+    #[test]
+    fn a_batch_concerns_the_names_it_lists_and_every_name_when_it_lists_none() {
+        let listed = batch(
+            DirWatchStatus::Changes,
+            false,
+            &[
+                DirChange::Present(present(b"system.conf")),
+                DirChange::Absent(b"old.log"),
+            ],
+        );
+        let listed = DirChangeBatch::decode(&listed).expect("valid batch");
+        assert!(listed.concerns(b"system.conf"));
+        assert!(listed.concerns(b"old.log"));
+        assert!(!listed.concerns(b"network.conf"));
+        for status in [DirWatchStatus::Rescan, DirWatchStatus::Gone] {
+            let bare = batch(status, false, &[]);
+            let bare = DirChangeBatch::decode(&bare).expect("bare status");
+            assert!(bare.concerns(b"system.conf"), "{status:?}");
+        }
     }
 
     #[test]

@@ -12,20 +12,24 @@
 //! # The reactor
 //!
 //! One wait-set over the delivery port the network stack posts this service's
-//! datagrams to, armed with the timeout the engine's single folded deadline
-//! implies. The loop parks; it never polls. A wake is either a datagram
-//! (evaluate it in the sandbox worker, apply the verdict) or the deadline
-//! lapsing (send the next request). With no deadline left — every server in
-//! use retired and the re-selection ladder spent — the service exits rather
-//! than holding a task and a bound delivery port doing nothing.
+//! datagrams to and a watch on the machine configuration, armed with the
+//! timeout the engine's single folded deadline implies. The loop parks; it
+//! never polls. A wake is a datagram (evaluate it in the sandbox worker, apply
+//! the verdict), a configuration change (read it, apply `tairix_timed::retune`'s
+//! answer), or the deadline lapsing (send the next request). With no deadline
+//! left the service parks on the watch alone, since the configuration may yet
+//! switch network time on or name a server; only with no watch either does it
+//! exit, rather than hold a task and a bound port doing nothing.
 //!
 //! # Where the servers come from
 //!
 //! The three tiers of `tairix_timesync::select_servers`: the operator's
-//! `time.servers`, else what DHCP offered, else the built-in fallback. A
-//! boot-floor service starts before either of the first two is knowable, so it
-//! starts on the fallback and re-selects on a bounded ladder, replacing its
-//! servers only when a *strictly better* tier appears.
+//! `time.servers`, else what DHCP offered, else the built-in fallback. The
+//! service starts before either of the first two is knowable, so it starts on
+//! the fallback and re-selects on a bounded ladder, replacing its
+//! servers only when a *strictly better* tier appears. The same ladder is what
+//! finds the root mounted: the configuration is watched, and the record read
+//! again, from the first rung that reaches it.
 //!
 //! # Two roles, one binary
 //!
@@ -54,11 +58,13 @@ mod program {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use tairix_abi::driver_store::SystemConfigFile;
+    use tairix_abi::fs::DirChangeBatch;
     use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketId};
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
-    use tairix_abi::waitset::WaitSourceKind;
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{Errno, WallClockReading, WallTimeState, MAX_TIME_SERVERS};
     use tairix_log::{Event, EventId, Level};
     use tairix_net::addr::IpAddr;
@@ -70,15 +76,17 @@ mod program {
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{worker_role, RtLauncher};
     use tairix_sandbox::timesync::TimeSyncService;
-    use tairix_sysconfig::SystemConfig;
+    use tairix_sysconfig::{Switch, SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN};
     use tairix_timed::{
-        Clock, RecordStore, RtcSource, Timed, TimedConfig, Transport, CONFIG_RETRY_ATTEMPTS,
+        retune, selection_for, watch_verdict, Clock, NetworkSettings, NetworkTime, RecordStore,
+        Retune, RtcSource, Timed, TimedConfig, Transport, WatchVerdict, CONFIG_RETRY_ATTEMPTS,
         CONFIG_RETRY_BASE_NANOS,
     };
-    use tairix_timesync::events::{SERVERS_FROM_FALLBACK, SERVICE_UNAVAILABLE, TIMED_RANGE_START};
-    use tairix_timesync::{
-        select_servers, ServerSelection, ServerSource, TimeServer, RECORD_LEN, RECORD_PATH,
+    use tairix_timesync::events::{
+        CONFIG_NOT_FOLLOWED, CONFIG_REFUSED, SERVERS_FROM_FALLBACK, SERVICE_UNAVAILABLE,
+        TIMED_RANGE_START,
     };
+    use tairix_timesync::{ServerSelection, ServerSource, TimeServer, RECORD_LEN, RECORD_PATH};
     use tairix_util::retry::RetryLadder;
 
     /// Exit code when the service cannot serve: its reactor could not be
@@ -92,9 +100,20 @@ mod program {
     /// headroom lets a few queue rather than back-pressure the stack.
     const DELIVER_CAPACITY: usize = 8;
 
-    /// Wait-set token for the delivery port (one source, so any token
-    /// identifies it).
+    /// Wait-set token for the delivery port.
     const DELIVER_TOKEN: u64 = 1;
+
+    /// Wait-set token for the configuration watch.
+    const WATCH_TOKEN: u64 = 2;
+
+    /// The shortest interval between two reports of a storm of configuration
+    /// changes; an isolated change reports at once.
+    const WATCH_LATENCY_NS: u64 = 1_000_000_000;
+
+    /// The most change batches one wake drains before reading the
+    /// configuration anyway, so a directory changing without pause cannot hold
+    /// the reactor.
+    const WATCH_DRAIN_BATCHES: usize = 16;
 
     /// The audit sink every record is written through.
     static LOG_SINK: LogSink = LogSink;
@@ -160,17 +179,16 @@ mod program {
 
     impl RecordStore for RtRecordStore {
         fn read(&self) -> Result<Option<Vec<u8>>, Errno> {
-            let file = match tairix_rt::open(RECORD_PATH.as_bytes()) {
-                Ok(file) => file,
+            // One byte past the record's length is read, so a longer document
+            // is refused by the record's own length check rather than read as
+            // its first bytes.
+            match tairix_rt::read_path_to_end(RECORD_PATH.as_bytes(), RECORD_LEN) {
+                Ok(bytes) => Ok(Some(bytes)),
                 // A machine that has never synchronised has no record; that
                 // is the normal first-boot case, not a failure.
-                Err(ret) if Errno::from_syscall(ret) == Errno::NotFound => return Ok(None),
-                Err(ret) => return Err(Errno::from_syscall(ret)),
-            };
-            let mut buf = vec![0u8; RECORD_LEN];
-            let read = file.read_at(0, &mut buf).map_err(Errno::from_syscall)?;
-            buf.truncate(read);
-            Ok(Some(buf))
+                Err(ret) if Errno::from_syscall(ret) == Errno::NotFound => Ok(None),
+                Err(ret) => Err(Errno::from_syscall(ret)),
+            }
         }
 
         fn write(&self, bytes: &[u8]) -> Result<(), Errno> {
@@ -329,8 +347,8 @@ mod program {
     ///
     /// Advice, not authority: the answer is a set of addresses to *ask*, and
     /// every sample one returns is still nonce-gated and plausibility-checked
-    /// before the clock moves. An unavailable service (the usual case on a
-    /// boot-floor start-up, before `sysinfod` and `netstack` are up) is an
+    /// before the clock moves. An unavailable service (the usual case at
+    /// start-up, before `sysinfod` and `netstack` are up) is an
     /// empty set, which simply leaves a lower tier in place; the caller's
     /// bounded ladder is what looks again.
     fn learned_time_servers() -> Vec<IpAddr> {
@@ -342,35 +360,282 @@ mod program {
         servers
     }
 
-    /// Read the boot-time configuration store, falling back to the documented
-    /// defaults when it is absent or cannot be understood.
+    /// Read the network-time settings of the machine configuration as it
+    /// stands: the documented defaults where neither layer holds a document,
+    /// and `None`, recorded, for one that cannot be read or fully understood —
+    /// never a guess at a partial intent.
     ///
-    /// A store this service cannot fully parse yields the defaults — which
-    /// name no server, so the service simply never queries — rather than a
-    /// guess at a partial intent. Before the root is mounted the
-    /// path has no backing at all, which is indistinguishable from a
-    /// volume-less boot and equally yields the defaults; the caller's bounded
-    /// re-read ladder is what separates the two, by outlasting the unlock.
-    fn load_config() -> SystemConfig {
-        match tairix_rt::open(tairix_sysconfig::CONFIG_PATH.as_bytes()) {
-            Ok(file) => load_from(&file),
-            Err(_) => SystemConfig::default(),
+    /// Before the root is mounted the layers have no backing at all, which is
+    /// indistinguishable from a volume-less boot and equally yields the
+    /// defaults; the caller's bounded ladder is what separates the two, by
+    /// outlasting the unlock.
+    fn load_settings() -> Option<NetworkSettings> {
+        let read = SystemConfigFile::System
+            .read_effective(|path| tairix_rt::read_document(path.as_bytes(), MAX_CONFIG_LEN));
+        let parsed = match read {
+            Ok(Some(text)) => SystemConfig::parse(&text).ok(),
+            Ok(None) | Err(Errno::NotImplemented) => Some(SystemConfig::default()),
+            Err(_) => None,
+        };
+        if parsed.is_none() {
+            record(
+                CONFIG_REFUSED,
+                Level::Warn,
+                "timed: the machine configuration could not be read or understood; the settings in use stand",
+            );
+        }
+        parsed.as_ref().map(settings_of)
+    }
+
+    /// The network-time half of `config`.
+    fn settings_of(config: &SystemConfig) -> NetworkSettings {
+        NetworkSettings {
+            on: config.time_network == Switch::On,
+            configured: config.time_servers.clone(),
+            refresh: config.time_refresh.interval(),
         }
     }
 
-    /// Parse the store document `file` holds, or the documented defaults when
-    /// it cannot be read or fully understood — never a guess at a partial
-    /// intent.
-    fn load_from(file: &tairix_rt::File) -> SystemConfig {
-        let mut buf = vec![0u8; tairix_sysconfig::MAX_CONFIG_LEN];
-        let Ok(read) = file.read_at(0, &mut buf) else {
-            return SystemConfig::default();
+    /// The configuration watch: on the configuration's own directory, or on
+    /// its parent until that directory exists.
+    struct ConfigWatch {
+        dir: tairix_rt::Dir,
+        exact: bool,
+    }
+
+    /// What looking for the configuration found.
+    enum Follow {
+        /// The settings tree is not there: the root is not mounted yet.
+        NotYet,
+        /// It is there, and watched.
+        Watching(ConfigWatch),
+        /// It is there but cannot be watched, for this reason.
+        Unwatched(Errno),
+    }
+
+    /// Where the configuration is followed from.
+    struct Places {
+        /// The configuration's directory.
+        dir: &'static str,
+        /// The configuration's name in it.
+        file: &'static str,
+        /// That directory's parent.
+        parent: &'static str,
+        /// That directory's name in its parent.
+        leaf: &'static str,
+    }
+
+    impl Places {
+        /// The places [`CONFIG_PATH`] names.
+        fn of_config() -> Option<Self> {
+            let (dir, file) = CONFIG_PATH.rsplit_once('/')?;
+            let (parent, leaf) = dir.rsplit_once('/')?;
+            Some(Self {
+                dir,
+                file,
+                parent,
+                leaf,
+            })
+        }
+    }
+
+    /// Watch the configuration's directory, or its parent until it exists,
+    /// joined to `set`.
+    fn follow(set: &WaitSet) -> Follow {
+        let Some(places) = Places::of_config() else {
+            return Follow::Unwatched(Errno::OutOfRange);
         };
-        buf.truncate(read);
-        core::str::from_utf8(&buf)
-            .ok()
-            .and_then(|text| SystemConfig::parse(text).ok())
-            .unwrap_or_default()
+        let (opened, exact) = match tairix_rt::open_dir(places.dir.as_bytes()) {
+            Ok(opened) => (opened, true),
+            Err(_) => match tairix_rt::open_dir(places.parent.as_bytes()) {
+                Ok(opened) => (opened, false),
+                Err(_) => return Follow::NotYet,
+            },
+        };
+        let armed = opened
+            .watch(WATCH_LATENCY_NS)
+            .map_err(Errno::from_syscall)
+            .and_then(|()| {
+                set.add(
+                    WaitSourceKind::DirWatch,
+                    u64::from(opened.fd()),
+                    WATCH_TOKEN,
+                )
+            });
+        match armed {
+            Ok(()) => Follow::Watching(ConfigWatch { dir: opened, exact }),
+            Err(err) => Follow::Unwatched(err),
+        }
+    }
+
+    impl ConfigWatch {
+        /// Drain the watch, answering the most it asks for.
+        fn drain(&self) -> WatchVerdict {
+            let Some(places) = Places::of_config() else {
+                return WatchVerdict::Rewatch;
+            };
+            let name = if self.exact { places.file } else { places.leaf };
+            let mut scratch = [0u8; 2 * DirChangeBatch::MIN_BUFFER];
+            let mut verdict = WatchVerdict::Unconcerned;
+            for _ in 0..WATCH_DRAIN_BATCHES {
+                let Ok(len) = self.dir.read_changes(&mut scratch) else {
+                    return WatchVerdict::Rewatch;
+                };
+                let (said, more) = watch_verdict(
+                    scratch.get(..len).unwrap_or_default(),
+                    self.exact,
+                    name.as_bytes(),
+                );
+                verdict = verdict.max(said);
+                if !more {
+                    return verdict;
+                }
+            }
+            verdict.max(WatchVerdict::Reread)
+        }
+
+        /// Leave `set` and close the watch.
+        fn leave(self, set: &WaitSet) {
+            let _ = tairix_rt::waitset_ctl(
+                set.handle(),
+                WaitSetOp::Del,
+                WaitSourceKind::DirWatch,
+                u64::from(self.dir.fd()),
+                WATCH_TOKEN,
+            );
+        }
+    }
+
+    /// Look for the configuration again, replacing `watch`; answers whether
+    /// the settings tree was there. A tree that is there but cannot be watched
+    /// is recorded, since its changes then wait for a restart.
+    fn refollow(set: &WaitSet, watch: &mut Option<ConfigWatch>) -> bool {
+        if let Some(old) = watch.take() {
+            old.leave(set);
+        }
+        match follow(set) {
+            Follow::NotYet => false,
+            Follow::Watching(followed) => {
+                *watch = Some(followed);
+                true
+            }
+            Follow::Unwatched(err) => {
+                tairix_log::log(
+                    &LOG_SINK,
+                    &Event {
+                        level: Level::Warn,
+                        id: CONFIG_NOT_FOLLOWED,
+                        message: "timed: the machine configuration cannot be watched; a change to it applies when the service restarts",
+                        fields: &[tairix_log::Field {
+                            key: "error",
+                            value: tairix_abi::FieldValue::Error(err),
+                        }],
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    /// The running service.
+    type Service = Timed<RtClock, RtRecordStore, RtTransport, RtLauncher, LogSink, RtRtc>;
+
+    /// Whether there is nothing better to look for: the operator named a
+    /// server, or switched network time off.
+    fn settled(service: &Service, held: &NetworkSettings) -> bool {
+        !held.on || service.source() == Some(ServerSource::Configured)
+    }
+
+    /// The service as it starts, asking the network as `held` says.
+    fn start(held: &NetworkSettings, deliver: u64, rng: &mut FastRng) -> Service {
+        Timed::new(TimedConfig {
+            clock: RtClock,
+            store: RtRecordStore,
+            sandbox: ParserSandbox::new(
+                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+                LOG_SINK,
+            ),
+            sink: LOG_SINK,
+            rtc: RtRtc,
+            network: held.on.then(|| {
+                network_time(
+                    selection_for(held, learned_time_servers),
+                    held.refresh,
+                    deliver,
+                    rng.next_u64(),
+                )
+            }),
+        })
+    }
+
+    /// Climb `retry`'s rung at `woken`, stopping once nothing better can be
+    /// found or the ladder is spent; a spent ladder says so when the fallback
+    /// stands.
+    fn climb(
+        retry: &mut Option<RetryLadder>,
+        service: &Service,
+        held: &NetworkSettings,
+        woken: u64,
+    ) {
+        if settled(service, held) {
+            *retry = None;
+        } else if !retry.as_mut().is_some_and(|rung| rung.advance(woken)) {
+            if service.source() == Some(ServerSource::Fallback) {
+                record(
+                    SERVERS_FROM_FALLBACK,
+                    Level::Info,
+                    "timed: no configured or network-supplied time server was found within the start-up window; the built-in fallback stands",
+                );
+            }
+            *retry = None;
+        }
+    }
+
+    /// Read the configuration again and apply what it asks of `service`,
+    /// which last applied `held`.
+    fn reread(service: &mut Service, held: &mut NetworkSettings, deliver: u64, rng: &mut FastRng) {
+        let Some(next) = load_settings() else {
+            return;
+        };
+        match retune(held, service.source(), &next, learned_time_servers) {
+            Retune::Keep => {}
+            Retune::Off => service.replace_network(None),
+            Retune::Select(selection) => service.replace_network(Some(network_time(
+                selection,
+                next.refresh,
+                deliver,
+                rng.next_u64(),
+            ))),
+            Retune::Refresh(refresh) => service.set_refresh(refresh),
+        }
+        *held = next;
+    }
+
+    /// Hand `service` every datagram the stack delivered to `deliver`; the
+    /// receive discards any other sender's post.
+    fn drain_datagrams(service: &mut Service, deliver: u64, scratch: &mut [u8], woken: Duration64) {
+        while let Ok(delivery) = tairix_rt::net::recv(deliver, scratch) {
+            // Its sockets join no group, so a link edge never arrives; were
+            // one to, it carries nothing for the clock.
+            if let SocketDelivery::Datagram(datagram) = delivery {
+                service.on_datagram(woken, datagram.payload);
+            }
+        }
+    }
+
+    /// The network half over `selection`, sending from `deliver`.
+    fn network_time(
+        selection: ServerSelection,
+        refresh: Duration64,
+        deliver: u64,
+        entropy: u64,
+    ) -> NetworkTime<RtTransport> {
+        NetworkTime {
+            transport: RtTransport::new(&selection.servers, deliver),
+            selection,
+            refresh,
+            entropy,
+        }
     }
 
     /// Widen a non-negative monotonic [`Duration64`] to the `u64` nanosecond
@@ -453,64 +718,56 @@ mod program {
             return EXIT_UNAVAILABLE;
         };
 
-        // Built immediately, from whatever is knowable right now — which on a
-        // boot-floor service is usually neither the store (the root is not
-        // mounted yet) nor a lease (no NIC is up), so it is usually the
+        // Watched before it is read, so no change falls between the two.
+        let mut watch = None;
+        let mut reachable = refollow(&set, &mut watch);
+        // Built immediately, from whatever is knowable right now — which at
+        // start-up is usually neither the store (the root is not mounted yet) nor a lease (no NIC is up), so it is usually the
         // built-in fallback. Waiting here instead would hold the boot up
         // behind a service nothing else is waiting for, and the fallback tier
         // is exactly what makes waiting unnecessary.
-        let mut config = load_config();
-        let mut selection = select_servers(&config.time_servers, &learned_time_servers());
+        let mut held = load_settings().unwrap_or_else(|| settings_of(&SystemConfig::default()));
+        let mut service = start(&held, deliver.id(), &mut rng);
         let mut retry = RetryLadder::arm(
             tairix_rt::clock_get(),
             CONFIG_RETRY_BASE_NANOS,
             CONFIG_RETRY_ATTEMPTS,
-            selection.source == ServerSource::Configured,
+            settled(&service, &held),
         );
-        let build = |selection: &ServerSelection, refresh: Duration64, entropy: u64| {
-            Timed::new(TimedConfig {
-                clock: RtClock,
-                rtc: RtRtc,
-                store: RtRecordStore,
-                transport: RtTransport::new(&selection.servers, deliver.id()),
-                sandbox: ParserSandbox::new(
-                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
-                    LOG_SINK,
-                ),
-                sink: LOG_SINK,
-                selection: selection.clone(),
-                refresh,
-                entropy,
-            })
-        };
-        let mut service = build(&selection, config.time_refresh.interval(), rng.next_u64());
 
         let mut scratch = vec![0u8; SocketDatagram::MAX_WIRE_LEN];
         let mut token = 0u64;
         loop {
             let now = tairix_rt::clock_get();
             let engine_at = service.next_deadline().map(nanos);
-            let Some(timeout) = timeout_until(now, engine_at, retry.as_ref().map(|r| r.at)) else {
-                // Nothing left to wait for: every server in use has retired
-                // and the re-read ladder is spent. Exit rather than hold a
-                // task and a bound delivery port for the rest of the boot
-                // doing nothing; restarting the service is what picks a later
-                // configuration up either way, and PID 1 audits the exit.
-                return 0;
+            let timeout = match timeout_until(now, engine_at, retry.as_ref().map(|r| r.at)) {
+                Some(timeout) => timeout,
+                // Nothing is due, but the configuration may yet switch network
+                // time on or name a server.
+                None if watch.is_some() => u64::MAX,
+                // Nothing is due and nothing can change. Exit rather than hold
+                // a task and a bound delivery port for the rest of the boot
+                // doing nothing; a restart picks a later configuration up, and
+                // PID 1 audits the exit.
+                None => return 0,
             };
             let waited = tairix_rt::waitset_wait(set.handle(), timeout, &mut token);
             let woken = Duration64::from_nanos(tairix_rt::clock_get());
-            if waited == 0 {
-                // A datagram is waiting. Drain what the stack delivered —
-                // the receive discards any other sender's post — then fall
-                // through to the deadline check.
-                while let Ok(delivery) = tairix_rt::net::recv(deliver.id(), &mut scratch) {
-                    // Its sockets join no group, so a link edge never
-                    // arrives; were one to, it carries nothing for the clock.
-                    if let SocketDelivery::Datagram(datagram) = delivery {
-                        service.on_datagram(woken, datagram.payload);
+            let mut changed = false;
+            if waited == 0 && token == WATCH_TOKEN {
+                match watch
+                    .as_ref()
+                    .map_or(WatchVerdict::Rewatch, ConfigWatch::drain)
+                {
+                    WatchVerdict::Unconcerned => {}
+                    WatchVerdict::Reread => changed = true,
+                    WatchVerdict::Rewatch => {
+                        reachable = refollow(&set, &mut watch);
+                        changed = true;
                     }
                 }
+            } else if waited == 0 {
+                drain_datagrams(&mut service, deliver.id(), &mut scratch, woken);
             } else if Errno::from_syscall(waited) != Errno::TimedOut {
                 // A dead wait-set would degrade the loop into a busy poll;
                 // exit fail-loud instead and let PID 1 relaunch the service.
@@ -522,39 +779,20 @@ mod program {
                 return EXIT_UNAVAILABLE;
             }
 
-            // The re-selection rung, if one is due: the root may
-            // have been mounted, or a DHCP lease acquired, since the last
-            // attempt. Only a *strictly better* tier replaces the servers in
-            // use — an equal-tier change (a renewed lease naming a different
-            // server) would reset the engine's rotation and backoff and
-            // forget which servers had refused, which costs more than it
-            // buys.
-            if let Some(rung) = retry.as_mut() {
-                if nanos(woken) >= rung.at {
-                    config = load_config();
-                    let next = select_servers(&config.time_servers, &learned_time_servers());
-                    let upgraded = next.source > selection.source;
-                    if upgraded {
-                        selection = next;
-                        service = build(&selection, config.time_refresh.interval(), rng.next_u64());
-                    }
-                    if selection.source == ServerSource::Configured {
-                        // The best tier there is: nothing further to look for.
-                        retry = None;
-                    } else if !rung.advance(nanos(woken)) {
-                        if selection.source == ServerSource::Fallback {
-                            record(
-                                SERVERS_FROM_FALLBACK,
-                                Level::Info,
-                                "timed: no configured or network-supplied time server was found within the start-up window; the built-in fallback stands",
-                            );
-                        }
-                        retry = None;
-                    }
-                    if upgraded {
-                        continue;
-                    }
+            // The ladder's rung, if one is due: the root may have been
+            // mounted, or a DHCP lease acquired, since the last.
+            let rung_due = retry.as_ref().is_some_and(|rung| nanos(woken) >= rung.at);
+            if rung_due && !reachable {
+                reachable = refollow(&set, &mut watch);
+                if reachable {
+                    service.store_reachable(rng.next_u64());
                 }
+            }
+            if rung_due || changed {
+                reread(&mut service, &mut held, deliver.id(), &mut rng);
+            }
+            if rung_due {
+                climb(&mut retry, &service, &held, nanos(woken));
             }
 
             service.poll(woken, rng.next_u64());

@@ -46,6 +46,19 @@ The refresh cadence is measured in **uptime**, not wall time. That is what
 keeps a frequently-rebooting machine from re-querying on every boot while still
 refreshing about once a day.
 
+`decide` is the start of a boot. Three later moments change the schedule without
+it, each one the engine's own politeness still bounds:
+
+| Call | When | Effect |
+|---|---|---|
+| `TimeSync::switched_on` | Network time was switched on while the service ran | The first query is as prompt as an unset clock's, reason `SwitchedOn`. |
+| `TimeSync::reconsider` | The record was read only after the client was built | A first query not yet sent is brought forward when the record now gives a reason; once a request has left, nothing moves. |
+| `TimeSync::set_refresh` | The cadence changed | A query waiting out the old cadence is brought within the new one, never later; a backoff is left alone. |
+
+`TimeSync::not_before` holds a client built to replace another back to the poll
+floor after its predecessor's last request, so a replacement can never ask
+sooner than the engine itself would have.
+
 ## Which servers
 
 `select_servers` is the other half of the policy: **whose** server to ask.

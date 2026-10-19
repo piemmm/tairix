@@ -106,9 +106,10 @@ pub use auth::{DenyAll, UsersAuthenticator};
 pub use broker::{
     handle_session_request, DbAccounts, SessionDirectory, SessionReply, ZoneStoreGrant,
 };
-pub use budget::AttemptBudget;
+pub use budget::{AttemptBudget, GuessMeter};
 pub use elevate::{
-    audit_launch_ended_abnormally, drain_bounded, handle_elevate_request, Captured, ElevateLauncher,
+    audit_launch_ended_abnormally, drain_bounded, handle_elevate_request, AuthoriserPage,
+    Authority, Caller, Captured, ElevateDirectory, ElevateLauncher, ProgramRequests,
 };
 pub use error::LoginError;
 pub use login::{Login, LoginConfig};

@@ -25,6 +25,9 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
+    decode_authorised_output_reply, SystemTask, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+};
+use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
     decode_drag_spot_reply, decode_drop_target_reply, decode_hand_over_reply,
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
@@ -96,7 +99,10 @@ const PULL_REPLY_MAX: usize = {
                 WINDOW_CLIPBOARD_REPLY_LEN,
                 wider(
                     wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PICKED_FILE_REPLY_MAX),
-                    wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
+                    wider(
+                        wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
+                        WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+                    ),
                 ),
             ),
         ),
@@ -1582,6 +1588,40 @@ impl<T: WindowTransport> WindowClient<T> {
     /// its own Settings application) or a transport failure.
     pub fn lock_screen(&mut self) -> Result<(), Errno> {
         self.status_call(&WindowRequest::LockScreen)
+    }
+
+    /// Ask the desktop to authorise and perform `task` for window
+    /// `window_id`. The outcome arrives as a
+    /// [`WindowEvent::Authorised`]; a captured task's output is then taken
+    /// with [`take_authorised_output`](Self::take_authorised_output).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a task the wire cannot carry, the session's
+    /// refusal ([`Errno::PermissionDenied`] for any caller but its own
+    /// Settings application, [`Errno::OutOfRange`] for a task it will
+    /// not perform as asked, [`Errno::AlreadyExists`] while one is pending
+    /// on the window, [`Errno::SeatBusy`] while anything else holds the
+    /// seat), or a transport failure.
+    pub fn authorise(&mut self, window_id: u64, task: &SystemTask) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::Authorise {
+            window_id,
+            task: *task,
+        })
+    }
+
+    /// What window `window_id`'s last task printed, once its
+    /// [`WindowEvent::Authorised`] said it was captured. One-shot.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when there is none to take, a transport failure,
+    /// or a corrupt reply.
+    pub fn take_authorised_output(&mut self, window_id: u64) -> Result<Vec<u8>, Errno> {
+        let output = decode_authorised_output_reply(
+            self.pull(&WindowRequest::TakeAuthorisedOutput { window_id })?,
+        )?;
+        Ok(output.to_vec())
     }
 
     /// A read-only delegation of the desktop's civil-time store: the

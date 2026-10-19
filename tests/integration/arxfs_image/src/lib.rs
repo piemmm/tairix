@@ -325,30 +325,12 @@ pub fn build_users_root_image() -> Result<Vec<u8>, DriverError> {
     build_users_root_image_keyed(FIXTURE_KEYING, &[])
 }
 
-/// Create PID 1's enrolment-override directory under `settings`, owned by the
-/// system user exactly as `tools/mkimage` provisions it.
-///
-/// Without it every `servicectl enable`/`disable` would be refused rather than
-/// recorded: `/System/Settings` is system-user-owned, so the manager cannot
-/// create the directory its own document lives in.
-fn create_service_overrides_dir(
-    fs: &mut ARXFS<VecBlock>,
-    settings: NodeId,
-) -> Result<(), DriverError> {
-    let leaf = tairix_abi::SERVICE_OVERRIDES_DIR
-        .rsplit('/')
-        .next()
-        .unwrap_or(tairix_abi::SERVICE_OVERRIDES_DIR);
-    let dir = fs.create(settings, leaf.as_bytes(), NodeKind::Directory)?;
-    fs.set_security(
-        dir,
-        Security::new(
-            0o755,
-            tairix_users::SYSTEM_UID.0,
-            tairix_users::SYSTEM_GID.0,
-        ),
-    )
-    .map(drop)
+/// A shape refusal as the driver error this fixture reports.
+fn shape_error(err: tairix_users::ShapeError) -> DriverError {
+    match err {
+        tairix_users::ShapeError::Driver(err) => err,
+        tairix_users::ShapeError::Occupied => DriverError::Unsupported,
+    }
 }
 
 /// Plant the regular file `name` holding `content` in `dir`, a folder of the
@@ -414,26 +396,8 @@ pub fn build_users_root_image_keyed(
     for name in tairix_abi::stored_root_entries() {
         let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
         if name == "System" {
-            // The time service's state directory, owned by that service
-            // exactly as `tools/mkimage` provisions it: `/System/Settings` is
-            // system-user-owned, so without this `timed` could not create the
-            // directory its own record lives in and every boot would lose the
-            // last-seen instant.
             let settings = fs.create(node, b"Settings", NodeKind::Directory)?;
-            let time = fs.create(
-                settings,
-                tairix_timesync::RECORD_SUBDIR.as_bytes(),
-                NodeKind::Directory,
-            )?;
-            fs.set_security(
-                time,
-                Security::new(
-                    0o755,
-                    tairix_users::TIMED_UID.0,
-                    tairix_users::SERVICES_GID.0,
-                ),
-            )?;
-            create_service_overrides_dir(&mut fs, settings)?;
+            tairix_users::provision_settings_dirs(&mut fs, settings).map_err(shape_error)?;
         }
         if name == "Users" {
             // The planted account's recorded home directory with the fixed
@@ -447,10 +411,7 @@ pub fn build_users_root_image_keyed(
                 tairix_users::FIRST_USER_UID,
                 tairix_users::FIRST_USER_GID,
             )
-            .map_err(|err| match err {
-                tairix_users::HomeShapeError::Driver(err) => err,
-                tairix_users::HomeShapeError::Occupied => DriverError::Unsupported,
-            })?;
+            .map_err(shape_error)?;
             // Two readable documents among the account's own files, where a
             // bare file-manager window and the trusted picker both open, so
             // both user-mediated routes to a file have something real to
@@ -480,9 +441,36 @@ pub fn build_users_root_image_keyed(
     }
     for (components, bytes) in root_files {
         plant_nested_file(&mut fs, root, components, bytes)?;
+        own_settings_document(&mut fs, root, components)?;
     }
     fs.flush()?;
     Ok(fs.into_block()?.into_bytes())
+}
+
+/// Give a document planted in a service's `/System/Settings` directory to
+/// that service, as it would own one it wrote itself.
+fn own_settings_document(
+    fs: &mut ARXFS<VecBlock>,
+    root: NodeId,
+    components: &[&[u8]],
+) -> Result<(), DriverError> {
+    let [system, settings, dir, file] = components else {
+        return Ok(());
+    };
+    let Some(owned) = tairix_users::SETTINGS_DIRS
+        .iter()
+        .find(|owned| owned.name().as_bytes() == *dir)
+    else {
+        return Ok(());
+    };
+    if (*system, *settings) != (&b"System"[..], &b"Settings"[..]) {
+        return Ok(());
+    }
+    let node = fs.lookup(root, system)?;
+    let node = fs.lookup(node, settings)?;
+    let node = fs.lookup(node, dir)?;
+    let node = fs.lookup(node, file)?;
+    fs.set_security(node, owned.document_security())
 }
 
 /// Re-export of the single store-planting helper. The
@@ -506,6 +494,28 @@ mod tests {
         let bytes = build_image().expect("the fixture builds a valid arxfs volume");
         let dev = VecBlock { store: bytes };
         ARXFS::open(dev, FIXTURE_KEYING).expect("the built image is a valid arxfs volume")
+    }
+
+    #[test]
+    fn a_document_planted_in_a_service_s_settings_belongs_to_that_service() {
+        use tairix_abi::driver::filesystem::FilesystemSecurity;
+        use tairix_abi::driver_store::SystemConfigFile;
+
+        let components: [&[u8]; 4] = [b"System", b"Settings", b"Configuration", b"system.conf"];
+        let bytes =
+            build_users_root_image_keyed(FIXTURE_KEYING, &[(&components, b"time.network off\n")])
+                .expect("the image builds");
+        let mut fs = ARXFS::open(VecBlock { store: bytes }, FIXTURE_KEYING).expect("mounts");
+        let mut node = fs.root();
+        for component in components {
+            node = fs.lookup(node, component).expect("planted");
+        }
+        let found = fs.security(node).expect("a record");
+        let wanted = tairix_users::document_dir(SystemConfigFile::System).document_security();
+        assert_eq!(
+            (found.mode & 0o7777, found.uid, found.gid),
+            (wanted.mode, wanted.uid, wanted.gid)
+        );
     }
 
     #[test]

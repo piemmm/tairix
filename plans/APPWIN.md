@@ -83,8 +83,8 @@ exception.
   veil or sheet over its own window's content is forbidden. Such a panel is
   clipped to the window, cannot be moved or raised, and makes every
   application re-implement modality. None remains: TextEdit's Go to line,
-  Paint's forms, Settings' credential question and each file operation's
-  progress are dialog windows (`docs/src/desktop/wm.md`), and the shared
+  Paint's forms and each file operation's progress are dialog windows
+  (`docs/src/desktop/wm.md`), and the shared
   controls offer no way to place a dialog over an application's own content.
 - **Alerts and dialog windows size to their content.** The width is set by a
   readable measure and the button row; the height is exactly what the

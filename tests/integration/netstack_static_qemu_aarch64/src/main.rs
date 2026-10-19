@@ -2,7 +2,7 @@
 //! production aarch64 `tairix-kernel` pipeline on the `virt` board against
 //! the shared `static-net-root` whole-disk image — whose read-only `/System`
 //! volume carries the **kernel-signed virtio-net driver bundle** and a
-//! planted `/System/Settings/Network/network.conf` — with a
+//! planted `/System/Defaults/Network/network.conf` — with a
 //! `virtio-net-device` attached and the harness-side **static-addressing**
 //! link peer on the QEMU `dgram` netdev, and prove the `<iface>.match.node`
 //! binding **and** static addressing end to end.
@@ -24,7 +24,7 @@
 //!   discriminator, not a tautology.
 //!
 //! The production boot path (all **before** any root unlock — the `/System`
-//! store and its `Settings/` config are on the read-only volume mounted
+//! store and its `Defaults/` config are on the read-only volume mounted
 //! before the passphrase, so the guest needs no console dialogue, exactly
 //! like the headless riscv64 autoload sibling):
 //!

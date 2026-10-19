@@ -248,6 +248,13 @@ pub fn entry_path(bundle: &str) -> String {
     format!("{bundle}/{}", BundleEntry::Run.as_str())
 }
 
+/// Whether `bundle` lies in one of the read-only, system-signed stores, with
+/// no component that could name somewhere else.
+#[must_use]
+pub fn is_machine_bundle(bundle: &str) -> bool {
+    is_plain_absolute(bundle) && ProgramKind::of_system_store(bundle).is_some()
+}
+
 /// The bundle directory whose entry-point binary `entry` is, or `None` for a
 /// path that is no bundle's entry.
 #[must_use]

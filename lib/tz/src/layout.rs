@@ -6,12 +6,13 @@
 //! is specified in `docs/src/lib/tz.md`.
 
 use crate::rule::{DayRule, Moment, TimeBase};
+use crate::Weekday;
 
 /// The first four bytes of every store.
 pub const MAGIC: [u8; 4] = *b"TZX1";
 
 /// The format version this reader understands.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// Bytes in the header.
 pub const HEADER_LEN: usize = 60;
@@ -55,9 +56,6 @@ pub const NO_TRAILING: u32 = u32::MAX;
 
 /// The largest store accepted. A security bound, not a capacity.
 pub const MAX_STORE_LEN: usize = 4 << 20;
-
-/// The longest zone name.
-pub const MAX_ZONE_NAME: usize = 64;
 
 /// The longest abbreviation.
 pub const MAX_ABBREV: usize = 16;
@@ -437,6 +435,8 @@ fn decode_phase(bytes: &[u8]) -> Option<PhaseRecord> {
 pub struct RegionRecord {
     /// Its ISO 3166-1 alpha-2 code.
     pub code: [u8; 2],
+    /// The day its calendar week begins on.
+    pub first_weekday: Weekday,
     /// Offset of its English name.
     pub name: u32,
     /// Offset of its numeric date pattern.
@@ -451,20 +451,23 @@ impl RegionRecord {
     pub fn encode(&self) -> [u8; REGION_LEN] {
         let mut out = [0; REGION_LEN];
         out[0..2].copy_from_slice(&self.code);
+        out[2] = u8::try_from(self.first_weekday.iso()).unwrap_or(0);
         out[4..8].copy_from_slice(&self.name.to_le_bytes());
         out[8..12].copy_from_slice(&self.date.to_le_bytes());
         out[12..16].copy_from_slice(&self.time.to_le_bytes());
         out
     }
 
-    /// The record `bytes` hold, or `None` for a set pad byte.
+    /// The record `bytes` hold, or `None` for a weekday no day is numbered
+    /// or a set pad byte.
     #[must_use]
     pub fn decode(bytes: &[u8; REGION_LEN]) -> Option<Self> {
-        if u16_at(bytes, 2) != 0 {
+        if bytes[3] != 0 {
             return None;
         }
         Some(Self {
             code: [bytes[0], bytes[1]],
+            first_weekday: Weekday::from_iso(u32::from(bytes[2]))?,
             name: u32_at(bytes, 4),
             date: u32_at(bytes, 8),
             time: u32_at(bytes, 12),

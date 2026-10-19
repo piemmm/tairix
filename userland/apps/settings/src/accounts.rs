@@ -104,12 +104,6 @@ const NOLOGIN_FOOTNOTE: &str = "This is a service identity. It never starts a se
 /// What an entry shows in place of a value the account does not carry.
 const UNSET: &str = "not set";
 
-/// The tool that owns every account field but the password.
-const USERMOD_RUN_PATH: &str = "/System/Commands/usermod.app/Run";
-
-/// The tool that owns an account's password.
-const PASSWD_RUN_PATH: &str = "/System/Commands/passwd.app/Run";
-
 /// The caller's own account, which is three different facts rather than an
 /// [`Option`] of one.
 ///
@@ -468,13 +462,22 @@ pub(crate) struct AccountSetting {
     pub(crate) field: AccountField,
 }
 
-/// The one elevated run a staged account change becomes.
+/// The one system task a staged account change becomes.
 pub(crate) struct AccountRun {
-    /// The absolute path of the tool that owns the change.
-    pub(crate) program: &'static str,
+    /// The tool that owns the change.
+    pub(crate) tool: AccountTool,
     /// The arguments to hand it, in the order its own command line takes
     /// them.
     pub(crate) argv: Vec<String>,
+}
+
+/// Which of the two account tools a change is for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AccountTool {
+    /// `usermod`, which owns every field but the password.
+    Fields,
+    /// `passwd`, which owns the password.
+    Password,
 }
 
 /// Why a staged change is not one elevated run, and so cannot be applied.
@@ -757,7 +760,7 @@ pub(crate) fn run_of(
     argv.push(String::from("--"));
     argv.push(account.username.clone());
     Ok(AccountRun {
-        program: USERMOD_RUN_PATH,
+        tool: AccountTool::Fields,
         argv,
     })
 }
@@ -862,7 +865,7 @@ fn password_run(
     )
     .map_err(|_| Unappliable::Unspellable)?;
     Ok(AccountRun {
-        program: PASSWD_RUN_PATH,
+        tool: AccountTool::Password,
         argv: alloc::vec![
             String::from("--record"),
             record.encode(),

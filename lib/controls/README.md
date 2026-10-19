@@ -573,12 +573,14 @@ its groups are stacked down), the picture choice (`picture` —
 `FieldGroup` beneath its rows), the colour wells (`swatch_grid` —
 `SwatchGrid`, a grid of wells with a primary and an optional secondary mark,
 chosen by pointer or arrow keys, a translucent well shown over the one
-`checker` — `Checker` — every surface shows transparency over), and the
-credential question (`credential` — `CredentialSheet`, the one surface that
-asks for an account and its password so a more-privileged program can be
-started as that account: the desktop session's prompt window and the settings
-application's dialog window compose the same focus order, wording and secret
-hygiene, each drawing it across a window of its own).
+`checker` — `Checker` — every surface shows transparency over), and the place
+chooser (`place` — `PlaceChooser`, a search field over its owner's places,
+narrowed without case or accent as the reader types, each row the place, where
+it is, and a reading such as its local time now, and `zone`, the one time-zone
+dialog over a `lib/tz` place listing that Settings and Date & Time open). No
+application asks for an account and its password here: that question is the
+system's own authorisation prompt (`lib/greeter`'s `AuthoriseSheet`), which
+only the desktop puts up.
 
 An application's *screen* is not here. This crate holds only behaviour any
 surface may reuse, so a composition that arranges these controls into one

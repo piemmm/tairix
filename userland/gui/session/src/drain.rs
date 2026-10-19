@@ -11,13 +11,14 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::Errno;
-use tairix_greeter::{Asking, Courier, Ticket, Verdict, Verifier};
+use tairix_greeter::{Asking, Courier, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point};
 
 use crate::clipboard::TextClipboard;
 use crate::drag::{DragEnd, DragPlace, DragStep, DragSurface, OwedReport};
-use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
-use crate::lock::{LockOutcome, ScreenLock};
+use crate::elevate::{AuthorisePrompt, Elevator, PromptOutcome};
+use crate::keyboard::{is_secure_attention, KeyInputChannel, KeyboardInputSource};
+use crate::lock::{LockOutcome, ScreenLock, UnlockAnswer};
 use crate::menu::MenuChain;
 use crate::saver::Waking;
 use crate::shell::{DesktopShell, InputSource, ShellOutcome, Stopped};
@@ -99,6 +100,10 @@ pub trait SeatRouter {
 
     /// Tell the application a carried drag began in how it ended.
     fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd);
+
+    /// The secure attention key was pressed at `now_ns` while the shell or
+    /// the menu chain held the seat: bring up the system's own surface.
+    fn attend(&mut self, seat: &mut Seat<'_>, now_ns: u64);
 }
 
 /// A seat drain, keeping the outcome buffer its batches reuse.
@@ -164,6 +169,11 @@ impl SeatDrain {
             else {
                 break;
             };
+            if is_secure_attention(&event) {
+                // What it brings up holds the seat; what follows is its.
+                router.attend(seat, now_ns);
+                break;
+            }
             let outcome = seat.shell.apply(event, seat.compositor, now_ns);
             typed = true;
             if let Some(end) = route(router, seat, outcome, Some(record), now_ns) {
@@ -246,6 +256,10 @@ where
         let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
             break;
         };
+        if is_secure_attention(&event) {
+            router.attend(seat, now_ns);
+            break;
+        }
         if matches!(event, InputEvent::KeyPressed { .. }) {
             seat.shell
                 .route_to_chain(seat.compositor, seat.menu, &event, seat.clipboard, now_ns);
@@ -357,6 +371,56 @@ where
     Ok(())
 }
 
+/// Drain the seat straight into the authorisation prompt: no motion, click
+/// or key reaches the window manager, the icon bar or an application, and the
+/// secure attention key answers on the prompt's own band.
+///
+/// Draining stops once the prompt concludes, leaving what follows queued for
+/// whoever holds the seat next. Answers how it concluded, if it did.
+///
+/// # Errors
+///
+/// A channel's fault.
+pub fn drain_authorising<P, C>(
+    seat: &mut Seat<'_>,
+    (pointer, keyboard): (&mut P, &mut KeyboardInputSource<C>),
+    prompt: &mut AuthorisePrompt,
+    elevator: &mut dyn Elevator,
+    now_ns: u64,
+) -> Result<PromptOutcome, Errno>
+where
+    P: InputSource + ?Sized,
+    C: KeyInputChannel,
+{
+    seat.shell.yield_pointer(seat.compositor);
+    while prompt.is_up() {
+        let Some(event) = pointer.poll(now_ns)? else {
+            break;
+        };
+        if let InputEvent::PointerMoved { to } = event {
+            seat.shell.track_pointer(to, seat.compositor);
+        }
+        let outcome = prompt.handle(&event, now_ns, elevator, seat.shell, seat.compositor);
+        if outcome != PromptOutcome::Pending {
+            return Ok(outcome);
+        }
+    }
+    while prompt.is_up() {
+        let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
+            break;
+        };
+        if is_secure_attention(&event) {
+            let _ = prompt.attend(now_ns, seat.shell, seat.compositor);
+            continue;
+        }
+        let outcome = prompt.handle(&event, now_ns, elevator, seat.shell, seat.compositor);
+        if outcome != PromptOutcome::Pending {
+            return Ok(outcome);
+        }
+    }
+    Ok(PromptOutcome::Pending)
+}
+
 /// Adopt every answer the broker has given the lock, each once the seat has
 /// been drained into the lock that is still up, answering whether one
 /// unlocked it.
@@ -379,7 +443,7 @@ pub fn adopt_unlocks<P, C, B>(
 where
     P: InputSource + ?Sized,
     C: KeyInputChannel,
-    B: Courier<Answer = (Ticket, Verdict)>,
+    B: Courier<Answer = UnlockAnswer>,
 {
     let mut outcome = LockOutcome::Pending;
     while let Some(answer) = unlocker.landed() {

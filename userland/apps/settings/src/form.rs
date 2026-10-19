@@ -41,6 +41,7 @@ use tairix_abi::font_ipc::FamilyEntry;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::PreviewSubject;
+use tairix_abi::zone::ZoneName;
 use tairix_abi::{BundleId, Errno};
 use tairix_appconf::Registry;
 use tairix_audio::stream::DeviceControl;
@@ -157,6 +158,8 @@ pub struct Offered<'a> {
     /// The delegated zone store's regions and places, which the Language &
     /// Region rows offer.
     pub(crate) civil: Option<&'a CivilChoices>,
+    /// The machine's own zone, which *Default* reads.
+    pub(crate) machine_zone: Option<ZoneName>,
 }
 
 /// What the Text rows offer beyond the document: the families the font store
@@ -419,9 +422,7 @@ impl Setting {
                  the screen locks."
             }
             Self::Region => "How the desktop writes dates and times.",
-            Self::TimeZone => {
-                "Where the desktop's clocks read the time. Type a city to find it in the list."
-            }
+            Self::TimeZone => "Where the desktop's clocks read the time.",
         }
     }
 
@@ -450,17 +451,7 @@ impl Setting {
             Self::Backdrop => list(backdrop_choices(settings.backdrop)),
             Self::Icons => list(pick(&IconFlow::ALL, settings.icons, icon_flow_label)),
             Self::Sort => list(pick(&IconSort::ALL, settings.sort, icon_sort_label)),
-            Self::CursorSet => {
-                let ladder = cursor_set_ladder(settings.cursor_set, offered.cursor_sets);
-                let at = ladder
-                    .iter()
-                    .position(|set| *set == settings.cursor_set)
-                    .unwrap_or(0);
-                Offer::List(
-                    ladder.iter().map(|set| set.name().to_string()).collect(),
-                    at,
-                )
-            }
+            Self::CursorSet => list(cursor_set_choices(settings.cursor_set, offered.cursor_sets)),
             Self::CursorSize => list(pick(
                 &CursorSize::ALL,
                 settings.cursor_size,
@@ -530,7 +521,7 @@ impl Setting {
                 idle_label,
             )),
             Self::Region => list(civil::region_choices(settings, offered.civil)),
-            Self::TimeZone => list(civil::zone_choices(settings, offered.civil)),
+            Self::TimeZone => Offer::Chooser,
         }
     }
 
@@ -634,7 +625,8 @@ impl Setting {
                 &mut settings.lock_after,
             ),
             Self::Region => civil::choose_region(index, settings, offered.civil),
-            Self::TimeZone => civil::choose_zone(index, settings, offered.civil),
+            // Chosen in a window of its own, never by index.
+            Self::TimeZone => false,
         }
     }
 
@@ -654,24 +646,44 @@ impl Setting {
                 slider.set_value(slider.stop_value(at).unwrap_or(0));
                 FieldControl::Slider(slider)
             }
+            Offer::Chooser => FieldControl::Button(Button::new(
+                ButtonContent::Label(String::from("Change\u{2026}")),
+                ControlRole::Neutral,
+            )),
         };
-        FieldRow::new(self.label(), control)
-            .with_description(self.described(settings, offered.civil))
+        FieldRow::new(self.label(), control).with_description(self.described(
+            settings,
+            offered.civil,
+            offered.machine_zone,
+        ))
     }
 
     /// The sentence beneath the row's label for `settings`: the region's row
-    /// also says how the region it holds writes a date and a time.
-    fn described(self, settings: &DesktopSettings, civil: Option<&CivilChoices>) -> String {
+    /// also says how the region it holds writes a date and a time, and the
+    /// zone's which zone its clocks read.
+    fn described(
+        self,
+        settings: &DesktopSettings,
+        civil: Option<&CivilChoices>,
+        machine_zone: Option<ZoneName>,
+    ) -> String {
+        if self == Self::TimeZone {
+            let held = civil::zone_held(settings, civil, machine_zone.as_ref());
+            return alloc::format!("{held}. {}", self.description());
+        }
         if self != Self::Region {
             return String::from(self.description());
         }
-        let (clock, _) = tairix_wallpaper::civil_clock(civil.map(|civil| civil.zones), settings);
+        let machine = machine_zone.as_ref().map(ZoneName::as_str);
+        let (clock, _) =
+            tairix_wallpaper::civil_clock(civil.map(|civil| civil.zones), settings, machine);
         alloc::format!("{} {}", self.description(), civil::written_example(&clock))
     }
 }
 
-/// What a setting offers: a list of choices by label, or the stops of a
-/// slider whose two ends say what its direction means.
+/// What a setting offers: a list of choices by label, the stops of a slider
+/// whose two ends say what its direction means, or a choice among too many to
+/// list in a row, made in a window of its own.
 ///
 /// A setting measured in a unit a reader does not think in — how many
 /// milliseconds apart a double-click's presses may be — is set on a slider
@@ -686,14 +698,18 @@ enum Offer {
         at: u16,
         ends: (&'static str, &'static str),
     },
+    /// Chosen in a window the row's command opens; the row states what is
+    /// held.
+    Chooser,
 }
 
 impl Offer {
-    /// How many choices, or stops, there are.
+    /// How many choices, or stops, the row itself offers.
     fn len(&self) -> usize {
         match self {
             Self::List(choices, _) => choices.len(),
             Self::Scale { stops, .. } => usize::from(*stops),
+            Self::Chooser => 0,
         }
     }
 
@@ -1051,6 +1067,16 @@ fn backdrop_ladder(current: Backdrop) -> Vec<(String, Backdrop)> {
     ladder
 }
 
+/// The cursor sets the row offers by name, and which `current` is.
+fn cursor_set_choices(current: CursorSetId, offered: &[CursorSetId]) -> (Vec<String>, usize) {
+    let ladder = cursor_set_ladder(current, offered);
+    let at = ladder.iter().position(|set| *set == current).unwrap_or(0);
+    (
+        ladder.iter().map(|set| set.name().to_string()).collect(),
+        at,
+    )
+}
+
 /// The cursor sets offered to a desktop currently drawing `current`: the
 /// built-in set first, then whatever the desktop listed, plus `current`
 /// itself when it is none of them.
@@ -1320,6 +1346,7 @@ impl Declared {
                     text: documents.text,
                     output: documents.output,
                     civil: documents.civil,
+                    machine_zone: documents.machine_zone,
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
@@ -2070,6 +2097,8 @@ pub(crate) struct Documents<'a> {
     /// The delegated zone store's regions and places, once it has arrived;
     /// kept for the life of the process.
     pub(crate) civil: Option<&'static CivilChoices>,
+    /// The machine's own zone, as the desktop states it.
+    pub(crate) machine_zone: Option<ZoneName>,
     /// The machine's boot-time configuration, or `None` while it has not
     /// been read.
     pub(crate) config: Option<&'a SystemConfig>,
@@ -2171,6 +2200,9 @@ pub enum FormOutcome {
     Staged,
     /// The reader asked for the screen to be locked now.
     LockScreen,
+    /// The reader asked to choose the time zone from every place the zone
+    /// store lists.
+    ChooseZone,
     /// The reader asked to see the screensaver now: the screensaver keys'
     /// document as the pane shows them, which the desktop previews without
     /// keeping.
@@ -2258,6 +2290,8 @@ pub struct Form {
     output: Option<(u32, u32)>,
     /// The delegated zone store's choices, kept for the same reason.
     civil: Option<&'static CivilChoices>,
+    /// The machine's own zone, kept for the same reason.
+    machine_zone: Option<ZoneName>,
     /// What renders each picture the choosers show, and which the desktop
     /// would not.
     pictures: Pictures,
@@ -2310,6 +2344,7 @@ impl Form {
             text: documents.text.cloned(),
             output: documents.output,
             civil: documents.civil,
+            machine_zone: documents.machine_zone,
             pictures: Pictures::default(),
             notify_sources: documents.notify_sources.map(<[_]>::to_vec),
             sources_full: documents.sources_full,
@@ -2753,6 +2788,35 @@ impl Form {
             .count()
     }
 
+    /// Take the choice at `index` of `setting` onto the working copy,
+    /// answering `None` where it named none, else whether the row's ladder
+    /// changed length: a value off its ladder is a choice of its own only
+    /// while it is held, so leaving it reshapes the row.
+    fn adopt_choice(&mut self, setting: Setting, index: usize) -> Option<bool> {
+        let Self {
+            settings,
+            cursor_sets,
+            catalog,
+            text,
+            output,
+            civil,
+            machine_zone,
+            ..
+        } = self;
+        let offered = Offered {
+            cursor_sets,
+            catalog,
+            text: text.as_ref(),
+            output: *output,
+            civil: *civil,
+            machine_zone: *machine_zone,
+        };
+        let before = setting.offer(settings, offered).len();
+        setting
+            .adopt(index, settings, offered)
+            .then(|| setting.offer(settings, offered).len() != before)
+    }
+
     /// Rebuild every row from the stores the form currently holds.
     ///
     /// A masked entry is **moved** across rather than rebuilt: it owns the
@@ -2775,6 +2839,7 @@ impl Form {
             text: self.text.as_ref(),
             output: self.output,
             civil: self.civil,
+            machine_zone: self.machine_zone,
             config: self.config.as_ref(),
             addressing: &self.addressing,
             staged: &self.staged,
@@ -3238,13 +3303,16 @@ impl Form {
             effects,
             settings,
             civil,
+            machine_zone,
             ..
         } = self;
         let mut moved = Vec::new();
         for (at, (group, rows)) in groups.iter_mut().zip(owners.iter()).enumerate() {
             for (index, (held, owner)) in group.rows_mut().iter_mut().zip(rows).enumerate() {
-                if changed == Owner::Desktop(Setting::Region) && *owner == changed {
-                    let described = Setting::Region.described(settings, *civil);
+                if let (Owner::Desktop(setting @ (Setting::Region | Setting::TimeZone)), true) =
+                    (changed, *owner == changed)
+                {
+                    let described = setting.described(settings, *civil, *machine_zone);
                     if held.set_description(Some(described)) {
                         moved.push((at, index));
                     }
@@ -3311,6 +3379,7 @@ impl Form {
             }
             FieldAction::Activated => match owner {
                 Owner::Action(Action::LockNow) => FormOutcome::LockScreen,
+                Owner::Desktop(Setting::TimeZone) => FormOutcome::ChooseZone,
                 Owner::Action(Action::PreviewScreensaver) => {
                     FormOutcome::PreviewScreensaver(self.applied())
                 }
@@ -3386,28 +3455,10 @@ impl Form {
     fn chose(&mut self, owner: Owner, index: usize) -> FormOutcome {
         match owner {
             Owner::Desktop(setting) => {
-                let offered = Offered {
-                    cursor_sets: &self.cursor_sets,
-                    catalog: &self.catalog,
-                    text: self.text.as_ref(),
-                    output: self.output,
-                    civil: self.civil,
-                };
-                let offered_before = setting.offer(&self.settings, offered).len();
-                if !setting.adopt(index, &mut self.settings, offered) {
+                let Some(reshaped) = self.adopt_choice(setting, index) else {
                     return FormOutcome::Changed;
-                }
-                // A value off its ladder is a choice of its own only while it
-                // is held: leaving it shortens the ladder, and the row must
-                // show the one the next choice is read against.
-                let offered = Offered {
-                    cursor_sets: &self.cursor_sets,
-                    catalog: &self.catalog,
-                    text: self.text.as_ref(),
-                    output: self.output,
-                    civil: self.civil,
                 };
-                if setting.offer(&self.settings, offered).len() != offered_before {
+                if reshaped {
                     self.rebuild();
                 }
                 // The region's row states how the region it holds writes a
@@ -3585,6 +3636,30 @@ impl Form {
     /// alone.
     pub(crate) fn applied(&self) -> String {
         self.settings.document_of(self.composition.keys()).render()
+    }
+
+    /// Take `zone` as the account's own, or follow the machine's for `None`:
+    /// the document that implies, for the desktop to adopt, or nothing where
+    /// it is already held or this form shows no Time zone row.
+    pub(crate) fn choose_zone(&mut self, zone: Option<ZoneName>) -> FormOutcome {
+        let shown = self
+            .owners
+            .iter()
+            .flatten()
+            .any(|owner| *owner == Owner::Desktop(Setting::TimeZone));
+        if !shown || self.settings.time_zone == zone {
+            return FormOutcome::Idle;
+        }
+        self.settings.time_zone = zone;
+        // Chosen in another window, so nothing here was laid out against it:
+        // the owner repaints the pane whole.
+        if self
+            .restate_rows(Owner::Desktop(Setting::TimeZone))
+            .is_none()
+        {
+            self.rebuild();
+        }
+        FormOutcome::Apply(self.applied())
     }
 
     /// The next picture this form's choosers want the desktop to render, the

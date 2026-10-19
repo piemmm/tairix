@@ -1,6 +1,7 @@
 //! Which bytes begin a UTF-8 sequence, and how long it is (Unicode 15.0,
 //! Table 3-7), for the decoders that must step over or validate text by hand;
-//! and which characters must be escaped when text from elsewhere is shown.
+//! which characters must be escaped when text from elsewhere is shown; and the
+//! letters a reader looks a name up by.
 
 /// How many bytes the sequence `lead` begins, or `None` for a byte no
 /// well-formed sequence begins with: a continuation byte, `0xC0`/`0xC1`
@@ -14,6 +15,36 @@ pub const fn sequence_len(lead: u8) -> Option<usize> {
         0xf0..=0xf4 => Some(4),
         _ => None,
     }
+}
+
+/// The letter a reader looks `ch` up by: a Latin-1 letter folded to the
+/// letter it is written on, and every letter in lower case, so `São` finds
+/// and sorts beside `Sao`.
+#[must_use]
+pub fn fold(ch: char) -> char {
+    match ch {
+        'À'..='Å' | 'à'..='å' => 'a',
+        'Ç' | 'ç' => 'c',
+        'È'..='Ë' | 'è'..='ë' => 'e',
+        'Ì'..='Ï' | 'ì'..='ï' => 'i',
+        'Ñ' | 'ñ' => 'n',
+        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' => 'o',
+        'Ù'..='Ü' | 'ù'..='ü' => 'u',
+        'Ý' | 'ý' | 'ÿ' => 'y',
+        other => other.to_lowercase().next().unwrap_or(other),
+    }
+}
+
+/// `text` as a reader looks it up: each character [`fold`]ed.
+pub fn folded(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().map(fold)
+}
+
+/// The order a reader looks names up in: their letters [`folded`], then
+/// their bytes, so distinct names never compare equal.
+#[must_use]
+pub fn reader_order(a: &str, b: &str) -> core::cmp::Ordering {
+    folded(a).cmp(folded(b)).then_with(|| a.cmp(b))
 }
 
 /// Whether `ch` draws nothing where it stands yet can hide, reorder or break
@@ -50,7 +81,38 @@ pub const fn is_hidden(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_hidden, sequence_len};
+    use core::cmp::Ordering;
+
+    use super::{fold, folded, is_hidden, reader_order, sequence_len};
+
+    #[test]
+    fn names_sort_by_their_folded_letters_and_never_compare_equal_unless_they_are() {
+        let mut names = ["Zürich", "sao Paulo", "São Paulo", "Aden", "Sao Tome"];
+        names.sort_by(|a, b| reader_order(a, b));
+        assert_eq!(
+            names,
+            ["Aden", "São Paulo", "sao Paulo", "Sao Tome", "Zürich"],
+            "folded letters first, then the bytes break the tie"
+        );
+        let mut regions = ["Zambia", "Åland Islands", "albania", "Curaçao", "Cuba"];
+        regions.sort_by(|a, b| reader_order(a, b));
+        assert_eq!(
+            regions,
+            ["Åland Islands", "albania", "Cuba", "Curaçao", "Zambia"]
+        );
+        assert_eq!(reader_order("Lima", "Lima"), Ordering::Equal);
+    }
+
+    #[test]
+    fn a_name_folds_to_the_letters_a_reader_types() {
+        let fold_all = |text: &str| folded(text).collect::<alloc::string::String>();
+        assert_eq!(fold_all("São Paulo"), "sao paulo");
+        assert_eq!(fold_all("Curaçao"), "curacao");
+        assert_eq!(fold_all("ÅLAND Øy"), "aland oy");
+        assert_eq!(fold_all("Réunion"), "reunion");
+        assert_eq!(fold('Ł'), 'ł', "beyond Latin-1, case alone folds");
+        assert_eq!(fold('-'), '-');
+    }
 
     #[test]
     fn what_hides_or_reorders_text_is_hidden() {

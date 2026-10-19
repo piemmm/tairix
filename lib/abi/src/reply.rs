@@ -99,16 +99,17 @@ pub(crate) fn put_refusal(out: &mut [u8], err: Errno) {
 /// * The decoded [`Errno`] — the service refused, or
 ///   [`Errno::OutOfRange`] when the refusal is not a defined discriminant.
 pub(crate) fn take_payload(bytes: &[u8], len: usize) -> Result<&[u8], Errno> {
-    let Some(frame) = bytes.get(..len) else {
-        return Err(Errno::BufferTooSmall);
-    };
+    let (status, payload) = bytes
+        .get(..len)
+        .and_then(|frame| frame.split_at_checked(STATUS_REPLY_LEN))
+        .ok_or(Errno::BufferTooSmall)?;
     let mut raw = [0u8; STATUS_REPLY_LEN];
-    raw.copy_from_slice(&frame[..STATUS_REPLY_LEN]);
+    raw.copy_from_slice(status);
     let status = i32::from_le_bytes(raw);
     if status != 0 {
         return Err(Errno::try_from_status(status).unwrap_or(Errno::OutOfRange));
     }
-    Ok(&frame[STATUS_REPLY_LEN..])
+    Ok(payload)
 }
 
 /// Byte length of the page header following the status word: the
@@ -193,9 +194,35 @@ pub fn decode_page_reply(
 mod tests {
     use super::{
         decode_page_reply, decode_status_reply, encode_page_reply, encode_status_reply,
-        PAGE_HEADER_LEN, STATUS_REPLY_LEN,
+        put_refusal, take_payload, PAGE_HEADER_LEN, STATUS_REPLY_LEN,
     };
     use crate::Errno;
+
+    #[test]
+    fn a_payload_is_taken_only_from_a_frame_holding_its_status_word() {
+        let mut frame = [0u8; STATUS_REPLY_LEN + 2];
+        frame[STATUS_REPLY_LEN..].copy_from_slice(&[7, 9]);
+        assert_eq!(take_payload(&frame, frame.len()), Ok(&[7, 9][..]));
+        assert_eq!(take_payload(&frame, STATUS_REPLY_LEN), Ok(&[][..]));
+        for len in 0..STATUS_REPLY_LEN {
+            assert_eq!(
+                take_payload(&frame, len),
+                Err(Errno::BufferTooSmall),
+                "{len}"
+            );
+            assert_eq!(
+                take_payload(&frame[..len], len),
+                Err(Errno::BufferTooSmall),
+                "{len}"
+            );
+        }
+        assert_eq!(
+            take_payload(&frame, frame.len() + 1),
+            Err(Errno::BufferTooSmall)
+        );
+        put_refusal(&mut frame, Errno::NotFound);
+        assert_eq!(take_payload(&frame, frame.len()), Err(Errno::NotFound));
+    }
 
     #[test]
     fn round_trips_ok_and_every_errno() {

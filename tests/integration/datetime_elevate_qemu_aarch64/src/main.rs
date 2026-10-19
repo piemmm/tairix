@@ -4,9 +4,9 @@
 //!
 //! # What this proves that no host test can
 //!
-//! Every piece of elevation *logic* — the credential prompt, the broker's
-//! re-authentication, the Launch reply — is already covered by host unit
-//! tests. What only a real machine can show is that those pieces are
+//! Every piece of elevation *logic* — the authorisation prompt, the broker's
+//! listing of who may allow it, its re-authentication, the Launch reply — is
+//! already covered by host unit tests. What only a real machine can show is that those pieces are
 //! **wired to each other and to the running application**: that the
 //! session's `SetDateTime` outcome opens the prompt, that the broker starts
 //! `/System/Components/datetime.app/Run` as the authenticated account,
@@ -15,9 +15,10 @@
 //! So the guest boots the **production** aarch64 pipeline
 //! (`boot_aarch64::boot`) against a planted encrypted root, and the host
 //! drives the desktop blind through the QEMU monitor: unlock, log in, start
-//! the desktop, right-click the clock, choose *Set Date & Time…*, type the
-//! fixture account into the prompt. Only the audit sink is swapped, for the
-//! PASS witnesses below.
+//! the desktop, right-click the clock, choose *Set Date & Time…*, and type
+//! the signed-in fixture account's password into the prompt, which asks for
+//! nothing else because that account may set the clock. Only the audit sink
+//! is swapped, for the PASS witnesses below.
 //!
 //! # The PASS gate
 //!
@@ -31,10 +32,10 @@
 //!
 //! # Why the guest cannot exit early
 //!
-//! The window is opened by the elevated program after the credentials are
-//! typed, and the runner sends no keystroke until the pointer script has
-//! opened the prompt. So the create that completes the PASS cannot happen
-//! until the prompt is up and the credentials are offered.
+//! The window is opened by the elevated program after the password is typed,
+//! and the runner sends no keystroke until the prompt announces that its
+//! question is drawn. So the create that completes the PASS cannot happen
+//! until the prompt is up and the password is offered.
 //!
 //! A panic before both latches parks the CPU, the guest falls silent, and
 //! the runner reports a timeout — loud failure, never a false pass.

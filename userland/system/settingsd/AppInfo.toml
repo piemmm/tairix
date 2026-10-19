@@ -1,0 +1,19 @@
+# Signed-AppInfo manifest source for the machine-settings service (a service
+# is an app). Discovered by the build's app-bundle composer and planted under
+# /System/Services/.
+#
+# CAP_IPC_BIND_PRIVILEGED binds the reserved settings rendezvous, which it binds
+# requiring CAP_SETTINGS_WRITE of every caller. CAP_FS_ACCESS reads both layers
+# of the two documents and replaces the administrator's, authorised per-inode
+# under the service's own identity: its two directories under /System/Settings
+# are the whole of its reach. CAP_LOG_EMIT writes its audit records.
+#
+# It holds no CAP_SETTINGS_WRITE (it enforces it), no CAP_FS_CHOWN, no
+# CAP_NET_ADMIN (the tool that asked tells the running stack), and no spawn
+# authority.
+id = "os.tairix.settingsd"
+name = "settingsd"
+title = "Settingsd"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_FS_ACCESS", "CAP_LOG_EMIT"]

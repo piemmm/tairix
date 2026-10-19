@@ -208,12 +208,18 @@ mod program {
         identity_line(reported.as_ref())
     }
 
-    /// The clock the screen tells the time in: the zone store's own zone and
-    /// region, since no one has signed in to choose another; UTC, recorded,
-    /// where no store can be had.
+    /// The clock the screen tells the time in: the machine's own zone, which
+    /// login hands it as `TZ`, else the zone store's, in the store's region,
+    /// since no one has signed in to choose another; UTC, recorded, where no
+    /// store can be had.
     fn civil() -> CivilClock<'static> {
         match zones() {
-            Ok(zones) => CivilClock::new(zones.default_zone(), zones.default_region().as_ref()),
+            Ok(zones) => {
+                let machine =
+                    tairix_rt::env_var(b"TZ").and_then(|tz| core::str::from_utf8(tz).ok());
+                let (zone, _) = tairix_tz::resolve_zone(Some(zones), machine.as_slice());
+                CivilClock::new(zone, zones.default_region().as_ref())
+            }
             Err(reason) => {
                 record(
                     ZONES_UNAVAILABLE,

@@ -6,11 +6,15 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cmp::Ordering;
-use core::fmt::Write;
 
 use tairix_abi::time::{CivilTime, Time64};
-use tairix_tz::{CivilClock, Place, ZoneInfo};
+use tairix_controls::zone::{self, Minute};
+use tairix_controls::{PlaceDialog, PlaceRow};
+use tairix_geometry::{Rect, Region, Scale};
+use tairix_theme::Theme;
+use tairix_tz::listing::{label as zone_label, Listing};
+use tairix_tz::{CivilClock, ZoneInfo};
+use tairix_util::utf8::reader_order;
 use tairix_wallpaper::{DesktopSettings, RegionCode, ZoneName};
 
 /// The instant a region's patterns are shown at: a day and a month no reader
@@ -37,41 +41,27 @@ pub(crate) struct CivilChoices {
     /// The store they come from.
     pub(crate) zones: &'static ZoneInfo<'static>,
     default_region: String,
-    default_zone: String,
     regions: Vec<(String, RegionCode)>,
-    places: Vec<(String, ZoneName)>,
+    places: Listing<'static>,
 }
 
 impl CivilChoices {
-    /// The choices `zones` offers.
+    /// The choices `zones` offers, its places' readings written as its own
+    /// default region writes a time.
     pub(crate) fn of(zones: &'static ZoneInfo<'static>) -> Self {
         let mut regions: Vec<(String, RegionCode)> = zones
             .regions()
             .filter_map(|region| Some((String::from(region.name), RegionCode::new(region.code)?)))
             .collect();
-        regions.sort_by(|a, b| name_order(&a.0, &b.0));
-        let mut places: Vec<(String, ZoneName)> = zones
-            .places()
-            .filter_map(|place| {
-                Some((
-                    place_label(zones, &place),
-                    ZoneName::new(place.zone.name())?,
-                ))
-            })
-            .collect();
-        places.sort_by(|a, b| name_order(&a.0, &b.0));
+        regions.sort_by(|a, b| reader_order(&a.0, &b.0));
         Self {
             zones,
             default_region: zones.default_region().map_or_else(
                 || String::from(DEFAULT),
                 |region| alloc::format!("{DEFAULT} ({})", region.name),
             ),
-            default_zone: alloc::format!(
-                "{DEFAULT} ({})",
-                zone_label(zones, zones.default_zone().name())
-            ),
             regions,
-            places,
+            places: Listing::of(zones, zones.default_region()),
         }
     }
 }
@@ -80,7 +70,7 @@ impl CivilChoices {
 /// store does not offer — that value under its own spelling, so opening the
 /// pane never changes it, then every offered value.
 struct Ladder<'a, T> {
-    default: &'a str,
+    default: alloc::borrow::Cow<'a, str>,
     held: Option<&'a T>,
     offered: &'a [(String, T)],
 }
@@ -89,7 +79,7 @@ impl<T: PartialEq> Ladder<'_, T> {
     /// The labels in order, and the index of the one `current` holds.
     fn choices(&self, current: Option<&T>, spell: impl Fn(&T) -> &str) -> (Vec<String>, usize) {
         let mut labels = Vec::with_capacity(self.offered.len() + 2);
-        labels.push(String::from(self.default));
+        labels.push(String::from(self.default.as_ref()));
         labels.extend(self.held.map(|held| String::from(spell(held))));
         let skip = labels.len();
         labels.extend(self.offered.iter().map(|(label, _)| label.clone()));
@@ -149,27 +139,13 @@ fn region_ladder<'a>(
 ) -> Ladder<'a, RegionCode> {
     let offered = civil.map_or(&[][..], |civil| civil.regions.as_slice());
     Ladder {
-        default: civil.map_or(DEFAULT, |civil| civil.default_region.as_str()),
+        default: alloc::borrow::Cow::Borrowed(
+            civil.map_or(DEFAULT, |civil| civil.default_region.as_str()),
+        ),
         held: settings
             .region
             .as_ref()
             .filter(|code| !offered.iter().any(|(_, offered)| offered == *code)),
-        offered,
-    }
-}
-
-/// The Time zone row's ladder for `settings` over `civil`.
-fn zone_ladder<'a>(
-    settings: &'a DesktopSettings,
-    civil: Option<&'a CivilChoices>,
-) -> Ladder<'a, ZoneName> {
-    let offered = civil.map_or(&[][..], |civil| civil.places.as_slice());
-    Ladder {
-        default: civil.map_or(DEFAULT, |civil| civil.default_zone.as_str()),
-        held: settings
-            .time_zone
-            .as_ref()
-            .filter(|name| !offered.iter().any(|(_, offered)| offered == *name)),
         offered,
     }
 }
@@ -199,30 +175,127 @@ pub(crate) fn choose_region(
     true
 }
 
-/// The zones the Time zone row offers, and which `settings` holds.
-pub(crate) fn zone_choices(
-    settings: &DesktopSettings,
-    civil: Option<&CivilChoices>,
-) -> (Vec<String>, usize) {
-    zone_ladder(settings, civil).choices(settings.time_zone.as_ref(), ZoneName::as_str)
+/// The zone the account follows when it has chosen none: the `machine`'s
+/// own where the store holds it, else the store's default.
+fn machine_zone_label(civil: Option<&CivilChoices>, machine: Option<&ZoneName>) -> String {
+    let Some(civil) = civil else {
+        return machine.map_or_else(|| String::from("UTC"), |zone| String::from(zone.as_str()));
+    };
+    let name = machine
+        .map(ZoneName::as_str)
+        .filter(|name| civil.zones.zone(name).is_some())
+        .unwrap_or_else(|| civil.zones.default_zone().name());
+    zone_label(civil.zones, name)
 }
 
-/// Take the zone at `index` of the Time zone row's choices onto `settings`,
-/// answering whether it named one; fails closed on any other.
-pub(crate) fn choose_zone(
-    index: usize,
-    settings: &mut DesktopSettings,
+/// What the Time zone row says the account's clocks read: the zone it chose,
+/// or the `machine`'s it follows.
+pub(crate) fn zone_held(
+    settings: &DesktopSettings,
     civil: Option<&CivilChoices>,
-) -> bool {
-    let Some(value) = zone_ladder(settings, civil)
-        .value(index)
-        .map(Choice::setting)
-    else {
-        return false;
-    };
-    settings.time_zone = value;
-    true
+    machine: Option<&ZoneName>,
+) -> String {
+    match (&settings.time_zone, civil) {
+        (Some(zone), Some(civil)) => zone_label(civil.zones, zone.as_str()),
+        (Some(zone), None) => String::from(zone.as_str()),
+        (None, _) => alloc::format!(
+            "{} (this machine's zone)",
+            machine_zone_label(civil, machine)
+        ),
+    }
 }
+
+/// The chooser's rows for the Time zone row: *This machine's zone* first,
+/// then every place, each read at `now`; and the row `settings` holds, where
+/// one does.
+pub(crate) fn zone_rows(
+    settings: &DesktopSettings,
+    civil: &CivilChoices,
+    machine: Option<&ZoneName>,
+    now: Option<Time64>,
+) -> (Vec<PlaceRow>, Option<usize>) {
+    let mut rows = Vec::with_capacity(civil.places.entries().len() + 1);
+    rows.push(PlaceRow {
+        name: String::from(MACHINE_ZONE),
+        region: machine_zone_label(Some(civil), machine),
+        reading: machine_reading(civil, machine, now),
+        key: String::from(tairix_sysconfig::DEFAULT_ZONE),
+    });
+    rows.extend(zone::rows(&civil.places, now));
+    let held = match &settings.time_zone {
+        None => Some(0),
+        Some(zone) => civil.places.index_of(zone).map(|at| at + 1),
+    };
+    (rows, held)
+}
+
+/// Rewrite the zone chooser's readings once the minute `written` holds has
+/// turned: the machine's row, then every place, reporting what moved in a
+/// dialog drawn in `frame`'s bounds.
+pub(crate) fn refresh_zone_readings(
+    civil: &CivilChoices,
+    machine: Option<&ZoneName>,
+    (dialog, written): (&mut PlaceDialog, &mut Minute),
+    now: Time64,
+    frame: (Rect, Scale, &Theme),
+    damage: &mut Region,
+) {
+    if !zone::refresh(dialog, written, (&civil.places, 1), now, frame, damage) {
+        return;
+    }
+    let (bounds, scale, theme) = frame;
+    if let Some(list) = dialog.chooser_rect(bounds, scale, theme) {
+        let reading = machine_reading(civil, machine, Some(now));
+        dialog
+            .chooser_mut()
+            .set_reading(0, reading, list, scale, theme, damage);
+    }
+}
+
+/// The reading of the zone the machine keeps, or the store's default where
+/// it names none the store holds.
+fn machine_reading(
+    civil: &CivilChoices,
+    machine: Option<&ZoneName>,
+    now: Option<Time64>,
+) -> String {
+    let followed = machine
+        .copied()
+        .filter(|zone| civil.zones.zone(zone.as_str()).is_some())
+        .or_else(|| ZoneName::new(civil.zones.default_zone().name()));
+    followed.map_or_else(String::new, |zone| zone::reading(&civil.places, &zone, now))
+}
+
+/// What a row of the zone chooser sets the account's zone to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ZoneChoice {
+    /// Follow the machine's zone.
+    Machine,
+    /// Keep this zone.
+    Own(ZoneName),
+}
+
+impl ZoneChoice {
+    /// The `time_zone` setting the choice writes.
+    pub(crate) const fn setting(self) -> Option<ZoneName> {
+        match self {
+            Self::Machine => None,
+            Self::Own(zone) => Some(zone),
+        }
+    }
+}
+
+/// What the zone chooser's `row` sets the account's zone to, or `None` for a
+/// row the chooser was not built with.
+pub(crate) fn zone_of_row(civil: &CivilChoices, row: usize) -> Option<ZoneChoice> {
+    match row.checked_sub(1) {
+        None => Some(ZoneChoice::Machine),
+        Some(place) => civil.places.zone(place).map(ZoneChoice::Own),
+    }
+}
+
+/// The chooser's first row: the account follows the machine's zone.
+const MACHINE_ZONE: &str = "This machine's zone";
 
 /// How `clock`'s region writes a date and a time, shown at [`EXAMPLE`].
 pub(crate) fn written_example(clock: &CivilClock<'_>) -> String {
@@ -277,57 +350,11 @@ pub(crate) fn zone_reading<'a>(
         line.push_str(", ");
         line.push_str(offset.abbreviation);
     }
-    let secs = offset.utc_offset;
-    let sign = if secs < 0 { '-' } else { '+' };
-    let minutes = secs.unsigned_abs() / 60;
     // A `String` takes any write, so there is no failure to keep.
-    let _ = write!(line, " (UTC{sign}{:02}:{:02})", minutes / 60, minutes % 60);
+    line.push_str(" (");
+    let _ = offset.write_from_utc(&mut line);
+    line.push(')');
     line
-}
-
-/// The place `name` is, as a reader names it: the city and region the zone
-/// table lists it by, else the name itself.
-fn zone_label<'a>(info: &'a ZoneInfo<'a>, name: &str) -> String {
-    info.places()
-        .find(|place| place.zone.name() == name)
-        .map_or_else(|| String::from(name), |place| place_label(info, &place))
-}
-
-/// `place` as `City, Region`.
-fn place_label(info: &ZoneInfo<'_>, place: &Place<'_>) -> String {
-    let mut label = String::new();
-    // A `String` takes any write, so there is no failure to keep.
-    let _ = place.write_city(&mut label);
-    if let Some(region) = info.region(place.region) {
-        label.push_str(", ");
-        label.push_str(region.name);
-    }
-    label
-}
-
-/// The order a reader looks a name up in: letters without case or accent,
-/// then the bytes, so distinct names never compare equal.
-fn name_order(a: &str, b: &str) -> Ordering {
-    a.chars()
-        .map(unaccented)
-        .cmp(b.chars().map(unaccented))
-        .then_with(|| a.cmp(b))
-}
-
-/// `ch` for ordering: a Latin-1 letter folded to the letter it is written on,
-/// in lower case, as a region's English name can carry one.
-const fn unaccented(ch: char) -> char {
-    match ch {
-        'À'..='Å' | 'à'..='å' => 'a',
-        'Ç' | 'ç' => 'c',
-        'È'..='Ë' | 'è'..='ë' => 'e',
-        'Ì'..='Ï' | 'ì'..='ï' => 'i',
-        'Ñ' | 'ñ' => 'n',
-        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' => 'o',
-        'Ù'..='Ü' | 'ù'..='ü' => 'u',
-        'Ý' | 'ý' | 'ÿ' => 'y',
-        other => other.to_ascii_lowercase(),
-    }
 }
 
 #[cfg(test)]

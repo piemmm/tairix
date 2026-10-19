@@ -1,6 +1,6 @@
 ## NAME
 
-configure — lire et régler la configuration système au démarrage
+configure — lire et régler les paramètres de la machine
 
 ## SYNOPSIS
 
@@ -8,23 +8,31 @@ configure — lire et régler la configuration système au démarrage
 
 ## DESCRIPTION
 
-Liste, affiche et règle les paramètres du magasin de configuration
-situé à `/System/Settings/Configuration/system.conf`. Sans opérande,
-chaque paramètre est listé avec sa valeur actuelle ; avec une clé
-seule, la valeur de ce paramètre est affichée ; avec une clé et une
-valeur, le paramètre est modifié.
+Liste, affiche et règle les paramètres de la machine, conservés dans
+`/System/Settings/Configuration/system.conf`. Sans opérande, chaque
+paramètre est listé avec sa valeur actuelle ; avec une clé seule, la
+valeur de ce paramètre est affichée ; avec une ou plusieurs paires
+`<key> <value>`, ces paramètres sont modifiés ensemble.
 
-Le magasin réside sur le volume racine chiffré et n'est lu par ses
-consommateurs qu'après le déverrouillage du système de fichiers
-racine ; une modification prend donc effet au prochain démarrage de son
-consommateur (`os.loginType` : la connexion du prochain démarrage ;
-les commutateurs `cache.*` : le déverrouillage du prochain démarrage).
+Plusieurs paires forment une seule modification, et non plusieurs :
+chaque paire est vérifiée avant que quoi que ce soit ne change, puis les
+paramètres sont enregistrés en une seule fois. Une ligne de commande qui
+nomme une clé inconnue, une valeur hors de l'ensemble de sa clé ou deux
+fois la même clé ne change absolument rien ; un groupe de paramètres ne
+peut donc jamais rester à moitié appliqué.
+
+Seul un administrateur peut modifier un paramètre : un compte ordinaire
+lit les paramètres de la machine mais n'en modifie aucun. Le système
+fournit ses propres paramètres, qui restent en vigueur jusqu'à ce qu'un
+administrateur en modifie un, et la première modification conserve tous
+les autres paramètres fournis par le système. Une modification prend
+effet la prochaine fois que démarre la partie du système qui la lit —
+`os.loginType` à la prochaine connexion, les commutateurs `cache.*` au
+prochain démarrage — sauf mention contraire pour sa clé ci-dessous.
 
 L'ensemble des clés est fermé : une clé inconnue, ou une valeur hors de
 l'ensemble d'une clé, est refusée avec l'énoncé des choix valides et ne
-change rien. Modifier un paramètre réécrit le magasin sous sa forme
-canonique et exige le droit d'écriture sur `/System/Settings` — un
-compte ordinaire peut lire les paramètres mais pas les changer.
+change rien.
 
 - `os.loginType` — `text` ou `graphical` : le type de session que le
   service de connexion lance pour un utilisateur authentifié.
@@ -79,21 +87,37 @@ travail concerné — cela ne change jamais un résultat.
   l'ensemble des principaux. `auto` (par défaut) la dimensionne d'après la
   RAM de la machine, pour qu'un grand serveur ne soit pas tenu à un
   chiffre choisi sur une petite ; une taille le remplace pour une charge
-  que vous connaissez mieux. Chaque principal peut en détenir un seizième.
-  En octets plutôt qu'en nombre de sockets, car le même nombre de sockets
-  représente quelques kilo-octets au repos et des mégaoctets une fois les
-  tampons pleins : le budget porte beaucoup de connexions calmes ou moins
-  de connexions actives, selon la charge réelle.
+  que vous connaissez mieux. Chaque principal peut détenir un seizième
+  du budget effectif ; il y a donc toujours de la place pour seize. En
+  octets plutôt qu'en nombre de sockets, car le même nombre de sockets
+  représente quelques kilo-octets au repos et des mégaoctets une fois
+  les tampons pleins : le budget porte beaucoup de connexions calmes ou
+  moins de connexions actives, selon la charge réelle.
 - `time.servers` — `none` ou une liste de serveurs de temps réseau
   séparés par des virgules, chacun un nom d'hôte ou une adresse. `none`
-  (par défaut) signifie que l'horloge n'est jamais réglée depuis le
-  réseau : TAIRiX n'a pas de parc de serveurs de temps propre, donc
-  nommer un serveur relève du choix de l'exploitant.
+  (par défaut) ne nomme aucun serveur à vous : l'horloge est alors réglée
+  depuis le serveur que nomme le bail d'adresse du réseau, sinon depuis le
+  parc public `pool.ntp.org`. Les serveurs nommés ici l'emportent sur les
+  deux.
 - `time.refresh` — `6h`, `12h`, `1d`, `2d` ou `7d` : le temps de
   fonctionnement écoulé entre deux interrogations de l'horloge une fois
   l'heure connue. `1d` est la valeur par défaut. Une horloge non réglée,
   invraisemblable ou trop ancienne est corrigée dès que le réseau le
   permet, quoi que dise ce réglage.
+- `time.network` — `on` (par défaut) ou `off` : si l'horloge est réglée
+  depuis le réseau. Avec `off`, aucune requête de temps ne part vers un
+  serveur, et l'horloge est réglée à la main ou par la puce d'horloge de
+  la carte, lue à chaque démarrage dans tous les cas. Un changement
+  s'applique aussitôt ; le réglage est stocké sur le disque système, donc
+  la valeur par défaut s'applique en début de démarrage tant que ce disque
+  n'est pas atteint.
+- `time.zone` — `default` ou le nom d'un fuseau horaire comme
+  `Europe/London` : le fuseau horaire que suit la machine, celui
+  qu'affiche l'écran de connexion et qu'utilise un compte qui n'en a
+  choisi aucun. `default` est le fuseau que le système fournit comme le
+  sien ; un nom que la liste des fuseaux du système ne contient pas est
+  ignoré, comme s'il valait `default`. Un changement s'applique
+  aussitôt.
 - `input.mouse.debounce` — en millisecondes entières, `25` par défaut, `0`
   pour désactiver, `100` au maximum : durée après le relâchement d'un bouton
   pendant laquelle l'appui suivant du même bouton est ignoré comme rebond du
@@ -113,8 +137,58 @@ travail concerné — cela ne change jamais un résultat.
   service audio prend une valeur modifiée au démarrage suivant ;
   `audioctl` modifie la machine en marche.
 
-La pile réseau lit les réglages `net.*` ; une modification prend effet
-lorsque la pile applique de nouveau sa configuration.
+Une clé absente de la liste ci-dessus est cherchée dans un second
+registre : les paramètres réseau de chaque interface, conservés dans
+`/System/Settings/Network/network.conf`. Ses clés s'écrivent
+`<interface>.<setting>`, où `<interface>` est l'alias qu'un
+administrateur a donné à une interface réseau (`wan`, `lan0`) et
+`<setting>` l'un des noms suivants : `kind`, `match.mac`, `match.node`,
+`ipv4.method`, `ipv4.address`, `ipv4.gateway`, `ipv6.method`,
+`ipv6.address`, `ipv6.gateway`, `dns.servers`, `mtu`, `bond.members`,
+`bond.mode`, `bond.monitor-interval` et `bond.primary`.
+
+Le registre de la machine ci-dessus est toujours consulté en premier ;
+un alias d'interface ne peut donc jamais s'approprier le nom d'un
+paramètre de la machine.
+
+Les paramètres réseau n'ont pas de valeur par défaut : la liste
+n'affiche donc que les paramètres définis, et l'affichage d'un paramètre
+non défini répond par une ligne vide plutôt que d'inventer une valeur.
+Seul un administrateur peut les lire ou les modifier : ils désignent le
+matériel de chaque interface et les adresses de cette machine. Pour tout
+autre compte, la liste affiche les paramètres de la machine et signale
+que ceux du réseau ne sont pas affichés.
+
+Comme ce registre n'a pas de valeur par défaut, un paramètre est
+supprimé plutôt que réinitialisé, et c'est une **valeur vide** qui le
+supprime : `configure wan.ipv4.address ""`. Aucun paramètre d'interface
+n'accepte de valeur vide ; cette écriture ne peut donc jamais être
+confondue avec le réglage d'une valeur. C'est ce qui permet à une seule
+commande de faire passer une interface d'une adresse statique à DHCP —
+`configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""`
+— une modification dont aucune des deux moitiés, prise seule, ne décrit
+une configuration cohérente. Une interface dont le dernier paramètre est
+supprimé n'est plus déclarée du tout.
+
+Toute la configuration modifiée est vérifiée avant le moindre
+enregistrement : une modification qui la laisserait incohérente (une
+méthode statique sans adresse, un agrégat de liens de moins de deux
+membres) est refusée et rien n'est enregistré.
+
+Modifier un paramètre `net.*`, ou un paramètre d'interface, l'enregistre
+et le transmet à la pile réseau en marche ; il prend donc effet
+aussitôt. Seules les interfaces que la modification touche réellement
+sont transmises. Si la pile en marche n'accepte pas une transmission —
+aucune ne tourne, ou votre compte ne peut pas administrer le réseau —,
+le paramètre est tout de même enregistré et `configure` le signale ; il
+s'applique alors au prochain démarrage.
+
+Deux limites sont signalées plutôt que cachées. Une interface que vous
+avez retirée de la configuration continue de fonctionner jusqu'au
+prochain démarrage avec la dernière configuration transmise à la pile,
+car la pile n'a aucun message qui retire une interface. Une interface
+enregistrée sans `match.mac` ni `match.node` ne peut jamais être liée à
+un périphérique ; elle est donc enregistrée, et le refus est énoncé.
 
 ## OPTIONS
 
@@ -130,16 +204,32 @@ lorsque la pile applique de nouveau sa configuration.
   le système.
 - `configure cache.filesystem off` — désactiver uniquement le cache du
   système de fichiers.
+- `configure net.ipv6.enabled false` — désactiver IPv6 dans toute la
+  pile.
+- `configure time.servers 0.example.test,1.example.test` — définir les
+  serveurs de temps réseau sur lesquels l'horloge se synchronise.
+- `configure time.zone Europe/London` — mettre la machine à l'heure de
+  Londres.
+- `configure wan.ipv4.address` — afficher l'adresse IPv4 statique
+  configurée pour l'interface nommée `wan`.
+- `configure wan.ipv4.address 10.0.0.7/24 wan.ipv4.gateway 10.0.0.1` —
+  donner à `wan` une adresse IPv4 statique et une passerelle par défaut.
+- `configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""`
+  — faire passer `wan` de l'adressage statique à DHCP.
+- `configure wan.dns.servers 9.9.9.9,2001:db8::53` — définir les
+  serveurs DNS récursifs à utiliser sur `wan`.
 
 ## EXIT STATUS
 
 - `0` — la liste, la valeur, l'aide courte ou la modification a été
   effectuée.
-- `1` — le magasin n'a pas pu être lu ou écrit (par exemple l'appelant
-  ne peut pas modifier les réglages système), ou la sortie n'a pas pu
-  être délivrée.
-- `2` — la ligne de commande n'a pas été comprise, la clé est inconnue
-  ou la valeur est hors de l'ensemble de la clé.
+- `1` — les paramètres n'ont pas pu être lus ou modifiés (par exemple
+  l'appelant ne peut pas modifier les paramètres de la machine, ou ne
+  peut pas lire ses paramètres réseau), ou la sortie n'a pas pu être
+  délivrée.
+- `2` — la ligne de commande n'a pas été comprise, la clé est inconnue,
+  la valeur est hors de l'ensemble de la clé, ou la modification
+  laisserait la configuration réseau incohérente.
 
 ## ENVIRONMENT
 

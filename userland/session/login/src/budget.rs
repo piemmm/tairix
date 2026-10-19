@@ -218,6 +218,22 @@ impl AttemptBudget {
     }
 }
 
+/// The authority's one meter as the text prompt charges it, the clock read
+/// by the implementation.
+///
+/// The `Run` binary backs it with the same [`AttemptBudget`] the login
+/// screen and every elevation charge, so guesses cannot be spread between
+/// surfaces; tests script it.
+pub trait GuessMeter {
+    /// How long `account` must wait before a password for it is checked,
+    /// [`Duration64::ZERO`] when one may be now.
+    fn retry_after(&self, account: &str) -> Duration64;
+
+    /// Charge `account` one adjudicated attempt: cleared when it was
+    /// `accepted`, counted towards a cooldown when not.
+    fn charge(&self, account: &str, accepted: bool);
+}
+
 /// The bytes an account is tracked under: the name, clipped to the wire
 /// bound so every key fits an entry.
 ///

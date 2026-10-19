@@ -246,6 +246,7 @@ top of the session baseline:
 | `CAP_TIME_SET` | Adjust the wall clock. |
 | `CAP_TIME_HIRES` | Full-resolution monotonic clock (diagnostics/profiling). |
 | `CAP_MEM_PIN` | Exempt a process's anonymous memory from the swap tiers (`mem_pin`, bounded by the `pinned-memory-bytes` limit; `plans/STRESSTEST.md` ST2). |
+| `CAP_SETTINGS_WRITE` | Change the machine's settings, and read its network addressing, through the settings service (`docs/src/userland/settingsd.md`); the service is the documents' one writer and enforces the capability, which it never holds itself. |
 
 The **debug image's root account** is seeded with exactly the session
 baseline plus this administrative set — the "administrative capability
@@ -616,21 +617,55 @@ exist from CU3).
   of stream *before* it reaps, because a child that fills the pipe blocks
   until it is emptied. The audit records that output was returned and how
   much, never what it was — the same reasoning as the argument count.
+- **Who may allow a program.** An account may allow one only when every
+  capability the program's signed manifest requests lies within the
+  account's ceiling. The broker decides it from the users database and the
+  manifest, read under login's own identity through the load gate's own
+  request reader (`tairix_appload::requested_capabilities`), never from the
+  request. An account that may not is refused exactly as a wrong password
+  is — one `PermissionDenied`, one charge to the meter — and the audit names
+  the true cause. A program whose manifest cannot be read is refused before
+  any attempt is spent. A manifest that changes between the read and the
+  spawn widens nothing: the kernel still grants `manifest ∩ ceiling`.
+- **One meter.** Every attempt in every form is charged to the per-account
+  budget the login screen and the text prompt charge, so guesses cannot be
+  spread across surfaces; a request for an account still cooling down is
+  answered `Cooling { retry_after }` and nothing about it is checked. The
+  verify-only form is metered under the caller's own login name.
+- **Who is told.** `Authorisers { program, offset }` is answered only to the
+  desktop session presenting on the broker's console — the attested uid owns
+  the foreground session, and the caller runs `session_ipc::DESKTOP_BUNDLE`
+  under login's own publisher — and only for a program in a read-only system
+  store, so what it can learn is bounded to the shipped programs' requests.
+  It answers whether the caller's own account may allow the program (that
+  account then leads the listing) and pages the accounts that may, by shown
+  and login name in the `session_ipc` account-page encoding, never by
+  ceiling and never naming one that may not. It exists for the system
+  authorisation prompt (`docs/src/desktop/session.md`, *Asking for an account
+  that may*).
+- **No application collects a password.** On a desktop the broker's caller
+  is the session alone: Settings names one of a closed set of system tasks
+  through its window (`window_ipc::SystemTask`), and the session's prompt
+  asks, maps the task to its program and how it runs, and posts the request
+  (`docs/src/desktop/session.md`, *Asked for by Settings*).
 - Wire contract: `lib/abi/src/elevate.rs` — `ElevateRequest` is a
-  four-variant enum (`Run { username, password, program, argv }` /
+  five-variant enum (`Run { username, password, program, argv }` /
   `Verify { password }` / `Launch { username, password, program }` /
-  `Capture { username, password, program, argv }`, an opcode byte after the
-  version word; `Run`, `Capture` and `Launch` share one encode/decode arm so
-  their shape cannot drift) and `ElevateReply<'_>` is a six-variant enum
+  `Capture { username, password, program, argv }` /
+  `Authorisers { program, offset }`, an opcode byte after the version word;
+  `Run`, `Capture` and `Launch` share one encode/decode arm so their shape
+  cannot drift) and `ElevateReply<'_>` is an eight-variant enum
   (`Completed { exit_code }` / `Verified` / `Launched { pid }` /
   `Captured { exit_code, output }` / `Overran { exit_code }` /
+  `Authorisers { own, page }` / `Cooling { retry_after }` /
   `Refused(Errno)`, encoded as a result-discriminant word — `0` completed,
-  `1` verified, `2` launched, `3` captured, `4` overran, negative `-errno`
-  refused — plus a second word carrying the exit code, the pid, or zero).
-  Every reply but the captured one is exactly that fixed head; a captured
-  one appends a `u32` length and that many bytes, so a reply that relays
-  nothing costs nothing to copy and `ELEVATE_MAX_REPLY` is the endpoint's
-  ceiling rather than every frame's size. The reply borrows the buffer it
+  `1` verified, `2` launched, `3` captured, `4` overran, `5` authorisers,
+  `6` cooling, negative `-errno` refused — plus a second word carrying the
+  exit code, the pid, the own-account flag, the wait in nanoseconds, or
+  zero). A captured or authorisers reply appends a `u32` length and that
+  many bytes; every other reply is exactly that fixed head, so a reply that
+  relays nothing costs nothing to copy and `ELEVATE_MAX_REPLY` is the
+  endpoint's ceiling rather than every frame's size. The reply borrows the buffer it
   was decoded from, because `lib/abi` has no allocator to own the output
   with. Both decode fail-closed (wrong version, unknown opcode/status, a
   negative pid, an output region longer than the bound or disagreeing with
@@ -672,8 +707,9 @@ exist from CU3).
   exists.
 - Audit: `ELEVATE_GRANTED` / `ELEVATE_REFUSED` / `ELEVATE_UNAVAILABLE` /
   `VERIFY_GRANTED` / `VERIFY_REFUSED` / `LAUNCH_GRANTED` /
-  `LAUNCH_REFUSED` / `LAUNCH_ENDED_ABNORMALLY` (login's 10_007–10_009,
-  10_012–10_013, 10_024–10_026); the launch pair is separate from the run
+  `LAUNCH_REFUSED` / `LAUNCH_ENDED_ABNORMALLY` / `AUTHORISERS_SENT` /
+  `AUTHORISERS_REFUSED` (login's 10_007–10_009, 10_012–10_013,
+  10_024–10_026, 10_033–10_034); the launch pair is separate from the run
   pair because no exit code exists at that point and the record names the
   pid login now owns. The exit code arrives later, at the reap, and a
   non-zero one is audited then: a launched child's `stderr` is login's

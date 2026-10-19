@@ -14,7 +14,7 @@ use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_appconf::Registry;
-use tairix_controls::testkit::keystroke;
+use tairix_controls::testkit::{keystroke, premul};
 use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, MenuItem, WHEEL_STEP};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
@@ -136,6 +136,39 @@ fn the_strip_spans_the_panel_and_the_field_keeps_its_inset() {
     assert_eq!(bar.left(), strip.right());
     assert_eq!(bar.right(), sidebar.right());
     assert_eq!(scrolling.content, frame.content);
+}
+
+/// The strip's bar stands inside the panel's plate, whose rim already bounds
+/// it, so its channel carries no edge: one standing mid-plate with open ends
+/// read as a stray line.
+#[test]
+fn the_strip_bar_draws_no_edge_inside_the_panel() {
+    let theme = theme();
+    let short = Rect::new(0, 0, WIDE.width, 260);
+    let mut shell = shell();
+    shell.lay_out(short, Scale::ONE, &theme);
+    let bar = shell
+        .frame(short, Scale::ONE, &theme)
+        .strip_scrollbar
+        .expect("every category does not fit a short strip");
+    let mut surface = Surface::new(short.width, short.height).expect("a surface");
+    shell.render(
+        &mut surface,
+        short,
+        Scale::ONE,
+        opaque(&theme),
+        &mut NoArtwork,
+    );
+    let frame = premul(theme.palette().frame);
+    let left = u32::try_from(bar.left()).expect("on the surface");
+    let top = u32::try_from(bar.top()).expect("on the surface");
+    for y in top..top + bar.height {
+        assert_ne!(
+            surface.get(left, y),
+            Some(frame),
+            "the bar's left side at row {y}"
+        );
+    }
 }
 
 /// The sidebar's panel is a settings group's own plate rather than a
@@ -1911,7 +1944,8 @@ fn the_idle_panes_post_only_their_own_keys() {
 
 /// The Language & Region pane offers the delegated store's regions and
 /// places, posts its own two keys alone, and a region's row says how that
-/// region writes a date.
+/// region writes a date; its zone is chosen in the zone chooser the row's
+/// command asks for.
 #[test]
 fn the_language_pane_offers_the_stores_regions_and_places_and_posts_its_own_keys() {
     let category = Pane::Language.locate().expect("a located pane").0;
@@ -1921,13 +1955,37 @@ fn the_language_pane_offers_the_stores_regions_and_places_and_posts_its_own_keys
     });
     shell.adopt_zones(Some(crate::test_support::zones()));
     let form = shell.form_mut_for_test().expect("a composed form");
-    let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 1, 5) else {
+    assert_eq!(
+        form.act_for_test(0, 1, tairix_controls::FieldAction::Activated),
+        crate::FormOutcome::ChooseZone,
+        "the zone row's command asks for the chooser"
+    );
+    let (rows, held) = shell.zone_rows(None).expect("the store was delegated");
+    assert_eq!(rows[5].key, "America/New_York");
+    assert_eq!(held, Some(0));
+    let ShellOutcome::Apply(document) = shell.choose_zone(5) else {
         panic!("choosing a place posts a document");
     };
     assert!(
         document.contains("time.zone = America/New_York"),
         "{document}"
     );
+    assert_eq!(
+        shell.choose_zone(5),
+        ShellOutcome::Idle,
+        "the zone already held posts nothing"
+    );
+    let described = crate::test_support::rows(&shell)
+        .into_iter()
+        .find(|row| row.label() == "Time zone")
+        .and_then(|row| row.description().map(String::from))
+        .expect("the zone row");
+    assert!(
+        described.starts_with("New York, United States."),
+        "{described}"
+    );
+    assert_eq!(shell.choose_zone(99), ShellOutcome::Idle, "fails closed");
+    let form = shell.form_mut_for_test().expect("a composed form");
     let crate::FormOutcome::Apply(document) = form.choose_for_test(0, 0, 4) else {
         panic!("choosing a region posts a document");
     };

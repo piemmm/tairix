@@ -186,7 +186,7 @@ store under `Settings/<App>/`, an app cache under `Library/<App>/`, the
 user's own bundles under `Commands/` and `Applications/` — and a writer that
 creates only its immediate parent would fail on a brand-new account the
 first time anything was saved. Every route that lays a home down takes the
-one walk, `provision_home_shape`, over the small `HomeTree` seam every volume
+one walk, `provision_home_shape`, over the small `ShapeTree` seam every volume
 offers: the `CAP_USER_ADMIN` provisioning path
 (`RootAdminBacking::provision_home`), the image builder's seeded home, and
 the QEMU users-root fixture. The walk fills in a missing folder on a later
@@ -194,10 +194,24 @@ run and never rewrites what the account itself put there — a file where the
 shape wants a folder is left alone and not descended into — while the per-app
 data parents and their gated root, which are OS shape, are re-stamped every
 run; a per-app data parent that is not a folder is refused
-(`HomeShapeError::Occupied`). Provisioning fills in the shape only inside a
+(`ShapeError::Occupied`). Provisioning fills in the shape only inside a
 home the account **owns**: an administrator pointing a new account at an
 existing directory never has one principal's storage laid out inside
 another's.
+
+### The services' settings directories
+
+`/System/Settings` is the system user's, so a service writes only in a
+directory laid out for it. `SETTINGS_DIRS` names each one and whose it is —
+the settings service's `Configuration` (`0755`) and `Network` (`0750`, the
+services group alone), the time service's `Time`, and PID 1's `Services` — and
+`provision_settings_dirs` lays them out over the same `ShapeTree` seam,
+re-stamping one already there, so the image builder and the QEMU fixtures can
+never differ in who owns which. A document planted in one of them takes the
+directory's owner (`SettingsDir::document_security`), because its service
+replaces it keeping its owner and holds no authority to change one.
+`provision_default_dirs` lays out the image's defaults on the read-only
+`/System` volume with the same reach (`default_dir_security`).
 
 The compiled-in **system identity** (`plans/USERS.md`) is defined here
 too: `system_accounts()` — the no-login `system` record (uid 0, group
@@ -205,9 +219,9 @@ too: `system_accounts()` — the no-login `system` record (uid 0, group
 resolves to) plus one no-login account per system service (`devmgr` 10,
 `sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, `fontd` 15,
 `greeter` 16, `confd` 17, `timed` 18, `audiod` 19, `discoveryd` 20,
-`soundd` 21, primary group `services` gid 101), each carrying exactly its own
-service's grant ceiling (`DEVMGR_CEILING` … `SOUNDD_CEILING`) so the
-ceiling∩manifest intersection does real work. The uids a protocol
+`soundd` 21, `settingsd` 22, primary group `services` gid 101), each carrying
+exactly its own service's grant ceiling (`DEVMGR_CEILING` …
+`SETTINGSD_CEILING`) so the ceiling∩manifest intersection does real work. The uids a protocol
 authenticates its peer by — the network stack's, the discovery service's,
 the cue authority's, and the login service's and device manager's the cue
 authority admits lifecycle sounds by — are defined in that protocol's

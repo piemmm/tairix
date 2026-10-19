@@ -467,6 +467,35 @@ fn the_opposing_series_grows_the_other_way() {
     );
 }
 
+/// A part of a reading is drawn within it: both rise from the one floor over
+/// the whole box, no axis is drawn, and the part's own colour reaches below
+/// where a mirrored half would begin.
+#[test]
+fn a_series_within_the_first_shares_the_whole_box() {
+    let theme = Theme::dark();
+    let whole = network(&theme);
+    let part = premul(theme.palette().disk_pressure);
+    let nested = Chart::new(SignalRole::Network)
+        .with_samples([1000; 8])
+        .with_within(SignalRole::Disk, [500; 8]);
+    let surface = chart_surface(&nested, &theme);
+    assert!(!has_pixel(&surface, premul(theme.palette().rim)), "no axis");
+    let whole_top = topmost(&surface, whole).expect("the whole plots");
+    let part_top = topmost(&surface, part).expect("the part plots");
+    assert!(
+        part_top > whole_top,
+        "the part reaches half as high as the whole: {part_top} vs {whole_top}"
+    );
+    assert!(
+        part_top < surface.height() * 3 / 4,
+        "and rises from the floor, not from a midline: row {part_top}"
+    );
+    assert!(!nested.is_empty());
+    assert!(Chart::new(SignalRole::Network)
+        .with_within(SignalRole::Disk, [])
+        .is_empty());
+}
+
 #[test]
 fn a_duplex_chart_draws_its_axis() {
     let theme = Theme::dark();

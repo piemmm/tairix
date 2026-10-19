@@ -2,7 +2,7 @@
 //! production aarch64 `tairix-kernel` pipeline on the `virt` board against
 //! the shared `bond-net-root` whole-disk image — whose read-only `/System`
 //! volume carries the **kernel-signed virtio-net driver bundle** and a
-//! planted `/System/Settings/Network/network.conf` composing an
+//! planted `/System/Defaults/Network/network.conf` composing an
 //! **active-backup bond** over two NICs — with **two** `virtio-net-device`s
 //! attached and the harness-side **bond** link peer serving both wires, and
 //! prove live link-aggregation **failover** end to end.

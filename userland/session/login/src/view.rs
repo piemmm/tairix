@@ -55,6 +55,7 @@ use core::cell::{Cell, RefCell};
 use core::time::Duration;
 
 use tairix_abi::sysinfo::{LoadAverage, OsVersion, SYSTEM_NAME};
+use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, Time64};
 use tairix_curses::{str_width, Event, InputMode, Pos, Screen, Size, Tty, Window};
 use tairix_users::MAX_USERNAME_LEN;
@@ -180,6 +181,9 @@ pub struct CursesView<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> {
     input: W,
     /// Rejected attempts since the last successful login.
     failures: Cell<u32>,
+    /// Whole seconds the account last named must still wait, stated in
+    /// place of the count until the next attempt is decided.
+    cooling: Cell<Option<i64>>,
     /// Whether the console is in the raw (echo-off) discipline; a secret
     /// is read only while this holds.
     raw_active: Cell<bool>,
@@ -342,8 +346,14 @@ fn fit_tail(shown: &str, cols: usize) -> &str {
     tail
 }
 
-/// The failed-attempts line, or `None` while no attempt has failed.
-fn failure_line(failures: u32) -> Option<String> {
+/// The line beneath the box: how long the account last named must wait,
+/// else the failed-attempt count, else nothing.
+fn failure_line(failures: u32, cooling: Option<i64>) -> Option<String> {
+    if let Some(secs) = cooling {
+        return Some(format!(
+            "Too many attempts: try that account again in {secs} s"
+        ));
+    }
     match failures {
         0 => None,
         1 => Some(String::from("1 failed attempt")),
@@ -362,6 +372,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> CursesView<T, S, M, 
             mode,
             input,
             failures: Cell::new(0),
+            cooling: Cell::new(None),
             raw_active: Cell::new(false),
             may_give_way: Cell::new(false),
             status: RefCell::new(LoginStatus::default()),
@@ -426,7 +437,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> CursesView<T, S, M, 
 
         let origin = Self::box_origin(size);
         // The red failure count, centred beneath the box.
-        if let Some(line) = failure_line(self.failures.get()) {
+        if let Some(line) = failure_line(self.failures.get(), self.cooling.get()) {
             let red = Attributes {
                 bold: true,
                 foreground: Color::Basic(BasicColor::Red),
@@ -653,11 +664,18 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> LoginView for Curses
 
     fn note_failure(&self) {
         self.failures.set(self.failures.get().saturating_add(1));
+        self.cooling.set(None);
+        self.draw("Username: ", "");
+    }
+
+    fn note_cooling(&self, retry_after: Duration64) {
+        self.cooling.set(Some(retry_after.secs_rounded_up()));
         self.draw("Username: ", "");
     }
 
     fn session_handoff(&self) {
         self.failures.set(0);
+        self.cooling.set(None);
         self.leave();
     }
 
@@ -685,6 +703,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
     use tairix_abi::sysinfo::{OsVersion, LOAD_FIXED_SHIFT};
+    use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, Time64};
     use tairix_curses::{CursesError, Screen, Size, Tty};
     use tairix_termcap::TermType;
@@ -1040,9 +1059,9 @@ mod tests {
 
     #[test]
     fn failure_line_counts_in_english() {
-        assert_eq!(failure_line(0), None);
-        assert_eq!(failure_line(1).as_deref(), Some("1 failed attempt"));
-        assert_eq!(failure_line(3).as_deref(), Some("3 failed attempts"));
+        assert_eq!(failure_line(0, None), None);
+        assert_eq!(failure_line(1, None).as_deref(), Some("1 failed attempt"));
+        assert_eq!(failure_line(3, None).as_deref(), Some("3 failed attempts"));
     }
 
     /// Replay `written` through the shared vt parser onto a 24x80 grid,
@@ -1348,6 +1367,21 @@ mod tests {
         // operator sees the keystrokes landing (the diff renderer may
         // split it into cursor-jump runs, so each word is asserted alone).
         assert!(text.contains("[input") && text.contains("active"), "{text}");
+    }
+
+    #[test]
+    fn a_cooling_account_is_told_how_long_to_wait_rounded_up_in_place_of_the_count() {
+        assert_eq!(
+            failure_line(4, Some(5)).as_deref(),
+            Some("Too many attempts: try that account again in 5 s")
+        );
+        let (view, written, _mode) = view_with(&[]);
+        view.note_cooling(Duration64::from_secs(12));
+        assert!(transcript(&written).contains("try that account again in 12 s"));
+        // The next decided attempt returns the line to the count.
+        view.note_failure();
+        assert_eq!(view.cooling.get(), None);
+        assert_eq!(view.failures.get(), 1);
     }
 
     #[test]

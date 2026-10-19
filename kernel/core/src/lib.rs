@@ -229,7 +229,7 @@ pub use dispatch_slot::{
 };
 pub use driver_store::{
     enumerate_driver_store, DriverImageError, DriverImageReader, DRIVER_STORE_PATH,
-    MAX_DRIVER_IMAGE_LEN, MAX_STORE_DEPTH, MAX_STORE_DRIVERS, SYSTEM_VOLUME_SETTINGS_PATH,
+    MAX_DRIVER_IMAGE_LEN, MAX_STORE_DEPTH, MAX_STORE_DRIVERS, SYSTEM_VOLUME_DEFAULTS_PATH,
     SYSTEM_VOLUME_STORE_PATH,
 };
 pub use filemap::{FileMap, NullFileMap, NULL_FILE_MAP};
@@ -307,7 +307,10 @@ pub use supervisor_system::{
     BootLogTail, SupervisorSystem,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers, LoadPlan};
-pub use syscfg::{load_and_apply_system_config, SYSTEM_CONFIG};
+pub use syscfg::{
+    load_and_apply_system_config, read_image_system_config, ImageConfig, IMAGE_SYSTEM_CONFIG,
+    SYSTEM_CONFIG,
+};
 pub use traps::{on_reschedule_ipi, on_timer_tick, on_user_preempt_point};
 pub use useradmin::{
     LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,

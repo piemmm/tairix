@@ -16,6 +16,7 @@ use tairix_icon::{IconKind, IconPicture};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use crate::menu::RowIcon;
 use crate::paint::{paint_icon_slot, role_font, surface_rect, to_i32, withheld, TextBlock};
 use crate::record::FactList;
 use crate::window::TitleBar;
@@ -42,6 +43,7 @@ pub struct AboutSheet {
     purpose: Option<String>,
     facts: FactList,
     icon: IconKind,
+    source: Option<RowIcon>,
     artwork: Option<Surface>,
 }
 
@@ -81,14 +83,34 @@ impl AboutSheet {
             purpose: purpose.filter(|purpose| !purpose.is_empty()),
             facts,
             icon,
+            source: None,
             artwork: None,
         }
+    }
+
+    /// Resolve the sheet's picture from `source`, the host's to decode; the
+    /// built-in glyph stands until [`set_artwork`](Self::set_artwork) gives
+    /// it the picture.
+    pub fn set_source(&mut self, source: RowIcon) {
+        self.source = Some(source);
+    }
+
+    /// Where the sheet's picture is resolved from, when its host named it.
+    #[must_use]
+    pub const fn source(&self) -> Option<&RowIcon> {
+        self.source.as_ref()
     }
 
     /// Show `artwork`, the bundle's own picture rasterised at
     /// [`ABOUT_ICON_SIDE`] scaled, in place of the built-in glyph.
     pub fn set_artwork(&mut self, artwork: Surface) {
         self.artwork = Some(artwork);
+    }
+
+    /// The bundle's picture, once its host gave it one.
+    #[must_use]
+    pub const fn artwork(&self) -> Option<&Surface> {
+        self.artwork.as_ref()
     }
 
     /// The application's name.

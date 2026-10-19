@@ -933,6 +933,12 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-18 — §3, §16.2: `/System/Defaults` and the settings service.**
+  Elevated programs run as the administrator's own account, so nobody could
+  write the machine's settings, and the image's defaults sat hidden beneath
+  the writable `Settings/` mount where no editor could start from them; one
+  service now writes the settings for a holder of `CAP_SETTINGS_WRITE`, and
+  the defaults are read-only files every reader sees.
 - **2026-10-17 — §16.3: `Home` replaces `UserFiles` in the home.** At the
   user's direction the folder of the user's own files is called `Home`, the
   file manager's Home place.

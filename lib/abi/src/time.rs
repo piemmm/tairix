@@ -25,6 +25,9 @@
 use crate::le::{put_i64, put_u32, read_i64, read_u32};
 use crate::Errno;
 
+/// The directory the time service keeps its last-seen record in.
+pub const TIME_STATE_DIR: &str = "/System/Settings/Time";
+
 /// Nanoseconds in one second. The sub-second field of every time type is
 /// kept in `0..NANOS_PER_SEC`.
 pub const NANOS_PER_SEC: u32 = 1_000_000_000;
@@ -525,6 +528,13 @@ impl Duration64 {
     #[must_use]
     pub const fn subsec_nanos(&self) -> u32 {
         self.nanos
+    }
+
+    /// The span in whole seconds, rounded up, so a wait stated from it is
+    /// never shorter than the wait is.
+    #[must_use]
+    pub const fn secs_rounded_up(&self) -> i64 {
+        self.secs.saturating_add(if self.nanos > 0 { 1 } else { 0 })
     }
 
     /// Encode `self` little-endian.
@@ -1088,6 +1098,16 @@ mod tests {
         assert_eq!(d.secs(), 2);
         assert_eq!(d.subsec_nanos(), 500_000_001);
         assert_eq!(Duration64::from_bytes(&d.to_le_bytes()), Ok(d));
+    }
+
+    #[test]
+    fn a_span_in_whole_seconds_is_rounded_up_and_never_overflows() {
+        assert_eq!(Duration64::from_secs(5).secs_rounded_up(), 5);
+        assert_eq!(Duration64::from_nanos(4_000_000_001).secs_rounded_up(), 5);
+        assert_eq!(Duration64::from_nanos(1).secs_rounded_up(), 1);
+        assert_eq!(Duration64::ZERO.secs_rounded_up(), 0);
+        let longest = Duration64::new(i64::MAX, 1).expect("canonical");
+        assert_eq!(longest.secs_rounded_up(), i64::MAX);
     }
 
     #[test]

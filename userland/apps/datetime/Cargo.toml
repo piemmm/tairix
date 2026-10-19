@@ -1,6 +1,6 @@
 [package]
 name = "tairix-datetime"
-description = "TAIRiX Date & Time app (datetime.app): the windowed application that shows the kernel's wall-clock reading in editable civil fields and, on commit, steps the clock through wall_time_set. The host-tested field/validation/composition model is the crate's [lib]; the freestanding `Run` binary is the on-disk bundle's entry point composing it over lib/window."
+description = "TAIRiX Date & Time dialog (datetime.app): the machine's clock to the second and where it came from, network time on or off, the date and time set by hand in the machine's zone, and the zone itself. The host-tested engine and window are the crate's [lib]; the freestanding `Run` binary is the on-disk bundle's entry point composing them over lib/window."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The host-testable model: the six civil fields, their validation, the
-# composition of a `Time64` instant, and the one status line every surface
-# states a result through. It is `no_std` + `alloc` so it links unchanged
-# into the freestanding `Run` binary and runs under the host test harness.
+# The host-testable engine and window: the readout and its provenance, the
+# zone's next change, a hand-set instant composed or refused, the calendar,
+# the time entry, the chooser's places and the window's layout and paint. It
+# is `no_std` + `alloc` so it links unchanged into the freestanding `Run`
+# binary and runs under the host test harness.
 [lib]
 name = "tairix_datetime"
 path = "src/lib.rs"
@@ -24,17 +25,16 @@ name = "tairix-datetime-run"
 path = "src/run.rs"
 
 [dependencies]
-# The frozen `Time64`/`WallTimeState`/`Errno` vocabulary the clock reading and
-# the set request are expressed in.
+# The `Time64`/`WallTimeState`/`Errno` vocabulary the clock reading and the
+# set request are expressed in, and the settings and clock-chip protocols.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The one proleptic-Gregorian calendar: `CivilTime::from_time64` seeds the
-# fields and `days_from_civil` composes the instant back, so the app can never
-# disagree with the desktop clock's own decomposition.
+# The one proleptic-Gregorian calendar and its spellings — the full date, the
+# weekday and month names — so the dialog can never disagree with the desktop
+# clock's own.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
-# The Reactive Alloy control families the window is built from: the form-field
-# family (`FieldGroup`/`FieldRow`) holding a `TextField` per civil field, the
-# `Dialog` chrome around them, and `Button` for Set/Close — no new control and
-# no second form layout here.
+# The Reactive Alloy control families the window is built from: the dialog
+# window's bands, the form-field groups and their toggle and button rows, the
+# number fields the time entry is made of, and the place chooser.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # Integer screen geometry (`Rect`, `Region`, `Scale`): every length is authored
 # logical and converted through the one shared scale.
@@ -46,6 +46,15 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The shared pointer/key input vocabulary every control consumes.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The chevrons the calendar's month and year steppers wear.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# Civil time: the zone store the machine's zone is chosen from, local time read
+# and composed both ways, and the region's hours and weeks.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["listing"] }
+# The machine configuration's grammar: the `time.network` and `time.zone` keys
+# the dialog reads and asks the settings service to change, spelled by the one
+# registry every reader parses.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # Shared software rasteriser (`Surface`): the same premultiplied-alpha
 # primitives the window manager paints with.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
@@ -66,11 +75,24 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # font service over the runtime `ipc_call` transport; the base dependency
 # stays host-neutral so host tests inject the mock transport instead.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The zone store's loader, which reads the planted store once for the life of
+# the process.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["rt"] }
+# The System Information API client the machine configuration is read
+# through, as every surface showing a setting reads it.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The time service's record of when the network last set the clock, read
+# through the one codec that writes it.
+tairix-timesync = { path = "../../../lib/timesync", version = "=0.0.0" }
+# The worker's queued desk, on which every read and write is answered in turn.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The model's host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# A small store of real zones and regions the tests read their clocks from.
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["test-support"] }
 # The control families' shared test fixtures: the view's layout is held to the
 # same two axes every control is (the built-in themes and a varied type
 # ladder), over the one fixture rather than a copy of it here.

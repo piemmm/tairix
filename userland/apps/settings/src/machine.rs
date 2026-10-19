@@ -14,9 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_controls::{ComboBox, FieldControl, FieldRow};
-use tairix_sysconfig::{
-    CacheMode, CacheSwitch, Key, LoginType, NetToggle, SynCookies, SystemConfig,
-};
+use tairix_sysconfig::{CacheMode, Key, LoginType, NetToggle, Switch, SynCookies, SystemConfig};
 
 /// What a row states while the machine's configuration has not been read.
 const UNREAD: &str = "not read yet";
@@ -173,7 +171,7 @@ impl MachineSetting {
             Self::CacheFilesystem
             | Self::CacheBlock
             | Self::CacheTransform
-            | Self::CacheSemantic => (config.cache_all == CacheSwitch::Off, Self::CACHING_OFF),
+            | Self::CacheSemantic => (config.cache_all == Switch::Off, Self::CACHING_OFF),
             Self::NetIpv6Privacy => (
                 config.net_ipv6_enabled == NetToggle::Disabled,
                 Self::IPV6_OFF,
@@ -196,11 +194,7 @@ impl MachineSetting {
                 config.login_type,
                 login_label,
             ),
-            Self::CacheAll => pick(
-                &[CacheSwitch::On, CacheSwitch::Off],
-                config.cache_all,
-                switch_label,
-            ),
+            Self::CacheAll => pick(&[Switch::On, Switch::Off], config.cache_all, switch_label),
             Self::CacheFilesystem
             | Self::CacheBlock
             | Self::CacheTransform
@@ -283,11 +277,7 @@ impl MachineSetting {
                 index,
                 &mut config.login_type,
             ),
-            Self::CacheAll => set(
-                &[CacheSwitch::On, CacheSwitch::Off],
-                index,
-                &mut config.cache_all,
-            ),
+            Self::CacheAll => set(&[Switch::On, Switch::Off], index, &mut config.cache_all),
             Self::CacheFilesystem => modes(index, &mut config.cache_filesystem),
             Self::CacheBlock => modes(index, &mut config.cache_block),
             Self::CacheTransform => modes(index, &mut config.cache_transform),
@@ -391,10 +381,10 @@ const fn login_label(kind: LoginType) -> &'static str {
 }
 
 /// The display label of the master caching switch.
-const fn switch_label(switch: CacheSwitch) -> &'static str {
+const fn switch_label(switch: Switch) -> &'static str {
     match switch {
-        CacheSwitch::On => "On",
-        CacheSwitch::Off => "Off",
+        Switch::On => "On",
+        Switch::Off => "Off",
     }
 }
 

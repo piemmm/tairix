@@ -43,6 +43,7 @@ use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
 use tairix_abi::time::WallClockReading;
+use tairix_abi::zone::ZoneName;
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
 use tairix_browse::{DirectorySource, GridView};
 use tairix_controls::damage::{self, Repaint};
@@ -276,6 +277,8 @@ pub struct DesktopShell {
     /// The zone store the user's zone and region are resolved against, or
     /// `None` where none is planted and the clock reads UTC.
     zones: Option<HeldZones>,
+    /// The machine's own zone, which a user who chose none reads.
+    machine_zone: Option<ZoneName>,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -455,6 +458,7 @@ impl DesktopShell {
             preview_requested: None,
             clock: SessionClock::new(CivilClock::UTC),
             zones: None,
+            machine_zone: None,
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -2259,7 +2263,11 @@ impl DesktopShell {
     /// Whether `caller` is the desktop's own Settings application, recording
     /// the refusal of `request` to any other caller: an application reaching
     /// for what only Settings may do is a decision the audit trail keeps.
-    fn settings_only(&self, caller: Option<&AppIdentity>, request: &'static str) -> bool {
+    pub(crate) fn settings_only(
+        &self,
+        caller: Option<&AppIdentity>,
+        request: &'static str,
+    ) -> bool {
         let settings = is_settings_surface(caller, self.own_app.as_ref());
         if !settings {
             tairix_log::log(
@@ -2477,11 +2485,26 @@ impl DesktopShell {
         self.zones.map(|held| held.fd).ok_or(Errno::NotFound)
     }
 
-    /// Read the clock in the zone and region `settings` name, keeping the
-    /// bar's room for its widest lines. The clock is due at once, so the
-    /// change shows on the next wake.
+    /// Hold `zone` as the machine's own, which the next
+    /// [`adopt_civil`](Self::adopt_civil) reads for a user who chose none;
+    /// answers whether it moved.
+    pub fn set_machine_zone(&mut self, zone: Option<ZoneName>) -> bool {
+        core::mem::replace(&mut self.machine_zone, zone) != zone
+    }
+
+    /// The machine's own zone, as every windowed application is told it.
+    #[must_use]
+    pub const fn machine_zone(&self) -> Option<ZoneName> {
+        self.machine_zone
+    }
+
+    /// Read the clock in the zone and region `settings` name — the machine's
+    /// zone for a user who chose none — keeping the bar's room for its widest
+    /// lines. The clock is due at once, so the change shows on the next wake.
     pub fn adopt_civil(&mut self, settings: &DesktopSettings) -> CivilAdoption {
-        let (civil, (zone, region)) = tairix_wallpaper::civil_clock(self.zones(), settings);
+        let machine = self.machine_zone.as_ref().map(ZoneName::as_str);
+        let (civil, (zone, region)) =
+            tairix_wallpaper::civil_clock(self.zones(), settings, machine);
         self.clock.set_civil(civil);
         let widest = self.clock.widest();
         let reshaped = self.session.taskbar().clock().widest() != widest.as_slice();

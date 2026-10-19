@@ -179,8 +179,10 @@ fn core_cells(sample: &Sample, meters: &RollingMeters) -> Vec<CoreCell> {
         .collect()
 }
 
-/// The scheduler's two rates as one duplex trace — dispatches above the
-/// midline, timer preemptions below — or the statement of why there is none.
+/// The scheduler's two rates as one trace — every context switch, and the
+/// timer preemptions among them drawn within it — or the statement of why
+/// there is none. A preemption is a switch, so the two share one scale and
+/// one direction, and the whole height carries both.
 fn scheduler_body(sample: &Sample, meters: &RollingMeters) -> BlockBody {
     let trace = meters.scheduler.trace();
     if trace.primary.is_empty() {
@@ -190,16 +192,16 @@ fn scheduler_body(sample: &Sample, meters: &RollingMeters) -> BlockBody {
         ));
     }
     BlockBody::Trend {
-        trace: Trace::Duplex {
-            inbound: SignalRole::Cpu,
-            outbound: SignalRole::Workload,
-            into: trace.primary,
-            out: trace.opposing,
-        },
         caption: format!(
-            "context switches above, preemptions below · {} /s full scale",
+            "{} /s full scale · context switches, preemptions within",
             format_count(trace.full_scale)
         ),
+        trace: Trace::Within {
+            whole: SignalRole::Cpu,
+            part: SignalRole::Workload,
+            totals: trace.primary,
+            parts: trace.opposing,
+        },
     }
 }
 

@@ -49,7 +49,7 @@ use tairix_caps::CapabilitySet;
 use crate::grants::{
     capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, DISCOVERYD_CEILING,
     FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,
-    SOUNDD_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
+    SETTINGSD_CEILING, SOUNDD_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -160,6 +160,13 @@ pub const SOUNDD_USERNAME: &str = "soundd";
 /// tenancies by.
 pub const SOUNDD_UID: Uid = Uid(tairix_abi::sound_cue::SOUNDD_UID);
 
+/// Name of the machine-settings service account — the one writer of the
+/// administrator's machine and network configuration.
+pub const SETTINGSD_USERNAME: &str = "settingsd";
+
+/// The [`Uid`] of [`SETTINGSD_USERNAME`].
+pub const SETTINGSD_UID: Uid = Uid(22);
+
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
 /// set and the name→uid lookup can never diverge.
@@ -264,6 +271,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Sound Service",
         ceiling: SOUNDD_CEILING,
+    },
+    SystemAccountSpec {
+        username: SETTINGSD_USERNAME,
+        uid: SETTINGSD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Settings Service",
+        ceiling: SETTINGSD_CEILING,
     },
 ];
 
@@ -413,6 +427,7 @@ mod tests {
                 ("audiod", 19, 101),
                 ("discoveryd", 20, 101),
                 ("soundd", 21, 101),
+                ("settingsd", 22, 101),
             ]
         );
         for record in &records {
@@ -478,6 +493,10 @@ mod tests {
         assert_eq!(
             by_name("soundd").capabilities(),
             capability_set(SOUNDD_CEILING)
+        );
+        assert_eq!(
+            by_name("settingsd").capabilities(),
+            capability_set(SETTINGSD_CEILING)
         );
     }
 

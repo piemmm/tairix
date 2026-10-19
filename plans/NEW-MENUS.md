@@ -948,9 +948,12 @@ would and dies with the chain — and is a sheet (`lib/controls`' `AboutSheet`):
 a band titled "About *App*", the bundle's own artwork beside its name and
 version, its purpose wrapped as prose, and the remaining facts below a rule,
 all inset by the plate's padding and sized to what it states between a floor
-and a ceiling. A bar chain whose application exits is dismissed, and a bar
-chain names its application by its group, never by its index in a strip that
-may move under it.
+and a ceiling. The sheet names where its artwork comes from (the bundle the
+kernel attests) and the chain resolves it with its rows' pictures before every
+present, so a sheet opened before its decode landed is drawn with it when it
+does. A bar chain whose application exits is dismissed, and a bar chain names
+its application by its group, never by its index in a strip that may move under
+it.
 
 ### M10 — every row states its function
 

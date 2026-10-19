@@ -211,13 +211,15 @@ write path on landing.
      settles, and no pane ever blocks its window on a store (`AGENTS.md` §28).
      A slider that posted its document per pointer sample would freeze both
      this window and the desktop's.
-  2. **Machine scope → the tool that already writes that store, run as an
-     authenticated account.** `system.conf` and `network.conf` have exactly
-     one writer engine each (`lib/sysconfig`, `lib/netconfig`) and one command
-     app over them (`configure`). Settings does not grow a second writer: it
-     asks the console's elevation broker to re-authenticate an account that
-     may and run that same program (DS6). The CLI and the GUI are then
-     literally the same writer and cannot diverge.
+  2. **Machine scope → the settings service, asked by the tool that already
+     speaks for that store, run as an authenticated account.** `system.conf`
+     and `network.conf` have exactly one writer engine each (`lib/sysconfig`,
+     `lib/netconfig`), one writer (the settings service, `settingsd`, behind
+     `CAP_SETTINGS_WRITE`) and one command app over them (`configure`).
+     Settings does not grow a second writer: it asks the console's elevation
+     broker to re-authenticate an account that may and run that same program
+     (DS6). The CLI and the GUI then reach the one writer the same way and
+     cannot diverge.
   3. **Kernel scope → the syscall's own tool, run as an authenticated
      account.** Users, groups, grants and passwords go through the
      `users_admin` syscall, whose gate is `CAP_USER_ADMIN`; the clock goes
@@ -235,13 +237,10 @@ write path on landing.
 
 - **A pane is a form, and the form family is shared.** A settings pane is a
   scrollable column of captioned groups of label/description/control rows.
-  That shape is not this app's to invent privately: the file manager
-  hand-rolled a permissions grid, the wallpaper surface a column of four
-  drop-downs, and `datetime.app` a row of six fields. `lib/controls::form` is
-  the one family (DS1): `datetime.app` and the file manager's Permissions tab
-  are drawn with it (DS14), and the wallpaper copy went with the application
-  that carried it (DS4), because two form idioms in one desktop is the
-  duplication `AGENTS.md` §2.2 forbids. The family composes the existing row
+  That shape is not this app's to invent privately: `lib/controls::form` is the
+  one family (DS1), and the Date & Time dialog's groups and the file manager's
+  Permissions tab are drawn with it (DS14), because two form idioms in one
+  desktop is the duplication `AGENTS.md` §2.2 forbids. The family composes the existing row
   chrome and control families; it re-implements no plate, press, focus,
   disabled or Authority-Mark rendering.
 
@@ -317,9 +316,8 @@ The window is drawn on `WINDOW_GROUND` (`SurfaceGround::Frosted`): its bare
 ground and the command band let the blurred desktop through at the icon bar's
 weight, and everything laid on them — the sidebar's rows, every group, field,
 button and picture — is solid. A
-choice list, the category menu and the credential question stand over the
-window's content rather than on the glass, so `Grounds` draws them on the
-opaque theme. The window manager's frame and title bar stay opaque.
+choice list and the category menu stand over the window's content rather
+than on the glass, so `Grounds` draws them on the opaque theme. The window manager's frame and title bar stay opaque.
 
 ```
  ┌──────────────────────────────────────────────────────────────────┐
@@ -409,9 +407,9 @@ owner the change goes to; the last column is what a refusal looks like.
 | Category → pane | Read | Write goes to | On refusal |
 |---|---|---|---|
 | General → About | `SYSTEM_IDENTITY`, `UPTIME`, `CPU_INFO`, `MEMORY_TOTAL` | — (read-only) | reading renders unmeasured |
-| General → Login & startup | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
-| General → Caching | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure` | working copy stands, refusal stated |
-| General → Date & Time | `WallClockReading`, read in the user's zone and region from the delegated zone store | elevated `datetime.app` (launched) | refusal stated, clock untouched; no store reads UTC |
+| General → Login & startup | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which asks the settings service | working copy stands, refusal stated |
+| General → Caching | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which asks the settings service | working copy stands, refusal stated |
+| General → Date & Time | `WallClockReading`, read in the user's zone and region from the delegated zone store | the elevated Date & Time dialog (launched), which asks the settings service for network time and the zone | refusal stated, clock untouched; no store reads UTC |
 | Appearance | the session's published settings document; the font store's families (`FontRequest::Families`) | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
 | Theme | — | — (no theme model, §3) | pane states absence |
@@ -419,10 +417,10 @@ owner the change goes to; the last column is what a refusal looks like.
 | Lock Screen | the session's published settings document (`lock.after_min`) | session apply; *Lock Now* is the `LockScreen` window request | apply refused, stated; a refused lock stated on its row |
 | Screensaver | the session's published settings document (`screensaver.*`) | session apply | apply refused, stated |
 | Power | — | — (no policy interface, §3) | pane states absence |
-| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which writes the store and hands the changed interfaces to the running stack (DS8) | pane states where the live readings live; a refused apply keeps the working copy and states why |
+| Networking → Ethernet | nothing ungated exists: the live readings need `CAP_SYSINFO_HW`/`CAP_SYSINFO_GLOBAL` and stay the Switchboard's, and `network.conf` carries the very identity and addressing those gates protect. The configured addressing is read by the admin-authenticated run (DS8a) | elevated `configure`, which asks the settings service for the change and hands the changed interfaces to the running stack (DS8) | pane states where the live readings live; a refused apply keeps the working copy and states why |
 | Networking → Wi-Fi | — | — | pane states absence (§3) |
 | Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` over each interface's own `dns.servers` (DS8) | reading renders unmeasured; a refused apply keeps the working copy and states why |
-| Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
+| Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which asks the settings service and hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
 | Sound → Output & Input | `audio-v1` `Enumerate` (each device as the service shows this session), the user's own `SELF_AUDIO_STREAMS` captures, the `AudioCapture` count; re-read on the `AudioDevices` and `AudioCapture` notices | `audio-v1` `SetDefault`, `SetLevel`, `SetMute`, admitted by the room's tenancy | another session's room: controls drawn disabled under an Authority Mark; a refused control stated |
 | Sound → Sound Effects | the session's `SoundRead` (the user's choices over the machine's, each file by name) and `SoundThemes` pages; re-read after every answered change | session `SoundApply`, `SoundPick` (the session's own picker), `SoundUseTheme` | a refused change stated, and the pane re-read |
@@ -1034,9 +1032,10 @@ will, so `system.conf` is served by a new ungated `sysinfo-v1` query,
 `SYSTEM_CONFIG`, over a kernel introspect domain of the same name: the kernel
 already owns the VFS and already parses this document at the root unlock, so
 serving it adds no authority to anything and no manifest widens. It answers
-the **text**, read fresh (a boot snapshot would report the old value after
-`configure` wrote a new one), and `lib/procinfo::system_config` parses it with
-`lib/sysconfig` — the engine `configure` writes through. Ungated on the same
+the **text** as it stands — the administrator's layer, else the image's —
+read fresh (a boot snapshot would report the old value after a change), and
+`lib/procinfo::system_config` parses it with `lib/sysconfig` — the engine the
+settings service writes through. Ungated on the same
 ground as `MOUNT_LIST`: a world-readable public document carrying no
 credential, with no write path anywhere near it. The `network.conf` read is
 not the same shape: that document is not world-readable, which is why the
@@ -1053,8 +1052,8 @@ group of settings can never be left half written — the defect a run per key
 would have had. The master switch's ceiling is shown as the ceiling it is: a
 per-class row keeps its own value, because that is what the store says, and
 states that caching is off for the machine so it cannot be read as running.
-Date & Time launches `datetime.app` through the broker's existing `Launch`,
-started and left running. Its clock reading is the day written out and the time
+Date & Time launches the Date & Time dialog through the system authorisation
+prompt's `Launch`, started and left running. Its clock reading is the day written out and the time
 in the user's region, and its zone row names the place, its abbreviation and
 its offset from UTC; both are read through the zone store the session delegates
 (below), and read UTC where none was.
@@ -1066,22 +1065,25 @@ alone, mints it the descriptor the session opened at bring-up, and Settings
 reads and keeps the store for its life. The Region row offers *Default* (the
 store's own region, by name) and then every region by name, its description
 showing how the region it holds writes a date and a time at an instant that
-shows both field order and clock style; the Time zone row offers *Default* and
-then every place as *City, Region*, ordered by city. Both lists are long, so the
-choice list scrolls a window of whole rows and seeks a choice by typed prefix
-(`plans/GUI-CONTROLS-DESIGN.md` §11.10). A held value the store lacks is offered
-under its own spelling, so opening the pane never changes it; the session
-refuses an apply that names one.
+shows both field order and clock style; the list scrolls a window of whole rows
+and seeks a choice by typed prefix (`plans/GUI-CONTROLS-DESIGN.md` §11.10). The
+Time zone row names the zone the account's clocks read and its **Change…** opens
+the time-zone dialog (`tairix_controls::zone`, §11.47) in an owner-modal dialog
+window over `lib/tz`'s place listing: *This machine's zone* first, then every
+place by city with the local time there, rewritten as each minute turns,
+narrowed by a city, region or zone name. A held value
+the store lacks is stated under its own spelling, so opening the pane never
+changes it; the session refuses an apply that names one.
 
-**The credential question is shared.** The desktop has one credential
-surface, `lib/controls::CredentialSheet`: the session's prompt window and this
-application's in-window sheet compose the same focus order, wording, "an empty
-field is never offered" rule and secret hygiene. It is modal while it is up.
+**No password is collected here.** Every privileged action is a system task
+(`window_ipc::SystemTask`) asked of the desktop through the window: the
+desktop's own authorisation prompt names Settings, decides what runs and how,
+and answers `WindowEvent::Authorised` once; a captured listing is fetched with
+`TakeAuthorisedOutput`. One task is asked at a time.
 
-**One more desk each way.** The store read and the elevated run are worker
-desks like DS5's, because the broker answers only once the program it started
-has exited — a window that waited would stop drawing for the whole of an
-authentication and a store write.
+**One more desk.** The store read is a worker desk like DS5's, and the
+desktop round trips — asking for a task and fetching what it printed — ride
+the desktop desk, so the window never waits on the session's loop.
 
 ### DS7 — Networking: read, and the stack-wide options
 
@@ -1920,9 +1922,11 @@ UI scale stays on Appearance.
 ### DS14 — retire the second form idiom
 
 Every form in the desktop is drawn with `lib/controls::form`, and none carries
-a private layout. `datetime.app` composes its six fields from it (DS1), and the
-file manager's Permissions tab is an **Access** group (the mode as a reading,
-then one Owner/Group/Other row of flags each) over an **Ownership** group.
+a private layout. The Date & Time dialog composes its network-time and zone
+groups from it, its calendar and time entry seated in a group's owner band
+(`FieldGroup::set_band`), and the file manager's Permissions tab is an
+**Access** group (the mode as a reading, then one Owner/Group/Other row of flags
+each) over an **Ownership** group.
 
 - **One new slot, `FieldControl::Flags`.** A `FlagSet` is a row of checkboxes
   in one slot, reported as `FieldAction::SetFlag { index, on }`. Every box
@@ -1953,7 +1957,8 @@ What it guarantees:
   window's edges that ends where the pane's column begins, so it stands one
   gap from the plates beside it. The search field keeps the plate's content
   inset; the strip spans its interior and stops short of the rim's rounded
-  corners, and its scrollbar is carved from the plate, never from the pane.
+  corners, and its scrollbar is carved from the plate, never from the pane,
+  and drawn without channel edges, since the plate's rim already bounds it.
   The panel is a group's own plate, painted and rounded through
   `FieldGroup::paint_plate` and `FieldGroup::plate_radius`, so the two cannot
   drift apart.
@@ -1990,13 +1995,10 @@ What it guarantees:
 The graph is the ledger's `Depends on` column; this is the reasoning behind the
 five edges that are not obvious from it.
 
-**DS1 does not land alone.** It is host-provable by itself, but a shared family
-whose only caller is its own gallery tab is one caller, not the two independent
-ones `AGENTS.md` §23.3 requires of a shared helper. So it lands with the first
-of DS14's two conversions in the same increment — `datetime.app`'s six-field
-row is the smaller, and its private arithmetic dies with it — and the family is
-proven by a surface that already had a form to draw rather than by a gallery
-shaped around it.
+**DS1 is proven by surfaces that already had a form to draw**, not by a
+gallery shaped around it: a shared family whose only caller is its own gallery
+tab is one caller, not the two independent ones `AGENTS.md` §23.3 requires of a
+shared helper.
 
 **DS2 is independently useful the day it lands**, which is why it comes before
 any writing pane: every category is reachable and every absence is honest.

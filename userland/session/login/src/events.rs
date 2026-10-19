@@ -132,21 +132,31 @@ pub const TEXT_ROUND_UNWATCHED: EventId = EventId(10_031);
 /// The login screen asked for the civil-time store and none was delegated:
 /// the store could not be opened, or the kernel refused the delegation.
 pub const ZONE_STORE_WITHHELD: EventId = EventId(10_032);
+/// The presenting desktop was told which accounts may allow a system
+/// program: the program, whether its own account may, and how many may.
+pub const AUTHORISERS_SENT: EventId = EventId(10_033);
+/// A request to list the accounts that may allow a program was refused: a
+/// caller other than the presenting desktop, a program outside the system
+/// stores, or a manifest the authority could not read.
+pub const AUTHORISERS_REFUSED: EventId = EventId(10_034);
+/// A text-prompt attempt named an account still cooling down after refused
+/// passwords; its password was neither asked for nor checked.
+pub const AUTH_COOLING: EventId = EventId(10_035);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_FAILED, CAPTURE_GRANTED, CAPTURE_REFUSED, CONSOLE_ERROR, ELEVATE_GRANTED,
-        ELEVATE_REFUSED, ELEVATE_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED,
-        LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT, LOGIN_RANGE_END,
-        LOGIN_RANGE_START, ROUND_CHOSEN, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED,
-        SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT,
-        SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED,
-        SESSION_RESUMED, SESSION_STARTED, TEXT_ROUND_SUPERSEDED, TEXT_ROUND_UNWATCHED,
-        VERIFY_GRANTED, VERIFY_REFUSED, ZONE_STORE_WITHHELD,
+        AUTHORISERS_REFUSED, AUTHORISERS_SENT, AUTH_COOLING, AUTH_FAILED, CAPTURE_GRANTED,
+        CAPTURE_REFUSED, CONSOLE_ERROR, ELEVATE_GRANTED, ELEVATE_REFUSED, ELEVATE_UNAVAILABLE,
+        GREETER_DEGRADED, GREETER_FAILED, LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED,
+        LOCKED_OUT, LOGIN_RANGE_END, LOGIN_RANGE_START, ROUND_CHOSEN, SESSION_ACCOUNTS_SENT,
+        SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED,
+        SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED,
+        SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED, TEXT_ROUND_SUPERSEDED,
+        TEXT_ROUND_UNWATCHED, VERIFY_GRANTED, VERIFY_REFUSED, ZONE_STORE_WITHHELD,
     };
 
-    const ALL: [u32; 30] = [
+    const ALL: [u32; 33] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -177,6 +187,9 @@ mod tests {
         TEXT_ROUND_SUPERSEDED.0,
         TEXT_ROUND_UNWATCHED.0,
         ZONE_STORE_WITHHELD.0,
+        AUTHORISERS_SENT.0,
+        AUTHORISERS_REFUSED.0,
+        AUTH_COOLING.0,
     ];
 
     #[test]

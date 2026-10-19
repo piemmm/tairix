@@ -2094,6 +2094,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
+            | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
@@ -2176,6 +2177,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
+            | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }
@@ -2302,6 +2304,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
+            | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::DragOver { .. }
             | WindowEvent::DragEnded { .. }

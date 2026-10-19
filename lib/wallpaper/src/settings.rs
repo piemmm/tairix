@@ -67,7 +67,7 @@ use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
 use crate::catalog;
-use crate::civil::{RegionCode, ZoneName};
+use crate::civil::RegionCode;
 use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{
     parse_decimal, parse_millis, render_millis, PointerSpeed, PrimaryButton, RepeatRate,
@@ -81,6 +81,7 @@ use crate::saver::{
 };
 use crate::sound::SoundControls;
 use crate::text::{TextFamily, TextSize};
+use tairix_abi::zone::ZoneName;
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
 /// key: the bound every path-valued setting shares.

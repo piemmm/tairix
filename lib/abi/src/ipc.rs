@@ -44,7 +44,8 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// service ([`crate::pinboard_ipc::PINBOARD_ENDPOINT`]), the sandboxed font
 /// service ([`crate::font_ipc::FONT_ENDPOINT`]), the service
 /// manager's control surface
-/// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the RAID array
+/// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the machine
+/// settings service ([`crate::settings_ipc::SETTINGS_ENDPOINT`]), the RAID array
 /// composer's member rendezvous
 /// ([`crate::raid_ipc::RAID_REGISTRY_ENDPOINT`]) and its administration and
 /// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the
@@ -85,6 +86,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::service_control::SERVICE_ACTIVATION_ENDPOINT
         || id == crate::service_control::SERVICE_NOTICE_ENDPOINT
         || id == crate::session_ipc::SESSION_ENDPOINT
+        || id == crate::settings_ipc::SETTINGS_ENDPOINT
         || id == crate::sound_cue::SOUND_CUE_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
         || id == crate::raid_admin::RAID_CONTROL_ENDPOINT
@@ -509,6 +511,7 @@ mod tests {
         assert!(is_reserved_endpoint(crate::net::NETSTACK_SOCKET_ENDPOINT));
         assert!(is_reserved_endpoint(crate::font_ipc::FONT_ENDPOINT));
         assert!(is_reserved_endpoint(crate::session_ipc::SESSION_ENDPOINT));
+        assert!(is_reserved_endpoint(crate::settings_ipc::SETTINGS_ENDPOINT));
         assert!(is_reserved_endpoint(
             crate::service_control::SERVICE_NOTICE_ENDPOINT
         ));

@@ -51,7 +51,9 @@ under the floor and are unchanged.
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A, of which `ClipboardChord` names cut, copy and paste. A field's text, selection and caret stand inside its rim and focus ring, the selection and caret a line tall |
-| `number` | `NumberField`: an integer between two bounds — or a whole number of hundredths and the like, spelled with a point (`with_decimals`) — live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, settled by a step, Enter or the owner's commit as the focus leaves |
+| `number` | `NumberField`: an integer between two bounds — or a whole number of hundredths and the like, spelled with a point (`with_decimals`), padded with zeros to a number of whole digits (`with_digits`) — live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, carried round its bounds where it wraps (`with_wrap`), settled by a step, Enter or the owner's commit as the focus leaves |
+| `place` | `PlaceChooser`, `PlaceRow`, `PlaceAction`, `PressTiming`: a search field over the owner's places, matched without case or a Latin-1 name's accents on the name, the place beneath it and an unseen key, names that begin with the query leading; the arrows and Page keys walk the highlight while the keyboard stays in the query, Enter or a double-click (the desktop's interval, `DoubleClickTracker`) chooses, Escape clears then cancels, and each row's reading — a zone's local time — is the owner's to keep current. `PlaceDialog` is the chooser above Cancel and Choose as a dialog window's client, opening at the extent it states (`opening_extent`); `set_readings` rewrites many readings laid out once |
+| `zone` | the time-zone dialog, one definition for Settings' Time zone row and the Date & Time dialog: its `TITLE`, `rows` over a `lib/tz` place listing (keyed by zone name), `dialog`, and `refresh`, which rewrites every reading once the `Minute` they were written for has turned |
 | `colour_picker` | `ColourPicker`: one colour picked on a square (saturation and value plane and hue strip), a wheel (hue ring round a saturation and value triangle) or sliders (a swept track per channel), an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and number fields for one model's channels and A, its values held as typed, laid beside the view in wide bounds and beneath it in narrow ones |
 | `colour_model` | `PickerView` and `ColourModel` — RGB, HSV, HSL, CMYK, Lab, `LCh` or grey — with each model's channels (`ChannelSpec`) and its conversions to and from a colour, a CIE value past sRGB reported clipped |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar` (across a window or down it), `Tab`/`Tabs`, `ComboBox` |
@@ -62,11 +64,10 @@ under the floor and are unchanged.
 | `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
 | `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, laid out as many to a row as its owner fits to the room (`set_columns`), a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead |
 | `checker` | `Checker`: the one checkerboard transparency is shown over, in the theme's surface and that colour lifted, square side scaled |
-| `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
-| `decision` | `Dialog`, `Tooltip`, `HelpTip`; a `Dialog` is a form a window draws over itself for an answer typed in it |
+| `decision` | `Dialog`, `Tooltip`, `HelpTip`; a `Dialog` is a form a window draws over itself for an answer typed in it, or, `in_window`, a dialog window's whole client: no plate and no title of its own, since the window's frame carries it, its bands set in from the window's edges and its ground the one an alert stands on. `set_reason` restates the inline reason in place |
 | `alert` | `Alert`: an alert window's content — severity mark (or, through `with_picture`, the badge of a statement the desktop makes about itself, its About window), headline, detail, and the bottom row of up to four answers — as wide as its text up to a readable measure and exactly as tall as its content, the whole text scrolling past the screen's share, answering Enter or Space with the focused button and Escape with its cancel |
 
 A continuous control reports where its interaction *settled*, distinctly from
@@ -203,7 +204,12 @@ row is not, so only the control in its slot lights under the pointer — a
 `ComboBox` field washing and pressing exactly as a button does.
 `FieldGroup::paint_plate` and
 `FieldGroup::plate_radius` are the group's plate alone, for a surface that
-must read as the same object as the groups beside it.
+must read as the same object as the groups beside it. Content no row can
+carry, such as a calendar, keeps its group's caption and footnote through
+`FieldGroup::set_band`: a band of the height the owner states, beneath the rows
+and any picture choice and above the footnote, measured with the plate and
+answered by `FieldGroup::band_rect`, which the owner draws into and routes
+input to itself. `FieldGroup::set_footnote` replaces the footnote in place.
 
 Five rules are the family's own, and each is what stops a settings pane lying
 about the machine:
@@ -377,9 +383,11 @@ owner reports the content it slid.
 A `ScrollBar`'s ends are two raised buttons with grid-fitted chevrons, so an
 arrow is whole pixels at every density and centred exactly in a button of either
 parity, and a press toward an end the content already rests at presses nothing.
-Its channel is edged along both long sides in the theme's `frame` colour, and a
-hovered or held end button and an awake thumb take the neutral
-`scroll_thumb_active` grey, never the accent. **A held press repeats on the control's own
+Its channel is edged along both long sides in the theme's `frame` colour, except
+on a bar embedded in a plate whose rim already bounds it (`without_edges`), and
+an awake thumb and an end button while its press is live — held, with the pointer
+on it — take the neutral `scroll_thumb_active` grey, never the accent; hover
+alone lights no end button. **A held press repeats on the control's own
 cadence** (`HoldRepeat`): the first step lands with the press, then one after
 `REPEAT_DELAY_NS` and one every `REPEAT_INTERVAL_NS`, the one cadence every
 press-and-hold stepping control shares. The owner keeps no timer of its own:
@@ -433,7 +441,10 @@ it, or frame the content that does:
   optional opposing series: the box splits at a drawn axis, the primary series
   rising above it and the opposing one mirrored below **in that direction's own
   tint**, so a glance says which way the bytes went. Giving both halves one
-  role draws one reading in one colour and says nothing. Adding an opposing
+  role draws one reading in one colour and says nothing. A reading and a part
+  of it — context switches and the preemptions among them — share one box
+  instead (`with_within`): the part drawn within the whole on its scale, both
+  over the whole height, with no axis. Adding an opposing
   series asserts that direction is measured; a direction with no reading behind
   it is left off, so the chart stays a single-series trend over the whole box
   rather than showing an empty half as a quiet nothing.
@@ -493,22 +504,6 @@ it, or frame the content that does:
   its heading, cut with the shared mark where it does not fit, and
   `titled_content` / `content_rect` where its content goes. The Switchboard's
   sections and the System Monitor screensaver's panels share this one anatomy.
-`CredentialSheet` is the one surface that asks for an account and its
-password so a more-privileged program can be started as that account. Two
-places on the desktop ask that question — the session, when a command it may
-not perform is chosen, and Settings, when a machine setting is applied by
-re-running the tool that owns the store — and they may not depend on one
-another, so the wording, the focus order, the "an empty field is never
-offered" rule and the secret's hygiene live here once. It knows nothing of a
-compositor, a window, an account database or IPC: an owner gives it events
-and a rectangle, takes back a painted surface and a `CredentialAction`, and
-performs the exchange itself. The password is held only in the masked field's
-bounded, pre-reserved buffer, which zeroises every byte it discards including
-on drop. An owner that has handed the password to its worker calls `check`:
-the sheet clears it, states `CREDENTIAL_CHECKING_REASON`, and takes no input —
-not even a cancel, which could not recall what the authority may already be
-doing — until the owner `refuse`s it or takes it down.
-
 - `FactList` is a column of key/value readouts with the values right-aligned
   on one another: the value keeps its room and the label gives way first,
   elided with the shared mark, so a narrow detail pane loses a word of
@@ -1296,8 +1291,8 @@ account's password, `tairix_abi::account::MAX_PASSWORD_LEN`, shared by every
 prompt. What is typed past it is counted rather than stored or dropped, and
 Backspace erases those characters first. While any remain, `secret()` answers
 `None`: an entry longer than any credential can be is refused whole, never
-offered as its prefix. `CredentialSheet` and the login screen refuse it in the
-refusal's own words, spending no attempt against the account.
+offered as its prefix. The login screen and the system's authorisation prompt
+refuse it in the refusal's own words, spending no attempt against the account.
 
 ### The owner keeps the time
 
@@ -1309,8 +1304,8 @@ steps through every frame due and answers whether the field must be
 repainted. The animation runs for three seconds after the latest keystroke and
 then freezes, so a field left alone arms nothing; under reduced motion the
 marker is frozen at every keystroke, so no deadline is armed at all and none
-is left to replay once motion returns. `FieldRow`, `FieldGroup` and `CredentialSheet` fold
-their fields' deadlines and advance them, so a container's owner asks once.
+is left to replay once motion returns. `FieldRow` and `FieldGroup` fold their
+fields' deadlines and advance them, so a container's owner asks once.
 
 ### The buffer is reserved once, up front
 

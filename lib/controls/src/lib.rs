@@ -287,6 +287,11 @@
 //! stepped by keys and a focused field's wheel, and settled by a step, Enter,
 //! or its owner's commit as the focus leaves.
 //!
+//! The [`place`] module is the place chooser — [`PlaceChooser`]: a search
+//! field over its owner's [`PlaceRow`]s, narrowed without case or accent as
+//! the reader types, the highlight walked by the arrows while the keyboard
+//! stays in the query, and a row chosen by Enter or a double-click.
+//!
 //! The [`swatch_grid`] module is [`SwatchGrid`], the grid of colour wells a
 //! scheme editor and an image editor's palette are, and the
 //! [`colour_picker`] module is [`ColourPicker`], one colour edited by its
@@ -320,7 +325,6 @@ pub mod collection;
 pub mod colour_model;
 pub mod colour_picker;
 pub mod combo;
-pub mod credential;
 pub mod damage;
 pub mod decision;
 pub mod disclosure;
@@ -331,6 +335,7 @@ pub mod nav;
 pub mod number;
 mod paint;
 pub mod picture;
+pub mod place;
 pub mod rail;
 pub mod record;
 pub mod scroll;
@@ -347,6 +352,7 @@ pub mod text;
 pub mod toolbar;
 pub mod value;
 pub mod window;
+pub mod zone;
 
 pub use about::{AboutSheet, ABOUT_ICON_SIDE, ABOUT_MAX_WIDTH, ABOUT_MIN_WIDTH};
 pub use alert::{Alert, AlertAction, ALERT_BUTTON_MIN_WIDTH, ALERT_MARK_SIDE, ALERT_MIN_WIDTH};
@@ -360,10 +366,6 @@ pub use collection::{
 pub use colour_model::{ChannelSpec, ColourModel, PickerView, MOST_CHANNELS};
 pub use colour_picker::{ColourPicker, PickerOutcome};
 pub use combo::{ComboAction, ComboBox};
-pub use credential::{
-    CredentialAction, CredentialSheet, CREDENTIAL_CHECKING_REASON, CREDENTIAL_HEIGHT,
-    CREDENTIAL_NOT_STARTED_REASON, CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
-};
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
 pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
 pub use form::{
@@ -385,6 +387,9 @@ pub use paint::{
     run_width, withheld, ArtworkTone, ChromeLayer, Measured, Run, FULL as FULL_PERMILLE,
 };
 pub use picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
+pub use place::{
+    PlaceAction, PlaceChooser, PlaceDialog, PlaceOutcome, PlaceRow, PressTiming, NO_MATCH,
+};
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{
@@ -451,6 +456,8 @@ mod paint_tests;
 #[cfg(test)]
 mod picture_tests;
 #[cfg(test)]
+mod place_tests;
+#[cfg(test)]
 mod rail_tests;
 #[cfg(test)]
 mod record_tests;
@@ -486,3 +493,5 @@ static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 mod value_tests;
 #[cfg(test)]
 mod window_tests;
+#[cfg(test)]
+mod zone_tests;

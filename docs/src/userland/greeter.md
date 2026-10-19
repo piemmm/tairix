@@ -151,8 +151,8 @@ immediately with no extra present.
 
 There is one wait set, holding the seat's input, and its timeout is the
 *next* thing that actually needs doing: the instant the clock's zone next
-turns its minute (`Zone::next_minute`, a change of offset included), the next
-one-second tick of a lockout while one is counting down, the next frame
+turns its minute (`Zone::next_minute`, a change of offset included), the
+moment a counting-down lockout's shown second turns over, the next frame
 of a running animation or of the ribbon, or the moment the display is owed its
 sleep, whichever is nearer. Under reduced motion, with no lockout running,
 that leaves one wake a minute for the clock and the one the sleep is owed at;
@@ -332,7 +332,9 @@ The authority meters each login name on its own, so the countdown the screen
 shows belongs to the account it was reported for: it is shown, ticked and
 enforced only while the screen asks about that account. Picking another
 account never finds the first one's wait on its prompt or holding back its
-secret, and going back to the first finds it still counting.
+secret, and going back to the first finds it still counting. The countdown is
+`tairix_greeter::Cooldown`, the one the desktop's screen lock counts its own
+down with.
 
 ## Degradation
 

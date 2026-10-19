@@ -2786,62 +2786,74 @@ terminal → pipe → shell → spawn round trip.
 
 ## Date & Time (`tairix-datetime`)
 
-The `datetime.app` bundle sets the machine's wall clock
-(`plans/NEW-TASKBAR.md` T17). It is reached from the [taskbar clock's own
-menu](taskbar.md#the-clocks-menu) rather than from the program library —
-its manifest deliberately carries no `library` key, because the app is
-useful only to somebody who can authenticate an account that may set the
-clock.
+The `datetime.app` bundle is the machine's Date & Time dialog
+(`plans/TIMEZONES.md` TZ6). It is reached from the [taskbar clock's own
+menu](taskbar.md#the-clocks-menu) rather than from the program library — its
+manifest carries no `library` key, because it is useful only to somebody who
+can authenticate an account that may change these settings — and it ends when
+its window closes, so the authority it was started with is never left
+resident.
 
-**It is *given* the authority; it never assumes it.** Stepping the clock
-needs `CAP_TIME_SET`, which the manifest requests and the kernel grants
-as `manifest ∩ the launching account's ceiling`. A desktop session holds
-no such capability and must never hold one, so it re-authenticates an
-account that does through its console's elevation broker (see [the
-desktop session](session.md#asking-for-an-account-that-may)) and the
-broker starts this program *as that account*. The app performs no
-authentication itself and asks for no elevation.
+**It is *given* the authority; it never assumes it.** Stepping the clock and
+setting the clock chip need `CAP_TIME_SET`; turning network time on or off and
+changing the machine's zone need `CAP_SETTINGS_WRITE`, through the settings
+service ([`settingsd`](../userland/settingsd.md)). The manifest requests both,
+and the kernel grants them as `manifest ∩ the launching account's ceiling`: the
+desktop asks for an account that may in its own authorisation prompt (see [the
+desktop session](session.md#asking-for-an-account-that-may)) and starts the
+program as that account. A refused change is an ordinary outcome: an alert held
+by the window says why, the window shows what is really in force, and the
+dialog keeps running.
 
-A refused set is therefore an ordinary outcome, not a defect: the app
-states it in an error alert held by its window **and** on `stderr`, leaves
-the clock untouched, and keeps running. It never reports a clock it did not change as changed,
-and a refused authentication reads differently from a program that would
-not start.
+**What the window holds.** A dialog window's client (`Dialog::in_window`),
+sized to its content and resized when that changes:
 
-**One calendar, shared.** Seeding decomposes the reading with
-`CivilTime::from_time64`; committing composes the instant with
-`days_from_civil` — the exact inverse, from the same `lib/fsmeta`
-calendar the desktop clock and `ls`'s date column read, so the app and
-the bar can never disagree about what time it is. There is no second
-day-counting rule and no leap-year table of the app's own.
+- *Now* — the time to the second, ticking on the clock's own second through a
+  one-shot deadline; the full date; the zone with its abbreviation and offset.
+  An unreadable clock says so, and an unset one says it is not set rather than
+  showing the epoch placeholder.
+- *Date and time* — the network-time switch, with where the clock's time came
+  from beneath it (the wall clock's provenance and the time service's record of
+  its last sync: *set automatically from the network today at 13:58*, *set by
+  hand*, *from the clock chip*, *not set*; the record is read again whenever
+  the provenance changes, so a resync that leaves it unchanged — the daily
+  refresh — shows on the next change or the next opening), and in the group's
+  band a calendar month and a time entry on the region's 12- or 24-hour clock.
+  The hand-set controls follow the running clock until the user makes them
+  their own; while network time is on they are disabled and the group says
+  why.
+- *Time zone* — the machine's zone, its next change (*Clocks go back an hour on
+  Sunday 25 October at 02:00*) and what the machine zone is for, with
+  **Change…** opening the time-zone dialog (`tairix_controls::zone`) in an
+  owner-modal dialog window.
 
-**An unset clock shows nothing.** A machine whose wall time has never
-been established reports `WallTimeState::Unset`, whose instant is the
-epoch placeholder and means nothing; the fields open empty and the window
-says so, rather than presenting `1970-01-01` as a reading the user is
-invited to correct. Empty fields compose nothing, so an unset clock
-cannot be committed by accident.
+**A local time names one instant, or it is refused in words.** The hand-set
+date and time are composed through `Zone::instant_from_local` in the machine's
+zone: a time the clocks skip is refused with the change that skips it; one they
+pass twice is put to the user as a question naming both offsets; one outside
+the plausible window (`is_plausible_wall_time`) is confirmed first. A step is
+`WallTimeState::Adjusted` — what a person at the keyboard is — and the clock
+chip is then given the clock's own reading over the RTC endpoint; a machine
+with no chip is told its time will not survive a restart unless network time is
+on.
 
-**Validation refuses, never corrects.** All six fields — year, month and
-day in the first group, hour, minute and second in the second — are checked
-before anything is set, and the first fault is named in the window: a
-month outside 1–12, an hour outside 0–23, a minute or second outside
-0–59, or a day that does not exist in the month and year entered (31
-April, 29 February outside a leap year). Nothing is clamped, wrapped, or
-saturated into range, because that would set a time the user did not ask
-for. Dates before 1970 and beyond 2038 are ordinary input: the instant is
-a 64-bit `Time64`, and the reading is UTC because the system keeps no
-timezone offset.
+**Nothing waits on the loop.** Every read and write — the machine
+configuration through the System Information API, the time service's record,
+the zone store, the settings service, the wall clock and the clock chip — is
+carried out by one worker on a queued desk, each job answered in turn. The
+first read is waited for before the window opens, so it opens on the machine's
+own settings rather than a guess; after that the loop submits and draws. Network
+time and the zone apply as each settles and are adopted from the document the
+settings service answers it wrote; a refusal reverts the switch. Closing the
+window sees what it was asked out before the program ends, so a change or a
+clock step asked for just before is never dropped with the worker.
 
-The host-tested engine holds the fields, the faults, the composition, and
-the one status line; `view` holds the window's geometry and its paint
-through the shared `lib/controls` dialog and the form-field family — two
-captioned `FieldGroup`s, the date above the time, each row a label and a
-`TextField` in its slot. The window's extent is measured from what those
-groups need at the active density and type ladder, so a wider ladder is
-seated rather than pushed under the action band. The `Run` binary is the usual
-windowed-app composition: one granted frame region, one event mailbox
-parked on a wait-set, and the `WindowClient` calls.
+The host-tested engine (`lib.rs`) holds the readout, the zone's changes, the
+composition and every outcome's words; `calendar.rs` and `time_entry.rs` are
+the two app-local controls; `view.rs` is the window's layout, focus walk and
+input routing; `run.rs` is the loop. The zone chooser is the shared
+`tairix_controls::zone` dialog Settings opens too, its readings rewritten as
+each minute turns on the window's own tick.
 
 ## Picture and document viewer (`tairix-view`)
 

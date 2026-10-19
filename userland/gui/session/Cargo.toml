@@ -162,6 +162,11 @@ tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["rt"] }
 # its interfaces, which the bar's network menu hands over; the session reads
 # nothing else of it.
 tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0" }
+# The machine configuration's key registry and the account-name grammar: a
+# system task Settings asks for is checked against them before the system's
+# prompt names what it changes.
+tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
+tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # The app-data client: the desktop's pinboard settings live in this
 # application's own *published* scope, so the session is the only principal
 # that can write them and any application may read what it says about its own

@@ -275,7 +275,7 @@ pub const GUEST_STATIC_V6: Ipv6Addr = Ipv6Addr::new(0xFD00, 0, 0, 0, 0, 0, 0, 0x
 /// the peer reaches the guest's static address directly over the wire.
 pub const PEER_STATIC_V6: Ipv6Addr = Ipv6Addr::new(0xFD00, 0, 0, 0, 0, 0, 0, 0x0001);
 
-/// The `/System/Settings/Network/network.conf` the static-addressing
+/// The `/System/Defaults/Network/network.conf` the static-addressing
 /// vertical plants on its read-only `/System` volume.
 ///
 /// It binds the alias [`STATIC_IFACE_ALIAS`] to the NIC at bus location
@@ -296,7 +296,7 @@ wan.ipv6.method static
 wan.ipv6.address fd00::2/64
 ";
 
-/// The `/System/Settings/Network/network.conf` the **x86_64** static-addressing
+/// The `/System/Defaults/Network/network.conf` the **x86_64** static-addressing
 /// vertical plants on its read-only `/System` volume — the virtio-PCI sibling
 /// of [`STATIC_NETWORK_CONF_AARCH64`].
 ///
@@ -321,7 +321,7 @@ wan.ipv6.method static
 wan.ipv6.address fd00::2/64
 ";
 
-/// The `/System/Settings/Network/network.conf` the **riscv64** static-addressing
+/// The `/System/Defaults/Network/network.conf` the **riscv64** static-addressing
 /// vertical plants on its read-only `/System` volume — the virtio-MMIO sibling
 /// of [`STATIC_NETWORK_CONF_AARCH64`].
 ///
@@ -360,7 +360,7 @@ wan.ipv6.address fd00::2/64
 // (the sender-side congestion response). Only when all three are witnessed,
 // alongside the full echoed transfer, does the peer report success.
 
-/// The `/System/Settings/Configuration/system.conf` the ECN vertical plants
+/// The `/System/Defaults/Configuration/system.conf` the ECN vertical plants
 /// on its read-only `/System` volume. It differs from the absent-store
 /// default in exactly one setting — `net.tcp.ecn true` — so the vertical
 /// proves the operator toggle, and only that toggle, drives the live ECN
@@ -441,7 +441,7 @@ pub const fn applied_is_fixture_sample(secs: i64) -> bool {
 pub const NTP_SPOOF_SECS: i64 = NTP_FIXTURE_SECS + 1_000_000;
 
 /// The `/System/Settings/Configuration/system.conf` the time vertical plants
-/// on its read-only `/System` volume.
+/// as the administrator's document, on its encrypted root.
 ///
 /// It names the host peer ([`PEER_STATIC_V6`]) as the one time server, by
 /// **address literal** so the run exercises the clock path alone and never
@@ -506,7 +506,7 @@ pub const BOND_PRIMARY_NETDEV_ID: &str = "net0";
 /// recovery would take.
 pub const BOND_MONITOR_INTERVAL_MS: u32 = 200;
 
-/// The `/System/Settings/Network/network.conf` the bond-failover vertical
+/// The `/System/Defaults/Network/network.conf` the bond-failover vertical
 /// plants on its read-only `/System` volume.
 ///
 /// It declares the two members ([`BOND_PRIMARY_MEMBER_ALIAS`],
@@ -578,7 +578,7 @@ pub const DHCP_LEASED_V4: Ipv4Addr = Ipv4Addr::new(192, 168, 66, 50);
 /// exercises acquisition and steady-state reachability, not renewal timing.
 pub const DHCP_LEASE_SECS: u32 = 3600;
 
-/// The `/System/Settings/Network/network.conf` the aarch64 DHCP vertical
+/// The `/System/Defaults/Network/network.conf` the aarch64 DHCP vertical
 /// plants on its read-only `/System` volume.
 ///
 /// It binds the alias [`DHCP_IFACE_ALIAS`] to the NIC at bus location
@@ -599,7 +599,7 @@ wan.ipv4.method dhcp
 wan.ipv6.method disabled
 ";
 
-/// The `/System/Settings/Network/network.conf` the **x86_64** DHCPv4
+/// The `/System/Defaults/Network/network.conf` the **x86_64** DHCPv4
 /// vertical plants on its read-only `/System` volume — the virtio-PCI sibling
 /// of [`DHCP_NETWORK_CONF_AARCH64`].
 ///
@@ -623,7 +623,7 @@ wan.ipv4.method dhcp
 wan.ipv6.method disabled
 ";
 
-/// The `/System/Settings/Network/network.conf` the **riscv64** DHCPv4
+/// The `/System/Defaults/Network/network.conf` the **riscv64** DHCPv4
 /// vertical plants on its read-only `/System` volume — the virtio-MMIO sibling
 /// of [`DHCP_NETWORK_CONF_AARCH64`].
 ///
@@ -707,7 +707,7 @@ pub const SLAAC_PREFIX_LEN: u8 = 64;
 /// the map draws a global subnet and a gateway.
 pub const SLAAC_PREFIX: Ipv6Addr = Ipv6Addr::new(0x2001, 0x0DB8, 0, 0, 0, 0, 0, 0);
 
-/// The `/System/Settings/Network/network.conf` the aarch64 DHCPv6 vertical
+/// The `/System/Defaults/Network/network.conf` the aarch64 DHCPv6 vertical
 /// plants on its read-only `/System` volume.
 ///
 /// It binds the alias [`DHCP6_IFACE_ALIAS`] to the NIC at bus location
@@ -728,7 +728,7 @@ wan.ipv4.method disabled
 wan.ipv6.method dhcp
 ";
 
-/// The `/System/Settings/Network/network.conf` the **x86_64** DHCPv6
+/// The `/System/Defaults/Network/network.conf` the **x86_64** DHCPv6
 /// vertical plants on its read-only `/System` volume — the virtio-PCI sibling
 /// of [`DHCP6_NETWORK_CONF_AARCH64`].
 ///
@@ -748,7 +748,7 @@ wan.ipv4.method disabled
 wan.ipv6.method dhcp
 ";
 
-/// The `/System/Settings/Network/network.conf` the **riscv64** DHCPv6
+/// The `/System/Defaults/Network/network.conf` the **riscv64** DHCPv6
 /// vertical plants on its read-only `/System` volume — the virtio-MMIO sibling
 /// of [`DHCP6_NETWORK_CONF_AARCH64`].
 ///

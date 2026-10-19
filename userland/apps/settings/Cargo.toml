@@ -38,6 +38,11 @@ tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The single shared theme definition, so this window's colours, metrics and
 # type ladder are the desktop's.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The app half of the window channel: the shared app shell that owns the
+# transport, the parked event mailbox, the desktop query, and the retained
+# window surface; and the one repaint vocabulary a round of the loop decides
+# in, which the host tests.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The colour value a backdrop swatch and the theme's roles are authored in.
 tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # Shared text rasterisation: the face each statement and label is drawn with.
@@ -99,7 +104,7 @@ tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # The civil-time engine: the regions and places the Language & Region rows
 # offer, and the reading the Date & Time pane states, from the store the
 # session delegates.
-tairix-tz = { path = "../../../lib/tz", version = "=0.0.0" }
+tairix-tz = { path = "../../../lib/tz", version = "=0.0.0", features = ["listing"] }
 # The full date a reading is stated in, from the one calendar every surface
 # writes a day out by.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
@@ -116,10 +121,6 @@ tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # one round trip.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0", features = ["rt"] }
-# The app half of the window channel: the shared app shell that owns the
-# transport, the parked event mailbox, the desktop query, and the retained
-# window surface.
-tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

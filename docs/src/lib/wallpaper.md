@@ -121,7 +121,7 @@ that key's own closed vocabulary:
 | `screensaver.system_monitor.tasks` | `true` \| `false`               | `true`                                        |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 | `region` | empty, or an ISO 3166-1 alpha-2 code (two capitals); a region the zone store no longer holds is kept and reads as its default | empty: the zone store's own |
-| `time.zone` | empty, or an IANA zone name in the shape `lib/tz` checks; a zone the store no longer holds is kept and reads as its default | empty: the zone store's own |
+| `time.zone` | empty, or an IANA zone name in the shape `tairix_abi::zone` checks; a zone the store no longer holds is kept and passed over | empty: the machine's own, else the zone store's |
 
 Keys and values are case-sensitive: each has one canonical spelling.
 
@@ -139,8 +139,10 @@ drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER`, `LOCK` and
 shape of a region code or zone name is checked here: the session refuses an
 apply that changes either to one its zone store does not hold. `civil_clock` is
 the one answer to which clock the document asks for — its zone and region where
-the store holds them, else the store's own, else UTC — read by the session for
-its clocks and by Settings for its Date & Time pane.
+the store holds them, for the zone else the fallback its reader names (the
+machine's own), else the store's own, else UTC — read by the session for its
+clocks and by Settings for its Date & Time pane. `ZoneName` is
+`tairix_abi::zone::ZoneName`, the one zone-name shape.
 They share one document because they share one owner and one published scope,
 and a desktop half-adopted from several documents is a desktop nobody chose.
 `merge_within` is the strict reading confined to one group: a document naming
@@ -379,8 +381,9 @@ every source pixel at 1:1 and so needs the native size.
   does not list falls back to the theme's and is named.
 - `fit::{place, decode_request, nominal_source_size, Placement}` — the
   placement geometry.
-- `PINBOARD_PUBLISHER` — the desktop session's signed bundle identifier, the
-  one spelling a reader hands to `tairix_appdata::read_published`.
+- `PINBOARD_PUBLISHER` — the desktop session's signed bundle identifier
+  (`tairix_abi::session_ipc::DESKTOP_BUNDLE`), what a reader hands to
+  `tairix_appdata::read_published`.
 - `ApplyOutcome` and (behind `rt`) `apply` — the one client every surface
   asks the session to adopt a document with.
 

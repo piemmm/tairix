@@ -28,7 +28,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_kernel_core::{SleepLock, UserAdminBacking};
-use tairix_users::{provision_home_shape, HomeShapeError, HOME_MODE};
+use tairix_users::{provision_home_shape, ShapeError, HOME_MODE};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
 /// mounted root volume.
@@ -121,8 +121,8 @@ where
         // storage into another's.
         if fs.security(home).map_err(DriverError::as_errno)?.uid == uid {
             provision_home_shape(fs, home, uid, gid).map_err(|err| match err {
-                HomeShapeError::Driver(err) => err.as_errno(),
-                HomeShapeError::Occupied => Errno::AlreadyExists,
+                ShapeError::Driver(err) => err.as_errno(),
+                ShapeError::Occupied => Errno::AlreadyExists,
             })?;
         }
         fs.flush().map_err(DriverError::as_errno)

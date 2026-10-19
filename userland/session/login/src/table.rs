@@ -168,6 +168,15 @@ impl LiveSessions {
         self.get(login_name).is_some()
     }
 
+    /// The uid owning the session that presents, if one does.
+    #[must_use]
+    pub fn presenting(&self) -> Option<u32> {
+        self.entries
+            .iter()
+            .find(|entry| entry.state == SessionState::Foreground)
+            .map(|entry| entry.uid)
+    }
+
     /// Empty the table, returning every session newest first — the order
     /// shutdown ends them in, so a session never outlives one started
     /// after it.
@@ -295,8 +304,7 @@ mod tests {
         assert!(claimants <= 1, "{claimants} sessions claim the seat");
     }
 
-    /// The account presenting, read straight off the entries the table keeps
-    /// private — nothing in production needs to ask.
+    /// The account presenting, by name, read straight off the entries.
     fn presenting(table: &LiveSessions) -> Option<&str> {
         table
             .entries
@@ -368,6 +376,23 @@ mod tests {
         assert!(table.set_foreground("ada"));
         assert_eq!(presenting(&table), Some("ada"));
         assert_eq!(table.entries.len(), 1);
+    }
+
+    #[test]
+    fn the_presenting_uid_follows_the_seat_and_is_none_when_it_is_free() {
+        let mut table = LiveSessions::new();
+        assert_eq!(table.presenting(), None);
+        table.insert("ada", 1000, 42).expect("a fresh account");
+        table.insert("grace", 1001, 43).expect("a fresh account");
+        assert_eq!(table.presenting(), Some(1001));
+        assert!(table.set_foreground("ada"));
+        assert_eq!(table.presenting(), Some(1000));
+        assert!(table.background(1000));
+        assert_eq!(
+            table.presenting(),
+            None,
+            "a session behind the login screen presents nothing"
+        );
     }
 
     #[test]

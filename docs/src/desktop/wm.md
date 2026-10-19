@@ -1999,12 +1999,11 @@ transient its application draws and the desktop frames, places and names
   content. As it closes it hands the keyboard to the front of its owner: the
   holder behind it, else the owner.
 - **An application's dialog never passes for the system's.** The desktop's
-  own credential and confirmation prompts are undecorated, centred on the
+  own authorisation and confirmation prompts are undecorated, centred on the
   screen, and hold the whole seat: nothing an application opens comes over one
-  or takes the keyboard while it is up. An application's dialog, its
-  credential sheet included, is always a framed window whose band begins with
-  that application's attested name, sits over the application's own window,
-  and never holds the seat. An application titled as the desktop, or whose
+  or takes the keyboard while it is up. An application's dialog is always a
+  framed window whose band begins with that application's attested name, sits
+  over the application's own window, and never holds the seat. An application titled as the desktop, or whose
   title carries a character that draws nothing yet can hide or reorder the
   text beside it, is named by its bundle path; every title a band shows has
   such characters drawn as the gap they are.

@@ -28,11 +28,12 @@ use tairix_wallpaper::DesktopSettings;
 use crate::accounts::{AccountFacts, OwnAccount, Roster};
 use crate::form::Composition;
 use crate::registry::{Pane, PaneBacking, PaneContent};
-use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell};
+use crate::shell::{Authorised, Shell};
 use crate::test_support::{
-    band_line, captions, click, damage, labels, offer_account, opaque, press_band, row_at, row_for,
-    rows, showing, stated, theme, value_of, WIDE,
+    asked_task, band_line, captions, click, damage, labels, opaque, press_band, row_at, row_for,
+    rows, showing, stated, task_words, theme, value_of, WIDE,
 };
+use tairix_abi::window_ipc::SystemTask;
 
 /// The caption of the plate stating the caller's own record.
 const OWN: &str = "YOUR ACCOUNT";
@@ -137,9 +138,8 @@ fn showing_users() -> Shell {
 /// A shell on the Users pane with the listing already answered.
 fn showing_listing(accounts: &[Account]) -> Shell {
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(0, capture(accounts)));
+    let _ = asked_task(&mut shell, 0);
+    shell.adopt_authorisation(Authorised::Printed(0, capture(accounts)));
     shell.lay_out(WIDE, Scale::ONE, &theme());
     shell
 }
@@ -154,11 +154,9 @@ fn footnote(shell: &Shell, caption: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Press Apply and offer an account for it, handing back the run asked
-/// for.
-fn apply(shell: &mut Shell) -> Elevation {
-    press_band(shell, 1);
-    offer_account(shell)
+/// Press Apply, handing back the task it asked the desktop for.
+fn apply(shell: &mut Shell) -> SystemTask {
+    asked_task(shell, 1)
 }
 
 // --- the readings -------------------------------------------------------
@@ -185,7 +183,7 @@ fn opening_the_pane_asks_for_the_public_readings_and_no_account() {
         shell.accounts_wanted(),
         "coming on show asks for the ungated readings"
     );
-    assert!(!shell.asking(), "looking at the pane asks for no account");
+    assert!(!shell.authorising(), "looking at the pane asks for nothing");
     shell.adopt_accounts(facts());
     assert!(
         !shell.accounts_wanted(),
@@ -312,20 +310,12 @@ fn the_group_plate_is_the_ungated_directory() {
     );
 }
 
-// --- the authenticated listing -----------------------------------------
+// --- the authorised listing --------------------------------------------
 
 #[test]
-fn the_reading_band_asks_for_the_non_interactive_listing() {
+fn the_reading_band_asks_the_desktop_for_the_account_listing() {
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let asked = offer_account(&mut shell);
-    assert_eq!(asked.program, "/System/Commands/users.app/Run");
-    assert_eq!(asked.argv, alloc::vec![String::from("-l")]);
-    assert_eq!(
-        asked.mode,
-        RunMode::Capture,
-        "what the run printed is the answer"
-    );
+    assert_eq!(asked_task(&mut shell, 0), SystemTask::ShowAccounts);
 }
 
 #[test]
@@ -398,9 +388,8 @@ fn a_service_identity_offers_no_home_shell_password_or_lock() {
 #[test]
 fn a_capture_that_is_not_a_listing_is_refused_and_one_bad_line_keeps_the_rest() {
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
-    shell.adopt_elevation(Elevated::Printed(0, alloc::vec![0xff, 0xfe]));
+    let _ = asked_task(&mut shell, 0);
+    shell.adopt_authorisation(Authorised::Printed(0, alloc::vec![0xff, 0xfe]));
     assert!(
         matches!(shell.roster_for_test(), Roster::Refused(_)),
         "bytes that are no listing at all are refused, never believed"
@@ -409,11 +398,10 @@ fn a_capture_that_is_not_a_listing_is_refused_and_one_bad_line_keeps_the_rest() 
     // Within valid text, a line the grammar does not admit is skipped so
     // one unreadable record never hides the rest.
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
+    let _ = asked_task(&mut shell, 0);
     let mut mixed = b"u:ada:notanumber:1000::::::a\n".to_vec();
     mixed.extend_from_slice(&capture(&[account("bob", 1001, AccountStateCode::Locked)]));
-    shell.adopt_elevation(Elevated::Printed(0, mixed));
+    shell.adopt_authorisation(Authorised::Printed(0, mixed));
     shell.lay_out(WIDE, Scale::ONE, &theme());
     assert_eq!(captions(&shell), alloc::vec![OWN, "bob (1001)", GROUPS]);
 }
@@ -421,14 +409,10 @@ fn a_capture_that_is_not_a_listing_is_refused_and_one_bad_line_keeps_the_rest() 
 #[test]
 fn a_reply_too_large_for_the_seam_is_stated_and_never_asked_again_for_the_same_answer() {
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
-    shell.adopt_elevation(Elevated::Overran);
+    let _ = asked_task(&mut shell, 0);
+    shell.adopt_authorisation(Authorised::Overran);
     assert_eq!(*shell.roster_for_test(), Roster::Overran);
-    assert!(
-        !shell.asking(),
-        "the question came down: asking again answers the same"
-    );
+    assert!(!shell.authorising(), "the task is over");
     assert!(
         footnote(&shell, ROSTER).contains("too large to show here"),
         "the pane says what happened, beside the names it does hold"
@@ -441,17 +425,21 @@ fn a_reply_too_large_for_the_seam_is_stated_and_never_asked_again_for_the_same_a
 }
 
 #[test]
-fn a_refused_account_leaves_the_pane_as_it_was_and_states_why() {
+fn a_declined_prompt_leaves_the_pane_as_it_was() {
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
-    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::Credentials));
+    let _ = asked_task(&mut shell, 0);
+    shell.adopt_authorisation(Authorised::Declined);
     assert_eq!(
         *shell.roster_for_test(),
         Roster::Unasked,
         "nothing was read, so nothing is shown"
     );
-    assert!(shell.asking(), "the question stays up to be corrected");
+    assert!(!shell.authorising());
+    assert_eq!(
+        asked_task(&mut shell, 0),
+        SystemTask::ShowAccounts,
+        "and it may be asked again"
+    );
 }
 
 #[test]
@@ -472,11 +460,10 @@ fn a_listing_that_lands_after_the_window_has_left_the_pane_is_dropped() {
     // and a privileged reading installed for a surface that never asked
     // for it is exactly what routing by "whatever is showing" would do.
     let mut shell = showing_users();
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
+    let _ = asked_task(&mut shell, 0);
     let mut sink = damage();
     assert!(shell.go_to_pane("storage", WIDE, Scale::ONE, &theme(), &mut sink));
-    shell.adopt_elevation(Elevated::Printed(
+    shell.adopt_authorisation(Authorised::Printed(
         0,
         capture(&[account("ada", 1000, AccountStateCode::Active)]),
     ));
@@ -492,11 +479,10 @@ fn an_addressing_capture_never_lands_on_the_users_pane() {
     // The same rule the other way round: two panes drive the same seam and
     // each capture is adopted only by the pane that asked for it.
     let mut shell = showing("ethernet");
-    press_band(&mut shell, 0);
-    let _ = offer_account(&mut shell);
+    let _ = asked_task(&mut shell, 0);
     let mut sink = damage();
     assert!(shell.go_to_pane("users", WIDE, Scale::ONE, &theme(), &mut sink));
-    shell.adopt_elevation(Elevated::Printed(0, b"wan.ipv4.method dhcp\n".to_vec()));
+    shell.adopt_authorisation(Authorised::Printed(0, b"wan.ipv4.method dhcp\n".to_vec()));
     assert_eq!(*shell.roster_for_test(), Roster::Unasked);
     assert!(
         shell.addressing_for_test().document().is_none(),
@@ -516,20 +502,19 @@ fn one_accounts_fields_apply_as_one_usermod_run() {
     assert_eq!(band_line(&shell), "2 changes not applied");
 
     let asked = apply(&mut shell);
-    assert_eq!(asked.program, "/System/Commands/usermod.app/Run");
+    assert!(matches!(asked, SystemTask::ChangeAccount(_)));
     assert_eq!(
-        asked.argv,
-        alloc::vec![
-            String::from("--comment"),
-            String::from("Ada B Lovelace"),
-            String::from("--home"),
-            String::from("/Users/ada2"),
-            String::from("--"),
-            String::from("ada"),
+        task_words(&asked),
+        [
+            "--comment",
+            "Ada B Lovelace",
+            "--home",
+            "/Users/ada2",
+            "--",
+            "ada"
         ],
         "one invocation, so the fields are never split across two runs"
     );
-    assert_eq!(asked.mode, RunMode::Wait);
 }
 
 #[test]
@@ -540,27 +525,13 @@ fn the_lock_row_spells_its_two_settable_states_as_usermods_own_switches() {
     // already in effect.
     assert!(shell.choose_for_test(group, row, 1));
     let asked = apply(&mut shell);
-    assert_eq!(
-        asked.argv,
-        alloc::vec![
-            String::from("--lock"),
-            String::from("--"),
-            String::from("ada")
-        ]
-    );
+    assert_eq!(task_words(&asked), ["--lock", "--", "ada"]);
 
     let mut shell = showing_listing(&[account("bob", 1001, AccountStateCode::Locked)]);
     let (group, row) = row_at(&shell, "bob (1001)", "Login");
     assert!(shell.choose_for_test(group, row, 0));
     let asked = apply(&mut shell);
-    assert_eq!(
-        asked.argv,
-        alloc::vec![
-            String::from("--unlock"),
-            String::from("--"),
-            String::from("bob")
-        ]
-    );
+    assert_eq!(task_words(&asked), ["--unlock", "--", "bob"]);
 }
 
 #[test]
@@ -606,15 +577,7 @@ fn the_group_rows_are_read_by_name_and_applied_by_number() {
     // neither does not.
     assert!(shell.type_for_test(group, row, "storage,1000"));
     let asked = apply(&mut shell);
-    assert_eq!(
-        asked.argv,
-        alloc::vec![
-            String::from("--groups"),
-            String::from("100,1000"),
-            String::from("--"),
-            String::from("ada"),
-        ]
-    );
+    assert_eq!(task_words(&asked), ["--groups", "100,1000", "--", "ada"]);
 }
 
 #[test]
@@ -631,7 +594,7 @@ fn a_value_the_store_would_refuse_marks_its_row_and_blocks_the_apply() {
     assert_eq!(band_line(&shell), "1 value this cannot be saved with");
     press_band(&mut shell, 1);
     assert!(
-        !shell.asking(),
+        !shell.authorising(),
         "a refused value is corrected or reverted, never applied around"
     );
 
@@ -646,7 +609,7 @@ fn a_value_the_store_would_refuse_marks_its_row_and_blocks_the_apply() {
 }
 
 #[test]
-fn a_change_spanning_two_accounts_is_refused_before_a_password_is_typed() {
+fn a_change_spanning_two_accounts_is_refused_before_anything_is_asked() {
     // One command changes one account, so a change split across two runs
     // could leave half of it durable.
     let mut shell = showing_listing(&[
@@ -658,7 +621,7 @@ fn a_change_spanning_two_accounts_is_refused_before_a_password_is_typed() {
     let (group, row) = row_at(&shell, "bob (1001)", "Full name");
     assert!(shell.type_for_test(group, row, "Bobby Tables"));
     press_band(&mut shell, 1);
-    assert!(!shell.asking(), "nothing is run");
+    assert!(!shell.authorising(), "nothing is run");
     assert_eq!(
         band_line(&shell),
         "Changes to more than one account. One command changes one account, so apply them one \
@@ -674,7 +637,7 @@ fn a_password_beside_other_fields_is_refused_for_the_same_reason() {
     let (group, row) = row_at(&shell, "ada (1000)", "New password");
     assert!(shell.type_for_test(group, row, "correct horse"));
     press_band(&mut shell, 1);
-    assert!(!shell.asking());
+    assert!(!shell.authorising());
     assert_eq!(
         band_line(&shell),
         "A password and other fields together. The password is set by its own command, so apply \
@@ -689,20 +652,20 @@ fn a_password_is_hashed_here_and_only_the_record_rides_the_command_line() {
     assert!(shell.type_for_test(group, row, "correct horse"));
     assert_eq!(band_line(&shell), "1 change not applied");
     let asked = apply(&mut shell);
-    assert_eq!(asked.program, "/System/Commands/passwd.app/Run");
-    assert_eq!(asked.argv.len(), 4);
-    assert_eq!(asked.argv[0], "--record");
-    assert_eq!(asked.argv[2], "--");
-    assert_eq!(asked.argv[3], "ada");
-    let record = PasswordRecord::decode(&asked.argv[1]).expect("the tool's own decoder takes it");
+    assert!(matches!(asked, SystemTask::SetPassword(_)));
+    let argv = task_words(&asked);
+    assert_eq!(argv.len(), 4);
+    assert_eq!(argv[0], "--record");
+    assert_eq!(argv[2], "--");
+    assert_eq!(argv[3], "ada");
+    let record = PasswordRecord::decode(&argv[1]).expect("the tool's own decoder takes it");
     assert!(
         record.verify(b"correct horse"),
         "the record is of the password that was typed"
     );
     assert!(
-        !asked.argv.iter().any(|arg| arg.contains("correct horse")),
-        "no plaintext rides the command line: {:?}",
-        asked.argv
+        !argv.iter().any(|arg| arg.contains("correct horse")),
+        "no plaintext rides the command line: {argv:?}"
     );
 }
 
@@ -881,7 +844,7 @@ fn a_password_longer_than_the_record_will_hash_is_refused_on_its_row() {
         );
     }
     press_band(&mut shell, 1);
-    assert!(!shell.asking(), "nothing is hashed and nothing is run");
+    assert!(!shell.authorising(), "nothing is hashed and nothing is run");
     assert_eq!(band_line(&shell), "1 value this cannot be saved with");
 }
 
@@ -892,7 +855,7 @@ fn a_password_apply_with_no_randomness_refuses_rather_than_salting_predictably()
     let (group, row) = row_at(&shell, "ada (1000)", "New password");
     assert!(shell.type_for_test(group, row, "correct horse"));
     press_band(&mut shell, 1);
-    assert!(!shell.asking(), "nothing is hashed and nothing is run");
+    assert!(!shell.authorising(), "nothing is hashed and nothing is run");
     assert_eq!(
         band_line(&shell),
         "No randomness was available to salt the new password with, so it was not hashed and \
@@ -965,7 +928,7 @@ fn an_applied_change_moves_the_listing_on_and_leaves_the_reader_in_place() {
     let (group, row) = row_at(&shell, "ada (1000)", "Full name");
     assert!(shell.type_for_test(group, row, "Ada B Lovelace"));
     let _ = apply(&mut shell);
-    shell.adopt_elevation(Elevated::Finished(0));
+    shell.adopt_authorisation(Authorised::Ran(0));
     assert_eq!(band_line(&shell), "Applied");
     // The tool applied every field it was given or refused the run, so the
     // listing holds the change: re-reading it would cost a second password
@@ -981,7 +944,7 @@ fn an_applied_change_moves_the_listing_on_and_leaves_the_reader_in_place() {
         shell.accounts_wanted(),
         "the public readings are free, so they are taken again at once"
     );
-    // A second change needs no second reading, only a second authentication.
+    // A second change needs no second reading, only a second authorisation.
     assert!(shell.type_for_test(group, row, "Ada Lovelace"));
     assert_eq!(band_line(&shell), "1 change not applied");
 }
@@ -992,7 +955,7 @@ fn an_applied_password_leaves_no_secret_behind() {
     let (group, row) = row_at(&shell, "ada (1000)", "New password");
     assert!(shell.type_for_test(group, row, "correct horse"));
     let _ = apply(&mut shell);
-    shell.adopt_elevation(Elevated::Finished(0));
+    shell.adopt_authorisation(Authorised::Ran(0));
     let form = shell.form_for_test().expect("a composed pane");
     assert_eq!(
         value_of(&form.groups()[group].rows()[row]),
@@ -1008,10 +971,10 @@ fn a_refused_run_leaves_the_change_staged_so_it_can_be_corrected() {
     let (group, row) = row_at(&shell, "ada (1000)", "Full name");
     assert!(shell.type_for_test(group, row, "Ada B Lovelace"));
     let _ = apply(&mut shell);
-    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::NotRun(String::from(
-        "the kernel would not widen that grant",
-    ))));
-    assert_eq!(band_line(&shell), "the kernel would not widen that grant");
+    shell.adopt_authorisation(Authorised::Refused(String::from(
+        "The desktop could not be asked.",
+    )));
+    assert_eq!(band_line(&shell), "The desktop could not be asked.");
     let form = shell.form_for_test().expect("a composed pane");
     assert_eq!(
         value_of(&form.groups()[group].rows()[row]),

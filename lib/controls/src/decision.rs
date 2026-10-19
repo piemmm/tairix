@@ -143,11 +143,23 @@ pub enum DialogAction {
     },
 }
 
+/// Where a [`Dialog`] is drawn.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+enum Seat {
+    /// An elevated plate over the window asking, naming itself by its title.
+    #[default]
+    Plate,
+    /// A dialog window's whole client, on the window's ground: the window's
+    /// frame names it, so it draws no title of its own.
+    Window,
+}
+
 /// A modal decision surface (spec §11.24).
 ///
 /// A dialog is an elevated plate carrying a title, a message, and a right-
 /// aligned row of action [`Button`]s (the trailing one being, by convention,
-/// the recommended action). Action Warmth is honest: an action is warm only
+/// the recommended action), or the same bands as a dialog window's client
+/// ([`in_window`](Self::in_window)). Action Warmth is honest: an action is warm only
 /// when its [`ControlRole`] is [`Recommended`](ControlRole::Recommended) or
 /// [`Primary`](ControlRole::Primary); a destructive action carries
 /// [`Destructive`](ControlRole::Destructive) and the caller sets its
@@ -158,6 +170,7 @@ pub enum DialogAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dialog {
     title: String,
+    seat: Seat,
     message: Option<String>,
     reason: Option<String>,
     actions: Vec<Button>,
@@ -178,6 +191,7 @@ impl Dialog {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
+            seat: Seat::Plate,
             message: None,
             reason: None,
             actions: Vec::new(),
@@ -185,6 +199,14 @@ impl Dialog {
             hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
         }
+    }
+
+    /// This dialog as a dialog window's whole client: no plate and no title
+    /// line, since the window's frame carries its title.
+    #[must_use]
+    pub const fn in_window(mut self) -> Self {
+        self.seat = Seat::Window;
+        self
     }
 
     /// This dialog with a message body.
@@ -237,6 +259,17 @@ impl Dialog {
         self.reason.as_deref()
     }
 
+    /// Replace the inline reason, keeping the actions and where the pointer
+    /// and the focus are; answers whether it changed. The bands move with
+    /// it, so the owner re-lays its content out and repaints the dialog.
+    pub fn set_reason(&mut self, reason: Option<String>) -> bool {
+        if self.reason == reason {
+            return false;
+        }
+        self.reason = reason;
+        true
+    }
+
     /// The dialog's action buttons.
     #[must_use]
     pub fn actions(&self) -> &[Button] {
@@ -248,10 +281,18 @@ impl Dialog {
         &mut self.actions
     }
 
+    /// The rim a plate has and a window's client does not.
+    fn rim(&self, scale: Scale, theme: &Theme) -> u32 {
+        match self.seat {
+            Seat::Plate => plate_border(theme, scale),
+            Seat::Window => 0,
+        }
+    }
+
     /// The inner content rectangle (inside the rim) as surface pixels.
-    fn inner(bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32, u32)> {
+    fn inner(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<(u32, u32, u32, u32)> {
         let (x, y, w, h) = surface_rect(bounds)?;
-        inset(x, y, w, h, plate_border(theme, scale))
+        inset(x, y, w, h, self.rim(scale, theme))
     }
 
     /// The most lines of prose a dialog gives its message or its reason when
@@ -264,8 +305,9 @@ impl Dialog {
     const MAX_PROSE_LINES: usize = 8;
 
     /// How far below the plate's interior top the content band begins: the
-    /// title, the message wrapped over `message_lines` where it has one, and
-    /// the pads around them.
+    /// title on a plate, the message wrapped over `message_lines` where it has
+    /// one, and the pads around them. A window's client has only its margin
+    /// above a band with no message over it.
     fn head_height(&self, pad: u32, line: u32, message_lines: usize) -> u32 {
         let message = if self.message.is_some() {
             line.saturating_mul(u32::try_from(message_lines).unwrap_or(u32::MAX))
@@ -273,9 +315,23 @@ impl Dialog {
         } else {
             0
         };
-        pad.saturating_add(line)
+        let title = match self.seat {
+            Seat::Plate => line,
+            Seat::Window if self.message.is_none() => return pad,
+            Seat::Window => 0,
+        };
+        pad.saturating_add(title)
             .saturating_add(message)
             .saturating_add(pad)
+    }
+
+    /// The margin a window's client keeps beneath its actions; a plate's rim
+    /// is its own edge.
+    fn foot_margin(&self, pad: u32) -> u32 {
+        match self.seat {
+            Seat::Plate => 0,
+            Seat::Window => pad,
+        }
     }
 
     /// How far above the plate's interior bottom the content band ends: the
@@ -288,7 +344,10 @@ impl Dialog {
         } else {
             0
         };
-        action_h.saturating_add(reason).saturating_add(pad / 2)
+        action_h
+            .saturating_add(reason)
+            .saturating_add(pad / 2)
+            .saturating_add(self.foot_margin(pad))
     }
 
     /// The plate height that leaves a content band exactly `content` pixels
@@ -309,7 +368,7 @@ impl Dialog {
         let font = role_font(theme, scale, TextRole::Body);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let line = font.line_height();
-        let content_w = Self::content_width(width, scale, theme);
+        let content_w = self.content_width(width, scale, theme);
         let action_h = if self.actions.is_empty() {
             0
         } else {
@@ -320,7 +379,7 @@ impl Dialog {
                 Self::prose(font, content_w, Self::MAX_PROSE_LINES, theme).line_count(text)
             })
         };
-        plate_border(theme, scale)
+        self.rim(scale, theme)
             .saturating_mul(2)
             .saturating_add(self.head_height(pad, line, wanted(&self.message)))
             .saturating_add(content)
@@ -337,10 +396,10 @@ impl Dialog {
     /// out, so measuring against it and then drawing into the band cannot
     /// disagree.
     #[must_use]
-    pub fn content_width(width: u32, scale: Scale, theme: &Theme) -> u32 {
+    pub fn content_width(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         width
-            .saturating_sub(plate_border(theme, scale).saturating_mul(2))
+            .saturating_sub(self.rim(scale, theme).saturating_mul(2))
             .saturating_sub(pad.saturating_mul(2))
     }
 
@@ -364,7 +423,7 @@ impl Dialog {
     /// dialog cannot place its content over the title or under the actions
     /// when the theme's type ladder or insets change.
     fn bands(&self, bounds: Rect, scale: Scale, theme: &Theme, font: BitmapFont) -> Option<Bands> {
-        let (ix, iy, iw, ih) = Self::inner(bounds, scale, theme)?;
+        let (ix, iy, iw, ih) = self.inner(bounds, scale, theme)?;
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         let content_left = ix.saturating_add(pad);
         let content_w = iw.saturating_sub(pad.saturating_mul(2));
@@ -373,7 +432,8 @@ impl Dialog {
         }
         let line = font.line_height();
         let title_y = to_i32(iy) + to_i32(pad);
-        let actions = action_row_rects(&self.actions, (ix, iy, iw, ih), scale, theme, font);
+        let usable_h = ih.saturating_sub(self.foot_margin(pad));
+        let actions = action_row_rects(&self.actions, (ix, iy, iw, usable_h), scale, theme, font);
         let action_h = actions
             .iter()
             .filter(|r| r.height > 0)
@@ -387,8 +447,11 @@ impl Dialog {
         // it is anchored to and the other's side of the plate: a paragraph
         // grows into the space the dialog has, never over the actions a
         // reader has to reach or the title that names them.
-        let reason_bottom = action_top.unwrap_or(to_i32(iy + ih)) - to_i32(pad) / 2;
-        let message_top = title_y + to_i32(line) + to_i32(pad) / 2;
+        let reason_bottom = action_top.unwrap_or(to_i32(iy + usable_h)) - to_i32(pad) / 2;
+        let message_top = match self.seat {
+            Seat::Plate => title_y + to_i32(line) + to_i32(pad) / 2,
+            Seat::Window => title_y,
+        };
         let reason = self.reason.as_ref().and_then(|reason| {
             let room = reason_bottom - message_top;
             Self::wrapped_band(
@@ -490,33 +553,38 @@ impl Dialog {
             return;
         }
         let palette = theme.palette();
-        let border = plate_border(theme, scale);
-        let radius = plate_corner(w, h, theme.metrics().popup_corner_radius, scale);
-        paint_plate(
-            surface,
-            (x, y, w, h),
-            &PlateStyle {
-                radius,
-                border,
-                plate: Color::from(palette.surface_raised),
-                rim: Color::from(palette.rim),
-                focused: false,
-                ring: Color::from(palette.rim_active),
-            },
-        );
+        match self.seat {
+            Seat::Plate => paint_plate(
+                surface,
+                (x, y, w, h),
+                &PlateStyle {
+                    radius: plate_corner(w, h, theme.metrics().popup_corner_radius, scale),
+                    border: plate_border(theme, scale),
+                    plate: Color::from(palette.surface_raised),
+                    rim: Color::from(palette.rim),
+                    focused: false,
+                    ring: Color::from(palette.rim_active),
+                },
+            ),
+            // The ground an alert window stands on, so the desktop's dialog
+            // windows read as one family.
+            Seat::Window => surface.fill_rect(x, y, w, h, Color::from(palette.surface)),
+        }
         let Some(bands) = self.bands(bounds, scale, theme, font) else {
             return;
         };
 
-        let run = font.elide_to_width(&self.title, bands.content_w);
-        paint_run(
-            surface,
-            font,
-            run,
-            (to_i32(bands.content_left), bands.title_y),
-            foreground(theme, crate::state::ControlDisposition::Interactive),
-            None,
-        );
+        if self.seat == Seat::Plate {
+            let run = font.elide_to_width(&self.title, bands.content_w);
+            paint_run(
+                surface,
+                font,
+                run,
+                (to_i32(bands.content_left), bands.title_y),
+                foreground(theme, crate::state::ControlDisposition::Interactive),
+                None,
+            );
+        }
         if let (Some(message), Some(band)) = (&self.message, bands.message) {
             Self::prose(font, band.width, line_budget(font, band.height), theme).paint(
                 surface,

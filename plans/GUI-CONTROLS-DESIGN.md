@@ -41,7 +41,7 @@ Every control and every piece of window furniture named in this specification �
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
 Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField,
 TextArea, NumberField), choice entry (ComboBox, PictureChoice, SwatchGrid,
-ColourPicker), navigation and command surfaces (Menu, MenuItem,
+ColourPicker, PlaceChooser), navigation and command surfaces (Menu, MenuItem,
 Toolbar, Tabs, Breadcrumb, ActionRail), collection controls (ListRow, TableRow,
 TableCell, TableHeader, Card, Panel, MetricTile, StatusPill), record lists
 (FactList, Timeline), decision surfaces
@@ -1315,6 +1315,13 @@ Dialogs are decision surfaces.
 - Destructive actions use a Recovery Latch or deliberate confirmation step.
 - Disabled actions explain why through inline copy or a focused explanation.
 - Dialogs must not hide capability denial behind generic disabled state.
+- **Two seats, one anatomy.** A dialog drawn over the window that asks is an
+  elevated plate naming itself by its title. A dialog that is a window of its
+  own (`in_window`, `plans/APPWIN.md`) draws no plate and no title — the
+  window's frame carries both — and sets its bands in from the window's edges
+  on the ground an alert window stands on, so the desktop's dialog windows read
+  as one family. The inline reason is restated in place (`set_reason`), keeping
+  the actions and their focus.
 
 ### 11.25 Notification
 
@@ -1429,8 +1436,8 @@ ScrollBar
 - The thumb length is proportional to `viewport_extent / content_extent`, subject to the theme's minimum thumb length and the space required by end controls.
 - The thumb position maps the clamped `offset` across the draggable track. The same mapping is used in paint, hit testing, keyboard updates, and tests.
 - When the viewport covers the content, the offset is zero and the bar follows the declared layout policy: hidden, or a reserved quiet gutter with a non-draggable thumb. It must not oscillate between policies as content changes by a pixel.
-- Idle: low-contrast thumb and quiet Scroll Channel, its two long sides edged one rim-width in the theme's `frame` colour so the bar's extent reads against any ground.
-- Hover, keyboard focus, wheel input, or active scrolling: thumb and relevant end control step to the neutral `scroll_thumb_active` grey without changing geometry — never the accent, which is the selection's; the focus ring stays the bar's one accent line.
+- Idle: low-contrast thumb and quiet Scroll Channel, its two long sides edged one rim-width in the theme's `frame` colour so the bar's extent reads against any ground. A bar embedded in a plate whose own rim already bounds it draws no edge (`ScrollBar::without_edges`): an edge standing mid-plate with open ends reads as a stray line. The Settings category strip's bar is the one such bar.
+- Hover, keyboard focus, wheel input, or active scrolling: the thumb steps to the neutral `scroll_thumb_active` grey without changing geometry — never the accent, which is the selection's; the focus ring stays the bar's one accent line. An end control takes the same grey only while its press is live — held, with the pointer on it, the moments its hold steps — and never for hover alone, so which part the pointer is over draws nothing while nothing is held.
 - The end controls' chevrons are the shared grid-fitted triangle, centred exactly across the bar in a button of either parity and along it by their weight.
 - Thumb drag captures the pointer and preserves the initial pointer-to-thumb anchor so the content does not jump when the drag begins.
 - A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop. The cadence is the control's own: it states when its next step is due and steps when asked at that time, and its owner folds that one deadline into its wait rather than keeping a timer beside the control. A hold steps only while the pointer is on the part it pressed and the step would move something, and a press toward a bound already reached presses nothing.
@@ -1743,6 +1750,13 @@ two stacked charts loses the comparison the reader is there for.
   readings in either direction draws nothing, so a rule across an
   empty box can never read as a measured nought.
 - A box too short to seat an axis and both halves draws nothing at all.
+
+**A reading and a part of it share one box.** Where the second series counts a
+part of what the first does — the timer preemptions among context switches —
+the two are one direction on one scale, so the part is drawn *within* the whole
+(`with_within`): both rise from the one floor over the whole height, tinted by
+their own roles, with no axis. Mirroring a part would leave its half nearly
+empty whenever the part is a small share of the whole.
   Half a duplex reading is worse than none, so it is not drawn.
 - **Damage and settle point.** A chart is read-only: it has no settle point,
   and its pixels are its owner's to report when the series it was handed
@@ -2161,6 +2175,14 @@ a `FieldGroup` is the captioned plate its rows sit on.
   first line, a `FieldGroupAction` naming row `rows().len()` is its, and the
   group's focus rectangle is the one picture its cursor is on, so an owner
   scrolls a picture into view rather than a choice taller than the view.
+- **A group may hold a band its owner draws** (`set_band`, `band_rect`), for
+  content no row can carry — the Date & Time dialog's calendar and time entry
+  beneath its network-time switch. The band is the height the owner states,
+  beneath the rows and any picture choice and above the footnote, measured with
+  the plate so the caption and the footnote stay the group's. The group neither
+  paints nor routes it: the owner draws into it and routes input to what it put
+  there. The footnote is replaced in place (`set_footnote`), as a row's
+  description is.
 
 ### 11.42 TextArea
 
@@ -2275,6 +2297,11 @@ validation.
   number of the smallest place and is spelled and typed with a point — a gamma
   held as `100` to `999` reads `1.00` to `9.99`. A point is taken only by a
   field with places, and more decimals than it holds spell no number.
+- **Whole digits** (`with_digits`, up to nine) pad the spelled value with
+  zeros, so a minute reads `05`; typing need not type them.
+- **Wrapping** (`with_wrap`) carries a step past either bound round to the
+  other, as a clock's minutes run from 59 to 0. Typing past a bound is still
+  invalid: only a step carries.
 
 - **Typing takes effect while it spells a number in range,** so what the value
   drives follows the digits; anything else shows as invalid and moves nothing.
@@ -2342,6 +2369,45 @@ for every 8-bit colour.
   per scale and face.
 - **One bead.** The picker's fields take its enablement and authority, and the
   picker alone wears the authority bead.
+
+### 11.47 PlaceChooser
+
+A `PlaceChooser` finds one place among many: a `SearchField` (§11.8) over a
+list of `PlaceRow`s, each the place's name, where it is beneath it, and a
+trailing reading its owner keeps current — for a time zone, the local time and
+offset there now. The rows are the owner's, in its order; what a place *is* is
+not the chooser's business.
+
+- **The keyboard never leaves the query.** Typing edits the search field; Up
+  and Down walk the highlight through what the query matches and the Page keys
+  a viewport's worth, stopping at either end; Enter chooses the highlighted
+  row. Escape clears a query, then answers `Cancelled` so the owner closes.
+  Tab is the owner's.
+- **Matching ignores case and a Latin-1 name's accents** (`tairix_util::utf8::
+  fold`, the one fold a list's sort also reads), so `sao` finds *São Paulo*.
+  It looks at the name, the place beneath it and a key the owner gives but
+  never draws, such as a zone's IANA name. A name that begins with the query
+  is listed before one that merely holds it, each in the owner's order.
+- **The highlight follows the query.** It stays where it still shows and
+  otherwise moves to the first match; the owner may open the chooser
+  highlighting the current choice, scrolled into view once the bounds are
+  known.
+- **A click highlights; a double-click chooses,** paired by the desktop's own
+  interval through the one click-pairing rule (`DoubleClickTracker`). A press
+  on the search field or the scrollbar breaks a pair. The wheel scrolls the
+  list wherever the pointer is over the chooser.
+- **No match says so** (*No place matches.*) rather than drawing an empty list.
+- **Damage is scoped.** A hover reports the two rows it moves between, a
+  reading the one row it changes where that row shows, and a query or a scroll
+  the list.
+- **The window that asks for one place** is a `PlaceDialog`: the chooser above
+  Cancel and Choose as a dialog window's client, Choose offered only while a
+  place is highlighted, opening at the extent it states (`opening_extent`).
+- **The time-zone dialog is one definition** (`tairix_controls::zone`): its
+  title, its search hint, a `lib/tz` place listing's rows and the readings
+  rewritten in one pass (`set_readings`) as each minute turns. Settings' Time
+  zone row and the Date & Time dialog both open it owner-modal, Settings with
+  *This machine's zone* as its first row.
 
 ---
 
@@ -2746,6 +2812,7 @@ A control or control family is ready when the following are true:
 - Toolbar tests cover a wide strip seating every tool and reserving nothing, a narrow strip seating whole tools only inside its bounds, nothing outside the strip or on an affordance slot hit-testing to a tool, a chevron drawn only where there is something that way, a press stepping exactly one tool and a held press repeating until the offset reaches a bound, the wheel scrolling and a full strip ignoring it, keyboard focus scrolling a tool into view, a band too narrow for one tool showing and offering nothing, and the render-equivalence gate comparing the offset but not the press latch.
 - TableHeader tests cover a header and its rows resolving identical column spans across a row-state change, a reported sort never reordering or redrawing until `set_sort` commits one, a committed sort that differs from the request being what is drawn, an already-sorted column flipping order, a fixed column emitting nothing, and a denied column keeping its title and its layout.
 - Text-fitting tests (§11A) cover a newline forcing a break and a blank line between paragraphs surviving, a paragraph's last permitted line ending at its own break rather than running the next one into it, no laid-out line ever drawing a newline or overflowing its column, a wrapped line locating itself in the caller's own string, and a prose control's measured height at a width being exactly what its paint then draws.
+- PlaceChooser tests cover a query matching without case or accent, by the place beneath and by the unseen key, names that begin with it leading, the highlight kept where it still shows and moving to the first match where it does not, a query matching nothing still editing, the arrows and Page keys stopping at either end, Enter choosing and Escape clearing before it cancels, a click highlighting and a second within the interval choosing while a press on the search field breaks the pair, the wheel scrolling and a highlight opened with brought into view, a reading reporting only a change of a row that shows, a hover reporting only its two rows, and every theme drawing a list and the no-match line.
 - TextArea tests cover the wrap itself, Enter inserting a newline and never submitting, read-only and denied boxes refusing every edit, Up and Down walking visual lines and keeping their column, Home/End on the visual line against Ctrl+Home/Ctrl+End on the text, a selection spanning a break being replaced whole, a click landing on the line it fell on and clamping to that line's visible text, the viewport following the caret while the wheel moves it alone, the scrollbar appearing exactly when the text outgrows the box, a wrapped placeholder and a wrapped message, and the render-equivalence gate comparing the viewport but not the goal column.
 
 ---

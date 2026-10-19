@@ -33,30 +33,61 @@ borrowed byte slice and nothing more.
   skipped is `LocalError::Gap`; one they passed twice is
   `LocalError::Overlap` unless the caller says which instant it means.
   Nothing is guessed.
+- `Zone::next_change` is the zone's first change of offset after an instant —
+  its instant and the offsets either side — or `None` for a zone that keeps
+  its offset. A change of abbreviation or daylight flag alone moves no clock
+  and is passed over: Europe/Dublin's winter is its daylight saving.
 - `Zone::UTC` stands where no store does.
+- `ZoneOffset::write_from_utc` writes an offset as a person reads it, to the
+  minute: `UTC+01:00`, `UTC-03:30`.
 
 ## Regions, places and the clock
 
-A `Region` is an ISO 3166-1 region with its English name and its numeric date
-and time-of-day patterns. A pattern is the subset of Unicode CLDR's notation a
+A `Region` is an ISO 3166-1 region with its English name, its numeric date
+and time-of-day patterns, and the `Weekday` its calendar week begins on
+(CLDR's `weekData`). A pattern is the subset of Unicode CLDR's notation a
 clock shows: `d` or `dd`, `M` or `MM`, and `y` or `yyyy` once each for a date;
 `H` or `HH`, or `h` or `hh` with `a`, and `mm` for a time; and between them
 only ASCII punctuation and spaces. `y` is the whole year and `yyyy` the year in
 at least four digits after its sign, as ISO 8601 writes it. A `Place` is a row
 of IANA's zone table: a zone by the name the table lists it under, its region,
 and the comment that tells a region's zones apart. `Place::write_city` writes
-the city its name ends with.
+the city its name ends with, `Place::write_label` the city and its region's
+name (*London, United Kingdom*), and `ZoneInfo::place` finds the place the
+table lists a zone as.
 
 `CivilClock` is a zone read with a region's conventions, and the one renderer
-of a reading's date and time every clock draws through. With no region it
-writes ISO 8601's `yyyy-MM-dd` and a 24-hour clock. `WIDEST` are the local
+of a reading's date and time every clock draws through. It also answers how
+a person there counts hours (`hour_cycle`, from the time pattern) and weeks
+(`first_weekday`). With no region it writes ISO 8601's `yyyy-MM-dd` and a
+24-hour clock, and starts weeks on Monday. `write_time_with_seconds` writes the
+time of a clock that ticks each second: the seconds after the minutes, set off
+as the minutes are from the hour, as CLDR's medium time does (`14:05:09`,
+`14.05.09`, `2:05:09 PM`). `WIDEST` are the local
 times at which every field a pattern holds is at its widest, before noon and
 after, so a display that keeps room for what they write never moves.
 
 `resolve_zone` and `resolve_region` take the reader's preferences in order and
 answer the first the store holds, else the store's default, else UTC with no
 region, saying which decided (`Decided`). A preference the store does not hold
-is passed over, never guessed at.
+is passed over, never guessed at. The machine's own zone is one such
+preference, after a reader's own choice: the machine configuration's
+`time.zone` (`lib/sysconfig`), whose names have the one zone-name shape
+`tairix_abi::zone` defines (`is_zone_name`, re-exported here), so the store,
+the desktop's description of itself and that setting refuse the same names.
+
+## Listing the places
+
+With the `listing` feature — it allocates, so a reader that only reads a clock
+leaves it off — `listing::Listing` is every place a store lists as a reader
+looks one up: by city, then by region, through the one `reader_order`
+(`lib/util`) every list of names sorts by. Each `Listed` entry carries its city,
+its region with the comment that tells it from the region's other zones, and
+its zone; `Listing::reading` is the local time there at an instant in a
+region's clock with its offset (`14:02 · UTC+01:00`), and `listing::label`
+names a zone by its place, or by itself where the table lists it nowhere. The
+Date & Time dialog and Settings' Time zone row build their chooser's rows from
+it, so the two cannot list or read a place differently.
 
 ## Reading the store
 
@@ -82,7 +113,7 @@ The header, 60 bytes:
 | at | type | field |
 |---|---|---|
 | 0 | `[u8; 4]` | magic, `TZX1` |
-| 4 | `u16` | format version, `1` |
+| 4 | `u16` | format version, `2` |
 | 6 | `u16` | flags, `0` |
 | 8 | `u32` | offset of the IANA release, such as `2026e` |
 | 12 | `u32` | zones |
@@ -119,8 +150,9 @@ Then nine sections in this order, each packed:
    weekday on or before it), day (`u8`), weekday (`u8`, `0` Sunday, `0` for
    day code `0`), clock (`u8`: `0` wall, `1` standard, `2` universal), `0`
    (`u8`), seconds after that day's midnight (`i32`).
-7. **Regions**, 16 bytes each: ISO 3166-1 alpha-2 code (`[u8; 2]`), `0`
-   (`u16`), name, date pattern and time pattern offsets (`u32` each).
+7. **Regions**, 16 bytes each: ISO 3166-1 alpha-2 code (`[u8; 2]`), the
+   day its week begins on (`u8`, ISO 8601's `1` Monday to `7` Sunday), `0`
+   (`u8`), name, date pattern and time pattern offsets (`u32` each).
    Strictly ascending by code.
 8. **Places**, 12 bytes each: name index (`u32`), region code (`[u8; 2]`),
    `0` (`u16`), comment offset (`u32`). In the zone table's order.
@@ -140,8 +172,8 @@ of order or naming something twice; a zone whose first transition is not
 `i64::MIN`; an offset, a saving, or a trailing rule's standard offset plus
 either saving more than 26 hours, or a rule time more than a week, from zero; a
 rule naming a day some year lacks (the 29th of February only as an on-or-before
-bound); a region name or place comment holding a character that hides or
-reorders text; a pattern outside the subset above; or a default zone or region
+bound); a region whose week begins on no day; a region name or place comment
+holding a character that hides or reorders text; a pattern outside the subset above; or a default zone or region
 the store lacks.
 
 Its bounds are security bounds and fixed: the store at most 4 MiB; a zone name

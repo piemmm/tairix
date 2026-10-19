@@ -233,6 +233,13 @@ pressed while the first is asked is held and asked once it is answered, and
 a refusal is stated on its pane whenever that pane is shown, even after the
 reader has moved elsewhere.
 
+Quitting sees every change still owed out before the program ends — the
+apply in flight and the one waiting behind it, the sound controls and sound
+choices still queued, the session requests already handed over — so a change
+made just before *Quit* is never dropped with its worker. A refusal then is
+stated on `stderr`, the window being gone. What would ask the reader over the
+window (a sound file to pick, a held preview or task) is not started.
+
 Accessibility additionally carries the **pointer pair**, in a POINTER group
 of its own. *Pointer size* is a closed ladder over the desktop's
 `cursor.size` setting, magnifying the pointer's logical side on top of the
@@ -650,17 +657,22 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   a setting. A refused request is stated on the row that asked.
 - **Language & Region** sets the region whose conventions every date and time
   on the desktop is written in (`region`) and the zone its clocks read
-  (`time.zone`), each *Default* — this system's own, United Kingdom and
-  London as shipped — until chosen. The choices are the zone store's, which
-  Settings may not open: the session mints it a read-only delegation of the
-  store it holds (`TakeZoneStore`, answered for this application alone), read
-  once and kept. The Region row lists every region by name and says how the one
-  it holds writes a date and a time (*31/12/2026 and 23:30*); the Time zone row
-  lists every place as *City, Region*, ordered by city. Both lists run to
-  hundreds, so an open list scrolls a window of whole rows and seeks a choice as
-  its first letters are typed. A held value the store does not carry is offered
-  as itself, and choosing it changes nothing; the session refuses an apply
-  that changes either key to one the store lacks.
+  (`time.zone`), each this system's own — United Kingdom, and the machine's
+  zone — until chosen. The choices are the zone store's, which Settings may not
+  open: the session mints it a read-only delegation of the store it holds
+  (`TakeZoneStore`, answered for this application alone), read once and kept.
+  The Region row lists every region by name and says how the one it holds
+  writes a date and a time (*31/12/2026 and 23:30*); an open list scrolls a
+  window of whole rows and seeks a choice as its first letters are typed. The
+  Time zone row names the zone the account's clocks read — *London, United
+  Kingdom (this machine's zone)* while it follows the machine — and its
+  **Change…** opens the time-zone dialog (`tairix_controls::zone`) in an
+  owner-modal dialog window: *This machine's zone* first, then every place by
+  city, each with the local time there — rewritten as each minute turns while
+  the dialog is open — narrowed as a city, region or zone name is typed. A chosen
+  place posts at once, as any other choice does. A held value the store does
+  not carry is stated as itself and opening the pane never changes it; the
+  session refuses an apply that changes either key to one the store lacks.
 
 The document spells every span a person edits in whole units — milliseconds
 for the pointer and keyboard, minutes for the idle waits — and every in-memory
@@ -828,33 +840,27 @@ the staged source of truth; the shape of it is:
   is answered by an authenticated run of the same tool (above). Either way
   the row and the writer read one engine, so what a row shows and what the
   tool would set cannot disagree;
-- **kernel-scope panes** (Date & Time, Users & Groups) elevate the application
-  that owns the syscall, never acquiring the capability here. Date & Time's
-  action band starts `datetime.app` as an authenticated account and leaves it
-  running — a window that waited for a program the reader then works in would
-  stop drawing for the whole session. Users & Groups elevates the account
-  tools instead and *waits*: a capture of `users --list` to read what no
-  unprivileged caller may, and one `usermod` or `passwd` run to write it. It
-  reimplements none of them and holds no path to any of them without a
-  password.
+- **kernel-scope panes** (Date & Time, Users & Groups) ask for the program
+  that owns the change, never acquiring the capability here. Date & Time's
+  action band opens `datetime.app` and leaves it running. Users & Groups asks
+  for the account tools instead: the listing `users -l` prints, to read what
+  no unprivileged caller may, and one `usermod` or `passwd` run to write it.
+  It reimplements none of them.
 
-The credential question every elevated run is offered through is the shared
-`lib/controls` credential sheet, the same surface the desktop session puts up
-when a command it may not perform is chosen: one credential surface on the
-desktop, with one focus order, one refusal wording, and one place the secret
-lives. It is asked in a dialog window of its own whose band reads "Settings —
-Authenticate" from the bundle's attested identity, so it never passes for the
-session's own prompt, which is undecorated and holds the whole seat. The
-dialog holds the settings window until it is answered, so a press behind it
-cannot change a pane the reader is about to authenticate for; that hold is the
-desktop's, and the shell filters none of its window's input for it. A dialog
-the desktop will not open turns the question down with the reason stated in
-the action band. The password is held only in the masked field's bounded
-buffer, which zeroises what it discards; once offered it is copied into the
-request handed to the elevation worker and cleared from the sheet, which says
-it is checking and asks for no second run until the answer comes back. Both
-masked
-fields step their marker's dots on the window's own clock: the event loop
-stamps each key as it takes it, parks no later than
-`Shell::secret_deadline_ns`, and on that wake presents only the field
-`Shell::advance_secrets` repainted.
+Settings collects no password and sees none. Every privileged action is one of
+a closed set of **system tasks** (`window_ipc::SystemTask`) it asks the desktop
+for through its window: changing the machine's configuration with the pairs it
+staged, changing one account or its password, showing the network addressing,
+showing the accounts, or opening Date & Time. The task is all that crosses —
+no program path and no prompt wording — so the desktop decides what runs and
+says in the system's own prompt what is being allowed, naming Settings as the
+one asking (`docs/src/desktop/session.md`). The answer arrives once, as
+`WindowEvent::Authorised`, and a captured listing is fetched whole with
+`TakeAuthorisedOutput`. One task is asked at a time; a refusal states its
+reason in the action band and leaves the working copy to apply again, and a
+prompt the reader cancelled changes and says nothing.
+
+The masked password row of Users & Groups steps its marker's dots on the
+window's own clock: the event loop stamps each key as it takes it, parks no
+later than `Shell::secret_deadline_ns`, and on that wake presents only the
+field `Shell::advance_secrets` repainted.

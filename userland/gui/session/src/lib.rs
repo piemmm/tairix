@@ -220,6 +220,7 @@ pub mod shell;
 pub mod sound;
 pub mod switchboard;
 pub mod switchuser;
+pub mod systask;
 pub mod tasks;
 pub mod thumbs;
 pub mod tip;
@@ -251,7 +252,10 @@ pub use apps::{
 };
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
-pub use clock::{CivilAdoption, HeldZones, SessionClock};
+pub use clock::{
+    machine_zone_place, moves_machine_zone, read_machine_zone, CivilAdoption, HeldZones,
+    SessionClock,
+};
 pub use config::{
     DATETIME_LABEL, FILES_LABEL, SETTINGS_LABEL, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
@@ -266,12 +270,14 @@ pub use drag::{
     DragEnd, DragPlace, DragStep, DragSurface, DropRefusal, OwedReport, SlotAnswer, WindowUnder,
 };
 pub use drain::{
-    adopt_unlocks, drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake,
+    adopt_unlocks, drain_authorising, drain_away, drain_locked, Routed, Seat, SeatDrain,
+    SeatRouter, SeatWake,
 };
 pub use elevate::{
-    ElevateAsk, ElevatePrompt, Elevator, PromptOutcome, ELEVATE_PROMPT_SHOWN,
-    ELEVATE_PROMPT_SHOWN_MESSAGE, NOT_STARTED_REASON, REFUSED_REASON,
-    WIN_HEIGHT as ELEVATE_WIN_HEIGHT, WIN_WIDTH as ELEVATE_WIN_WIDTH,
+    Answer as AuthoriseAnswer, AuthoriseDesk, AuthorisePrompt, Concluded as AuthoriseConcluded,
+    Done as AuthoriseDone, ElevateAsk, Elevation, Elevator, Listing, PromptOutcome,
+    Refusal as AuthoriseRefusal, Request as AuthoriseRequest, ELEVATE_PROMPT_SHOWN,
+    ELEVATE_PROMPT_SHOWN_MESSAGE,
 };
 pub use fade::{
     BackdropFade, ScreenFade, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
@@ -293,7 +299,7 @@ pub use layer::{
     LAYER_REFUSED_MESSAGE, LAYER_RETIRED, LAYER_RETIRED_MESSAGE,
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
-pub use lock::{LockOutcome, ScreenLock, UnlockAsk};
+pub use lock::{LockOutcome, ScreenLock, UnlockAnswer, UnlockAsk};
 pub use notify::{is_settings_surface, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{
@@ -329,6 +335,7 @@ pub use switchuser::{
     park_within, ResumeFailure, SeatDeparture, SeatReturn, SessionAuthority, SwitchRefusal,
     SwitchUser, WakeRefusal,
 };
+pub use systask::SET_TIME_PURPOSE;
 pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};

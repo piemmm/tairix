@@ -48,6 +48,7 @@ use crate::{Errno, ProcId};
 
 mod alert;
 mod symbol;
+mod task;
 
 pub use symbol::AppMenuSymbol;
 
@@ -55,6 +56,10 @@ pub use alert::{
     AlertButton, AlertButtonRole, AlertDetail, AlertHeadline, AlertLabel, AlertOutcome,
     AlertSeverity, AlertSpec, ALERT_DETAIL_MAX, ALERT_HEADLINE_MAX, ALERT_LABEL_MAX,
     ALERT_MAX_BUTTONS, ALERT_MAX_OPEN,
+};
+pub use task::{
+    decode_authorised_output_reply, encode_authorised_output_reply, AuthorisedOutcome, SystemTask,
+    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
 };
 
 /// Reserved well-known call-endpoint id of the desktop session's window
@@ -3203,6 +3208,32 @@ pub enum WindowRequest {
         /// The alert, from its open's reply.
         alert_id: u64,
     },
+    /// Ask the desktop to authorise and perform `task` for the caller's own
+    /// window `window_id`.
+    ///
+    /// Answered only for the desktop's own Settings application: the desktop
+    /// puts its authorisation prompt up, naming Settings as the one asking,
+    /// and performs the task as the account the prompt allows it as. No
+    /// application collects a password; this one never sees one. The reply is
+    /// only the acceptance, and the task concludes exactly once with a
+    /// [`WindowEvent::Authorised`] delivered to the window's event endpoint.
+    /// One authorisation may be pending per window; a second is refused
+    /// (`AlreadyExists`), and one asked while anything else holds the seat is
+    /// refused (`SeatBusy`).
+    Authorise {
+        /// The caller's own window the outcome is delivered to.
+        window_id: u64,
+        /// What to perform.
+        task: SystemTask,
+    },
+    /// Take what window `window_id`'s last task printed, once its
+    /// [`WindowEvent::Authorised`] said it was captured. One-shot; the reply
+    /// is a [`decode_authorised_output_reply`] frame, and `NotFound` once
+    /// taken or before any capture concluded.
+    TakeAuthorisedOutput {
+        /// The window whose task concluded.
+        window_id: u64,
+    },
 }
 
 /// Wire operation discriminant of [`WindowRequest::Create`].
@@ -3287,6 +3318,10 @@ const OP_CLOSE_ALERT: u16 = 39;
 const OP_CREATE_DIALOG: u16 = 40;
 /// Wire operation discriminant of [`WindowRequest::TakeZoneStore`].
 const OP_TAKE_ZONE_STORE: u16 = 41;
+/// Wire operation discriminant of [`WindowRequest::Authorise`].
+const OP_AUTHORISE: u16 = 42;
+/// Wire operation discriminant of [`WindowRequest::TakeAuthorisedOutput`].
+const OP_TAKE_AUTHORISED_OUTPUT: u16 = 43;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -3708,6 +3743,11 @@ const OPEN_ALERT_SPEC_OFFSET: usize = 24;
 /// Encoded size of the longest possible [`WindowRequest::OpenAlert`].
 const OPEN_ALERT_MAX_WIRE_LEN: usize = OPEN_ALERT_SPEC_OFFSET + alert::MAX_WIRE_LEN;
 
+/// Byte offset of a [`WindowRequest::Authorise`]'s task, after its window.
+const AUTHORISE_TASK_OFFSET: usize = WINDOW_ID_WIRE_LEN;
+/// Encoded size of the longest possible [`WindowRequest::Authorise`].
+const AUTHORISE_MAX_WIRE_LEN: usize = AUTHORISE_TASK_OFFSET + task::MAX_WIRE_LEN;
+
 /// The larger of two encoded lengths.
 const fn longer(a: usize, b: usize) -> usize {
     if a > b {
@@ -3762,7 +3802,10 @@ impl WindowRequest {
             ),
             longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
         ),
-        longer(PREVIEW_SCREENSAVER_MAX_WIRE_LEN, OPEN_ALERT_MAX_WIRE_LEN),
+        longer(
+            longer(PREVIEW_SCREENSAVER_MAX_WIRE_LEN, OPEN_ALERT_MAX_WIRE_LEN),
+            AUTHORISE_MAX_WIRE_LEN,
+        ),
     );
 
     /// Encoded size of `self`: the header plus this operation's own operand
@@ -3785,8 +3828,10 @@ impl WindowRequest {
             | Self::TakeDropTarget { .. }
             | Self::TakeTerrain { .. }
             | Self::ActivateWindow { .. }
-            | Self::CloseAlert { .. } => WINDOW_ID_WIRE_LEN,
+            | Self::CloseAlert { .. }
+            | Self::TakeAuthorisedOutput { .. } => WINDOW_ID_WIRE_LEN,
             Self::OpenAlert { ref alert, .. } => OPEN_ALERT_SPEC_OFFSET + alert::wire_len(alert),
+            Self::Authorise { ref task, .. } => AUTHORISE_TASK_OFFSET + task::wire_len(task),
             Self::BeginDrag { ref items, .. } => {
                 begin_drag_wire_len(items.first().len_byte() as usize)
             }
@@ -3882,6 +3927,7 @@ impl WindowRequest {
             // that states its own is refused rather than silently retitled.
             Self::SetAppBar(ref bar) if !bar.menu.title.is_empty() => Err(Errno::OutOfRange),
             Self::OpenMenu { ref menu, .. } if menu.is_empty() => Err(Errno::OutOfRange),
+            Self::Authorise { ref task, .. } if !task.encodable() => Err(Errno::OutOfRange),
             // A ceiling under its own floor names no size the window could
             // be dragged to. `0` is how "no ceiling" is spelled, so such a
             // pair is a mistake on the app's side, refused here rather than
@@ -3940,6 +3986,8 @@ impl WindowRequest {
             Self::TakeTerrain { .. } => OP_TAKE_TERRAIN,
             Self::OpenAlert { .. } => OP_OPEN_ALERT,
             Self::CloseAlert { .. } => OP_CLOSE_ALERT,
+            Self::Authorise { .. } => OP_AUTHORISE,
+            Self::TakeAuthorisedOutput { .. } => OP_TAKE_AUTHORISED_OUTPUT,
         }
     }
 
@@ -4053,6 +4101,9 @@ impl WindowRequest {
             } => {
                 put_u64(out, 8, window_id);
             }
+            Self::Authorise { .. } | Self::TakeAuthorisedOutput { .. } => {
+                self.write_authorise_operands(out);
+            }
             Self::OpenAlert {
                 event_endpoint,
                 owner_window_id,
@@ -4066,18 +4117,7 @@ impl WindowRequest {
             | Self::BeginDrag { .. }
             | Self::DragVerdict { .. }
             | Self::QueryDragSpot { .. } => write_transfer_operands(self, out),
-            Self::OpenLayer { .. } => self.write_layer_operands(out),
-            Self::PlaceLayer {
-                window_id,
-                x,
-                y,
-                depth,
-            } => {
-                put_u64(out, 8, window_id);
-                put_i32(out, LAYER_PLACE_X, x);
-                put_i32(out, LAYER_PLACE_Y, y);
-                out[LAYER_PLACE_DEPTH] = depth.as_u8();
-            }
+            Self::OpenLayer { .. } | Self::PlaceLayer { .. } => self.write_layer_operands(out),
             Self::TakeMenuText { window_id, open_id } => {
                 put_u64(out, 8, window_id);
                 put_u64(out, 16, open_id);
@@ -4112,6 +4152,22 @@ impl WindowRequest {
                 anchor,
                 ref menu,
             } => write_open_menu(out, window_id, anchor, menu),
+        }
+    }
+
+    /// Write an authorisation's operand block, or its output take's: the
+    /// window, then any task. A no-op for any other request.
+    fn write_authorise_operands(&self, out: &mut [u8]) {
+        match *self {
+            Self::Authorise {
+                window_id,
+                ref task,
+            } => {
+                put_u64(out, 8, window_id);
+                task::write(&mut out[AUTHORISE_TASK_OFFSET..], task);
+            }
+            Self::TakeAuthorisedOutput { window_id } => put_u64(out, 8, window_id),
+            _ => {}
         }
     }
 
@@ -4253,10 +4309,24 @@ impl WindowRequest {
         }
     }
 
-    /// Write an [`OpenLayer`](Self::OpenLayer)'s operand block: the shared
+    /// Write an [`OpenLayer`](Self::OpenLayer)'s operand block — the shared
     /// surface prologue, then the screen point and stacking layer that are
-    /// the operation's own. A no-op for any other request.
+    /// the operation's own — or a [`PlaceLayer`](Self::PlaceLayer)'s: the
+    /// surface, its new point and layer. A no-op for any other request.
     fn write_layer_operands(&self, out: &mut [u8]) {
+        if let Self::PlaceLayer {
+            window_id,
+            x,
+            y,
+            depth,
+        } = *self
+        {
+            put_u64(out, 8, window_id);
+            put_i32(out, LAYER_PLACE_X, x);
+            put_i32(out, LAYER_PLACE_Y, y);
+            out[LAYER_PLACE_DEPTH] = depth.as_u8();
+            return;
+        }
         let Self::OpenLayer {
             shm_handle,
             event_endpoint,
@@ -4451,9 +4521,28 @@ impl WindowRequest {
                 let alert_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::CloseAlert { alert_id })
             }
+            OP_AUTHORISE | OP_TAKE_AUTHORISED_OUTPUT => read_authorise_request(op, bytes),
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode a [`WindowRequest::Authorise`], whose task must fill the rest of
+/// the frame exactly, or a [`WindowRequest::TakeAuthorisedOutput`].
+fn read_authorise_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if op == OP_TAKE_AUTHORISED_OUTPUT {
+        exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+        return Ok(WindowRequest::TakeAuthorisedOutput {
+            window_id: nonzero_id(read_u64(bytes, 8))?,
+        });
+    }
+    let task = bytes
+        .get(AUTHORISE_TASK_OFFSET..)
+        .ok_or(Errno::BufferTooSmall)?;
+    Ok(WindowRequest::Authorise {
+        window_id: nonzero_id(read_u64(bytes, 8))?,
+        task: task::read(task)?,
+    })
 }
 
 /// Decode a [`WindowRequest::OpenAlert`]: the endpoint, refused when
@@ -7109,6 +7198,8 @@ const EV_PINCH: u16 = 21;
 const EV_TOOL_MOVED: u16 = 23;
 /// Wire event discriminant of [`WindowEvent::AlertClosed`].
 const EV_ALERT_CLOSED: u16 = 25;
+/// Wire event discriminant of [`WindowEvent::Authorised`].
+const EV_AUTHORISED: u16 = 26;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -7460,6 +7551,14 @@ pub enum WindowEvent {
         /// How it ended.
         outcome: AlertOutcome,
     },
+    /// The whole answer to one accepted [`WindowRequest::Authorise`],
+    /// delivered **exactly once** to the window that asked.
+    Authorised {
+        /// The window the task was asked for.
+        window_id: u64,
+        /// What became of it.
+        outcome: AuthorisedOutcome,
+    },
     /// At least one target is queued for this **application** to open.
     ///
     /// A **wake**, not the target: the application answers by pulling with
@@ -7652,7 +7751,8 @@ impl WindowEvent {
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
             | Self::ToolMoved { window_id, .. }
-            | Self::MenuClosed { window_id, .. } => Some(window_id),
+            | Self::MenuClosed { window_id, .. }
+            | Self::Authorised { window_id, .. } => Some(window_id),
             Self::AppBarDefault
             | Self::AppBarMenu { .. }
             | Self::OpenRequested
@@ -7778,6 +7878,10 @@ impl WindowEvent {
                 put_u64(&mut out, 16, alert_id);
                 alert::write_outcome(&mut out, outcome);
             }
+            Self::Authorised { outcome, .. } => {
+                put_u16(&mut out, 6, EV_AUTHORISED);
+                task::write_outcome(&mut out, outcome);
+            }
         }
         out
     }
@@ -7892,6 +7996,13 @@ impl WindowEvent {
                     window_id,
                     open_id: nonzero_id(read_u64(bytes, 16))?,
                     outcome: read_menu_outcome(bytes)?,
+                })
+            }
+            EV_AUTHORISED => {
+                event_reserved_zero(bytes, task::AUTHORISED_WIRE_END)?;
+                Ok(Self::Authorised {
+                    window_id,
+                    outcome: task::read_outcome(bytes)?,
                 })
             }
             _ => Err(Errno::OutOfRange),
@@ -8461,10 +8572,11 @@ mod tests {
         PICKED_FILE_REPLY_HANDLE_OFFSET, PICK_PURPOSE_FOLDER, WINDOW_FOLDER_PICK_MAX,
         WINDOW_PICKED_FILE_REPLY_MAX,
     };
-    use super::{PreviewOutcome, PreviewSubject};
+    use super::{PreviewOutcome, PreviewSubject, SystemTask};
     use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS};
+    use crate::elevate::{ElevateWords, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES};
     use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
     use crate::pinboard_ipc::PinboardDocument;
     use crate::seat::SEATMGR_ENDPOINT;
@@ -9081,10 +9193,32 @@ mod tests {
             text: TooltipText::new(&"t".repeat(TOOLTIP_TEXT_MAX)).expect("the widest tip"),
         });
         visit(WindowRequest::QueryDesktop);
+        each_seat_request(&mut visit);
+        each_settings_request(&mut visit);
+    }
+
+    /// The requests reserved for the desktop's Settings, for [`each_request`]:
+    /// the bare ones, an authorisation of every task with the widest words
+    /// among them, and the take of what one printed.
+    fn each_settings_request(visit: &mut impl FnMut(WindowRequest)) {
         visit(WindowRequest::QueryNotifySources);
         visit(WindowRequest::LockScreen);
         visit(WindowRequest::TakeZoneStore);
-        each_seat_request(&mut visit);
+        let words = |args: &[&str]| ElevateWords::new(args).expect("within bounds");
+        let wide = [b'w'; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARGS];
+        let wide = core::str::from_utf8(&wide).expect("ascii");
+        for task in [
+            SystemTask::Configure(words(&["os.loginType", "text"])),
+            SystemTask::Configure(words(&[wide; ELEVATE_MAX_ARGS])),
+            SystemTask::ChangeAccount(words(&["--comment", "Ada L", "--", "ada"])),
+            SystemTask::SetPassword(words(&["--record", "pbkdf2$1$AA$BB", "--", "ada"])),
+            SystemTask::ShowAddressing,
+            SystemTask::ShowAccounts,
+            SystemTask::SetClock,
+        ] {
+            visit(WindowRequest::Authorise { window_id: 9, task });
+        }
+        visit(WindowRequest::TakeAuthorisedOutput { window_id: 9 });
     }
 
     /// The pointer-shape, activation and clipboard requests [`each_request`]

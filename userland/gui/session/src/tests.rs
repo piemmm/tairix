@@ -72,7 +72,7 @@ use crate::{
     PresentedOwners, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
     SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
     ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAsk, DESKTOP_REVEALED,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, UnlockAnswer, UnlockAsk, DESKTOP_REVEALED,
     DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
     MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
@@ -2315,7 +2315,7 @@ fn a_text_choice_reaches_the_compositor_and_the_published_desktop() {
         FamilyEntry::new(inter, "Inter", FamilyKind::Proportional, 1210).expect("entry"),
         FamilyEntry::new(serif, "Noto Serif", FamilyKind::Proportional, 1362).expect("entry"),
     ]);
-    let shipped = desktop_info(&comp).expect("described").text();
+    let shipped = desktop_info(&comp, None).expect("described").text();
     assert_eq!(
         shipped.map(|text| (text.family(), text.size_px())),
         Some((inter, 16))
@@ -2326,7 +2326,7 @@ fn a_text_choice_reaches_the_compositor_and_the_published_desktop() {
         .set_text(TextFamily::Named(serif), TextSize::Points(12));
     assert_eq!(gone, None);
     assert!(shell.sync_theme(&mut comp));
-    let published = desktop_info(&comp).expect("described").text();
+    let published = desktop_info(&comp, None).expect("described").text();
     // Twelve points in Noto's taller line box.
     assert_eq!(
         published.map(|text| (text.family(), text.size_px())),
@@ -6937,6 +6937,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
@@ -6961,6 +6962,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
             clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -10663,7 +10665,7 @@ impl ScriptedUnlocker {
         }
         let ticket = self.waiting.remove(0);
         let verdict = self.answers.pop().unwrap_or(Verdict::Refused);
-        Some(lock.answer((ticket, verdict), now_ns, shell, comp))
+        Some(lock.answer(UnlockAnswer::of(ticket, verdict), now_ns, shell, comp))
     }
 }
 
@@ -10865,6 +10867,79 @@ fn a_wrong_password_leaves_the_screen_locked() {
         lock.is_locked(),
         "a refused password leaves the screen locked"
     );
+}
+
+#[test]
+fn a_lockout_the_broker_reports_counts_down_and_holds_every_password_back() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    let mut unlocker = ScriptedUnlocker::scripted(Vec::new());
+    let second = 1_000_000_000;
+    for ch in "wrong".chars() {
+        lock.handle(
+            &key_press(Key::Char(ch)),
+            LOCK_EVENT_NS,
+            &mut unlocker,
+            &shell,
+            &mut comp,
+        );
+    }
+    let enter = key_press(Key::Named(NamedKey::Enter));
+    lock.handle(&enter, LOCK_EVENT_NS, &mut unlocker, &shell, &mut comp);
+    let ticket = unlocker.waiting.remove(0);
+    let cooling = UnlockAnswer {
+        ticket,
+        verdict: Verdict::Refused,
+        retry_after: tairix_abi::time::Duration64::new(4, 500_000_000).expect("canonical"),
+    };
+    assert_eq!(
+        lock.answer(cooling, LOCK_EVENT_NS, &shell, &mut comp),
+        LockOutcome::Pending
+    );
+    lock.advance(LOCK_EVENT_NS, &shell, &mut comp);
+
+    // While it runs no password reaches the broker, the right one included.
+    let offered = unlocker.offered.len();
+    for ch in "secret".chars() {
+        lock.handle(
+            &key_press(Key::Char(ch)),
+            LOCK_EVENT_NS,
+            &mut unlocker,
+            &shell,
+            &mut comp,
+        );
+    }
+    lock.handle(&enter, LOCK_EVENT_NS, &mut unlocker, &shell, &mut comp);
+    assert_eq!(
+        unlocker.offered.len(),
+        offered,
+        "nothing is checked during a lockout"
+    );
+
+    // The lock wakes when the second it shows turns over, not a second late.
+    let settled = LOCK_EVENT_NS + 2 * second;
+    lock.advance(settled, &shell, &mut comp);
+    assert!(
+        lock.park_deadline_ns(settled, u64::MAX) <= second / 2,
+        "2.5 s left shows as 3 until 2 s are left"
+    );
+
+    // Once it has run out, a password is checked again.
+    let after = LOCK_EVENT_NS + 5 * second;
+    lock.advance(after, &shell, &mut comp);
+    for ch in "secret".chars() {
+        lock.handle(
+            &key_press(Key::Char(ch)),
+            after,
+            &mut unlocker,
+            &shell,
+            &mut comp,
+        );
+    }
+    lock.handle(&enter, after, &mut unlocker, &shell, &mut comp);
+    assert_eq!(unlocker.offered.len(), offered + 1);
 }
 
 /// A broker the lock cannot reach at all is not the same answer as a real
@@ -11383,7 +11458,7 @@ fn an_answer_to_an_offer_the_lock_is_not_waiting_on_unlocks_nothing() {
     let foreign = Tickets::default().issue();
     assert_eq!(
         lock.answer(
-            (foreign, Verdict::Verified),
+            UnlockAnswer::of(foreign, Verdict::Verified),
             LOCK_EVENT_NS,
             &shell,
             &mut comp
@@ -11463,7 +11538,7 @@ fn an_unengaged_lock_is_harmless() {
     );
     assert_eq!(
         lock.answer(
-            (Tickets::default().issue(), Verdict::Verified),
+            UnlockAnswer::of(Tickets::default().issue(), Verdict::Verified),
             LOCK_EVENT_NS,
             &shell,
             &mut comp
@@ -13783,6 +13858,84 @@ fn every_menu_chain_surface_frosts_what_is_behind_it() {
     }
 }
 
+/// The regression: an *Info* sheet opened before its bundle's picture was
+/// decoded kept the built-in glyph for good, and only a second opening drew
+/// the picture.
+#[test]
+fn an_information_sheet_opened_before_its_picture_landed_is_drawn_with_it() {
+    let landed = Rc::new(Cell::new(false));
+    let assets = identity_bundle(
+        MemoryAssets::default(),
+        EDITOR_BUNDLE,
+        "Editor",
+        &[EDITOR_TINT],
+    );
+    let (mut shell, mut comp) = headless_desktop();
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Gated::over(assets, &landed)));
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    let sheet = tairix_controls::AboutSheet::new(
+        "Editor",
+        "1.0",
+        None,
+        FactList::new(vec![Fact::new("Author", "TAIRiX")]),
+        IconKind::AppBundle,
+    );
+    let mut wire = app_bar(AppBarClick::Raise).menu;
+    wire.push(AppMenuRow::Info)
+        .expect("an information row fits");
+    let mut model = ChainModel::from_app_menu("Editor", &wire, Some(&sheet));
+    model.set_info_source(&tairix_controls::RowIcon::Bundle(String::from(
+        EDITOR_BUNDLE,
+    )));
+    let mut chain = MenuChain::new();
+    chain
+        .open(
+            ChainOwner::Backdrop,
+            model,
+            crate::windows::window_menu_placement(Rect::new(100, 100, 0, 0)),
+            &geom,
+        )
+        .expect("an attested model opens");
+    let info_row = chain.row_rect(0, 1, &geom).expect("the information row");
+    let at = centre(info_row);
+    chain.handle(&moved(at.x, at.y), at, &geom, 0);
+    let side = comp.scale().scale_length(tairix_controls::ABOUT_ICON_SIDE);
+    let pictured = |comp: &Compositor, chain: &MenuChain| {
+        let panel = chain
+            .surfaces()
+            .into_iter()
+            .find(|placed| placed.kind == SurfaceKind::Info)
+            .expect("the panel hangs");
+        let id = comp
+            .window_at(centre(panel.rect))
+            .expect("the panel's window");
+        comp.window(id)
+            .and_then(Window::content)
+            .expect("the panel is painted")
+            .pixels()
+            .iter()
+            .filter(|pixel| (pixel.r, pixel.g, pixel.b) == (EDITOR_TINT, EDITOR_TINT, EDITOR_TINT))
+            .count()
+    };
+
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    let before = pictured(&comp, &chain);
+    landed.set(true);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    let after = pictured(&comp, &chain);
+    let whole = usize::try_from(side * side).expect("small");
+    assert!(
+        after >= whole && before < whole / 2,
+        "the picture is drawn once it lands: {before} then {after} of {whole} pixels"
+    );
+}
+
 /// The model of a chain whose one row is chooseable *and* carries a
 /// quick-entry field, as the file manager's Rename row is.
 pub(crate) fn renaming_menu() -> ChainModel {
@@ -14356,7 +14509,7 @@ fn desktop_info_reports_compositor_state() {
     let scale_200 = Scale::from_percent(200).expect("200% is in range");
     assert!(comp.set_scale(scale_200));
 
-    let info = desktop_info(&comp).expect("info exists");
+    let info = desktop_info(&comp, None).expect("info exists");
     assert_eq!(info.scale_percent(), 200);
     assert_eq!(info.screen_width_px(), 1920);
     assert_eq!(info.screen_height_px(), 1080);
@@ -14379,6 +14532,7 @@ fn desktop_info_reports_compositor_state() {
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
+        authorise: None,
     };
 
     // What an application is actually handed, whole: the record is one
@@ -14439,6 +14593,7 @@ fn with_window_host<R>(
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
+        authorise: None,
     };
     body(&mut host)
 }
@@ -14774,6 +14929,7 @@ fn no_tool_window_opens_while_the_seat_is_held() {
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
+        authorise: None,
     };
     assert_eq!(host.tool_opened(3, &spec), Err(Errno::SeatBusy));
     assert_eq!(host.windows.wm_id(3), None);
@@ -14934,6 +15090,7 @@ fn no_application_menu_opens_under_a_carried_drag() {
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
         clipboard: &mut crate::clipboard::NoClipboard,
+        authorise: None,
     };
     let anchor = WindowRegion::new(0, 0, 10, 10).expect("an anchor");
     assert_eq!(host.menu_open_requested(1, 5, anchor, &rows), Ok(()));
@@ -16205,25 +16362,38 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
 /// as they paint, so they have to be offered it again when it lands — this is
 /// that contract, exercised through the real resolution path with the landing
 /// under the test's control instead of a thread's.
-#[test]
-fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
-    /// Refuses every decode until `landed` is set, exactly as the desk does
-    /// while its worker is still reading and rasterising.
-    struct Gated {
-        inner: InlineArtwork<ArtworkFileReader<MemoryAssets>, ArtworkSandbox<TaggedRasteriser>>,
-        landed: Rc<Cell<bool>>,
-    }
+/// Answers every decode as still in flight until `landed` is set, exactly as
+/// the desk does while its worker is still reading and rasterising.
+struct Gated {
+    inner: InlineArtwork<ArtworkFileReader<MemoryAssets>, ArtworkSandbox<TaggedRasteriser>>,
+    landed: Rc<Cell<bool>>,
+}
 
-    impl ArtworkResolver for Gated {
-        fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
-            if self.landed.get() {
-                self.inner.resolve(key, side)
-            } else {
-                Resolved::Pending
-            }
+impl Gated {
+    /// A resolver over `assets` whose decodes land once `landed` is set.
+    fn over(assets: MemoryAssets, landed: &Rc<Cell<bool>>) -> Self {
+        Self {
+            inner: InlineArtwork::new(
+                ArtworkFileReader(assets),
+                ArtworkSandbox(TaggedRasteriser::new()),
+            ),
+            landed: Rc::clone(landed),
         }
     }
+}
 
+impl ArtworkResolver for Gated {
+    fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
+        if self.landed.get() {
+            self.inner.resolve(key, side)
+        } else {
+            Resolved::Pending
+        }
+    }
+}
+
+#[test]
+fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
     let landed = Rc::new(Cell::new(false));
     let assets = identity_bundle(
         MemoryAssets::default(),
@@ -16233,13 +16403,7 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
     );
     let index = installed_index(&assets);
     let mut shell = shell();
-    shell.set_artwork_resolver(alloc::boxed::Box::new(Gated {
-        inner: InlineArtwork::new(
-            ArtworkFileReader(assets),
-            ArtworkSandbox(TaggedRasteriser::new()),
-        ),
-        landed: Rc::clone(&landed),
-    }));
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Gated::over(assets, &landed)));
     let mut comp = compositor();
     let mut windows = SessionWindows::new();
 
@@ -16496,531 +16660,626 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
     );
 }
 
-// --- The credential prompt for a command the session may not perform ----
+// --- The system authorisation prompt -------------------------------------
 
 use crate::elevate::{
-    ElevateAsk, ElevatePrompt, Elevator, PromptOutcome, NOT_STARTED_REASON, REFUSED_REASON,
+    Answer as ElevateAnswer, AuthorisePrompt, Done, ElevateAsk, Elevation, Elevator,
+    Listing as Authorisers, PromptOutcome, Refusal, Request,
 };
 use alloc::string::ToString;
 use tairix_abi::DATETIME_RUN_PATH;
+use tairix_greeter::AccountTile;
 
-/// One sentence explaining the command, as the session words it.
-const ELEVATE_PURPOSE: &str = "Setting the clock needs an account that may.";
-
-/// A broker stand-in recording every offer and answering a scripted verdict.
-///
-/// It records the plaintext deliberately: a test has to be able to prove the
-/// prompt offered exactly what was typed, once. Asking only records the
-/// offer, as the elevation worker would; [`Self::answer`] brings the scripted
-/// answer back.
-#[derive(Default)]
-struct ScriptedElevator {
-    outcome: Option<Result<i64, Errno>>,
-    offers: Vec<(String, String, String)>,
-    tickets: Tickets,
-    waiting: Vec<Ticket>,
+/// The set-date-and-time request, as the clock menu makes it.
+fn set_time() -> Request {
+    Request {
+        program: DATETIME_RUN_PATH.to_string(),
+        elevation: Elevation::Launch,
+        requester: "Date & Time".to_string(),
+        bundle: None,
+        purpose: crate::systask::SET_TIME_PURPOSE.to_string(),
+        window: None,
+    }
 }
 
-impl ScriptedElevator {
-    fn accepting(pid: i64) -> Self {
-        Self {
-            outcome: Some(Ok(pid)),
-            ..Self::default()
-        }
-    }
-
-    fn refusing(err: Errno) -> Self {
-        Self {
-            outcome: Some(Err(err)),
-            ..Self::default()
-        }
-    }
-
-    /// Bring the scripted answer back to `prompt` for the oldest offer still
-    /// waiting, or `None` when none is.
-    fn answer(
-        &mut self,
-        prompt: &mut ElevatePrompt,
-        shell: &mut DesktopShell,
-        comp: &mut Compositor,
-    ) -> Option<PromptOutcome> {
-        if self.waiting.is_empty() {
-            return None;
-        }
-        let ticket = self.waiting.remove(0);
-        let answer = self.outcome.unwrap_or(Err(Errno::PermissionDenied));
-        Some(prompt.answer((ticket, answer), shell, comp))
-    }
+/// A broker stand-in recording every question and leaving the answers to the
+/// test.
+///
+/// It records the plaintext deliberately: a test has to be able to prove the
+/// prompt offered exactly what was typed, once.
+#[derive(Default)]
+struct ScriptedElevator {
+    listings: Vec<(Ticket, String)>,
+    offers: Vec<(Ticket, String, String, Request)>,
+    tickets: Tickets,
 }
 
 impl Elevator for ScriptedElevator {
-    fn ask(&mut self, username: &str, password: &str, program: &str) -> Ticket {
+    fn authorisers(&mut self, program: &str) -> Ticket {
+        let ticket = self.tickets.issue();
+        self.listings.push((ticket, program.to_string()));
+        ticket
+    }
+
+    fn offer(&mut self, username: &str, password: &str, request: &Request) -> Ticket {
+        let ticket = self.tickets.issue();
         self.offers.push((
+            ticket,
             username.to_string(),
             password.to_string(),
-            program.to_string(),
+            request.clone(),
         ));
-        let ticket = self.tickets.issue();
-        self.waiting.push(ticket);
         ticket
     }
 }
 
-/// Press Enter at `prompt` and bring the broker's answer back, answering
-/// what the answer did — or the Enter, when it offered nothing.
-fn submit_prompt(
-    prompt: &mut ElevatePrompt,
+fn ada() -> AccountTile {
+    AccountTile::new("Ada Lovelace", "ada")
+}
+
+/// A prompt asked about `request` whose listing has come back as `listing`.
+fn listed(
+    request: Request,
+    listing: Authorisers,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) -> (AuthorisePrompt, ScriptedElevator) {
+    let mut prompt = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
+    assert!(prompt.ask(request, &mut elevator, shell, comp));
+    let (ticket, _) = elevator.listings[0].clone();
+    assert_eq!(
+        prompt.answer(
+            ElevateAnswer::Listing(ticket, Some(listing)),
+            0,
+            shell,
+            comp
+        ),
+        PromptOutcome::Pending
+    );
+    (prompt, elevator)
+}
+
+fn own_only() -> Authorisers {
+    Authorisers {
+        own: Some(ada()),
+        others: Vec::new(),
+    }
+}
+
+fn press_key(
+    prompt: &mut AuthorisePrompt,
+    key: Key,
     elevator: &mut ScriptedElevator,
     shell: &mut DesktopShell,
     comp: &mut Compositor,
 ) -> PromptOutcome {
-    let pressed = prompt.handle(
-        &key_press(Key::Named(NamedKey::Enter)),
-        0,
-        elevator,
-        shell,
-        comp,
-    );
-    elevator.answer(prompt, shell, comp).unwrap_or(pressed)
+    prompt.handle(&key_press(key), 0, elevator, shell, comp)
 }
 
-/// Type `text` into whichever field holds the keyboard.
-fn type_text(
-    prompt: &mut ElevatePrompt,
+fn type_into_prompt(
+    prompt: &mut AuthorisePrompt,
     text: &str,
-    elevator: &mut dyn Elevator,
+    elevator: &mut ScriptedElevator,
     shell: &mut DesktopShell,
     comp: &mut Compositor,
 ) {
     for ch in text.chars() {
-        prompt.handle(&key_press(Key::Char(ch)), 0, elevator, shell, comp);
+        let _ = press_key(prompt, Key::Char(ch), elevator, shell, comp);
     }
 }
 
-/// Fill both fields: the account name, `Tab`, then the password.
-fn fill_credentials(
-    prompt: &mut ElevatePrompt,
-    account: &str,
-    password: &str,
-    elevator: &mut dyn Elevator,
-    shell: &mut DesktopShell,
-    comp: &mut Compositor,
-) {
-    type_text(prompt, account, elevator, shell, comp);
-    prompt.handle(
-        &key_press(Key::Named(NamedKey::Tab)),
-        0,
-        elevator,
-        shell,
-        comp,
-    );
-    type_text(prompt, password, elevator, shell, comp);
-}
-
 /// The seat is held while any one of the lock, the trusted picker, the
-/// elevation prompt, a confirmation or a resolution trial is up, and only then.
+/// authorisation prompt, a confirmation or a resolution trial is up, and only
+/// then.
 #[test]
 fn the_seat_is_held_by_the_lock_the_picker_and_any_prompt() {
     let (mut shell, mut comp) = headless_desktop();
     let mut lock = ScreenLock::new();
     let mut picker = SessionPicker::new(TreeSource::fixture);
     let mut confirm = ConfirmPrompt::new();
-    let mut elevate = ElevatePrompt::new();
+    let mut elevate = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
     let mut resolution = crate::ResolutionPrompt::new();
-    assert!(!crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    let held = |lock: &ScreenLock,
+                picker: &SessionPicker<_, _>,
+                confirm: &ConfirmPrompt,
+                elevate: &AuthorisePrompt,
+                resolution: &crate::ResolutionPrompt| {
+        crate::seat_held(lock, picker, (confirm, elevate, resolution))
+    };
+    assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
     let trial = crate::Trial {
         request: String::from("resolution = native\n"),
         ticket: 1,
     };
     assert!(resolution.ask(trial, 0, &mut shell, &mut comp).is_ok());
-    assert!(crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
     assert!(resolution.abandon(&mut shell, &mut comp));
-    assert!(!crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
     assert!(confirm.ask(PowerAction::PowerOff, 0, &mut shell, &mut comp));
-    assert!(crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
     confirm.abandon(&mut shell, &mut comp);
-    assert!(!crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
-    assert!(elevate.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    assert!(crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
-    elevate.abandon(&mut shell, &mut comp);
-    assert!(!crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(elevate.ask(set_time(), &mut elevator, &shell, &mut comp));
+    assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
+    let _ = elevate.abandon(&mut comp);
+    assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
     picker
         .begin(7, &OPEN, &mut shell, &mut comp)
         .expect("accepted");
-    assert!(crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
     picker.abort_for(7, &mut shell, &mut comp);
-    assert!(!crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(!held(&lock, &picker, &confirm, &elevate, &resolution));
 
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
-    assert!(crate::seat_held(
-        &lock,
-        &picker,
-        (&confirm, &elevate, &resolution)
-    ));
+    assert!(held(&lock, &picker, &confirm, &elevate, &resolution));
 }
 
 #[test]
-fn the_credential_prompt_opens_once_and_refuses_a_second() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    let wm = prompt.wm_id().expect("a prompt window is showing");
-    let placed = comp.window(wm).expect("live").bounds();
-    assert_eq!(
-        placed.origin,
-        crate::shell::prompt_origin(comp.screen_rect(), (placed.width, placed.height))
+fn the_prompt_dims_the_whole_screen_and_stands_its_sheet_above_everything() {
+    let (shell, mut comp) = headless_desktop();
+    let _behind = comp.add_window(
+        Point::new(40, 40),
+        Surface::new(100, 100).expect("a small window"),
     );
-    assert_eq!(prompt.pending(), Some(DATETIME_RUN_PATH));
-
-    assert!(
-        !prompt.ask(
-            "/System/Applications/other.app/Run",
-            ELEVATE_PURPOSE,
-            &mut shell,
-            &mut comp
-        ),
-        "one prompt at a time"
+    let mut prompt = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
+    assert!(prompt.ask(set_time(), &mut elevator, &shell, &mut comp));
+    let scrim = prompt.scrim_id().expect("a scrim covers the screen");
+    let sheet = prompt.wm_id().expect("the sheet stands on it");
+    assert_eq!(window_rect(&comp, scrim), comp.screen_rect());
+    let placed = window_rect(&comp, sheet);
+    assert!(comp.screen_rect().contains(placed.origin));
+    // The scrim lets the live desktop show through, dimmed.
+    let dim = comp
+        .window(scrim)
+        .and_then(|window| window.content())
+        .and_then(|cover| cover.get(0, 0))
+        .expect("the scrim is painted");
+    assert!(dim.a > 0 && dim.a < u8::MAX, "{dim:?}");
+    // A window opened after the prompt cannot surface above it.
+    let late = comp.add_window(
+        Point::new(10, 10),
+        Surface::new(50, 50).expect("a small window"),
     );
-    assert_eq!(
-        prompt.pending(),
-        Some(DATETIME_RUN_PATH),
-        "the question already asked stands"
-    );
+    prompt.keep_topmost(&mut comp, None);
+    assert_eq!(comp.window_at(placed.origin), Some(sheet));
+    assert_eq!(comp.window_at(Point::new(12, 12)), Some(scrim));
+    // The screensaver still comes up over it.
+    prompt.keep_topmost(&mut comp, Some(late));
+    assert!(comp.stack_below(sheet, late));
 }
 
 #[test]
-fn escape_cancels_the_prompt_and_offers_nothing() {
+fn the_broker_is_asked_who_may_before_anything_is_asked_of_the_user() {
     let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    let wm = prompt.wm_id().expect("showing");
-    fill_credentials(
+    let mut prompt = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
+    assert!(prompt.ask(set_time(), &mut elevator, &shell, &mut comp));
+    assert_eq!(
+        elevator
+            .listings
+            .iter()
+            .map(|(_, program)| program.as_str())
+            .collect::<Vec<_>>(),
+        [DATETIME_RUN_PATH]
+    );
+    type_into_prompt(&mut prompt, "hunter2", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
         &mut prompt,
-        "root",
-        "hunter2",
+        Key::Named(NamedKey::Enter),
         &mut elevator,
         &mut shell,
         &mut comp,
     );
+    assert!(
+        elevator.offers.is_empty(),
+        "nothing is asked until the listing lands"
+    );
+    assert!(
+        !prompt.advance(0, &shell, &mut comp),
+        "and nothing is announced as asking"
+    );
+}
 
+#[test]
+fn an_account_that_may_is_asked_only_its_password_and_an_allowed_request_concludes() {
+    let (mut shell, mut comp) = headless_desktop();
+    let (mut prompt, mut elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    assert!(
+        prompt.advance(0, &shell, &mut comp),
+        "the question is announced once drawn"
+    );
+    assert!(!prompt.advance(0, &shell, &mut comp), "and only once");
+    type_into_prompt(&mut prompt, "byron", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    let (ticket, username, password, request) = elevator.offers[0].clone();
+    assert_eq!((username.as_str(), password.as_str()), ("ada", "byron"));
+    assert_eq!(request, set_time());
+    assert!(prompt
+        .sheet()
+        .is_some_and(tairix_greeter::AuthoriseSheet::is_checking));
     assert_eq!(
-        prompt.handle(
-            &key_press(Key::Named(NamedKey::Escape)),
+        prompt
+            .sheet()
+            .and_then(tairix_greeter::AuthoriseSheet::secret),
+        Some(""),
+        "the password handed over is erased"
+    );
+    let (scrim, sheet) = (prompt.scrim_id(), prompt.wm_id());
+    let outcome = prompt.answer(
+        ElevateAnswer::Offer(ticket, Ok(Done::Launched { pid: 4210 })),
+        0,
+        &shell,
+        &mut comp,
+    );
+    assert_eq!(
+        outcome,
+        PromptOutcome::Done {
+            request: set_time(),
+            done: Done::Launched { pid: 4210 },
+        }
+    );
+    assert!(!prompt.is_up());
+    for window in [scrim, sheet].into_iter().flatten() {
+        assert!(
+            comp.window(window).is_none(),
+            "everything it showed is gone"
+        );
+    }
+}
+
+#[test]
+fn a_refused_password_keeps_the_question_up_and_asks_again() {
+    let (mut shell, mut comp) = headless_desktop();
+    let (mut prompt, mut elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    type_into_prompt(&mut prompt, "wrong", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    let (ticket, ..) = elevator.offers[0].clone();
+    assert_eq!(
+        prompt.answer(
+            ElevateAnswer::Offer(ticket, Err(Refusal::Refused)),
             0,
+            &shell,
+            &mut comp
+        ),
+        PromptOutcome::Pending
+    );
+    let sheet = prompt.sheet().expect("still up");
+    assert!(!sheet.is_checking());
+    assert!(
+        sheet.stated().contains("not accepted"),
+        "{}",
+        sheet.stated()
+    );
+    type_into_prompt(&mut prompt, "right", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(elevator.offers.len(), 2, "asked again");
+}
+
+#[test]
+fn a_lockout_the_broker_reports_counts_down_on_the_sheet() {
+    let (mut shell, mut comp) = headless_desktop();
+    let (mut prompt, mut elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    type_into_prompt(&mut prompt, "wrong", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    let (ticket, ..) = elevator.offers[0].clone();
+    let wait = tairix_abi::time::Duration64::new(4, 500_000_000).expect("canonical");
+    let _ = prompt.answer(
+        ElevateAnswer::Offer(ticket, Err(Refusal::Cooling(wait))),
+        0,
+        &shell,
+        &mut comp,
+    );
+    let stated = prompt
+        .sheet()
+        .map(tairix_greeter::AuthoriseSheet::stated)
+        .unwrap_or_default();
+    assert!(stated.contains("5s"), "{stated}");
+    assert!(
+        prompt.park_deadline_ns(0, u64::MAX) <= 500_000_000,
+        "it wakes when the shown second turns over"
+    );
+    type_into_prompt(&mut prompt, "right", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(elevator.offers.len(), 1, "nothing is offered while it runs");
+    let _ = prompt.advance(5_000_000_000, &shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(elevator.offers.len(), 2, "and once it has run out, it is");
+}
+
+#[test]
+fn only_the_answer_the_prompt_waits_on_is_adopted() {
+    let (mut shell, mut comp) = headless_desktop();
+    let (mut prompt, _elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    let stale = Tickets::default().issue();
+    assert_eq!(
+        prompt.answer(
+            ElevateAnswer::Offer(stale, Ok(Done::Launched { pid: 1 })),
+            0,
+            &shell,
+            &mut comp
+        ),
+        PromptOutcome::Pending
+    );
+    assert!(
+        prompt.is_up(),
+        "an answer nothing asked for concludes nothing"
+    );
+}
+
+#[test]
+fn escape_cancels_and_takes_everything_down() {
+    let (mut shell, mut comp) = headless_desktop();
+    let (mut prompt, mut elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    let outcome = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Escape),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(
+        outcome,
+        PromptOutcome::Cancelled {
+            request: Some(set_time()),
+        }
+    );
+    assert!(!prompt.is_up());
+    assert!(elevator.offers.is_empty());
+}
+
+#[test]
+fn an_account_that_may_not_chooses_another_and_its_password_is_offered_for_it() {
+    let (mut shell, mut comp) = headless_desktop();
+    let listing = Authorisers {
+        own: None,
+        others: alloc::vec![AccountTile::new("Grace Hopper", "grace")],
+    };
+    let (mut prompt, mut elevator) = listed(set_time(), listing, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    type_into_prompt(&mut prompt, "cobol", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Enter),
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(elevator.offers[0].1, "grace");
+}
+
+#[test]
+fn a_listing_the_broker_could_not_give_says_so_and_only_closes() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
+    assert!(prompt.ask(set_time(), &mut elevator, &shell, &mut comp));
+    let (ticket, _) = elevator.listings[0].clone();
+    let _ = prompt.answer(ElevateAnswer::Listing(ticket, None), 0, &shell, &mut comp);
+    assert_eq!(
+        press_key(
+            &mut prompt,
+            Key::Named(NamedKey::Enter),
             &mut elevator,
             &mut shell,
             &mut comp
         ),
-        PromptOutcome::Cancelled
+        PromptOutcome::Cancelled {
+            request: Some(set_time()),
+        }
     );
-    assert_eq!(prompt.wm_id(), None, "the prompt window is closed");
-    assert!(comp.window(wm).is_none(), "and gone from the compositor");
+}
+
+#[test]
+fn the_secure_attention_key_shows_the_systems_notice_when_nothing_is_waiting() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
+    assert!(prompt.attend(0, &shell, &mut comp));
+    assert!(prompt.is_up(), "the system's own surface comes up");
+    assert!(prompt.pending().is_none(), "asking about nothing");
     assert!(
-        elevator.offers.is_empty(),
-        "a cancelled prompt never spends an attempt against the account"
+        !prompt.ask(set_time(), &mut elevator, &shell, &mut comp),
+        "one at a time"
     );
+    assert_eq!(
+        press_key(
+            &mut prompt,
+            Key::Named(NamedKey::Enter),
+            &mut elevator,
+            &mut shell,
+            &mut comp
+        ),
+        PromptOutcome::Cancelled { request: None }
+    );
+
+    // At a question already up it answers on that question, not with a second.
+    let (mut prompt, _elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    let sheet = prompt.wm_id();
+    assert!(prompt.attend(0, &shell, &mut comp));
+    assert_eq!(prompt.wm_id(), sheet);
+    assert!(prompt.pending().is_some());
 }
 
 #[test]
-fn enter_offers_exactly_what_was_typed_and_reports_the_started_pid() {
+fn abandoning_the_prompt_concludes_it_unanswered() {
     let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    fill_credentials(
-        &mut prompt,
-        "root",
-        "hunter2",
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-
+    let (mut prompt, _elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
     assert_eq!(
-        submit_prompt(&mut prompt, &mut elevator, &mut shell, &mut comp),
-        PromptOutcome::Started { pid: 4210 }
+        prompt.abandon(&mut comp),
+        PromptOutcome::Cancelled {
+            request: Some(set_time()),
+        }
     );
+    assert!(!prompt.is_up());
     assert_eq!(
-        elevator.offers.as_slice(),
-        &[(
-            "root".to_string(),
-            "hunter2".to_string(),
-            DATETIME_RUN_PATH.to_string()
-        )],
-        "offered once, verbatim, for the program the prompt named"
-    );
-    assert_eq!(prompt.wm_id(), None, "an accepted prompt is already down");
-}
-
-#[test]
-fn an_incomplete_prompt_is_never_offered() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-
-    // An account with no password: there is nothing to check, and asking
-    // would spend an audited attempt against the account.
-    type_text(&mut prompt, "root", &mut elevator, &mut shell, &mut comp);
-    assert_eq!(
-        submit_prompt(&mut prompt, &mut elevator, &mut shell, &mut comp),
-        PromptOutcome::Pending
-    );
-    assert!(elevator.offers.is_empty());
-    assert!(
-        prompt.wm_id().is_some(),
-        "the prompt stays up to be finished"
-    );
-
-    // The keyboard moved to the empty field, so typing continues there.
-    type_text(&mut prompt, "hunter2", &mut elevator, &mut shell, &mut comp);
-    assert_eq!(
-        submit_prompt(&mut prompt, &mut elevator, &mut shell, &mut comp),
-        PromptOutcome::Started { pid: 4210 }
-    );
-    assert_eq!(elevator.offers.len(), 1);
-}
-
-#[test]
-fn a_refusal_keeps_the_prompt_up_states_it_and_clears_the_password() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::refusing(Errno::PermissionDenied);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    fill_credentials(
-        &mut prompt,
-        "root",
-        "wrong",
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-
-    assert_eq!(
-        submit_prompt(&mut prompt, &mut elevator, &mut shell, &mut comp),
+        prompt.abandon(&mut comp),
         PromptOutcome::Pending,
-        "a refusal is not a conclusion"
-    );
-    assert!(prompt.wm_id().is_some(), "the prompt is still up to retry");
-    assert_eq!(prompt.stated_reason(), Some(REFUSED_REASON));
-    assert_eq!(
-        prompt.secret_len(),
-        0,
-        "the refused password was cleared for another attempt"
-    );
-    assert_eq!(
-        prompt.account_text(),
-        Some("root"),
-        "the account name is not the secret and is kept"
-    );
-
-    // The retry types only a password, into the field the refusal focused.
-    type_text(&mut prompt, "hunter2", &mut elevator, &mut shell, &mut comp);
-    prompt.handle(
-        &key_press(Key::Named(NamedKey::Enter)),
-        0,
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-    assert_eq!(
-        elevator.offers,
-        vec![
-            (
-                "root".to_string(),
-                "wrong".to_string(),
-                DATETIME_RUN_PATH.to_string()
-            ),
-            (
-                "root".to_string(),
-                "hunter2".to_string(),
-                DATETIME_RUN_PATH.to_string()
-            ),
-        ],
-        "the retry offers the new password under the same account"
+        "nothing left to abandon"
     );
 }
 
-#[test]
-fn a_launch_failure_reads_differently_from_a_refused_password() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::refusing(Errno::NotFound);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    fill_credentials(
-        &mut prompt,
-        "root",
-        "hunter2",
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-
-    assert_eq!(
-        submit_prompt(&mut prompt, &mut elevator, &mut shell, &mut comp),
-        PromptOutcome::Pending
-    );
-    assert_eq!(
-        prompt.stated_reason(),
-        Some(NOT_STARTED_REASON),
-        "an accepted account is never blamed on the password"
-    );
+/// The system task Settings asks for its window 12, as the bridge maps it.
+fn settings_task(task: &tairix_abi::window_ipc::SystemTask) -> Request {
+    crate::systask::request_for(task, 12).expect("a well-formed task")
 }
 
+/// What a request asked for an application window ends with is owed to that
+/// window exactly once, a capture with what it printed.
 #[test]
-fn abandoning_the_prompt_offers_nothing_and_closes_it() {
+fn a_task_asked_for_a_window_is_owed_to_it_once_with_its_capture() {
+    use tairix_abi::window_ipc::{AuthorisedOutcome, SystemTask};
     let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    let wm = prompt.wm_id().expect("showing");
-    fill_credentials(
+    let request = settings_task(&SystemTask::ShowAccounts);
+    let (mut prompt, mut elevator) = listed(request.clone(), own_only(), &mut shell, &mut comp);
+    assert!(prompt.take_concluded().is_empty(), "nothing has ended yet");
+    type_into_prompt(&mut prompt, "byron", &mut elevator, &mut shell, &mut comp);
+    let _ = press_key(
         &mut prompt,
-        "root",
-        "hunter2",
+        Key::Named(NamedKey::Enter),
         &mut elevator,
         &mut shell,
         &mut comp,
     );
-
-    prompt.abandon(&mut shell, &mut comp);
-    assert_eq!(prompt.wm_id(), None);
-    assert!(comp.window(wm).is_none());
-    assert!(elevator.offers.is_empty());
-}
-
-/// While the broker checks an offer the prompt takes nothing — not even the
-/// cancel, which could not recall a launch already under way — and its
-/// answer decides.
-#[test]
-fn a_prompt_being_checked_takes_no_input_until_the_broker_answers() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    fill_credentials(
-        &mut prompt,
-        "root",
-        "hunter2",
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-    prompt.handle(
-        &key_press(Key::Named(NamedKey::Enter)),
+    let (ticket, ..) = elevator.offers[0].clone();
+    let printed = b"ada 1000\n".to_vec();
+    let outcome = prompt.answer(
+        ElevateAnswer::Offer(
+            ticket,
+            Ok(Done::Captured {
+                exit_code: 0,
+                output: printed.clone(),
+            }),
+        ),
         0,
+        &shell,
+        &mut comp,
+    );
+    assert!(matches!(outcome, PromptOutcome::Done { .. }));
+    assert_eq!(
+        prompt.take_concluded(),
+        [crate::elevate::Concluded {
+            window_id: 12,
+            outcome: AuthorisedOutcome::Captured {
+                exit_code: 0,
+                len: u32::try_from(printed.len()).expect("short"),
+            },
+            output: printed,
+        }]
+    );
+    assert!(prompt.take_concluded().is_empty(), "once");
+}
+
+/// A task's prompt the user cancels, or the session abandons, is owed to its
+/// window as nothing having run; the desktop's own requests owe nothing.
+#[test]
+fn a_cancelled_or_abandoned_task_is_owed_as_declined() {
+    use tairix_abi::window_ipc::{AuthorisedOutcome, SystemTask};
+    let (mut shell, mut comp) = headless_desktop();
+    let declined = [crate::elevate::Concluded {
+        window_id: 12,
+        outcome: AuthorisedOutcome::Declined,
+        output: Vec::new(),
+    }];
+
+    let request = settings_task(&SystemTask::SetClock);
+    let (mut prompt, mut elevator) = listed(request.clone(), own_only(), &mut shell, &mut comp);
+    let _ = press_key(
+        &mut prompt,
+        Key::Named(NamedKey::Escape),
         &mut elevator,
         &mut shell,
         &mut comp,
     );
-    assert_eq!(prompt.secret_len(), 0, "the password handed over is erased");
+    assert_eq!(prompt.take_concluded(), declined);
 
-    for event in [
-        key_press(Key::Named(NamedKey::Escape)),
-        key_press(Key::Named(NamedKey::Enter)),
-        key_press(Key::Char('x')),
-    ] {
-        assert_eq!(
-            prompt.handle(&event, 0, &mut elevator, &mut shell, &mut comp),
-            PromptOutcome::Pending
+    let (mut prompt, _elevator) = listed(request, own_only(), &mut shell, &mut comp);
+    let _ = prompt.abandon(&mut comp);
+    assert_eq!(prompt.take_concluded(), declined);
+
+    let (mut prompt, _elevator) = listed(set_time(), own_only(), &mut shell, &mut comp);
+    let _ = prompt.abandon(&mut comp);
+    assert!(prompt.take_concluded().is_empty());
+}
+
+/// A window that closes takes the question it asked down and is owed nothing;
+/// another window's closing leaves the question up.
+#[test]
+fn a_closing_window_takes_its_own_question_down() {
+    use tairix_abi::window_ipc::SystemTask;
+    let (mut shell, mut comp) = headless_desktop();
+    let request = settings_task(&SystemTask::ShowAddressing);
+    let (mut prompt, _elevator) = listed(request, own_only(), &mut shell, &mut comp);
+    let (scrim, sheet) = (prompt.scrim_id(), prompt.wm_id());
+
+    prompt.abort_for(13, &mut comp);
+    assert!(prompt.is_up(), "another window's closing is not this one's");
+    prompt.abort_for(12, &mut comp);
+    assert!(!prompt.is_up());
+    for window in [scrim, sheet].into_iter().flatten() {
+        assert!(
+            comp.window(window).is_none(),
+            "everything it showed is gone"
         );
     }
-    assert!(prompt.wm_id().is_some(), "still up, still checking");
-    assert_eq!(elevator.offers.len(), 1, "offered once");
-    assert_eq!(
-        elevator.answer(&mut prompt, &mut shell, &mut comp),
-        Some(PromptOutcome::Started { pid: 4210 })
-    );
-}
-
-/// An answer to an offer a prompt since abandoned made changes nothing about
-/// the prompt showing now.
-#[test]
-fn an_answer_to_an_abandoned_prompts_offer_changes_nothing() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    fill_credentials(
-        &mut prompt,
-        "root",
-        "hunter2",
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-    prompt.handle(
-        &key_press(Key::Named(NamedKey::Enter)),
-        0,
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-    prompt.abandon(&mut shell, &mut comp);
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-
-    assert_eq!(
-        elevator.answer(&mut prompt, &mut shell, &mut comp),
-        Some(PromptOutcome::Pending)
-    );
-    assert!(prompt.wm_id().is_some(), "the new prompt still asks");
+    assert!(prompt.take_concluded().is_empty(), "nobody is left to tell");
 }
 
 /// The question carried to the broker holds the password until it is erased,
 /// and nothing of it after.
 #[test]
-fn an_elevation_question_holds_its_password_until_it_is_erased() {
-    let mut ask = ElevateAsk::new(
-        Tickets::default().issue(),
-        "root",
-        "hunter2",
-        DATETIME_RUN_PATH,
-    )
-    .expect("a small password fits");
+fn an_offer_on_its_way_holds_its_password_until_it_is_erased() {
+    let mut ask = ElevateAsk::offer(Tickets::default().issue(), "ada", "hunter2", &set_time())
+        .expect("a small password fits");
     assert_eq!(ask.password(), Some("hunter2"));
-    assert_eq!((ask.username(), ask.program()), ("root", DATETIME_RUN_PATH));
     ask.erase();
     assert!(ask
         .password()
@@ -17029,10 +17288,9 @@ fn an_elevation_question_holds_its_password_until_it_is_erased() {
 
 #[test]
 fn an_idle_prompt_ignores_every_event() {
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
-
+    let (shell, mut comp) = headless_desktop();
+    let mut prompt = AuthorisePrompt::new();
+    let mut elevator = ScriptedElevator::default();
     for event in [
         key_press(Key::Named(NamedKey::Enter)),
         key_press(Key::Named(NamedKey::Escape)),
@@ -17040,68 +17298,14 @@ fn an_idle_prompt_ignores_every_event() {
         PRIMARY_PRESS,
     ] {
         assert_eq!(
-            prompt.handle(&event, 0, &mut elevator, &mut shell, &mut comp),
+            prompt.handle(&event, 0, &mut elevator, &shell, &mut comp),
             PromptOutcome::Pending
         );
     }
-    assert!(elevator.offers.is_empty());
-}
-
-/// The password field says input is arriving the way a text-mode prompt
-/// does, and the session schedules the marker's frames like any animation.
-#[test]
-fn the_prompts_password_marker_moves_on_the_sessions_frame_schedule() {
-    use tairix_vt::secret::SECRET_TICK_NS;
-
-    let (mut shell, mut comp) = headless_desktop();
-    let mut prompt = ElevatePrompt::new();
-    let mut elevator = ScriptedElevator::accepting(4210);
+    assert!(elevator.offers.is_empty() && elevator.listings.is_empty());
     assert_eq!(
         prompt.park_deadline_ns(0, u64::MAX),
         u64::MAX,
-        "nothing is up"
+        "and arms nothing"
     );
-    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
-    let wm = prompt.wm_id().expect("showing");
-    type_text(&mut prompt, "root", &mut elevator, &mut shell, &mut comp);
-    prompt.handle(
-        &key_press(Key::Named(NamedKey::Tab)),
-        0,
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-    assert_eq!(
-        prompt.park_deadline_ns(0, u64::MAX),
-        u64::MAX,
-        "no secret, no marker"
-    );
-    prompt.handle(
-        &key_press(Key::Char('p')),
-        50,
-        &mut elevator,
-        &mut shell,
-        &mut comp,
-    );
-    assert_eq!(
-        prompt.park_deadline_ns(50, u64::MAX),
-        SECRET_TICK_NS,
-        "the next frame is one cadence after the keystroke"
-    );
-
-    let pixels = |comp: &Compositor| {
-        comp.window(wm)
-            .and_then(|window| window.content())
-            .expect("the prompt is painted")
-            .pixels()
-            .to_vec()
-    };
-    let before = pixels(&comp);
-    prompt.advance(50 + SECRET_TICK_NS, &mut shell, &mut comp);
-    let after = pixels(&comp);
-    assert_ne!(
-        before, after,
-        "the prompt was repainted with the dots moved"
-    );
-    assert!(elevator.offers.is_empty(), "moving the dots offers nothing");
 }

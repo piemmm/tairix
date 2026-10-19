@@ -22,6 +22,56 @@ use crate::bundle::{BundleIdentity, BundleStore, Clock, LoadedApp, ResolvedLibra
 use crate::error::AppError;
 use crate::events;
 
+/// Why a manifest's capability request could not be read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RequestRefused {
+    /// The body is shorter than the header says it is.
+    Truncated,
+    /// The header's counts overflow a body length.
+    Overflow(Errno),
+    /// An identifier names no capability.
+    Invalid(Errno),
+}
+
+impl RequestRefused {
+    /// The error a caller reports it as.
+    #[must_use]
+    pub const fn errno(self) -> Errno {
+        match self {
+            Self::Truncated => Errno::BufferTooSmall,
+            Self::Overflow(err) | Self::Invalid(err) => err,
+        }
+    }
+}
+
+/// The capabilities the manifest `bytes`, headed by `header`, requests: the
+/// one reading of a manifest's request, shared by the load gate and by an
+/// authority deciding who may allow a program.
+///
+/// # Errors
+///
+/// [`RequestRefused`] naming what made the body unreadable.
+pub fn requested_capabilities(
+    bytes: &[u8],
+    header: &AppInfoHeader,
+) -> Result<CapabilitySet, RequestRefused> {
+    let body = bytes
+        .get(AppInfoHeader::WIRE_LEN..)
+        .ok_or(RequestRefused::Truncated)?;
+    let expected = header.body_len().map_err(RequestRefused::Overflow)?;
+    if body.len() < expected {
+        return Err(RequestRefused::Truncated);
+    }
+    let mut scratch = [CapabilityId::FS_MOUNT; APPINFO_MAX_CAPABILITIES as usize];
+    let decoded = decode_capability_ids(body, usize::from(header.capability_count), &mut scratch)
+        .map_err(RequestRefused::Invalid)?;
+    let mut set = CapabilitySet::empty();
+    for cap in &scratch[..decoded] {
+        set.insert(*cap);
+    }
+    Ok(set)
+}
+
 /// The developer identity a manifest's publisher key digests to.
 ///
 /// One definition, because it is what per-app stored state is *owned by*: two
@@ -288,56 +338,23 @@ impl<'a> AppLoader<'a> {
         Ok(resolved)
     }
 
-    /// Decode the manifest's capability-request body into a [`CapabilitySet`].
+    /// Decode the manifest's capability-request body into a [`CapabilitySet`],
+    /// auditing what made it unreadable.
     fn requested_capabilities(
         &self,
         bytes: &[u8],
         header: &AppInfoHeader,
         bundle: &str,
     ) -> Result<CapabilitySet, AppError> {
-        let count = usize::from(header.capability_count);
-        let body = bytes.get(AppInfoHeader::WIRE_LEN..).ok_or_else(|| {
-            self.audit(
-                events::APP_MANIFEST_INVALID,
-                Level::Warn,
-                bundle,
-                "manifest body truncated",
-            );
-            AppError::Manifest(Errno::BufferTooSmall)
-        })?;
-        let expected = header.body_len().map_err(|e| {
-            self.audit(
-                events::APP_MANIFEST_INVALID,
-                Level::Warn,
-                bundle,
-                "manifest body length overflow",
-            );
-            AppError::Manifest(e)
-        })?;
-        if body.len() < expected {
-            self.audit(
-                events::APP_MANIFEST_INVALID,
-                Level::Warn,
-                bundle,
-                "manifest body truncated",
-            );
-            return Err(AppError::Manifest(Errno::BufferTooSmall));
-        }
-        let mut scratch = [CapabilityId::FS_MOUNT; APPINFO_MAX_CAPABILITIES as usize];
-        let decoded = decode_capability_ids(body, count, &mut scratch).map_err(|e| {
-            self.audit(
-                events::APP_MANIFEST_INVALID,
-                Level::Warn,
-                bundle,
-                "capability body invalid",
-            );
-            AppError::Manifest(e)
-        })?;
-        let mut set = CapabilitySet::empty();
-        for cap in &scratch[..decoded] {
-            set.insert(*cap);
-        }
-        Ok(set)
+        requested_capabilities(bytes, header).map_err(|refused| {
+            let why = match refused {
+                RequestRefused::Truncated => "manifest body truncated",
+                RequestRefused::Overflow(_) => "manifest body length overflow",
+                RequestRefused::Invalid(_) => "capability body invalid",
+            };
+            self.audit(events::APP_MANIFEST_INVALID, Level::Warn, bundle, why);
+            AppError::Manifest(refused.errno())
+        })
     }
 
     /// Verify the manifest's Ed25519 signature over the whole manifest
@@ -1182,6 +1199,23 @@ mod tests {
         assert_eq!(
             loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Manifest(Errno::BufferTooSmall))
+        );
+    }
+
+    /// The one reading of a manifest's request, as an authority deciding who
+    /// may allow a program reads it: exactly the identifiers the body lists,
+    /// and a short body refused rather than read as fewer.
+    #[test]
+    fn a_manifest_requests_exactly_the_capabilities_its_body_lists() {
+        let caps = [CapabilityId::TIME_SET, CapabilityId::SHM];
+        let manifest = build_manifest(&caps, [0; SYSCALL_TABLE_HASH_LEN], [0; 32]);
+        let header = AppInfoHeader::from_bytes(&manifest).expect("a header");
+        let requested = super::requested_capabilities(&manifest, &header).expect("a request");
+        assert!(caps.iter().all(|cap| requested.contains(*cap)));
+        assert!(!requested.contains(CapabilityId::FS_MOUNT));
+        assert_eq!(
+            super::requested_capabilities(&manifest[..AppInfoHeader::WIRE_LEN], &header),
+            Err(super::RequestRefused::Truncated)
         );
     }
 

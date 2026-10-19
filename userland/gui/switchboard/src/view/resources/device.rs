@@ -267,6 +267,18 @@ pub enum Trace {
         /// Outbound readings, oldest first.
         out: Vec<u16>,
     },
+    /// A reading and the part of it a second counts, in one direction on one
+    /// scale: the part drawn within the whole.
+    Within {
+        /// What the whole reads as.
+        whole: SignalRole,
+        /// What the part reads as.
+        part: SignalRole,
+        /// The whole's readings, oldest first.
+        totals: Vec<u16>,
+        /// The part's readings, oldest first.
+        parts: Vec<u16>,
+    },
 }
 
 impl Trace {
@@ -297,6 +309,7 @@ impl Trace {
             Self::Absent => true,
             Self::Single { samples, .. } => samples.is_empty(),
             Self::Duplex { into, out, .. } => into.is_empty() && out.is_empty(),
+            Self::Within { totals, parts, .. } => totals.is_empty() && parts.is_empty(),
         }
     }
 
@@ -331,6 +344,16 @@ impl Trace {
                 Chart::new(*inbound)
                     .with_samples(into.iter().copied())
                     .with_opposing(*outbound, out.iter().copied()),
+            ),
+            Self::Within {
+                whole,
+                part,
+                totals,
+                parts,
+            } => Some(
+                Chart::new(*whole)
+                    .with_samples(totals.iter().copied())
+                    .with_within(*part, parts.iter().copied()),
             ),
         }
     }

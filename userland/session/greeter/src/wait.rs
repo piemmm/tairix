@@ -5,10 +5,9 @@
 //! and a lockout counting down repaint, and a screen left untouched long
 //! enough puts its display to sleep; this module times those three.
 
-use alloc::string::{String, ToString};
-
 use tairix_abi::time::Duration64;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
+use tairix_greeter::Cooldown;
 use tairix_theme::Timeline;
 
 /// Nanoseconds in one second.
@@ -20,55 +19,6 @@ const MILLIS_PER_SEC: u64 = 1_000;
 /// How long the login screen waits without input before it puts its display
 /// to sleep.
 pub const ENERGY_SAVING_AFTER_NS: u64 = 30 * 60 * NANOS_PER_SEC;
-
-/// The authority's lockout on one account, counted down against the monotonic
-/// clock.
-///
-/// The authority meters each login name on its own, so a lockout belongs to
-/// the account it was reported for: it is shown only while the surface asks
-/// about that account, and a person who picks another is never held behind
-/// the first one's wait. The surface presents a remaining span and reads no
-/// clock of its own, so the countdown lives here; being monotonic, a
-/// wall-clock correction cannot shorten or lengthen it.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Cooldown {
-    /// When the lockout ends, and the login name it holds back.
-    lockout: Option<(u64, String)>,
-}
-
-impl Cooldown {
-    /// Record the authority's answer about `account`: a lockout of
-    /// `retry_after` starting now, or — for a zero or negative span — none.
-    ///
-    /// A lockout replaces whichever stood before it. An answer with none
-    /// clears only that account's own, so a refusal for one account leaves
-    /// another's countdown standing.
-    pub fn start(&mut self, now_ns: u64, retry_after: Duration64, account: &str) {
-        let span = retry_after.saturating_total_nanos();
-        if span > 0 {
-            self.lockout = Some((now_ns.saturating_add(span), account.to_string()));
-        } else if self
-            .lockout
-            .as_ref()
-            .is_some_and(|(_, held)| held == account)
-        {
-            self.lockout = None;
-        }
-    }
-
-    /// How much of the lockout on `asking` — the account the surface is
-    /// asking about, if any — is left: zero once it has run out, and for
-    /// every other account.
-    #[must_use]
-    pub fn remaining(&self, now_ns: u64, asking: Option<&str>) -> Duration64 {
-        match &self.lockout {
-            Some((until, held)) if asking == Some(held.as_str()) => {
-                Duration64::from_nanos(until.saturating_sub(now_ns))
-            }
-            _ => Duration64::ZERO,
-        }
-    }
-}
 
 /// When the login screen last saw input, and so when it puts its display to
 /// sleep.
@@ -115,9 +65,7 @@ impl Idle {
 /// changes until an input event arrives.
 #[must_use]
 pub fn park_timeout(clock: Option<u64>, cooldown_remaining: Duration64) -> u64 {
-    let remaining = cooldown_remaining.saturating_total_nanos();
-    let tick = (remaining > 0).then(|| remaining.min(NANOS_PER_SEC));
-    match (clock, tick) {
+    match (clock, Cooldown::tick_of(cooldown_remaining)) {
         (Some(clock), Some(tick)) => clock.min(tick),
         (Some(only), None) | (None, Some(only)) => only,
         (None, None) => WAITSET_TIMEOUT_NONE,

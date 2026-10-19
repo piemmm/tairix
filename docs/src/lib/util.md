@@ -233,7 +233,12 @@ and panic-free throughout.
   selectors, tags). TextEdit draws them as `[U+202E]` tokens, `lib/net`'s
   `DisplayLabel` escapes them in what a peer names itself, and `lib/devids`
   refuses a database that holds one, so text from elsewhere is escaped by one
-  rule.
+  rule. `fold` and `folded` are the letters a reader looks a name up by — a
+  Latin-1 letter folded to the letter it is written on, every letter in lower
+  case — and `reader_order` the order a list of names is read in: the folded
+  letters, then the bytes, so distinct names never compare equal. The place
+  chooser matches by the fold, and `lib/tz`'s place listing and Settings' region
+  list sort by the order.
 
 ## How to grow the crate
 

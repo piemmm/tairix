@@ -56,6 +56,13 @@ use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::time::Duration64;
 use crate::Errno;
 
+/// The signed bundle identifier of the desktop session the authority starts.
+///
+/// What the kernel attests for that session, so a principal the session must
+/// recognise — the authority answering it alone, a reader of the settings it
+/// publishes — compares this together with the publisher it runs under.
+pub const DESKTOP_BUNDLE: &str = "os.tairix.desktop";
+
 /// Reserved well-known call-endpoint id of the session authority's
 /// `session-v1` service (`"SE"` ASCII hex-spelled prefix, the sibling of
 /// [`crate::switchboard_ipc::SWITCHBOARD_ENDPOINT`] and

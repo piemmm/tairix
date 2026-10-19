@@ -3,7 +3,7 @@
 //! the shared `static-net-root` whole-disk image — whose always-readable
 //! `/System` volume carries the **kernel-signed virtio-net driver bundle**
 //! (cross-compiled for riscv64) and a planted
-//! `/System/Settings/Network/network.conf` — with a `virtio-net-device`
+//! `/System/Defaults/Network/network.conf` — with a `virtio-net-device`
 //! attached on the `virtio,mmio` transport and the harness-side
 //! **static-addressing** link peer on the QEMU `dgram` netdev, and prove the
 //! `<iface>.match.node` binding **and** static addressing end to end over the

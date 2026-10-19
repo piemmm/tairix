@@ -144,10 +144,10 @@ pub fn deliver_network_settings(
 /// The device manager's read of the per-interface `network.conf`
 /// configuration (`plans/NETWORK.md` §6.1).
 ///
-/// The production implementation reads
-/// `/System/Settings/Network/network.conf` and maps it through the one
-/// shared `lib/netconfig` projection ([`InterfaceConfigPlan::of`]); it is a
-/// seam so the delivery policy is host-testable against a scripted double.
+/// The production implementation reads `network.conf` from the first of its
+/// layers that exists and maps it through the one shared `lib/netconfig`
+/// projection ([`InterfaceConfigPlan::of`]); it is a seam so the delivery
+/// policy is host-testable against a scripted double.
 pub trait NetworkInterfaceConfigSource {
     /// Load the current per-interface configuration plan.
     ///

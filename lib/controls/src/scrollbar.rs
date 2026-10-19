@@ -217,22 +217,25 @@ impl BarLayout {
 /// the thumb reaches the pointer and no further.
 ///
 /// Equal bars draw the same pixels, so a host may use `==` as its repaint
-/// gate. The visible interaction state compares: the hovered part lights its
-/// end chevron, and `dragging`/`held` brighten the thumb and the held end. The
-/// raw pointer coordinate, the drag anchor and the repeat cadence do not —
-/// they are input bookkeeping no render path reads, so a sample that lands on
-/// a new coordinate without changing which part is under it draws the same
-/// pixels and must not force the host to repaint.
+/// gate. The visible interaction state compares: `dragging`/`held` brighten
+/// the thumb, and an end control is lit while its press is live — held, with
+/// the pointer on it — never merely because the pointer is over it. The part
+/// under the pointer, the raw pointer coordinate, the drag anchor and the
+/// repeat cadence do not: they are input bookkeeping no render path reads, so
+/// crossing between parts with nothing held draws the same pixels and must not
+/// force the host to repaint.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ScrollBar {
     orientation: ScrollOrientation,
+    /// Whether the channel's long sides carry their edge.
+    edged: bool,
     model: ScrollModel,
     state: ControlState,
     /// The part the pointer currently sits over, resolved when the pointer
-    /// moves and after every step that moved the thumb under it — drawn (an
-    /// end button brightens under the pointer), unlike the raw coordinate
-    /// below.
-    hover: ScrollPart,
+    /// moves and after every step that moved the thumb under it.
+    hover: RenderInvariant<ScrollPart>,
+    /// The end control drawn lit: the held one, while the pointer is on it.
+    lit: Option<ScrollPart>,
     /// The last pointer position, classified on the next press or re-mapped on
     /// the next drag move — hit-testing input, never a drawn property.
     pointer: RenderInvariant<Point>,
@@ -253,9 +256,11 @@ impl ScrollBar {
     pub fn new(orientation: ScrollOrientation, model: ScrollModel) -> Self {
         Self {
             orientation,
+            edged: true,
             model,
             state: ControlState::idle(),
-            hover: ScrollPart::Outside,
+            hover: RenderInvariant::new(ScrollPart::Outside),
+            lit: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
             dragging: false,
             anchor: RenderInvariant::new(0),
@@ -263,6 +268,15 @@ impl ScrollBar {
             cadence: RenderInvariant::new(HoldRepeat::default()),
             wheel_carry: RenderInvariant::new(0),
         }
+    }
+
+    /// This bar with no edge along its channel: one embedded in a plate whose
+    /// own rim already bounds it, where an edge standing mid-plate with open
+    /// ends reads as a stray line.
+    #[must_use]
+    pub const fn without_edges(mut self) -> Self {
+        self.edged = false;
+        self
     }
 
     /// The bar's orientation.
@@ -419,7 +433,7 @@ impl ScrollBar {
     /// it pressed, and that part would move the offset.
     fn stepping(&self) -> bool {
         self.held.is_some_and(|held| {
-            held == self.hover && self.state.is_actionable() && self.moves(held)
+            held == *self.hover && self.state.is_actionable() && self.moves(held)
         })
     }
 
@@ -427,13 +441,18 @@ impl ScrollBar {
     /// a step moved the thumb beneath it.
     fn rehover(&mut self, bounds: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
         if let Some(layout) = self.layout(bounds, scale, theme) {
-            damage::set(
-                &mut self.hover,
-                layout.part_at(*self.pointer),
-                bounds,
-                damage,
-            );
+            self.hover_on(layout.part_at(*self.pointer), bounds, damage);
         }
+    }
+
+    /// Take `part` as the one under the pointer, relighting the end control
+    /// whose press that makes live or idle.
+    fn hover_on(&mut self, part: ScrollPart, bounds: Rect, damage: &mut Region) {
+        *self.hover = part;
+        let live = self.held.filter(|held| {
+            *held == part && matches!(held, ScrollPart::Decrement | ScrollPart::Increment)
+        });
+        damage::set(&mut self.lit, live, bounds, damage);
     }
 
     /// Apply `change` to the held model, returning the requested offset when it
@@ -457,6 +476,7 @@ impl ScrollBar {
     fn end_press(&mut self, pointer: PointerState, bounds: Rect, damage: &mut Region) {
         damage::set(&mut self.dragging, false, bounds, damage);
         damage::set(&mut self.held, None, bounds, damage);
+        damage::set(&mut self.lit, None, bounds, damage);
         damage::set(&mut self.state.pointer, pointer, bounds, damage);
         self.cadence.release();
     }
@@ -471,10 +491,9 @@ impl ScrollBar {
     /// pending, or failed-closed bar ignores presses (fail closed), and a
     /// release or a cancel always ends the press, whatever became of the bar.
     /// The bar reports `bounds` into `damage` when the event changed how it
-    /// draws — a moved thumb, a part hovered or released, the awake look
+    /// draws — a moved thumb, an end control lit or put out, the awake look
     /// arriving or leaving. It is the whole bar because that look is the whole
-    /// bar: brightening for a hover is not confined to the part under the
-    /// pointer.
+    /// bar: the thumb brightens wherever on the bar the pointer is.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -500,7 +519,7 @@ impl ScrollBar {
             }
             InputEvent::PointerCancelled => {
                 self.end_press(PointerState::None, bounds, damage);
-                damage::set(&mut self.hover, ScrollPart::Outside, bounds, damage);
+                *self.hover = ScrollPart::Outside;
                 return None;
             }
             _ => {}
@@ -514,7 +533,7 @@ impl ScrollBar {
         match event {
             InputEvent::PointerMoved { .. } => {
                 let part = layout.part_at(*self.pointer);
-                damage::set(&mut self.hover, part, bounds, damage);
+                self.hover_on(part, bounds, damage);
                 if self.dragging {
                     let offset = layout
                         .geometry
@@ -536,8 +555,8 @@ impl ScrollBar {
                     if !self.moves(part) {
                         return None;
                     }
-                    damage::set(&mut self.hover, part, bounds, damage);
                     damage::set(&mut self.held, Some(part), bounds, damage);
+                    self.hover_on(part, bounds, damage);
                     damage::set(
                         &mut self.state.pointer,
                         PointerState::Pressed,
@@ -713,13 +732,14 @@ impl ScrollBar {
         let channel = ground_fill(theme, palette.scroll_track, ChromeLayer::Inlay);
         surface.fill_rect(bx, by, bw, bh, Color::from(channel));
         let edge = Color::from(palette.frame);
-        match self.orientation {
-            ScrollOrientation::Vertical => {
+        match (self.edged, self.orientation) {
+            (false, _) => {}
+            (true, ScrollOrientation::Vertical) => {
                 let line = plate_border(theme, scale).min(bw / 2);
                 surface.fill_rect(bx, by, line, bh, edge);
                 surface.fill_rect(bx + bw - line, by, line, bh, edge);
             }
-            ScrollOrientation::Horizontal => {
+            (true, ScrollOrientation::Horizontal) => {
                 let line = plate_border(theme, scale).min(bh / 2);
                 surface.fill_rect(bx, by, bw, line, edge);
                 surface.fill_rect(bx, by + bh - line, bw, line, edge);
@@ -780,7 +800,7 @@ impl ScrollBar {
         };
         let palette = theme.palette();
         let live = self.state.is_actionable() && self.moves(part);
-        let awake = live && (self.held == Some(part) || self.hover == part);
+        let awake = live && self.lit == Some(part);
         if live {
             let inset = layout.inset();
             let plate = Rect::new(

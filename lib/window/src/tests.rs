@@ -20,13 +20,13 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AlertButton, AlertButtonRole, AlertOutcome, AlertSeverity, AlertSpec, AppBar, AppBarClick,
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuReason, AppMenuRow, AppMenuRowView,
-    AppMenuSymbol, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DialogModality,
-    DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget, HandOverDocument,
-    HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, PickPurpose, PointerAction,
-    PreviewOutcome, PreviewSubject, SaveEndings, TerrainPlate, TooltipText, WindowEvent,
-    WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
-    HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS,
-    WINDOW_TITLE_MAX,
+    AppMenuSymbol, AuthorisedOutcome, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape,
+    DialogModality, DocumentName, DragAt, DragItems, DropOperation, DropSite, DropTarget,
+    HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, PickPurpose,
+    PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, SystemTask, TerrainPlate,
+    TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
+    DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX, WINDOW_FOLDER_PICK_MAX,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -318,6 +318,10 @@ struct RecordingHost {
     zone_grants: Vec<ProcId>,
     /// Every screensaver preview document this host was handed.
     previews: Vec<String>,
+    /// Every authorisation the engine passed on, and the refusal this host
+    /// answers them with.
+    authorisations: Vec<(Option<AppIdentity>, u64, SystemTask)>,
+    refuse_authorise: Option<Errno>,
 }
 
 impl Default for RecordingHost {
@@ -346,6 +350,8 @@ impl Default for RecordingHost {
             locks: 0,
             zone_grants: Vec::new(),
             previews: Vec::new(),
+            authorisations: Vec::new(),
+            refuse_authorise: None,
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
@@ -712,6 +718,20 @@ impl WindowHost for RecordingHost {
         }
         self.zone_grants.push(to);
         Ok(ZONE_GRANT)
+    }
+
+    fn authorise_requested(
+        &mut self,
+        caller: Option<&AppIdentity>,
+        window_id: u64,
+        task: &SystemTask,
+    ) -> Result<(), Errno> {
+        self.authorisations
+            .push((caller.copied(), window_id, *task));
+        if caller.is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        self.refuse_authorise.map_or(Ok(()), Err)
     }
 
     fn preview_render_requested(
@@ -3101,6 +3121,213 @@ fn a_caller_with_no_application_is_refused_by_the_host() {
     );
     assert_eq!(loopback.borrow().host.locks, 0);
     assert!(loopback.borrow().host.zone_grants.is_empty());
+}
+
+/// The desktop's Settings application, as the kernel attests it in these
+/// tests.
+fn settings_app() -> AppIdentity {
+    AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity")
+}
+
+/// A Settings window on `loopback`, attested as the desktop's Settings.
+fn settings_window(
+    loopback: &Rc<RefCell<Loopback>>,
+    client: &mut WindowClient<Rc<RefCell<Loopback>>>,
+) -> u64 {
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings_app())];
+    create_id(client, 7, EVENTS_A, 1, "Settings").expect("a window")
+}
+
+/// The configure task these tests ask for.
+fn configure_task() -> SystemTask {
+    SystemTask::Configure(
+        tairix_abi::elevate::ElevateWords::new(&["cache.all", "off"]).expect("within bounds"),
+    )
+}
+
+/// The authorisation outcomes the sink carried, in order.
+fn authorised(sink: &QueueSink) -> Vec<AuthorisedOutcome> {
+    sink.delivered
+        .iter()
+        .filter_map(|(_, frame)| match WindowEvent::from_bytes(frame) {
+            Ok(WindowEvent::Authorised { outcome, .. }) => Some(outcome),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An authorisation reaches the host with the attested application, the
+/// window and the task whole, and concludes exactly once.
+#[test]
+fn an_authorisation_reaches_the_host_and_concludes_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = settings_window(&loopback, &mut client);
+    let mut sink = QueueSink::default();
+
+    assert_eq!(client.authorise(window, &configure_task()), Ok(()));
+    assert_eq!(
+        loopback.borrow().host.authorisations,
+        alloc::vec![(Some(settings_app()), window, configure_task())]
+    );
+    assert_eq!(
+        client.authorise(window, &SystemTask::ShowAccounts),
+        Err(Errno::AlreadyExists),
+        "one pends per window"
+    );
+    let conclude = |sink: &mut QueueSink, outcome| {
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_authorisation(sink, window, outcome, Vec::new())
+    };
+    assert_eq!(
+        conclude(&mut sink, AuthorisedOutcome::Ran { exit_code: 0 }),
+        Ok(())
+    );
+    assert_eq!(
+        conclude(&mut sink, AuthorisedOutcome::Declined),
+        Err(Errno::OutOfRange),
+        "and it concluded that one"
+    );
+    assert_eq!(
+        authorised(&sink),
+        alloc::vec![AuthorisedOutcome::Ran { exit_code: 0 }]
+    );
+    assert_eq!(
+        client.authorise(window, &SystemTask::SetClock),
+        Ok(()),
+        "a fresh one is accepted once the last concluded"
+    );
+}
+
+/// A window the caller does not own answers as one that never existed, and a
+/// refused prompt leaves nothing pending.
+#[test]
+fn an_authorisation_is_refused_whole_for_a_foreign_window_or_a_refused_prompt() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = settings_window(&loopback, &mut client);
+    let mut sink = QueueSink::default();
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.authorise(window, &configure_task()),
+        Err(Errno::NotFound)
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert!(loopback.borrow().host.authorisations.is_empty());
+
+    loopback.borrow_mut().host.refuse_authorise = Some(Errno::SeatBusy);
+    assert_eq!(
+        client.authorise(window, &configure_task()),
+        Err(Errno::SeatBusy)
+    );
+    assert_eq!(
+        loopback.borrow_mut().server.conclude_authorisation(
+            &mut sink,
+            window,
+            AuthorisedOutcome::Declined,
+            Vec::new()
+        ),
+        Err(Errno::OutOfRange),
+        "nothing was owed"
+    );
+    assert!(sink.delivered.is_empty());
+}
+
+/// What a captured task printed is the owner's to take once, exactly as the
+/// outcome states it, and an outcome disagreeing with the output is refused.
+#[test]
+fn a_captured_output_is_the_owners_to_take_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = settings_window(&loopback, &mut client);
+    let mut sink = QueueSink::default();
+    let listing = b"alice 1000\n".to_vec();
+    let captured = AuthorisedOutcome::Captured {
+        exit_code: 0,
+        len: u32::try_from(listing.len()).expect("short"),
+    };
+
+    assert_eq!(
+        client.take_authorised_output(window),
+        Err(Errno::NotFound),
+        "nothing was captured"
+    );
+    client
+        .authorise(window, &SystemTask::ShowAccounts)
+        .expect("accepted");
+    let mut conclude = |outcome, output: Vec<u8>| {
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_authorisation(&mut sink, window, outcome, output)
+    };
+    assert_eq!(
+        conclude(captured, b"short".to_vec()),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        conclude(AuthorisedOutcome::Ran { exit_code: 0 }, listing.clone()),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(conclude(captured, listing.clone()), Ok(()));
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.take_authorised_output(window),
+        Err(Errno::NotFound),
+        "another client cannot read what this window was shown"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(client.take_authorised_output(window), Ok(listing));
+    assert_eq!(
+        client.take_authorised_output(window),
+        Err(Errno::NotFound),
+        "one-shot"
+    );
+}
+
+/// An authorisation's outcome goes through its conclusion and never through
+/// the general delivery path.
+#[test]
+fn an_authorised_event_is_not_delivered_as_any_other() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = settings_window(&loopback, &mut client);
+    client
+        .authorise(window, &SystemTask::SetClock)
+        .expect("accepted");
+    let mut sink = QueueSink::default();
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_event(
+            &mut sink,
+            &WindowEvent::Authorised {
+                window_id: window,
+                outcome: AuthorisedOutcome::Launched,
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert!(sink.delivered.is_empty());
+}
+
+/// A caller running no verified bundle is handed to the host as exactly that.
+#[test]
+fn an_authorisation_from_no_application_is_refused_by_the_host() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a window");
+    assert_eq!(
+        client.authorise(window, &configure_task()),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(
+        loopback.borrow().host.authorisations,
+        alloc::vec![(None, window, configure_task())]
+    );
 }
 
 /// An attestation that fails refuses the request before the host is asked.

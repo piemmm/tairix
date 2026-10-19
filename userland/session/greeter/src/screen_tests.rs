@@ -973,9 +973,16 @@ fn a_running_lockout_is_the_nearer_deadline() {
         "a shake whose span ran out still owes the frame that ends it"
     );
     refreshed(&mut login, settled_ns(), Some(twenty_past));
+    // The lockout began with the refusal at 0; its shown second next turns
+    // over once what is left of it is a whole second count.
+    let left = Duration64::from_secs(20).saturating_total_nanos() - settled_ns();
+    let turnover = match left % 1_000_000_000 {
+        0 => 1_000_000_000,
+        part => part,
+    };
     assert_eq!(
         login.park_timeout(settled_ns(), Some(twenty_past)),
-        1_000_000_000,
+        turnover,
         "once it has settled, the lockout ticks before the minute turns"
     );
 }

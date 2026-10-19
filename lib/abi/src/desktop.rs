@@ -34,6 +34,7 @@
 use crate::font_ipc::{FamilyKey, FONT_FAMILY_KEY_LEN};
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::time::Duration64;
+use crate::zone::{ZoneName, ZONE_NAME_MAX};
 use crate::Errno;
 
 /// Which way round a theme's colours run.
@@ -538,6 +539,7 @@ pub struct DesktopInfo {
     motion: Motion,
     double_click: Duration64,
     text: Option<DesktopText>,
+    machine_zone: Option<ZoneName>,
 }
 
 /// Byte offset of the double-click interval in an encoded [`DesktopInfo`].
@@ -551,14 +553,20 @@ const TEXT_OFFSET: usize = DOUBLE_CLICK_OFFSET + Duration64::WIRE_LEN;
 /// height follows it.
 const OUTPUT_OFFSET: usize = TEXT_OFFSET + 2 + FONT_FAMILY_KEY_LEN;
 
+/// Byte offset of the machine zone name's length in an encoded
+/// [`DesktopInfo`]; the name follows it.
+const ZONE_OFFSET: usize = OUTPUT_OFFSET + 8;
+
 impl DesktopInfo {
     /// Encoded size on the wire: screen width (4), screen height (4),
     /// scale percentage (2), appearance (1), one reserved byte that must be
     /// zero, contrast (1), density (1), motion (1), a second reserved byte
     /// that must be zero, the double-click interval (12), the text size (2)
     /// and the text family (16) — a zero size and an all-zero family where
-    /// the user chose none — then the output's width (4) and height (4).
-    pub const WIRE_LEN: usize = OUTPUT_OFFSET + 8;
+    /// the user chose none — then the output's width (4) and height (4), and
+    /// the machine zone's name: its length (1) and [`ZONE_NAME_MAX`] bytes,
+    /// zero past it, and all zero where the machine keeps none.
+    pub const WIRE_LEN: usize = ZONE_OFFSET + 1 + ZONE_NAME_MAX;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen at
     /// its output's own size, drawn at `scale_percent` of the reference
@@ -595,6 +603,7 @@ impl DesktopInfo {
             motion: Motion::Full,
             double_click: DOUBLE_CLICK_DEFAULT,
             text: None,
+            machine_zone: None,
         })
     }
 
@@ -625,6 +634,15 @@ impl DesktopInfo {
     #[must_use]
     pub const fn with_text(self, text: Option<DesktopText>) -> Self {
         Self { text, ..self }
+    }
+
+    /// The same desktop on a machine that keeps `zone` as its own, or none.
+    #[must_use]
+    pub const fn with_machine_zone(self, zone: Option<ZoneName>) -> Self {
+        Self {
+            machine_zone: zone,
+            ..self
+        }
     }
 
     /// The same desktop pairing presses under `interval`.
@@ -722,6 +740,13 @@ impl DesktopInfo {
         self.text
     }
 
+    /// The machine's own time zone, which a reader who chose none reads
+    /// before the zone store's default; `None` where the machine keeps none.
+    #[must_use]
+    pub const fn machine_zone(&self) -> Option<ZoneName> {
+        self.machine_zone
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -761,6 +786,11 @@ impl DesktopInfo {
         }
         put_u32(out, OUTPUT_OFFSET, self.output_width_px);
         put_u32(out, OUTPUT_OFFSET + 4, self.output_height_px);
+        if let Some(zone) = self.machine_zone {
+            let (len, name) = zone.wire();
+            out[ZONE_OFFSET] = len;
+            out[ZONE_OFFSET + 1..].copy_from_slice(name);
+        }
     }
 
     /// Decode the record occupying the `WIRE_LEN` bytes of `bytes` from
@@ -775,9 +805,10 @@ impl DesktopInfo {
     ///   interval outside its bounds, or an output smaller than the screen.
     /// * [`Errno::TimestampOutOfRange`] — a double-click interval whose
     ///   nanosecond field is not canonical.
-    /// * [`Errno::BadMagic`] — either reserved byte is not zero, or a
-    ///   family is carried with no size (wire corruption or a smuggled
-    ///   field, never silently ignored).
+    /// * [`Errno::BadMagic`] — either reserved byte is not zero, a family is
+    ///   carried with no size, or a byte past the zone's name is not zero
+    ///   (wire corruption or a smuggled field, never silently ignored).
+    /// * [`Errno::OutOfRange`] also for a zone name without one's shape.
     pub fn from_bytes_at(bytes: &[u8], at: usize) -> Result<Self, Errno> {
         let Some(record) = bytes.get(at..at + Self::WIRE_LEN) else {
             return Err(Errno::BufferTooSmall);
@@ -803,7 +834,12 @@ impl DesktopInfo {
             read_u32(record, OUTPUT_OFFSET),
             read_u32(record, OUTPUT_OFFSET + 4),
         )?;
-        Ok(desktop.with_text(decode_text(&record[TEXT_OFFSET..OUTPUT_OFFSET])?))
+        Ok(desktop
+            .with_text(decode_text(&record[TEXT_OFFSET..OUTPUT_OFFSET])?)
+            .with_machine_zone(ZoneName::from_wire(
+                record[ZONE_OFFSET],
+                &record[ZONE_OFFSET + 1..],
+            )?))
     }
 
     /// Decode a record that occupies the whole of `bytes`.
@@ -836,10 +872,11 @@ mod tests {
     use super::{
         Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, ScreensaverKind,
         DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
-        OUTPUT_OFFSET, TEXT_OFFSET,
+        OUTPUT_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
     };
     use crate::font_ipc::FamilyKey;
     use crate::time::Duration64;
+    use crate::zone::ZoneName;
     use crate::Errno;
 
     /// A desktop for the tests to round-trip.
@@ -943,6 +980,41 @@ mod tests {
         let mut nameless = info.to_le_bytes();
         nameless[TEXT_OFFSET + 2..OUTPUT_OFFSET].fill(0);
         assert_eq!(DesktopInfo::from_bytes(&nameless), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn the_machine_zone_round_trips_and_its_absence_is_all_zero() {
+        assert_eq!(desktop().machine_zone(), None);
+        assert!(desktop().to_le_bytes()[ZONE_OFFSET..]
+            .iter()
+            .all(|&byte| byte == 0));
+        let paris = ZoneName::new("Europe/Paris").expect("a zone name");
+        let info = desktop().with_machine_zone(Some(paris));
+        assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
+        assert_eq!(info.machine_zone(), Some(paris));
+        assert_eq!(paris.as_str(), "Europe/Paris");
+    }
+
+    #[test]
+    fn a_malformed_machine_zone_is_refused_on_decode() {
+        let paris = ZoneName::new("Europe/Paris").expect("a zone name");
+        let bytes = desktop().with_machine_zone(Some(paris)).to_le_bytes();
+        let mut trailing = bytes;
+        trailing[DesktopInfo::WIRE_LEN - 1] = b'x';
+        assert_eq!(DesktopInfo::from_bytes(&trailing), Err(Errno::BadMagic));
+        let mut misshapen = bytes;
+        misshapen[ZONE_OFFSET + 1] = b' ';
+        assert_eq!(DesktopInfo::from_bytes(&misshapen), Err(Errno::OutOfRange));
+        let mut overlong = bytes;
+        overlong[ZONE_OFFSET] = u8::MAX;
+        assert_eq!(DesktopInfo::from_bytes(&overlong), Err(Errno::OutOfRange));
+        let mut nameless = bytes;
+        nameless[ZONE_OFFSET] = 0;
+        assert_eq!(
+            DesktopInfo::from_bytes(&nameless),
+            Err(Errno::BadMagic),
+            "a name with no length is a smuggled field"
+        );
     }
 
     #[test]

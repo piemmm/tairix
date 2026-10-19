@@ -81,8 +81,8 @@ pub use complete::{complete, Candidate, Completion, DirEntryInfo, DirLister, Res
 pub use env::Environment;
 pub use error::ParseError;
 pub use host::{
-    Console, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost, RedirAction, RedirTarget,
-    ResolvedCommand, ResolvedRedirection,
+    Console, Denied, Elevator, LaunchError, LaunchSpec, LimitStore, ProcessHost, RedirAction,
+    RedirTarget, ResolvedCommand, ResolvedRedirection,
 };
 pub use invocation::{parse as parse_invocation, Invocation, UsageError, USAGE};
 pub use job::{ExitStatus, Job, JobId, JobState, JobTable, Pid, Signal, WaitOutcome};

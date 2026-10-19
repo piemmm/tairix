@@ -13,7 +13,7 @@
 //! (so `devmgr` autoloads it into its own process and `netstack` binds it)
 //! **plus** the test-only `tcpecho` fixture bundle
 //! (`tests/integration/tcpecho_program`) — with one addition: a planted
-//! `/System/Settings/Configuration/system.conf`
+//! `/System/Defaults/Configuration/system.conf`
 //! (`tairix_test_netstack_wire::ECN_SYSTEM_CONF`) that turns `net.tcp.ecn`
 //! on stack-wide. `devmgr` reads that store pre-unlock over the read-only
 //! `/System` endpoint and delivers `tcp_ecn = true` to `netstack`, so the

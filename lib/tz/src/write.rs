@@ -12,6 +12,7 @@ use crate::layout::{
 };
 use crate::rule::Moment;
 use crate::store::{StoreError, ZoneInfo};
+use crate::Weekday;
 
 /// One transition of a zone.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,6 +67,8 @@ pub struct RegionInput {
     pub code: String,
     /// Its English name.
     pub name: String,
+    /// The day its calendar week begins on.
+    pub first_weekday: Weekday,
     /// Its numeric date pattern.
     pub date: String,
     /// Its time-of-day pattern.
@@ -289,6 +292,7 @@ impl Assembly {
         for region in regions {
             let record = RegionRecord {
                 code: code(&region.code)?,
+                first_weekday: region.first_weekday,
                 name: self.strings.intern(&region.name)?,
                 date: self.strings.intern(&region.date)?,
                 time: self.strings.intern(&region.time)?,

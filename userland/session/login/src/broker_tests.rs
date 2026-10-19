@@ -6,6 +6,7 @@ extern crate std;
 
 use super::{handle_session_request, DbAccounts, SessionDirectory, ZoneStoreGrant};
 use crate::budget::{AttemptBudget, FREE_ATTEMPTS};
+use crate::elevate::ElevateDirectory;
 use crate::events;
 use crate::session::{AuthenticatedUser, Authenticator, Credentials, Gid, Uid};
 use crate::table::LiveSessions;
@@ -21,7 +22,7 @@ use tairix_abi::session_ipc::{
     SESSION_ACCOUNTS_PER_PAGE, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
 };
 use tairix_abi::time::Duration64;
-use tairix_abi::Errno;
+use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_log::{Event, EventId, FieldValue, Sink};
 use tairix_users::{
@@ -930,7 +931,7 @@ fn record(
     home: Option<&str>,
     shell: Option<&str>,
 ) -> UserRecord {
-    let identity = Identity {
+    build(Identity {
         username,
         uid: tairix_users::Uid(uid),
         primary_gid: tairix_users::Gid(uid),
@@ -940,13 +941,155 @@ fn record(
         shell,
         capabilities: CapabilitySet::empty(),
         state,
-    };
-    if state == AccountState::NoLogin {
+    })
+}
+
+fn build(identity: Identity<'_>) -> UserRecord {
+    if identity.state == AccountState::NoLogin {
         UserRecord::new(identity, StoredPassword::NeverAuthenticates).expect("a valid record")
     } else {
         UserRecord::with_password(identity, b"secret", [0x42; 16], MIN_ITERATIONS)
             .expect("a valid record")
     }
+}
+
+/// An account in `state`, with a home and a shell, whose ceiling is `ceiling`.
+fn holding(username: &str, uid: u32, state: AccountState, ceiling: &[CapabilityId]) -> UserRecord {
+    let mut capabilities = CapabilitySet::empty();
+    for id in ceiling {
+        capabilities.insert(*id);
+    }
+    build(Identity {
+        username,
+        uid: tairix_users::Uid(uid),
+        primary_gid: tairix_users::Gid(uid),
+        supplementary_gids: &[],
+        display_name: "",
+        home: Some("/Users/someone"),
+        shell: Some("/System/Commands/elsh.app/Run"),
+        capabilities,
+        state,
+    })
+}
+
+/// Accounts of every kind, some of which may set the clock.
+fn clock_setters() -> UsersDb {
+    use CapabilityId as Cap;
+    UsersDb::new(vec![
+        holding(
+            "ada",
+            1000,
+            AccountState::Active,
+            &[Cap::TIME_SET, Cap::USER_ADMIN],
+        ),
+        holding("bob", 1001, AccountState::Active, &[Cap::USER_ADMIN]),
+        holding("cyd", 1002, AccountState::Active, &[Cap::TIME_SET]),
+        holding("dee", 1003, AccountState::Locked, &[Cap::TIME_SET]),
+        holding("eve", 1004, AccountState::Active, &[Cap::TIME_SET]),
+    ])
+    .expect("a valid database")
+}
+
+fn time_set() -> CapabilitySet {
+    let mut set = CapabilitySet::empty();
+    set.insert(CapabilityId::TIME_SET);
+    set
+}
+
+fn names(accounts: &[SessionAccount]) -> Vec<&str> {
+    accounts.iter().map(SessionAccount::login_name).collect()
+}
+
+#[test]
+fn the_authorisers_are_the_login_able_accounts_whose_ceiling_covers_the_request() {
+    let db = clock_setters();
+    let mut live = LiveSessions::new();
+    let directory = DbAccounts::new(Some(&db), &mut live);
+    // Bob cannot set the clock, and Dee's account is locked.
+    let page = directory.authorisers(&time_set(), 1001, 0);
+    assert!(!page.own);
+    assert_eq!(page.total, 3);
+    assert_eq!(names(&page.accounts), ["ada", "cyd", "eve"]);
+}
+
+#[test]
+fn the_callers_own_account_leads_the_authorisers_when_it_is_one() {
+    let db = clock_setters();
+    let mut live = LiveSessions::new();
+    let directory = DbAccounts::new(Some(&db), &mut live);
+    let page = directory.authorisers(&time_set(), 1002, 0);
+    assert!(page.own);
+    assert_eq!(page.total, 3);
+    assert_eq!(names(&page.accounts), ["cyd", "ada", "eve"]);
+    // Paging continues from the same order, listing each account once.
+    let rest = directory.authorisers(&time_set(), 1002, 1);
+    assert_eq!(names(&rest.accounts), ["ada", "eve"]);
+}
+
+#[test]
+fn a_request_for_nothing_may_be_allowed_by_every_login_able_account() {
+    let db = clock_setters();
+    let mut live = LiveSessions::new();
+    let directory = DbAccounts::new(Some(&db), &mut live);
+    let page = directory.authorisers(&CapabilitySet::empty(), 1000, 0);
+    assert!(page.own);
+    assert_eq!(page.total, 4);
+    assert_eq!(names(&page.accounts), ["ada", "bob", "cyd", "eve"]);
+}
+
+#[test]
+fn the_authorisers_are_paged_at_the_wire_bound() {
+    let accounts: Vec<UserRecord> = (0..SESSION_ACCOUNTS_PER_PAGE + 3)
+        .map(|index| {
+            let name = std::format!("admin{index}");
+            let uid = 2000 + u32::try_from(index).expect("small");
+            holding(&name, uid, AccountState::Active, &[CapabilityId::TIME_SET])
+        })
+        .collect();
+    let db = UsersDb::new(accounts).expect("a valid database");
+    let mut live = LiveSessions::new();
+    let directory = DbAccounts::new(Some(&db), &mut live);
+    let first = directory.authorisers(&time_set(), 1, 0);
+    assert_eq!(
+        first.total,
+        u32::try_from(SESSION_ACCOUNTS_PER_PAGE + 3).expect("small")
+    );
+    assert_eq!(first.accounts.len(), SESSION_ACCOUNTS_PER_PAGE);
+    let offset = u32::try_from(SESSION_ACCOUNTS_PER_PAGE).expect("small");
+    assert_eq!(
+        directory.authorisers(&time_set(), 1, offset).accounts.len(),
+        3
+    );
+    assert!(directory
+        .authorisers(&time_set(), 1, first.total)
+        .accounts
+        .is_empty());
+}
+
+#[test]
+fn the_meter_key_is_the_login_name_the_uid_owns() {
+    let db = mixed_db();
+    let mut live = LiveSessions::new();
+    let directory = DbAccounts::new(Some(&db), &mut live);
+    assert_eq!(directory.login_name(1000), Some("ada"));
+    // A service account owns a name too, and is metered under it.
+    assert_eq!(directory.login_name(10), Some("devmgr"));
+    assert_eq!(directory.login_name(4242), None);
+    let mut nothing = LiveSessions::new();
+    assert_eq!(DbAccounts::new(None, &mut nothing).login_name(1000), None);
+}
+
+#[test]
+fn the_presenting_uid_is_the_foreground_session_s() {
+    let db = mixed_db();
+    let mut live = LiveSessions::new();
+    live.insert("ada", 1000, 42).expect("a fresh account");
+    assert_eq!(
+        DbAccounts::new(Some(&db), &mut live).presenting(),
+        Some(1000)
+    );
+    assert!(live.background(1000));
+    assert_eq!(DbAccounts::new(Some(&db), &mut live).presenting(), None);
 }
 
 fn mixed_db() -> UsersDb {

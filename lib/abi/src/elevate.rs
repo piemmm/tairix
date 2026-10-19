@@ -62,16 +62,23 @@
 //!
 //! The endpoint is unrestricted-sender: the gate is the re-authentication
 //! itself, exactly as the login prompt is reachable by anyone at the
-//! keyboard. A wrong password, an unknown account, and a locked account are
-//! refused **indistinguishably** ([`ElevateReply::Refused`] with
-//! [`Errno::PermissionDenied`]) and every attempt is audited by the
-//! supervisor. The request carries the offered password in the clear across
-//! the kernel-copied IPC buffer (the same trust boundary as typing it at the
-//! login prompt); both ends zeroise their copies as soon as the exchange
-//! resolves.
+//! keyboard. An account may allow a program only when every capability the
+//! program's signed manifest requests lies within the account's ceiling; the
+//! supervisor decides that from its own database and the manifest, never
+//! from the request. A wrong password, an unknown account, a locked account,
+//! and an account that may not allow the program are refused
+//! **indistinguishably** ([`ElevateReply::Refused`] with
+//! [`Errno::PermissionDenied`]), and every attempt is audited by the
+//! supervisor and metered per account with the login screen's own budget,
+//! so a request for an account still cooling down is answered
+//! [`ElevateReply::Cooling`] without being checked. The request carries the
+//! offered password in the clear across the kernel-copied IPC buffer (the
+//! same trust boundary as typing it at the login prompt); both ends zeroise
+//! their copies as soon as the exchange resolves.
 
 use crate::le::{put_i32, put_i64, put_u32, read_i32, read_i64, read_u32};
 use crate::process::CONSOLE_INDEX_MAX;
+use crate::time::Duration64;
 use crate::Errno;
 
 /// Protocol version carried by every [`ElevateRequest`]; a request with any
@@ -321,6 +328,130 @@ impl<'a> Iterator for ElevateArgvIter<'a> {
     }
 }
 
+/// Most bytes the packed arguments of one [`ElevateWords`] occupy: every
+/// argument's length prefix and its bytes.
+pub(crate) const ELEVATE_WORDS_BYTES: usize = ELEVATE_MAX_ARGS * 2 + ELEVATE_MAX_ARGV_BYTES;
+
+/// An argument vector held by value, for a fixed frame that carries one
+/// rather than borrowing it.
+///
+/// Admitted by the one rule an [`ElevateArgv`] is, at construction and at
+/// decode alike, and read back as one ([`argv`](Self::argv)), so the words a
+/// frame carried and the vector a request hands the program cannot differ.
+#[derive(Copy, Clone)]
+pub struct ElevateWords {
+    count: u16,
+    len: u16,
+    /// Each argument's `u16` length and bytes, back to back; zero past `len`.
+    packed: [u8; ELEVATE_WORDS_BYTES],
+}
+
+impl ElevateWords {
+    /// No arguments.
+    pub const NONE: Self = Self {
+        count: 0,
+        len: 0,
+        packed: [0; ELEVATE_WORDS_BYTES],
+    };
+
+    /// The words of `args`, in order.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] exactly where [`ElevateArgv::new`] refuses
+    /// `args`.
+    pub fn new(args: &[&str]) -> Result<Self, Errno> {
+        check_argv(args.len(), args.iter().map(|arg| arg.len()))?;
+        let mut words = Self::NONE;
+        let len = {
+            let mut w = Writer::new(&mut words.packed);
+            for arg in args {
+                w.str(arg)?;
+            }
+            w.at
+        };
+        words.len = u16::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
+        words.count = u16::try_from(args.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        Ok(words)
+    }
+
+    /// The words as the vector a request carries.
+    #[must_use]
+    pub fn argv(&self) -> ElevateArgv<'_> {
+        ElevateArgv {
+            repr: ArgvRepr::Packed {
+                count: self.count,
+                bytes: self.packed_bytes(),
+            },
+        }
+    }
+
+    /// How many words there are.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether there are none.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The word count and the packed words, as a frame carries them.
+    pub(crate) fn packed(&self) -> (u16, &[u8]) {
+        (self.count, self.packed_bytes())
+    }
+
+    /// How many bytes the packed words take.
+    pub(crate) const fn packed_len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// The `count` words packed in `bytes`, checked whole by the rule a
+    /// constructed vector obeys.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a region past the bound, a word running
+    /// past the region or past its own bound, or bytes left after the last
+    /// word; [`Errno::OutOfRange`] for a word that is not UTF-8.
+    pub(crate) fn from_packed(count: u16, bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() > ELEVATE_WORDS_BYTES {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut cur = Cursor::new(bytes);
+        cur.words(count)?;
+        if !cur.exhausted() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut words = Self::NONE;
+        words.packed[..bytes.len()].copy_from_slice(bytes);
+        words.len = u16::try_from(bytes.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        words.count = count;
+        Ok(words)
+    }
+
+    fn packed_bytes(&self) -> &[u8] {
+        self.packed.get(..usize::from(self.len)).unwrap_or(&[])
+    }
+}
+
+impl PartialEq for ElevateWords {
+    /// By content, as the vector they view compares.
+    fn eq(&self, other: &Self) -> bool {
+        self.argv() == other.argv()
+    }
+}
+
+impl Eq for ElevateWords {}
+
+impl core::fmt::Debug for ElevateWords {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(&self.argv(), f)
+    }
+}
+
 /// The one admissibility rule for an argument vector, applied to a caller's
 /// slice and to a decoded region alike.
 ///
@@ -353,6 +484,8 @@ const OPCODE_VERIFY: u8 = 1;
 const OPCODE_LAUNCH: u8 = 2;
 /// Wire opcode naming an [`ElevateRequest::Capture`] request.
 const OPCODE_CAPTURE: u8 = 3;
+/// Wire opcode naming an [`ElevateRequest::Authorisers`] request.
+const OPCODE_AUTHORISERS: u8 = 4;
 
 /// One elevation request, posted to the console's supervisor.
 ///
@@ -436,6 +569,20 @@ pub enum ElevateRequest<'a> {
         /// Absolute path of the program to start on success.
         program: &'a str,
     },
+    /// Which accounts may allow `program`, from the `offset`th: whether the
+    /// caller's own account may, and a page of those that may.
+    ///
+    /// Answered only to the desktop session presenting on the supervisor's
+    /// own console, for a program in one of the system's read-only stores:
+    /// the system's authorisation prompt is its one use. A page names each
+    /// account by its shown and login names, never by the authority that
+    /// qualifies it, and names no account that may not.
+    Authorisers {
+        /// Absolute path of the program the prompt is for.
+        program: &'a str,
+        /// The first account of the page, counted from zero.
+        offset: u32,
+    },
 }
 
 impl<'a> ElevateRequest<'a> {
@@ -488,6 +635,12 @@ impl<'a> ElevateRequest<'a> {
                     }
                     2 + password.len()
                 }
+                Self::Authorisers { program, .. } => {
+                    if program.is_empty() {
+                        return Err(Errno::LengthOutOfRange);
+                    }
+                    (2 + program.len()) + 4
+                }
             };
         if total > ELEVATE_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
@@ -526,6 +679,10 @@ impl<'a> ElevateRequest<'a> {
                 w.str(program)?;
             }
             Self::Verify { password } => w.str(password)?,
+            Self::Authorisers { program, offset } => {
+                w.str(program)?;
+                w.u32(offset)?;
+            }
         }
         Ok(w.at)
     }
@@ -537,6 +694,7 @@ impl<'a> ElevateRequest<'a> {
             Self::Verify { .. } => OPCODE_VERIFY,
             Self::Launch { .. } => OPCODE_LAUNCH,
             Self::Capture { .. } => OPCODE_CAPTURE,
+            Self::Authorisers { .. } => OPCODE_AUTHORISERS,
         }
     }
 
@@ -590,6 +748,16 @@ impl<'a> ElevateRequest<'a> {
                     return Err(Errno::LengthOutOfRange);
                 }
                 Self::Verify { password }
+            }
+            OPCODE_AUTHORISERS => {
+                let program = cur.str()?;
+                if program.is_empty() {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                Self::Authorisers {
+                    program,
+                    offset: cur.u32()?,
+                }
             }
             _ => return Err(Errno::OutOfRange),
         };
@@ -656,6 +824,26 @@ pub enum ElevateReply<'a> {
         /// The elevated program's exit status.
         exit_code: i32,
     },
+    /// The answer to an [`ElevateRequest::Authorisers`]: whether the caller's
+    /// own account may allow the program, and a page of the accounts that
+    /// may, as [`crate::session_ipc::encode_account_page`] writes one.
+    ///
+    /// When `own` is set the caller's own account leads the listing, so the
+    /// prompt that offers it first and the others after reads them in the
+    /// order they are listed.
+    Authorisers {
+        /// Whether the caller's own account may allow it.
+        own: bool,
+        /// The page, which [`crate::session_ipc::decode_account_page`] reads.
+        page: &'a [u8],
+    },
+    /// The account the request is for is still cooling down after refused
+    /// attempts: nothing was checked, and nothing will be until
+    /// `retry_after` has passed.
+    Cooling {
+        /// How long until the account may be tried again.
+        retry_after: Duration64,
+    },
     /// The request was refused. Authentication failures (wrong password,
     /// unknown account, locked account) are all
     /// [`Errno::PermissionDenied`], indistinguishably; other codes report
@@ -671,6 +859,15 @@ const STATUS_LAUNCHED: i32 = 2;
 const STATUS_CAPTURED: i32 = 3;
 /// Wire status word naming an [`ElevateReply::Overran`] reply.
 const STATUS_OVERRAN: i32 = 4;
+/// Wire status word naming an [`ElevateReply::Authorisers`] reply.
+const STATUS_AUTHORISERS: i32 = 5;
+/// Wire status word naming an [`ElevateReply::Cooling`] reply.
+const STATUS_COOLING: i32 = 6;
+
+const _: () = assert!(
+    crate::session_ipc::SESSION_MAX_REPLY <= ELEVATE_MAX_OUTPUT,
+    "an account page fits the reply's region"
+);
 
 impl<'a> ElevateReply<'a> {
     /// Encode the reply into `out`, returning the encoded length.
@@ -707,21 +904,17 @@ impl<'a> ElevateReply<'a> {
                 (STATUS_LAUNCHED, pid)
             }
             Self::Captured { exit_code, output } => {
-                if output.len() > ELEVATE_MAX_OUTPUT {
-                    return Err(Errno::OutOfRange);
-                }
-                let region = u32::try_from(output.len()).map_err(|_| Errno::OutOfRange)?;
-                let end = REPLY_HEAD_LEN + 4 + output.len();
-                if out.len() < end {
-                    return Err(Errno::BufferTooSmall);
-                }
-                put_i32(out, 0, STATUS_CAPTURED);
-                put_i64(out, 4, i64::from(exit_code));
-                put_u32(out, REPLY_HEAD_LEN, region);
-                out[REPLY_HEAD_LEN + 4..end].copy_from_slice(output);
-                return Ok(end);
+                return encode_region(out, STATUS_CAPTURED, i64::from(exit_code), output);
+            }
+            Self::Authorisers { own, page } => {
+                crate::session_ipc::decode_account_page(page).map_err(|_| Errno::OutOfRange)?;
+                return encode_region(out, STATUS_AUTHORISERS, i64::from(own), page);
             }
             Self::Overran { exit_code } => (STATUS_OVERRAN, i64::from(exit_code)),
+            Self::Cooling { retry_after } => (
+                STATUS_COOLING,
+                i64::try_from(retry_after.saturating_total_nanos()).unwrap_or(i64::MAX),
+            ),
             Self::Refused(err) => (-err.as_i32(), 0),
         };
         put_i32(out, 0, status);
@@ -746,7 +939,22 @@ impl<'a> ElevateReply<'a> {
         let status = read_i32(bytes, 0);
         let word = read_i64(bytes, 4);
         if status == STATUS_CAPTURED {
-            return Self::decode_captured(bytes, word);
+            return Ok(Self::Captured {
+                exit_code: i32::try_from(word).map_err(|_| Errno::OutOfRange)?,
+                output: decode_region(bytes)?,
+            });
+        }
+        if status == STATUS_AUTHORISERS {
+            let page = decode_region(bytes)?;
+            crate::session_ipc::decode_account_page(page).map_err(|_| Errno::OutOfRange)?;
+            return Ok(Self::Authorisers {
+                own: match word {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Errno::OutOfRange),
+                },
+                page,
+            });
         }
         // Every other reply is exactly the head: trailing bytes are a frame
         // this end does not understand, not a longer one to read past.
@@ -762,6 +970,11 @@ impl<'a> ElevateReply<'a> {
             STATUS_OVERRAN => Ok(Self::Overran {
                 exit_code: i32::try_from(word).map_err(|_| Errno::OutOfRange)?,
             }),
+            STATUS_COOLING => Ok(Self::Cooling {
+                retry_after: Duration64::from_nanos(
+                    u64::try_from(word).map_err(|_| Errno::OutOfRange)?,
+                ),
+            }),
             s if s < 0 => {
                 let errno = Errno::try_from_status(s).ok_or(Errno::OutOfRange)?;
                 Ok(Self::Refused(errno))
@@ -769,25 +982,40 @@ impl<'a> ElevateReply<'a> {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
 
-    /// Decode the variable tail of a [`Self::Captured`] frame: a `u32`
-    /// length and exactly that many bytes, with nothing after them.
-    fn decode_captured(bytes: &'a [u8], word: i64) -> Result<Self, Errno> {
-        if bytes.len() < REPLY_HEAD_LEN + 4 {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let len = read_u32(bytes, REPLY_HEAD_LEN) as usize;
-        if len > ELEVATE_MAX_OUTPUT {
-            return Err(Errno::OutOfRange);
-        }
-        if bytes.len() != REPLY_HEAD_LEN + 4 + len {
-            return Err(Errno::LengthOutOfRange);
-        }
-        Ok(Self::Captured {
-            exit_code: i32::try_from(word).map_err(|_| Errno::OutOfRange)?,
-            output: &bytes[REPLY_HEAD_LEN + 4..],
-        })
+/// Encode a reply whose head carries `status` and `word`, followed by a `u32`
+/// length and `region`'s bytes.
+fn encode_region(out: &mut [u8], status: i32, word: i64, region: &[u8]) -> Result<usize, Errno> {
+    if region.len() > ELEVATE_MAX_OUTPUT {
+        return Err(Errno::OutOfRange);
     }
+    let len = u32::try_from(region.len()).map_err(|_| Errno::OutOfRange)?;
+    let end = REPLY_HEAD_LEN + 4 + region.len();
+    if out.len() < end {
+        return Err(Errno::BufferTooSmall);
+    }
+    put_i32(out, 0, status);
+    put_i64(out, 4, word);
+    put_u32(out, REPLY_HEAD_LEN, len);
+    out[REPLY_HEAD_LEN + 4..end].copy_from_slice(region);
+    Ok(end)
+}
+
+/// The region a reply carries after its head: a `u32` length and exactly
+/// that many bytes, with nothing after them.
+fn decode_region(bytes: &[u8]) -> Result<&[u8], Errno> {
+    if bytes.len() < REPLY_HEAD_LEN + 4 {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let len = read_u32(bytes, REPLY_HEAD_LEN) as usize;
+    if len > ELEVATE_MAX_OUTPUT {
+        return Err(Errno::OutOfRange);
+    }
+    if bytes.len() != REPLY_HEAD_LEN + 4 + len {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(&bytes[REPLY_HEAD_LEN + 4..])
 }
 
 /// A fail-closed little-endian reader over a request buffer (the
@@ -823,6 +1051,11 @@ impl<'a> Cursor<'a> {
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
+    fn u32(&mut self) -> Result<u32, Errno> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     /// A `u16`-length-prefixed UTF-8 string.
     fn str(&mut self) -> Result<&'a str, Errno> {
         let len = self.u16()? as usize;
@@ -839,10 +1072,22 @@ impl<'a> Cursor<'a> {
     /// path of its own.
     fn argv(&mut self) -> Result<ElevateArgv<'a>, Errno> {
         let count = self.u16()?;
+        let from = self.at;
+        self.words(count)?;
+        Ok(ElevateArgv {
+            repr: ArgvRepr::Packed {
+                count,
+                bytes: self.bytes.get(from..self.at).ok_or(Errno::OutOfRange)?,
+            },
+        })
+    }
+
+    /// Walk `count` length-prefixed UTF-8 arguments, refusing any the
+    /// admissibility rule refuses.
+    fn words(&mut self, count: u16) -> Result<(), Errno> {
         if count as usize > ELEVATE_MAX_ARGS {
             return Err(Errno::LengthOutOfRange);
         }
-        let from = self.at;
         let mut total = 0usize;
         for _ in 0..count {
             let arg = self.str()?;
@@ -854,12 +1099,7 @@ impl<'a> Cursor<'a> {
                 return Err(Errno::LengthOutOfRange);
             }
         }
-        Ok(ElevateArgv {
-            repr: ArgvRepr::Packed {
-                count,
-                bytes: self.bytes.get(from..self.at).ok_or(Errno::OutOfRange)?,
-            },
-        })
+        Ok(())
     }
 
     const fn exhausted(&self) -> bool {
@@ -899,6 +1139,10 @@ impl<'a> Writer<'a> {
         self.bytes(&v.to_le_bytes())
     }
 
+    fn u32(&mut self, v: u32) -> Result<(), Errno> {
+        self.bytes(&v.to_le_bytes())
+    }
+
     /// A `u16`-length-prefixed UTF-8 string; a string longer than a `u16`
     /// can carry is refused.
     fn str(&mut self, s: &str) -> Result<(), Errno> {
@@ -911,10 +1155,13 @@ impl<'a> Writer<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_ENDPOINT_BASE,
-        ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES, ELEVATE_MAX_ARG_LEN, ELEVATE_MAX_OUTPUT,
-        ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST, ELEVATE_VERSION,
+        elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ElevateWords,
+        ELEVATE_ENDPOINT_BASE, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES, ELEVATE_MAX_ARG_LEN,
+        ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST, ELEVATE_VERSION,
+        ELEVATE_WORDS_BYTES,
     };
+    use crate::session_ipc::{encode_account_page, SessionAccount, SESSION_MAX_REPLY};
+    use crate::time::Duration64;
     use crate::{Errno, ORIGIN_CONSOLE_NONE};
 
     #[test]
@@ -1113,9 +1360,9 @@ mod tests {
             ElevateRequest::decode(&wrong[..len]),
             Err(Errno::OutOfRange)
         );
-        // Unknown opcode (one past the four the protocol defines).
+        // Unknown opcode (one past the five the protocol defines).
         let mut unknown_opcode = buf;
-        unknown_opcode[2] = 4;
+        unknown_opcode[2] = 5;
         assert_eq!(
             ElevateRequest::decode(&unknown_opcode[..len]),
             Err(Errno::OutOfRange)
@@ -1359,10 +1606,10 @@ mod tests {
             Err(Errno::LengthOutOfRange)
         );
         // A status word past the known discriminants (`0` completed, `1`
-        // verified, `2` launched, `3` captured, `4` overran) is neither a
-        // success nor a negated errno.
+        // verified, `2` launched, `3` captured, `4` overran, `5` authorisers,
+        // `6` cooling) is neither a success nor a negated errno.
         let mut buf = [0u8; ELEVATE_MAX_REPLY];
-        buf[..4].copy_from_slice(&5i32.to_le_bytes());
+        buf[..4].copy_from_slice(&7i32.to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf[..head]), Err(Errno::OutOfRange));
         // A launched reply whose pid word is negative names no process.
         buf[..4].copy_from_slice(&2i32.to_le_bytes());
@@ -1376,6 +1623,79 @@ mod tests {
         // An unknown negated errno is refused, never guessed.
         buf[..4].copy_from_slice(&(-9999i32).to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf[..head]), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn an_authorisers_request_round_trips_and_names_a_program() {
+        let request = ElevateRequest::Authorisers {
+            program: "/System/Components/datetime.app/Run",
+            offset: 16,
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REQUEST];
+        let len = request.encode(&mut buf).expect("encodes");
+        assert_eq!(ElevateRequest::decode(&buf[..len]), Ok(request));
+        assert_eq!(
+            ElevateRequest::Authorisers {
+                program: "",
+                offset: 0
+            }
+            .encode(&mut buf),
+            Err(Errno::LengthOutOfRange)
+        );
+        // Short of its offset word: a frame this end does not understand.
+        assert_eq!(
+            ElevateRequest::decode(&buf[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
+    fn an_authorisers_reply_carries_an_account_page_and_refuses_any_other() {
+        let accounts = [SessionAccount::new("Ada Lovelace", "ada", false).expect("an account")];
+        let mut page = [0u8; SESSION_MAX_REPLY];
+        let page_len = encode_account_page(&mut page, 1, 0, &accounts).expect("a page");
+        let page = &page[..page_len];
+        let mut buf = [0u8; ELEVATE_MAX_REPLY];
+        for own in [false, true] {
+            let reply = ElevateReply::Authorisers { own, page };
+            let len = reply.encode(&mut buf).expect("encodes");
+            assert_eq!(ElevateReply::decode(&buf[..len]), Ok(reply));
+        }
+        let len = ElevateReply::Authorisers { own: true, page }
+            .encode(&mut buf)
+            .expect("encodes");
+        // An answer to "may your own account" that is neither is refused.
+        buf[4..12].copy_from_slice(&2i64.to_le_bytes());
+        assert_eq!(ElevateReply::decode(&buf[..len]), Err(Errno::OutOfRange));
+        // A region that is no account page is refused at both ends.
+        assert_eq!(
+            ElevateReply::Authorisers {
+                own: false,
+                page: b"not a page"
+            }
+            .encode(&mut buf),
+            Err(Errno::OutOfRange)
+        );
+        let len = ElevateReply::Captured {
+            exit_code: 0,
+            output: b"not a page",
+        }
+        .encode(&mut buf)
+        .expect("encodes");
+        buf[..4].copy_from_slice(&5i32.to_le_bytes());
+        assert_eq!(ElevateReply::decode(&buf[..len]), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_cooling_reply_states_how_long_and_refuses_a_negative_wait() {
+        let reply = ElevateReply::Cooling {
+            retry_after: Duration64::from_secs(30),
+        };
+        let mut buf = [0u8; ELEVATE_MAX_REPLY];
+        let len = reply.encode(&mut buf).expect("encodes");
+        assert_eq!(ElevateReply::decode(&buf[..len]), Ok(reply));
+        buf[4..12].copy_from_slice(&(-1i64).to_le_bytes());
+        assert_eq!(ElevateReply::decode(&buf[..len]), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -1458,5 +1778,77 @@ mod tests {
         .expect("encodes");
         assert_eq!(len, run_len);
         assert_ne!(buf[..len], run_buf[..run_len]);
+    }
+
+    #[test]
+    fn held_words_read_back_as_the_vector_they_were_built_from() {
+        let args = ["wan.ipv4.method", "", "dhcp"];
+        let words = ElevateWords::new(&args).expect("within bounds");
+        assert_eq!(words.len(), 3);
+        assert!(!words.is_empty());
+        assert_eq!(
+            words.argv(),
+            ElevateArgv::new(&args).expect("within bounds")
+        );
+        assert!(ElevateWords::NONE.is_empty());
+        assert_eq!(ElevateWords::NONE.argv(), ElevateArgv::NONE);
+        assert_ne!(words, ElevateWords::NONE);
+    }
+
+    #[test]
+    fn held_words_are_bounded_exactly_as_a_vector_is() {
+        let one = "a";
+        let too_many = [one; ELEVATE_MAX_ARGS + 1];
+        assert_eq!(
+            ElevateWords::new(&too_many).err(),
+            ElevateArgv::new(&too_many).err()
+        );
+        let long = [b'a'; ELEVATE_MAX_ARG_LEN];
+        let long = core::str::from_utf8(&long).expect("ascii");
+        let spread = [long; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARG_LEN + 1];
+        assert_eq!(
+            ElevateWords::new(&spread).err(),
+            Some(Errno::LengthOutOfRange)
+        );
+        // The widest admissible vector fills the held region exactly.
+        let arg = [b'a'; ELEVATE_MAX_ARGV_BYTES / ELEVATE_MAX_ARGS];
+        let arg = core::str::from_utf8(&arg).expect("ascii");
+        let widest = ElevateWords::new(&[arg; ELEVATE_MAX_ARGS]).expect("within bounds");
+        assert_eq!(widest.packed().1.len(), ELEVATE_WORDS_BYTES);
+    }
+
+    #[test]
+    fn packed_words_are_admitted_whole_or_not_at_all() {
+        let words = ElevateWords::new(&["key", "value"]).expect("within bounds");
+        let (count, bytes) = words.packed();
+        assert_eq!(ElevateWords::from_packed(count, bytes), Ok(words));
+        // A count the bytes do not hold, or bytes the count leaves over.
+        assert_eq!(
+            ElevateWords::from_packed(count + 1, bytes),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            ElevateWords::from_packed(count - 1, bytes),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A word that is not text.
+        let mut dirty = [0u8; 16];
+        dirty[..bytes.len()].copy_from_slice(bytes);
+        dirty[bytes.len() - 1] = 0xFF;
+        assert_eq!(
+            ElevateWords::from_packed(count, &dirty[..bytes.len()]),
+            Err(Errno::OutOfRange)
+        );
+        // More words than the bound, refused before any is read.
+        let too_many = u16::try_from(ELEVATE_MAX_ARGS + 1).expect("small");
+        assert_eq!(
+            ElevateWords::from_packed(too_many, &[]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let past = [0u8; ELEVATE_WORDS_BYTES + 1];
+        assert_eq!(
+            ElevateWords::from_packed(0, &past),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 }

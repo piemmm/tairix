@@ -1822,7 +1822,8 @@ fn paint_menu_mark(surface: &mut Surface, slot: (u32, u32, u32), mark: MenuMark,
     }
 }
 
-/// Where a chain row's picture is resolved from.
+/// Where a chain picture is resolved from: a row's, or its information
+/// sheet's.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowIcon {
     /// The icon of the application bundle at this path, read from its own
@@ -2073,6 +2074,16 @@ pub struct ChainModel {
 }
 
 impl ChainModel {
+    /// Resolve the information sheet's picture, if the model has a sheet,
+    /// from `source`.
+    pub fn set_info_source(&mut self, source: &RowIcon) {
+        for row in &mut self.rows {
+            if let ChainChild::Info(sheet) = &mut row.child {
+                sheet.set_source(source.clone());
+            }
+        }
+    }
+
     /// Give the information sheet, if the model has one, the bundle's
     /// `artwork` rasterised at the sheet's own side.
     pub fn set_info_artwork(&mut self, artwork: &Surface) {

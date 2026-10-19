@@ -33,9 +33,7 @@ pub fn producer_of(origin: &Origin) -> Result<Producer, Errno> {
 #[must_use]
 pub fn is_settings_surface(caller: Option<&AppIdentity>, own: Option<&AppIdentity>) -> bool {
     match (caller, own) {
-        (Some(caller), Some(own)) => {
-            caller.bundle_id() == SETTINGS_BUNDLE && caller.publisher() == own.publisher()
-        }
+        (Some(caller), Some(own)) => caller.is_bundle(SETTINGS_BUNDLE, own.publisher()),
         _ => false,
     }
 }

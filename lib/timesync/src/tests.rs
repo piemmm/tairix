@@ -2,8 +2,7 @@
 
 use super::{
     decide, ClockUpdate, Decision, Event, SyncReason, SyncRecord, TimeSync, DEFAULT_REFRESH,
-    INITIAL_DELAY_SPAN, RECORD_DIR, RECORD_LEN, RECORD_MAGIC, RECORD_PATH, RECORD_SUBDIR,
-    STALE_BOOT_GAP, STEP_THRESHOLD,
+    INITIAL_DELAY_SPAN, RECORD_LEN, RECORD_MAGIC, RECORD_PATH, STALE_BOOT_GAP, STEP_THRESHOLD,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{WallClockReading, WallTimeState, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS};
@@ -289,6 +288,117 @@ fn the_boot_instant_offsets_the_schedule() {
     let start = Duration64::from_secs(500);
     let client = TimeSync::new(1, DEFAULT_REFRESH, unset(), SyncRecord::EMPTY, start, 0);
     assert!(client.next_deadline().expect("scheduled") >= start);
+}
+
+#[test]
+fn a_client_switched_on_queries_promptly_whatever_the_reading() {
+    let start = Duration64::from_secs(500);
+    let mut client = TimeSync::switched_on(2, DEFAULT_REFRESH, start, 0);
+    assert_eq!(client.urgency(), Some(SyncReason::SwitchedOn));
+    let due = client.next_deadline().expect("a query is scheduled");
+    assert!(due >= start);
+    assert!(
+        due.saturating_total_nanos()
+            <= start.saturating_total_nanos() + INITIAL_DELAY_SPAN.saturating_total_nanos()
+    );
+    assert!(client.poll(due, 1).is_some());
+}
+
+#[test]
+fn a_replacing_client_waits_out_the_floor_after_the_last_request() {
+    let floor = Duration64::from_secs(64);
+    let client = TimeSync::switched_on(1, DEFAULT_REFRESH, Duration64::ZERO, 0).not_before(floor);
+    assert_eq!(client.next_deadline(), Some(floor));
+    // A floor already passed holds nothing back.
+    let late =
+        TimeSync::switched_on(1, DEFAULT_REFRESH, Duration64::from_secs(100), 0).not_before(floor);
+    assert!(late.next_deadline().expect("scheduled") >= Duration64::from_secs(100));
+}
+
+#[test]
+fn a_record_read_late_brings_a_believed_clocks_first_query_forward() {
+    let chip = reading(plausible(), WallTimeState::Firmware);
+    let mut client = TimeSync::new(
+        1,
+        DEFAULT_REFRESH,
+        chip,
+        SyncRecord::EMPTY,
+        Duration64::ZERO,
+        0,
+    );
+    assert_eq!(client.urgency(), None);
+    // The record says time was seen later than the chip now reads: the chip
+    // lost its time to a plausible date.
+    let later = Time64::from_secs(plausible().secs() + 86_400);
+    let now = Duration64::from_secs(30);
+    assert_eq!(
+        client.reconsider(chip, seen_at(later), now, 0),
+        Some(SyncReason::WentBackwards)
+    );
+    assert_eq!(client.urgency(), Some(SyncReason::WentBackwards));
+    let due = client.next_deadline().expect("scheduled");
+    assert!(
+        due.saturating_total_nanos()
+            <= now.saturating_total_nanos() + INITIAL_DELAY_SPAN.saturating_total_nanos()
+    );
+    // Asked again, nothing more moves.
+    assert_eq!(client.reconsider(chip, seen_at(later), now, 0), None);
+}
+
+#[test]
+fn a_record_that_gives_no_reason_or_arrives_after_a_request_changes_nothing() {
+    let chip = reading(plausible(), WallTimeState::Firmware);
+    let mut believed = TimeSync::new(
+        1,
+        DEFAULT_REFRESH,
+        chip,
+        SyncRecord::EMPTY,
+        Duration64::ZERO,
+        0,
+    );
+    let due = believed.next_deadline();
+    assert_eq!(
+        believed.reconsider(chip, seen_at(plausible()), Duration64::from_secs(30), 0),
+        None
+    );
+    assert_eq!(believed.next_deadline(), due);
+
+    // Once the believed clock's first refresh has gone out, the cadence is
+    // what decides; a late record cannot hasten the next request.
+    let (nonce, at) = in_flight(&mut believed);
+    assert!(matches!(
+        believed.on_datagram(at, chip, &reply(nonce, plausible())),
+        Event::Apply(_)
+    ));
+    let steady = believed.next_deadline();
+    let later = Time64::from_secs(plausible().secs() + 86_400);
+    assert_eq!(believed.reconsider(chip, seen_at(later), at, 0), None);
+    assert_eq!(believed.urgency(), None);
+    assert_eq!(believed.next_deadline(), steady);
+}
+
+#[test]
+fn a_new_refresh_cadence_applies_in_place() {
+    let chip = reading(plausible(), WallTimeState::Firmware);
+    let mut client = TimeSync::new(
+        1,
+        DEFAULT_REFRESH,
+        chip,
+        seen_at(plausible()),
+        Duration64::ZERO,
+        0,
+    );
+    let six_hours = Duration64::from_secs(6 * 3600);
+    let now = Duration64::from_secs(10);
+    client.set_refresh(six_hours, now);
+    assert_eq!(client.refresh(), six_hours);
+    assert!(
+        client
+            .next_deadline()
+            .expect("scheduled")
+            .saturating_total_nanos()
+            <= now.saturating_total_nanos() + six_hours.saturating_total_nanos()
+    );
 }
 
 // --- Applying a sample ----------------------------------------------------
@@ -654,10 +764,10 @@ fn the_record_document_shape_is_pinned() {
     assert_eq!(RECORD_LEN, 33);
     assert_eq!(RECORD_MAGIC, u32::from_le_bytes(*b"TMS1"));
     assert_eq!(RECORD_PATH, "/System/Settings/Time/state");
-    assert!(RECORD_PATH.starts_with(RECORD_DIR));
-    // The image builder authors the directory by its last component alone, so
-    // the two spellings must agree or the service's own state directory would
-    // be provisioned somewhere it never looks.
-    assert!(RECORD_DIR.ends_with(RECORD_SUBDIR));
-    assert_eq!(RECORD_DIR, "/System/Settings/Time");
+    // The image lays out the service's directory by its own path, so the two
+    // must agree or the record would be written somewhere never provisioned.
+    assert_eq!(
+        RECORD_PATH.strip_prefix(tairix_abi::time::TIME_STATE_DIR),
+        Some("/state")
+    );
 }

@@ -12,7 +12,7 @@ use tairix_taskbar::clock::ClockLines;
 use tairix_tz::{CivilClock, Decided, ZoneInfo};
 use tairix_wallpaper::{DesktopSettings, RegionCode, ZoneName};
 
-use super::{SessionClock, UNSET_LABEL};
+use super::{moves_machine_zone, read_machine_zone, SessionClock, UNSET_LABEL};
 use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_wallpaper::civil_clock;
 
@@ -96,7 +96,7 @@ fn settings(zone: Option<&str>, region: Option<&str>) -> DesktopSettings {
 fn a_reading_is_written_in_the_users_zone_and_region() {
     // 2026-10-18 13:05 UTC.
     let instant = at(1_792_328_700, 0);
-    let (london, decided) = civil_clock(Some(zones()), &settings(None, None));
+    let (london, decided) = civil_clock(Some(zones()), &settings(None, None), None);
     assert_eq!(decided, (Decided::StoreDefault, Decided::StoreDefault));
     let mut clock = SessionClock::new(london);
     clock.adopt(instant, 0);
@@ -112,6 +112,7 @@ fn a_reading_is_written_in_the_users_zone_and_region() {
     let (new_york, decided) = civil_clock(
         Some(zones()),
         &settings(Some("America/New_York"), Some("US")),
+        None,
     );
     assert_eq!(decided, (Decided::Preference(0), Decided::Preference(0)));
     let mut clock = SessionClock::new(new_york);
@@ -130,7 +131,7 @@ fn a_reading_is_written_in_the_users_zone_and_region() {
 fn the_next_tick_is_the_local_clocks_minute() {
     // Local mean time in 1800 is 75 seconds behind UT: 00:00:30 UT is 23:59:15
     // on the clock, 45 seconds short of its minute.
-    let (london, _) = civil_clock(Some(zones()), &settings(None, None));
+    let (london, _) = civil_clock(Some(zones()), &settings(None, None), None);
     let mut clock = SessionClock::new(london);
     clock.adopt(at(-5_364_662_370, 0), 0);
     assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 45 * SEC);
@@ -141,7 +142,7 @@ fn a_change_of_zone_is_due_at_once() {
     let mut clock = SessionClock::new(CivilClock::UTC);
     clock.adopt(at(1_709_214_367, 0), 0);
     assert!(!clock.is_due(SEC));
-    let (london, _) = civil_clock(Some(zones()), &settings(None, None));
+    let (london, _) = civil_clock(Some(zones()), &settings(None, None), None);
     clock.set_civil(london);
     assert!(clock.is_due(SEC), "not left until the minute turns");
     assert_eq!(clock.park_deadline_ns(SEC, WAITSET_TIMEOUT_NONE), 0);
@@ -161,6 +162,7 @@ fn the_widest_lines_hold_every_field_at_its_most_digits_either_side_of_noon() {
     let (us, _) = civil_clock(
         Some(zones()),
         &settings(Some("America/New_York"), Some("US")),
+        None,
     );
     assert_eq!(
         SessionClock::new(us).widest(),
@@ -326,4 +328,102 @@ fn adopting_a_reading_clears_the_debt_until_the_next_minute() {
     assert!(!clock.is_due(53 * SEC));
     assert!(!clock.is_due(112 * SEC));
     assert!(clock.is_due(113 * SEC));
+}
+
+/// The machine's zone is the machine configuration's `time.zone` as it
+/// stands: the administrator's layer, else the image's, else the default; a
+/// configuration that cannot be read or understood is stated, never guessed at.
+#[test]
+fn the_machine_zone_is_the_configuration_s_and_a_refusal_is_said_in_words() {
+    use crate::tests::MemoryAssets;
+    use tairix_abi::driver_store::SystemConfigFile;
+
+    let [administrator, image] = SystemConfigFile::System.layers();
+    let mut named = MemoryAssets::default().with(administrator, b"time.zone Europe/Paris\n");
+    assert_eq!(
+        read_machine_zone(&mut named),
+        Ok(ZoneName::new("Europe/Paris"))
+    );
+    let mut shipped = MemoryAssets::default().with(image, b"time.zone Asia/Tokyo\n");
+    assert_eq!(
+        read_machine_zone(&mut shipped),
+        Ok(ZoneName::new("Asia/Tokyo"))
+    );
+    let mut replaced = MemoryAssets::default()
+        .with(image, b"time.zone Asia/Tokyo\n")
+        .with(administrator, b"time.zone default\n");
+    assert_eq!(read_machine_zone(&mut replaced), Ok(None));
+    assert_eq!(read_machine_zone(&mut MemoryAssets::default()), Ok(None));
+    let mut malformed = MemoryAssets::default().with(administrator, b"time.zone Paris France\n");
+    assert!(read_machine_zone(&mut malformed).is_err_and(|said| said.contains("not understood")));
+}
+
+/// A drained batch moves the machine zone when it names the configuration
+/// or cannot say what changed, and says when more changes wait.
+#[test]
+fn a_change_to_the_configuration_directory_moves_the_zone_only_when_it_names_the_file() {
+    use tairix_abi::fs::{DirChange, DirChangeBatch, DirEntry, DirWatchStatus, FileKind};
+
+    let batch = |status, more, names: &[&[u8]]| {
+        let mut out = vec![0u8; 512];
+        let mut at = DirChangeBatch::HEADER_LEN;
+        for name in names {
+            at += DirChange::Absent(name)
+                .encode_into(&mut out[at..])
+                .expect("room");
+        }
+        let count = u32::try_from(names.len()).expect("few");
+        DirChangeBatch::encode_header(&mut out, status, more, count).expect("room");
+        out.truncate(at);
+        out
+    };
+    let (dir, file) = super::machine_zone_place();
+    assert_eq!(dir, "/System/Settings/Configuration");
+    let file = file.as_bytes();
+    assert_eq!(
+        moves_machine_zone(&batch(
+            DirWatchStatus::Changes,
+            false,
+            &[b"system.conf.0123456789abcdef.new", file]
+        )),
+        (true, false)
+    );
+    assert_eq!(
+        moves_machine_zone(&batch(
+            DirWatchStatus::Changes,
+            true,
+            &[b"system.conf.0123456789abcdef.new"]
+        )),
+        (false, true)
+    );
+    assert_eq!(
+        moves_machine_zone(&batch(DirWatchStatus::Rescan, false, &[])),
+        (true, false)
+    );
+    assert_eq!(
+        moves_machine_zone(b"\xff"),
+        (true, false),
+        "an unreadable batch"
+    );
+    let present = {
+        let mut out = vec![0u8; 512];
+        let entry = DirEntry {
+            kind: FileKind::Regular,
+            size: 20,
+            allocated: 4096,
+            modified: Time64::UNIX_EPOCH,
+            id: tairix_abi::fs::FileId::NONE,
+            nlink: 1,
+            content_gen: 0,
+            name: file,
+        };
+        let at = DirChangeBatch::HEADER_LEN
+            + DirChange::Present(entry)
+                .encode_into(&mut out[DirChangeBatch::HEADER_LEN..])
+                .expect("room");
+        DirChangeBatch::encode_header(&mut out, DirWatchStatus::Changes, false, 1).expect("room");
+        out.truncate(at);
+        out
+    };
+    assert_eq!(moves_machine_zone(&present), (true, false));
 }

@@ -528,7 +528,7 @@ impl AuthSurface {
         let remaining = remaining.max(Duration64::ZERO);
         // The notice counts whole seconds, so a span that still shows the
         // same one changes nothing on screen.
-        let shown = shown_seconds(remaining) == shown_seconds(self.cooldown);
+        let shown = remaining.secs_rounded_up() == self.cooldown.secs_rounded_up();
         self.cooldown = remaining;
         if shown {
             return Outcome::quiet();
@@ -1636,7 +1636,7 @@ fn stage_ms(theme: &Theme) -> u16 {
 }
 
 /// How long a rejected attempt shakes the question in `theme`.
-fn rejected_ms(theme: &Theme) -> u16 {
+pub(crate) fn rejected_ms(theme: &Theme) -> u16 {
     theme.motion().duration(MotionInteraction::AttemptRejected)
 }
 
@@ -1702,17 +1702,9 @@ fn is_escape(event: &InputEvent) -> bool {
 
 /// The line a live cooldown shows, rounded up so a lockout with any time left
 /// on it never reads as over.
-fn cooldown_notice(remaining: Duration64) -> String {
-    let seconds = shown_seconds(remaining);
+pub(crate) fn cooldown_notice(remaining: Duration64) -> String {
+    let seconds = remaining.secs_rounded_up();
     format!("Too many attempts — try again in {seconds}s")
-}
-
-/// The whole seconds a lockout of `remaining` reads as: a part second is a
-/// whole one, so time still on it never reads as over.
-fn shown_seconds(remaining: Duration64) -> i64 {
-    remaining
-        .secs()
-        .saturating_add(i64::from(remaining.subsec_nanos() > 0))
 }
 
 /// Fill `surface` with what lies behind the column: the theme's desktop

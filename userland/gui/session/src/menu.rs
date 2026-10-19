@@ -29,7 +29,7 @@ use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal, APP_MENU_ENTRY_MAX};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
     plate_rect, AboutSheet, ChainChild, ChainModel, ClipboardChord, Menu, MenuAction,
-    PlatePlacement, RowIcon, TextAction, TextField, TitleBar, TitleBarEvent,
+    PlatePlacement, RowIcon, TextAction, TextField, TitleBar, TitleBarEvent, ABOUT_ICON_SIDE,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -101,20 +101,31 @@ pub enum ChainAction {
     Closed,
 }
 
-/// One row of the open chain that wants a picture, and the pixel side it must
+/// One picture of the open chain that is wanted, and the pixel side it must
 /// be rasterised at.
 ///
-/// A row *names* where its picture comes from; resolving it is the session's,
-/// because only the session owns an icon cache and a sandboxed decoder. A
-/// paint reads nothing, so the answer is set before the next one.
+/// A row or the information sheet *names* where its picture comes from;
+/// resolving it is the session's, because only the session owns an icon cache
+/// and a sandboxed decoder. A paint reads nothing, so the answer is set before
+/// the next one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChainIconWant {
-    /// The model row asking, as [`MenuChain::set_row_artwork`] names it.
-    pub row: usize,
+    /// What wants it.
+    pub target: ChainPicture,
     /// The side, in physical pixels, the picture must be rasterised at.
     pub side: u32,
     /// Where the picture comes from.
     pub source: RowIcon,
+}
+
+/// A picture the open chain draws.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ChainPicture {
+    /// Model row `row`'s, as [`MenuChain::set_row_artwork`] names it.
+    Row(usize),
+    /// The open information sheet's, as [`MenuChain::set_info_artwork`]
+    /// sets it.
+    Info,
 }
 
 /// One surface the chain occupies on screen.
@@ -168,7 +179,8 @@ struct InfoPanel {
     /// Where it sits.
     rect: Rect,
     /// What of the sheet the session has still to paint. It states facts that
-    /// never change, so after its first paint it owes nothing.
+    /// never change, so after its first paint it owes nothing until its
+    /// picture arrives.
     repaint: Repaint,
 }
 
@@ -556,7 +568,18 @@ impl MenuChain {
                     continue;
                 }
                 wants.push(ChainIconWant {
-                    row,
+                    target: ChainPicture::Row(row),
+                    side,
+                    source: source.clone(),
+                });
+            }
+        }
+        if let Some(info) = chain.info.as_ref() {
+            let side = geom.scale.scale_length(ABOUT_ICON_SIDE);
+            let pictured = info.sheet.artwork().is_some_and(|art| art.width() == side);
+            if let (Some(source), false) = (info.sheet.source(), pictured) {
+                wants.push(ChainIconWant {
+                    target: ChainPicture::Info,
                     side,
                     source: source.clone(),
                 });
@@ -571,10 +594,11 @@ impl MenuChain {
     /// Set on the model *and* on whichever open plate draws that row: the
     /// model is what a plate rebuilt at the same depth is built from, so a
     /// picture survives a submenu closing and reopening without a second
-    /// decode.
-    /// Borrowed rather than owned: the picture is copied into the model and
-    /// into each plate that draws the row, so taking it by value would buy a
-    /// third copy the caller then drops.
+    /// decode. Borrowed rather than owned: the picture is copied into the
+    /// model and into each plate that draws the row, so taking it by value
+    /// would buy a third copy the caller then drops. A row with no picture
+    /// that still resolves none owes no repaint, so asking before every
+    /// present costs nothing while its decode is in flight.
     pub fn set_row_artwork(&mut self, row: usize, art: Option<&tairix_raster::Surface>) {
         let Some(chain) = self.open.as_mut() else {
             return;
@@ -584,21 +608,42 @@ impl MenuChain {
                 Some(art) => {
                     *entry.drawn_mut() = entry.drawn().clone().with_artwork(art.clone());
                 }
-                None => *entry.drawn_mut() = entry.drawn().clone().without_artwork(),
+                None if entry.drawn().artwork().is_some() => {
+                    *entry.drawn_mut() = entry.drawn().clone().without_artwork();
+                }
+                None => {}
             }
         }
         for plate in &mut chain.plates {
             let Some(at) = plate.rows.iter().position(|&held| held == row) else {
                 continue;
             };
-            if let Some(item) = plate.menu.items_mut().get_mut(at) {
-                let drawn = item.clone();
-                *item = match art {
-                    Some(art) => drawn.with_artwork(art.clone()),
-                    None => drawn.without_artwork(),
-                };
-                plate.repaint = Repaint::Whole;
+            let Some(item) = plate.menu.items_mut().get_mut(at) else {
+                continue;
+            };
+            if art.is_none() && item.artwork().is_none() {
+                continue;
             }
+            let drawn = item.clone();
+            *item = match art {
+                Some(art) => drawn.with_artwork(art.clone()),
+                None => drawn.without_artwork(),
+            };
+            plate.repaint = Repaint::Whole;
+        }
+    }
+
+    /// Give the information sheet the picture the session resolved for it:
+    /// on the model too, so a sheet opened again draws it at once. A sheet
+    /// whose picture is still in flight keeps its glyph and owes nothing.
+    pub fn set_info_artwork(&mut self, art: Option<&tairix_raster::Surface>) {
+        let (Some(chain), Some(art)) = (self.open.as_mut(), art) else {
+            return;
+        };
+        chain.model.set_info_artwork(art);
+        if let Some(info) = chain.info.as_mut() {
+            info.sheet.set_artwork(art.clone());
+            info.repaint = Repaint::Whole;
         }
     }
 
@@ -906,7 +951,10 @@ pub fn resolve_chain_icons(
         let art = cache
             .artwork(resolver, request, want.side)
             .and_then(IconPicture::artwork);
-        chain.set_row_artwork(want.row, art);
+        match want.target {
+            ChainPicture::Row(row) => chain.set_row_artwork(row, art),
+            ChainPicture::Info => chain.set_info_artwork(art),
+        }
     }
 }
 

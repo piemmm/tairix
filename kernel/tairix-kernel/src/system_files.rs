@@ -51,7 +51,7 @@ use tairix_abi::Errno;
 use tairix_drvhost::ImageSource;
 use tairix_kernel_core::{
     enumerate_driver_store, DriverImageError, DriverImageReader, VfsError,
-    SYSTEM_VOLUME_SETTINGS_PATH,
+    SYSTEM_VOLUME_DEFAULTS_PATH,
 };
 use tairix_log::Sink;
 
@@ -115,20 +115,19 @@ where
         enumerate_driver_store(&mut **self.fs.borrow_mut(), self.store_root, audit)
     }
 
-    /// Read one whitelisted `/System/Settings/` configuration file off the
-    /// mounted volume, **appending** its bytes to `buf`.
+    /// Read the image's default of one settings document off the mounted
+    /// volume, **appending** its bytes to `buf`.
     ///
     /// The device manager needs `network.conf` / `system.conf` before the
-    /// root is mounted — while the general VFS path is not yet
-    /// mounted — but this always-mounted read-only `/System` service can
-    /// reach them. The read is confined strictly below
-    /// [`SYSTEM_VOLUME_SETTINGS_PATH`] and runs under the same bootstrap
-    /// identity and fail-closed [`DriverImageReader`] delegation as a bundle
-    /// read — no new authority.
+    /// root is mounted — while the general VFS is not yet mounted — but this
+    /// always-mounted read-only `/System` service can reach the defaults. The
+    /// read is confined strictly below [`SYSTEM_VOLUME_DEFAULTS_PATH`] and
+    /// runs under the same bootstrap identity and fail-closed
+    /// [`DriverImageReader`] delegation as a bundle read — no new authority.
     ///
     /// The file set is closed ([`SystemConfigFile`]) and each member names
-    /// its own volume-relative path ([`SystemConfigFile::volume_path`]) — the
-    /// same spelling an image builder plants — so only those files are ever
+    /// its own path on the volume ([`SystemConfigFile::on_volume_path`]) —
+    /// the place an image builder plants it — so only those files are ever
     /// reachable and never an arbitrary caller-named path.
     ///
     /// # Errors
@@ -141,11 +140,14 @@ where
         which: SystemConfigFile,
         buf: &mut Vec<u8>,
     ) -> Result<(), Errno> {
-        let mut full = String::from("/");
-        full.push_str(which.volume_path());
         let mut fs = self.fs.borrow_mut();
         self.reader
-            .read_image(&mut **fs, SYSTEM_VOLUME_SETTINGS_PATH, &full, buf)
+            .read_image(
+                &mut **fs,
+                SYSTEM_VOLUME_DEFAULTS_PATH,
+                which.on_volume_path(),
+                buf,
+            )
             .map_err(DriverImageError::to_errno)
     }
 }
@@ -305,17 +307,17 @@ mod tests {
 
     #[test]
     fn every_whitelisted_config_lies_under_the_confinement_root() {
-        // The read is confined below the settings tree, so a file whose
+        // The read is confined below the defaults tree, so a file whose
         // volume path escaped it would be refused rather than read: the two
         // spellings must agree or the whole set becomes unreachable.
-        let root = SYSTEM_VOLUME_SETTINGS_PATH
+        let root = SYSTEM_VOLUME_DEFAULTS_PATH
             .strip_prefix('/')
             .expect("the confinement root is absolute");
         for which in [SystemConfigFile::System, SystemConfigFile::Network] {
             let rest = which
                 .volume_path()
                 .strip_prefix(root)
-                .unwrap_or_else(|| panic!("{which:?} lies outside {SYSTEM_VOLUME_SETTINGS_PATH}"));
+                .unwrap_or_else(|| panic!("{which:?} lies outside {SYSTEM_VOLUME_DEFAULTS_PATH}"));
             assert!(rest.starts_with('/'), "{which:?}");
         }
     }

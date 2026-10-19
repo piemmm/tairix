@@ -80,7 +80,9 @@ mod program {
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::driver::display::{Display, DisplayMode};
-    use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
+    use tairix_abi::elevate::{
+        elevate_endpoint, ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY,
+    };
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
@@ -91,6 +93,7 @@ mod program {
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::session_ipc::decode_account_page;
     use tairix_abi::session_ipc::{
         session_wake_endpoint, SessionRequest, SessionVerdict, SessionWake, SESSION_ENDPOINT,
         SESSION_MAX_REQUEST, SESSION_VERDICT_LEN, SESSION_WAKE_LEN,
@@ -118,7 +121,7 @@ mod program {
         Probes, RtLinkReader, Took, WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
     };
     use tairix_caps::CapabilitySet;
-    use tairix_controls::damage;
+    use tairix_controls::{damage, RowIcon};
     use tairix_desktop_session::about::SystemFacts;
     use tairix_desktop_session::alert::{alert_title, Speaker};
     use tairix_desktop_session::effects::{
@@ -136,46 +139,49 @@ mod program {
     use tairix_desktop_session::switchuser::{
         SeatDeparture, SeatReturn, SessionAuthority, SwitchUser,
     };
-    use tairix_desktop_session::windows::{sheet_artwork, window_menu_placement};
+    use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, adopt_unlocks, catalogued, chain_geometry, deliver_pending_open,
-        desktop_info, drain_away, drain_locked, drop_is_noteworthy, encode_switchboard_reply,
-        focus_reports, land_preview, launch_argv, load_pinboard as read_pinboard_store,
-        load_programs, maybe_send_seat_report, open_entry, open_tray, park_within, parse,
-        publish_pinboard, reap_launched, relay_power, resize_drag_event, resolve_launch,
-        resolve_window_identities, seat_held, serve_park_ns, serve_pinboard,
-        serve_switchboard_request, settled_size_event, size_state_name, tool_move_abandoned_event,
-        tool_move_event, window_control_alternate_event, window_control_event, Acquisition,
-        AidPolicy, Answer, AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader,
-        ArtworkSandbox, AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery,
-        Departure, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
-        DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface,
-        DropRefusal, ElevateAsk, ElevatePrompt, Elevator, FrameContent, FramePacer,
-        FrameReportGate, FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker,
-        HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
-        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
-        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport,
-        OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied,
-        PinboardCall, PinboardRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone,
-        PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Requester,
-        ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaverIdentity, SaverSetup,
-        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
-        SeatRouter, SeatWake, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
-        SizedRecord, SlotAnswer, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, Trial, TrialEnd, TrialOutcome, UnlockAsk, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED,
-        APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED,
-        CONTENT_RELEASED_MESSAGE, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        desktop_info, drain_authorising, drain_away, drain_locked, drop_is_noteworthy,
+        encode_switchboard_reply, focus_reports, land_preview, launch_argv,
+        load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
+        open_tray, park_within, parse, publish_pinboard, reap_launched, relay_power,
+        resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
+        serve_pinboard, serve_switchboard_request, settled_size_event, size_state_name,
+        tool_move_abandoned_event, tool_move_event, window_control_alternate_event,
+        window_control_event, Acquisition, AidPolicy, Answer, AppBarBridge, AppBarService,
+        AppearanceWork, ArtworkFileReader, ArtworkSandbox, AskedSettings, AuthoriseAnswer,
+        AuthoriseConcluded, AuthoriseDesk, AuthoriseDone, AuthorisePrompt, AuthoriseRefusal,
+        AuthoriseRequest, BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure,
+        Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
+        DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface, DropRefusal, ElevateAsk,
+        Elevation, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
+        FrameStatsSink, GestureRefusal, HangTracker, HoldBack, IconRasteriser, IdleAction,
+        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
+        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, Listing as Authorisers,
+        LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport, OwnPick, OwnerBundleGate,
+        OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied, PinboardCall, PinboardRefusal,
+        Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob, PreviewRequest,
+        PreviewRun, PreviewTarget, PromptOutcome, Requester, ResizedRecord, ResolutionAsk,
+        ResolutionPrompt, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
+        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SlotAnswer,
+        SoundCall, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd,
+        TrialOutcome, UnlockAnswer, UnlockAsk, WallpaperDesk, WallpaperJob, WallpaperService,
+        WallpaperSource, WindowUnder, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
+        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
-        SETTINGS_LABEL, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
-        TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE,
-        WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
-        WINDOW_SIZED_MESSAGE,
+        SETTINGS_LABEL, SET_TIME_PURPOSE, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN,
+        TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
+    use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_desktop_session::{
         preview_source, resolution_ask, CivilAdoption, HeldZones, ScreensaverPreview,
         ScreensaverServe,
@@ -183,6 +189,7 @@ mod program {
     use tairix_display::{
         DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay, RtShmMapper, SwitchedOff,
     };
+    use tairix_greeter::AccountTile;
     use tairix_greeter::{Asking, Courier, Ticket, Tickets, Verdict};
     use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
     use tairix_keymap::modifiers_to_abi;
@@ -405,8 +412,144 @@ mod program {
     const UNLOCK_TOKEN: u64 = 20;
 
     /// The wait-set token of the elevation worker's wake: the broker answered
-    /// an account offered at the credential prompt.
+    /// a question the authorisation prompt asked.
     const ELEVATE_TOKEN: u64 = 21;
+
+    /// The wait-set token of the watch on the directory the machine's zone
+    /// file is kept in: something there changed.
+    const MACHINE_ZONE_WATCH_TOKEN: u64 = 22;
+
+    /// The wait-set token of the machine zone worker's wake: it drained the
+    /// watch, and read the file where the file moved.
+    const MACHINE_ZONE_TOKEN: u64 = 23;
+
+    /// How often the configuration directory's watch may report. A changed
+    /// zone shows within this, and a burst of writes costs one read.
+    const MACHINE_ZONE_WATCH_LATENCY_NS: u64 = 250_000_000;
+
+    /// The thread the machine zone's watch is drained and the configuration
+    /// read on, so neither waits on the volume on the serve loop. It holds the
+    /// watched directory; an answer is `None` where the drain named no change
+    /// to the configuration.
+    type ZoneWorker = Worker<
+        Option<tairix_rt::Dir>,
+        (),
+        Option<Result<Option<tairix_abi::zone::ZoneName>, alloc::string::String>>,
+    >;
+
+    /// The machine zone worker's job: drain the watch, and read the
+    /// configuration where the drain says it moved.
+    fn drain_machine_zone(
+        dir: &mut Option<tairix_rt::Dir>,
+        (): &mut (),
+    ) -> Option<Result<Option<tairix_abi::zone::ZoneName>, alloc::string::String>> {
+        let dir = dir.as_ref()?;
+        let mut scratch = [0u8; 2 * tairix_abi::fs::DirChangeBatch::MIN_BUFFER];
+        let mut moved = false;
+        let mut drained = false;
+        for _ in 0..MACHINE_ZONE_DRAIN_BATCHES {
+            let Ok(len) = dir.read_changes(&mut scratch) else {
+                moved = true;
+                drained = true;
+                break;
+            };
+            let (named, more) = moves_machine_zone(scratch.get(..len).unwrap_or_default());
+            moved |= named;
+            if !more {
+                drained = true;
+                break;
+            }
+        }
+        (moved || !drained).then(|| read_machine_zone(&mut VfsFileReader))
+    }
+
+    /// The most change batches one drain reads before it re-reads the
+    /// configuration rather than read on, so a directory changing without
+    /// pause cannot hold the worker.
+    const MACHINE_ZONE_DRAIN_BATCHES: usize = 16;
+
+    /// The directory the machine configuration is kept in, watched and joined
+    /// to `set`, so a change to the machine's zone made while the desktop runs
+    /// shows at once; `None`, stated, where it cannot be.
+    fn watch_machine_settings(set: u64) -> Option<tairix_rt::Dir> {
+        let (place, _) = machine_zone_place();
+        let watched = tairix_rt::open_dir(place.as_bytes())
+            .and_then(|dir| dir.watch(MACHINE_ZONE_WATCH_LATENCY_NS).map(|()| dir))
+            .map_err(Errno::from_syscall)
+            .and_then(|dir| {
+                let joined = tairix_rt::waitset_ctl(
+                    set,
+                    WaitSetOp::Add,
+                    WaitSourceKind::DirWatch,
+                    u64::from(dir.fd()),
+                    MACHINE_ZONE_WATCH_TOKEN,
+                );
+                if joined == 0 {
+                    Ok(dir)
+                } else {
+                    Err(Errno::from_syscall(joined))
+                }
+            });
+        watched
+            .map_err(|err| {
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "the clock will not follow a change to the machine's time zone ({err})"
+                    ),
+                );
+            })
+            .ok()
+    }
+
+    /// Hold the machine zone `read` named, stating a refusal and keeping the
+    /// zone held before it; answers whether the zone moved.
+    fn hold_machine_zone(
+        read: Result<Option<tairix_abi::zone::ZoneName>, alloc::string::String>,
+        shell: &mut DesktopShell,
+    ) -> bool {
+        match read {
+            Ok(zone) => {
+                if let Some(name) = zone.filter(|name| {
+                    shell
+                        .zones()
+                        .is_some_and(|zones| zones.zone(name.as_str()).is_none())
+                }) {
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the machine's zone {} is not in the zone store; the clock reads its \
+                             default",
+                            name.as_str()
+                        ),
+                    );
+                }
+                shell.set_machine_zone(zone)
+            }
+            Err(reason) => {
+                app::report(APP_NAME, format_args!("{reason}; the clock keeps its zone"));
+                false
+            }
+        }
+    }
+
+    /// Adopt a re-read of the machine's zone: the clock reads it for a user
+    /// who chose none, and every application is told it.
+    fn adopt_machine_zone(
+        read: Result<Option<tairix_abi::zone::ZoneName>, alloc::string::String>,
+        settings: &DesktopSettings,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        if !hold_machine_zone(read, shell) {
+            return;
+        }
+        let reshaped = shell.adopt_civil(settings).reshaped;
+        if !tick_clock(shell, compositor, tairix_rt::clock_get()) && reshaped {
+            shell.present(compositor);
+        }
+        publish_desktop(compositor, shell);
+    }
 
     /// The frame ring the session presents through: its own frames, owned by
     /// the ring and unmapped with it.
@@ -812,14 +955,14 @@ mod program {
     /// The thread the screen lock's passwords go to the per-console elevation
     /// broker on — the login supervisor that started this session — so the key
     /// it derives from each never stalls the compositor.
-    type UnlockWorker = Worker<(), UnlockAsk, (Ticket, Verdict)>;
+    type UnlockWorker = Worker<(), UnlockAsk, UnlockAnswer>;
 
     /// What the screen lock asks through: its worker, which carries a question
     /// on the serve loop's own task only where the kernel granted no thread.
     struct ToBroker(alloc::sync::Arc<UnlockWorker>);
 
     impl Courier for ToBroker {
-        type Answer = (Ticket, Verdict);
+        type Answer = UnlockAnswer;
 
         /// The account name is not carried: the broker re-reads the caller's
         /// identity from the kernel and checks the password against that uid,
@@ -831,7 +974,8 @@ mod program {
             _account: &str,
             password: &str,
         ) -> Result<(), Self::Answer> {
-            let ask = UnlockAsk::new(ticket, password).ok_or((ticket, Verdict::Unreachable))?;
+            let ask = UnlockAsk::new(ticket, password)
+                .ok_or(UnlockAnswer::of(ticket, Verdict::Unreachable))?;
             self.0.submit(ask);
             Ok(())
         }
@@ -844,20 +988,30 @@ mod program {
     /// The broker's answer to one question at the lock, its password erased
     /// before returning. A password that is not text was never one the broker
     /// could check.
-    fn ask_broker(_: &mut (), ask: &mut UnlockAsk) -> (Ticket, Verdict) {
-        let verdict = ask.password().map_or(Verdict::Refused, broker_verdict);
+    fn ask_broker(_: &mut (), ask: &mut UnlockAsk) -> UnlockAnswer {
+        let answer = ask.password().map_or(
+            UnlockAnswer::of(ask.ticket(), Verdict::Refused),
+            |password| broker_answer(ask.ticket(), password),
+        );
         ask.erase();
-        (ask.ticket(), verdict)
+        answer
     }
 
-    /// The broker's verdict on `password` for this process's own attested
-    /// identity. The runtime client erases its request buffer on every return
-    /// path.
-    fn broker_verdict(password: &str) -> Verdict {
+    /// The broker's answer on `password` for this process's own attested
+    /// identity, about the offer `ticket` names. The runtime client erases its
+    /// request buffer on every return path.
+    fn broker_answer(ticket: Ticket, password: &str) -> UnlockAnswer {
         let mut reply = [0u8; ELEVATE_MAX_REPLY];
         match tairix_rt::elevate(&ElevateRequest::Verify { password }, &mut reply) {
-            Ok(ElevateReply::Verified) => Verdict::Verified,
-            Ok(ElevateReply::Refused(_)) => Verdict::Refused,
+            Ok(ElevateReply::Verified) => UnlockAnswer::of(ticket, Verdict::Verified),
+            Ok(ElevateReply::Refused(_)) => UnlockAnswer::of(ticket, Verdict::Refused),
+            // Nothing was checked: the password is refused, and the lock says
+            // how long until one will be.
+            Ok(ElevateReply::Cooling { retry_after }) => UnlockAnswer {
+                ticket,
+                verdict: Verdict::Refused,
+                retry_after,
+            },
             // Every other reply answers a request this surface did not send.
             // A broker that sent one is not speaking this protocol, and a lock
             // does not open on a reply it did not understand.
@@ -865,9 +1019,10 @@ mod program {
                 ElevateReply::Completed { .. }
                 | ElevateReply::Launched { .. }
                 | ElevateReply::Captured { .. }
-                | ElevateReply::Overran { .. },
+                | ElevateReply::Overran { .. }
+                | ElevateReply::Authorisers { .. },
             )
-            | Err(_) => Verdict::Unreachable,
+            | Err(_) => UnlockAnswer::of(ticket, Verdict::Unreachable),
         }
     }
 
@@ -883,7 +1038,7 @@ mod program {
         lock: &mut ScreenLock,
         (confirm, elevate, resolution): (
             &mut ConfirmPrompt,
-            &mut ElevatePrompt,
+            &mut AuthorisePrompt,
             &mut ResolutionPrompt,
         ),
         named: (&str, &str),
@@ -893,7 +1048,7 @@ mod program {
         sink: &mut RtEventSink,
     ) {
         confirm.abandon(shell, compositor);
-        elevate.abandon(shell, compositor);
+        report_elevation(elevate.abandon(compositor));
         resolution.abandon(shell, compositor);
         if let Some(ended) = shell.end_drag(compositor, false) {
             // A source whose port has gone is torn down by its next delivery.
@@ -1006,7 +1161,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // Every surface the session animates.
     fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
-        (lock, elevate): (&mut ScreenLock, &mut ElevatePrompt),
+        (lock, elevate): (&mut ScreenLock, &mut AuthorisePrompt),
         saver: &mut Screensaver,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
@@ -1021,7 +1176,12 @@ mod program {
         compositor.step_elevations(now_ns);
         shell.advance_pointer_aids(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
-        elevate.advance(now_ns, shell, compositor);
+        elevate.resolve_picture(shell, compositor.scale());
+        if elevate.advance(now_ns, shell, compositor) {
+            // The question is drawn and asking: announce it so a host that
+            // must type into it waits on a real surface.
+            log_info(ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, &[]);
+        }
         saver.advance(
             now_ns,
             compositor,
@@ -1091,11 +1251,15 @@ mod program {
     /// Said at bring-up alone: an apply that changes either choice to one the
     /// store lacks is refused, so no other adoption can bring one.
     fn report_passed_over(adopted: CivilAdoption, settings: &DesktopSettings) {
-        if let (Decided::StoreDefault, Some(name)) = (adopted.zone, settings.time_zone.as_ref()) {
+        if let Some(name) = settings
+            .time_zone
+            .as_ref()
+            .filter(|_| adopted.zone != Decided::Preference(0) && adopted.zone != Decided::NoStore)
+        {
             app::report(
                 APP_NAME,
                 format_args!(
-                    "the zone {} is not in the zone store; the clock reads its default",
+                    "the zone {} is not in the zone store; the clock reads the machine's",
                     name.as_str()
                 ),
             );
@@ -1745,7 +1909,7 @@ mod program {
         pointer: &'a mut DeviceInputSource<C, T>,
         prompts: (
             &'a mut ConfirmPrompt,
-            &'a mut ElevatePrompt,
+            &'a mut AuthorisePrompt,
             &'a mut ResolutionPrompt,
         ),
         saver: &'a mut Screensaver,
@@ -1867,7 +2031,7 @@ mod program {
         if let Ok(at) = parts.pointer.set_screen(screen, parts.compositor.scale()) {
             parts.shell.track_pointer(at, parts.compositor);
         }
-        publish_desktop(parts.compositor);
+        publish_desktop(parts.compositor, parts.shell);
         parts.shell.note_resized();
     }
 
@@ -2101,7 +2265,7 @@ mod program {
         }
 
         fn publish_desktop(&mut self) {
-            publish_desktop(self.parts.compositor);
+            publish_desktop(self.parts.compositor, self.parts.shell);
         }
 
         fn fade_in(&mut self) {
@@ -2581,7 +2745,7 @@ mod program {
         let _unlock_guard = tairix_rt::work::WorkerGuard::new(&unlock_worker);
         let mut unlocker = Asking::new(ToBroker(alloc::sync::Arc::clone(&unlock_worker)));
         let elevate_worker = alloc::sync::Arc::new(Worker::new(
-            launch_elevated,
+            ask_broker_for,
             (),
             tairix_rt::sync::WorkerWake::create(),
         ));
@@ -2589,16 +2753,11 @@ mod program {
             app::report(
                 APP_NAME,
                 format_args!(
-                    "no elevation thread ({reason:?}); the credential prompt waits for each answer on the serve loop"
+                    "no elevation thread ({reason:?}); the authorisation prompt waits for each answer on the serve loop"
                 ),
             );
         }
         let _elevate_guard = tairix_rt::work::WorkerGuard::new(&elevate_worker);
-        let mut elevator = RtElevator {
-            worker: alloc::sync::Arc::clone(&elevate_worker),
-            tickets: Tickets::default(),
-            unasked: None,
-        };
         // This session took the seat before it got here.
         effects.seat(true);
         let sound_themes = list_sound_themes();
@@ -2712,6 +2871,24 @@ mod program {
         // the user's own sort order and icon arrangement rather than
         // re-sorting a frame later.
         shell.set_zones(load_zones());
+        // Armed before the zone is read, so a change between the two is not
+        // missed.
+        let machine_settings = watch_machine_settings(set);
+        let _ = hold_machine_zone(read_machine_zone(&mut VfsFileReader), &mut shell);
+        let zone_worker: alloc::sync::Arc<ZoneWorker> = alloc::sync::Arc::new(Worker::new(
+            drain_machine_zone,
+            machine_settings,
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Worker::start(&zone_worker) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no time zone thread ({reason:?}); a change to the machine's zone is read on the serve loop"
+                ),
+            );
+        }
+        let _zone_guard = tairix_rt::work::WorkerGuard::new(&zone_worker);
         let mut pinboard = load_pinboard(&mut desktop, &mut shell, &mut compositor, sandbox);
         report_passed_over(shell.adopt_civil(desktop.settings()), desktop.settings());
         // The resolution the user chose is drawn from the first frame, where
@@ -3064,6 +3241,18 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "elevation wake wait refused");
             }
         }
+        if let Some(read) = zone_worker.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                MACHINE_ZONE_TOKEN,
+            ) != 0
+            {
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "time zone wake wait refused");
+            }
+        }
         // A member reports a generation that moves after it joins, so each
         // is read once after joining and nothing published in between is
         // missed.
@@ -3190,12 +3379,12 @@ mod program {
         // the desktop itself rather than by the bar, which holds no
         // authority; an unanswered prompt relays nothing.
         let mut confirm = ConfirmPrompt::new();
-        // The trusted credential prompt for a command this session may not
-        // perform — setting the clock. It too is the session's own window, so
-        // a password is typed into desktop chrome and offered to the
-        // console's broker, never to an application; an unanswered prompt
-        // offers nothing.
-        let mut elevate = ElevatePrompt::new();
+        // The system authorisation prompt, for a program that needs authority
+        // the signed-in account may not hold. The session draws it and holds
+        // the seat for it, so a password is typed into desktop chrome and
+        // offered to the console's broker, never to an application; an
+        // unanswered prompt offers nothing.
+        let mut elevate = AuthorisePrompt::new();
         // A new desktop resolution on trial: drawn at once, put to the user,
         // and kept only if they keep it.
         let mut resolution = ResolutionPrompt::new();
@@ -3214,6 +3403,12 @@ mod program {
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
+        let mut elevator = RtElevator {
+            worker: alloc::sync::Arc::clone(&elevate_worker),
+            tickets: Tickets::default(),
+            own: alloc::string::String::from(account),
+            unasked: None,
+        };
         // What this account is *called*, as the login screen showed it: a mark
         // derived from the login name instead differs from that screen's.
         // Unset leaves the surfaces unnamed rather than guessing.
@@ -3311,10 +3506,26 @@ mod program {
                     return leaving.exit_code();
                 }
             }
-            // However a window closed, what it asked of the preview desk goes
-            // with it before the next park.
+            // However a window closed, what it asked of the preview desk and
+            // of the authorisation prompt goes with it before the next park.
             for window_id in windows.take_closed() {
                 wallpapers.forget_window(window_id);
+                elevate.abort_for(window_id, &mut compositor);
+            }
+            // However a prompt an application asked for ended, the window that
+            // asked is told before the next park.
+            for concluded in elevate.take_concluded() {
+                settle_authorisation(
+                    concluded,
+                    &mut server,
+                    &mut sink,
+                    &mut shell,
+                    &mut compositor,
+                    &mut windows,
+                    &mut picker,
+                    &mut apps,
+                    &mut menu,
+                );
             }
             // Whatever path adopted a settings change, the seat's sources, the
             // pointer aids and the window manager are brought to it here,
@@ -3329,7 +3540,7 @@ mod program {
                 keyboard.set_repeat(input_now.repeat);
                 compositor.set_double_click(input_now.double_click);
                 if input_now.double_click != input_policy.double_click {
-                    publish_desktop(&compositor);
+                    publish_desktop(&compositor, &shell);
                 }
                 input_policy = input_now;
             }
@@ -3629,6 +3840,7 @@ mod program {
                 }
                 saver.keep_topmost(&mut compositor);
                 lock.keep_topmost(&shell, &mut compositor, saver.window());
+                elevate.keep_topmost(&mut compositor, saver.window());
                 if let Some(source) = saver.due_slide(now_ns).and_then(|index| {
                     slide_source(&wallpaper_catalog, index, compositor.screen_rect())
                 }) {
@@ -3735,6 +3947,10 @@ mod program {
                             },
                             cursor_sets: &cursor_set_names,
                             clipboard: &mut clipboard,
+                            authorise: Some(AuthoriseDesk {
+                                prompt: &mut elevate,
+                                elevator: &mut elevator,
+                            }),
                         };
                         server.serve(
                             &mut bridge,
@@ -4065,6 +4281,7 @@ mod program {
                             },
                             cursor_sets: &cursor_set_names,
                             clipboard: &mut clipboard,
+                            authorise: None,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -4144,6 +4361,12 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     shell.present_icon_artwork(&mut compositor, &arted);
+                    // An open chain re-resolves its pictures as it presents,
+                    // so a sheet or row that opened before its decode landed
+                    // is drawn with it now rather than on the next open.
+                    if menu.is_open() {
+                        present_menu_chain(&mut menu, &mut shell, &mut compositor, &windows);
+                    }
                 }
                 let layout = |desk: &_| shell.desktop_layout(&compositor, desk);
                 let moved = match listings.take_update(ListingClient::Pinboard) {
@@ -4438,6 +4661,7 @@ mod program {
                                 },
                                 cursor_sets: &cursor_set_names,
                                 clipboard: &mut clipboard,
+                                authorise: None,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -4613,7 +4837,20 @@ mod program {
                 }
             } else if token == ELEVATE_TOKEN {
                 elevate_worker.wake().drain();
-                adopt_elevations(&mut elevator, &mut elevate, &mut shell, &mut compositor);
+                adopt_elevations(&mut elevator, &mut elevate, &shell, &mut compositor);
+            } else if token == MACHINE_ZONE_WATCH_TOKEN || token == MACHINE_ZONE_TOKEN {
+                // A change is drained and the file read on the worker; with no
+                // worker it ran here and its answer is already landed.
+                if token == MACHINE_ZONE_TOKEN {
+                    zone_worker.wake().drain();
+                } else {
+                    let _ = zone_worker.submit(());
+                }
+                while let Some(answer) = zone_worker.collect() {
+                    if let Some(read) = answer {
+                        adopt_machine_zone(read, desktop.settings(), &mut shell, &mut compositor);
+                    }
+                }
             } else if token == UNLOCK_TOKEN || (token == SEAT_TOKEN && lock.is_locked()) {
                 if token == UNLOCK_TOKEN {
                     unlock_worker.wake().drain();
@@ -4646,6 +4883,29 @@ mod program {
                 if let Err(err) = drained {
                     return drain_fault(&mut shell, &mut compositor, err);
                 }
+            } else if token == SEAT_TOKEN && elevate.is_up() {
+                // The authorisation prompt's sheet only shows the question;
+                // this drain is what keeps the seat's input from reaching
+                // anything behind it.
+                let now = tairix_rt::clock_get();
+                let mut holder = Seat {
+                    shell: &mut shell,
+                    compositor: &mut compositor,
+                    menu: &mut menu,
+                    lock: &mut lock,
+                    clipboard: &mut clipboard,
+                };
+                match drain_authorising(
+                    &mut holder,
+                    (&mut pointer, &mut keyboard),
+                    &mut elevate,
+                    &mut elevator,
+                    now,
+                ) {
+                    Ok(outcome) => report_elevation(outcome),
+                    Err(err) => return drain_fault(&mut shell, &mut compositor, err),
+                }
+                adopt_elevations(&mut elevator, &mut elevate, &shell, &mut compositor);
             } else if token == SEAT_TOKEN {
                 // One wake is one instant: its time-driven gestures (a held
                 // capsule press) resolve against the clock read here.
@@ -4707,7 +4967,7 @@ mod program {
                 }
                 // An answer already back — carried here for want of a thread —
                 // is adopted on the same turn.
-                adopt_elevations(&mut elevator, &mut elevate, &mut shell, &mut compositor);
+                adopt_elevations(&mut elevator, &mut elevate, &shell, &mut compositor);
                 // A window minimised while the machine was already short of
                 // memory had its content released by the gesture itself, so
                 // its client is told here rather than waiting for a band
@@ -4815,13 +5075,14 @@ mod program {
             // the screensaver, before the frame is shown.
             saver.keep_topmost(&mut compositor);
             lock.keep_topmost(&shell, &mut compositor, saver.window());
+            elevate.keep_topmost(&mut compositor, saver.window());
             // A prompt keeps the pixels it was painted in, so one standing
             // through a change of look is repainted in the look now in force
             // rather than left in the one the user just left.
             if shell.style_generation() != prompts_style {
                 prompts_style = shell.style_generation();
                 confirm.repaint(&mut shell, &mut compositor);
-                elevate.repaint(&mut shell, &mut compositor);
+                elevate.repaint(&shell, &mut compositor);
                 resolution.repaint(&mut shell, &mut compositor);
                 windows.alerts.repaint(&shell, &mut compositor);
                 picker.restyle(&shell, &mut compositor);
@@ -7025,7 +7286,7 @@ mod program {
         sink: &'a mut RtEventSink,
         picker: &'a mut SessionPicker<S, F>,
         confirm: &'a mut ConfirmPrompt,
-        elevate: &'a mut ElevatePrompt,
+        elevate: &'a mut AuthorisePrompt,
         elevator: &'a mut RtElevator,
         resolution: &'a mut ResolutionPrompt,
         account: &'a str,
@@ -7288,6 +7549,12 @@ mod program {
                 );
             }
             light_drop_icon(seat.shell, seat.compositor, self.desktop);
+        }
+
+        fn attend(&mut self, seat: &mut Seat<'_>, now_ns: u64) {
+            if !self.elevate.attend(now_ns, seat.shell, seat.compositor) {
+                io::write_stderr_line("desktop: the secure attention notice could not be shown");
+            }
         }
     }
 
@@ -7606,12 +7873,8 @@ mod program {
     ) {
         let mut model = request.model;
         if let MenuSubject::App { owner } = request.subject {
-            let scale = compositor.scale();
-            let art = apps
-                .attested_bundle(owner)
-                .and_then(|bundle| sheet_artwork(shell, bundle, scale));
-            if let Some(art) = art {
-                model.set_info_artwork(&art);
+            if let Some(bundle) = apps.attested_bundle(owner) {
+                model.set_info_source(&RowIcon::Bundle(alloc::string::String::from(bundle)));
             }
         }
         let geom = chain_geometry(shell.session(), compositor);
@@ -8030,7 +8293,7 @@ mod program {
         picker: &mut SessionPicker<S, F>,
         (confirm, (elevate, elevator), resolution): (
             &mut ConfirmPrompt,
-            (&mut ElevatePrompt, &mut RtElevator),
+            (&mut AuthorisePrompt, &mut RtElevator),
             &mut ResolutionPrompt,
         ),
         lock: &mut ScreenLock,
@@ -8182,19 +8445,6 @@ mod program {
                         let now_ns = tairix_rt::clock_get();
                         let _ = resolution.handle_click(local, now_ns, shell, compositor);
                     }
-                    // A press on the showing credential prompt answers it the
-                    // same way: only the continuing button offers what was
-                    // typed, and the broker decides.
-                    if elevate.wm_id() == Some(window) {
-                        let outcome = elevate.handle_click(
-                            local,
-                            tairix_rt::clock_get(),
-                            elevator,
-                            shell,
-                            compositor,
-                        );
-                        report_elevation(outcome);
-                    }
                 }
                 InputResponse::SecondaryActivated { window, local } => {
                     // A right-click raises+focuses the window like a primary
@@ -8338,20 +8588,6 @@ mod program {
                         if let Some(record) = key {
                             let now_ns = tairix_rt::clock_get();
                             let _ = resolution.handle_key(&record, now_ns, shell, compositor);
-                        }
-                    } else if elevate.wm_id() == Some(window) {
-                        // The credential prompt consumes its own keys, so a
-                        // password is typed into it and never into whatever
-                        // held focus behind it.
-                        if let Some(record) = key {
-                            let outcome = elevate.handle_key(
-                                &record,
-                                tairix_rt::clock_get(),
-                                elevator,
-                                shell,
-                                compositor,
-                            );
-                            report_elevation(outcome);
                         }
                     } else if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
                         deliver(
@@ -8829,7 +9065,7 @@ mod program {
                 // itself is the loop's, which owns the frame region the
                 // session gives back.
                 confirm.abandon(shell, compositor);
-                elevate.abandon(shell, compositor);
+                report_elevation(elevate.abandon(compositor));
                 resolution.abandon(shell, compositor);
                 return Routed::SwitchUser;
             }
@@ -8838,7 +9074,7 @@ mod program {
                 // unanswered (so nothing irreversible follows a log-out) and
                 // unwind through the one owner-checked release.
                 confirm.abandon(shell, compositor);
-                elevate.abandon(shell, compositor);
+                report_elevation(elevate.abandon(compositor));
                 resolution.abandon(shell, compositor);
                 lock.abandon(compositor);
                 return Routed::EndSession;
@@ -8905,14 +9141,18 @@ mod program {
                 // broker re-authenticates it and starts the application
                 // itself. A prompt that cannot be shown asks nothing and
                 // sets nothing.
-                if elevate.ask(DATETIME_RUN_PATH, SET_TIME_PURPOSE, shell, compositor) {
-                    // The prompt is focused and on screen: announce it so a
-                    // host that must type into the fields waits on a real
-                    // surface rather than racing the click that asked for it.
-                    log_info(ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, &[]);
-                } else {
+                let request = AuthoriseRequest {
+                    program: alloc::string::String::from(DATETIME_RUN_PATH),
+                    elevation: Elevation::Launch,
+                    requester: alloc::string::String::from(DATETIME_TITLE),
+                    bundle: tairix_appstore::bundle_of_entry(DATETIME_RUN_PATH)
+                        .map(alloc::string::String::from),
+                    purpose: alloc::string::String::from(SET_TIME_PURPOSE),
+                    window: None,
+                };
+                if !elevate.ask(request, elevator, shell, compositor) {
                     io::write_stderr_line(
-                        "desktop: could not ask for an account; the clock was not changed",
+                        "desktop: could not ask for authorisation; the clock was not changed",
                     );
                 }
             }
@@ -9315,93 +9555,191 @@ mod program {
         }
     }
 
-    /// What the credential prompt says the account is wanted for.
-    const SET_TIME_PURPOSE: &str = "Setting the date and time needs an account that may.";
+    /// What the set-date-and-time request names as asking: the program that
+    /// runs once it is allowed.
+    const DATETIME_TITLE: &str = "Date & Time";
 
-    /// The thread the credential prompt's offers go to the broker on, so the
-    /// key it derives and the program it starts never stall the compositor.
-    type ElevateWorker = Worker<(), ElevateAsk, (Ticket, Result<i64, Errno>)>;
+    /// The most accounts a listing gathers, a page at a time: a containment
+    /// bound on what one answer may make the session hold, far past any
+    /// machine's count of accounts that may allow one program.
+    const MOST_AUTHORISERS: usize = 256;
 
-    /// The production elevation seam: post the offered credentials to this
-    /// console's broker on its worker, and let the broker re-authenticate and
-    /// start the program.
+    /// The thread the authorisation prompt's questions go to the broker on,
+    /// so the key it derives and the program it runs never stall the
+    /// compositor.
+    type ElevateWorker = Worker<(), ElevateAsk, AuthoriseAnswer>;
+
+    /// The production elevation seam: ask this console's broker, on its
+    /// worker, who may allow a program and whether a password allows it.
     ///
-    /// The desktop never authenticates anybody and never spawns the elevated
-    /// program itself; it carries the offer and reads the answer.
+    /// The desktop never authenticates anybody and never runs the program
+    /// itself; it carries the question and reads the answer.
     struct RtElevator {
         worker: alloc::sync::Arc<ElevateWorker>,
         tickets: Tickets,
-        /// The answer to an offer no memory could hold, owed before any the
-        /// worker brings back.
-        unasked: Option<(Ticket, Result<i64, Errno>)>,
+        /// The signed-in account's login name.
+        own: alloc::string::String,
+        /// The answer to a question no memory could hold, owed before any
+        /// the worker brings back.
+        unasked: Option<AuthoriseAnswer>,
     }
 
     impl RtElevator {
         /// The oldest answer that has landed, taken once.
-        fn landed(&mut self) -> Option<(Ticket, Result<i64, Errno>)> {
+        fn landed(&mut self) -> Option<AuthoriseAnswer> {
             self.unasked.take().or_else(|| self.worker.collect())
         }
     }
 
     impl Elevator for RtElevator {
-        fn ask(&mut self, username: &str, password: &str, program: &str) -> Ticket {
+        fn authorisers(&mut self, program: &str) -> Ticket {
             let ticket = self.tickets.issue();
-            match ElevateAsk::new(ticket, username, password, program) {
+            self.worker.submit(ElevateAsk::Authorisers {
+                ticket,
+                program: alloc::string::String::from(program),
+                own: self.own.clone(),
+            });
+            ticket
+        }
+
+        fn offer(&mut self, username: &str, password: &str, request: &AuthoriseRequest) -> Ticket {
+            let ticket = self.tickets.issue();
+            match ElevateAsk::offer(ticket, username, password, request) {
                 Some(ask) => {
                     self.worker.submit(ask);
                 }
-                None => self.unasked = Some((ticket, Err(Errno::OutOfMemory))),
+                None => {
+                    self.unasked = Some(AuthoriseAnswer::Offer(
+                        ticket,
+                        Err(AuthoriseRefusal::NotDone(Errno::OutOfMemory)),
+                    ));
+                }
             }
             ticket
         }
     }
 
-    /// The broker's answer to one offer at the credential prompt, its password
-    /// erased before returning. A password that is not text was never one the
-    /// broker could check.
-    fn launch_elevated(_: &mut (), ask: &mut ElevateAsk) -> (Ticket, Result<i64, Errno>) {
-        let answer = ask
-            .password()
-            .map_or(Err(Errno::PermissionDenied), |password| {
-                launch_as(ask.username(), password, ask.program())
-            });
+    /// The broker's answer to one question at the authorisation prompt, any
+    /// password erased before returning.
+    fn ask_broker_for(_: &mut (), ask: &mut ElevateAsk) -> AuthoriseAnswer {
+        let ticket = ask.ticket();
+        let answer = match ask {
+            ElevateAsk::Authorisers { program, own, .. } => {
+                AuthoriseAnswer::Listing(ticket, authorisers_of(program, own))
+            }
+            ElevateAsk::Offer { .. } => AuthoriseAnswer::Offer(ticket, perform(ask)),
+        };
         ask.erase();
-        (ask.ticket(), answer)
+        answer
     }
 
-    /// Have the broker authenticate `password` for `username` and start
-    /// `program` as that account, answering the started program's pid.
-    fn launch_as(username: &str, password: &str, program: &str) -> Result<i64, Errno> {
-        let mut reply = [0u8; ELEVATE_MAX_REPLY];
-        match tairix_rt::elevate(
-            &ElevateRequest::Launch {
+    /// Every account the broker says may allow `program`, a page at a time
+    /// up to [`MOST_AUTHORISERS`]; `None` when it could not say.
+    ///
+    /// The broker lists the caller's own account first when it may, so the
+    /// first account of the first page is taken as `own`'s only when it is
+    /// `own`: a page that left it out cannot have someone else shown as the
+    /// signed-in account.
+    fn authorisers_of(program: &str, own: &str) -> Option<Authorisers> {
+        let mut listing = Authorisers::default();
+        let mut offset = 0u32;
+        loop {
+            let mut reply = [0u8; ELEVATE_MAX_REPLY];
+            let ElevateReply::Authorisers { own: may, page } =
+                tairix_rt::elevate(&ElevateRequest::Authorisers { program, offset }, &mut reply)
+                    .ok()?
+            else {
+                return None;
+            };
+            let page = decode_account_page(page).ok()?;
+            let mut accounts = page
+                .accounts()
+                .iter()
+                .map(|account| AccountTile::new(account.display_name(), account.login_name()))
+                .peekable();
+            if offset == 0 && may && accounts.peek().is_some_and(|tile| tile.login_name() == own) {
+                listing.own = accounts.next();
+            }
+            listing.others.extend(accounts);
+            let read = u32::try_from(page.accounts().len()).ok()?;
+            offset = offset.checked_add(read)?;
+            if page.is_last() || read == 0 || listing.others.len() >= MOST_AUTHORISERS {
+                listing.others.truncate(MOST_AUTHORISERS);
+                return Some(listing);
+            }
+        }
+    }
+
+    /// Have the broker perform an offered request, answering what it did or
+    /// why it did nothing. A password that is not text was never one the
+    /// broker could check.
+    fn perform(ask: &ElevateAsk) -> Result<AuthoriseDone, AuthoriseRefusal> {
+        let ElevateAsk::Offer {
+            username, request, ..
+        } = ask
+        else {
+            return Err(AuthoriseRefusal::Unreachable);
+        };
+        let password = ask.password().ok_or(AuthoriseRefusal::Refused)?;
+        let program = request.program.as_str();
+        let words: Vec<&str> = match &request.elevation {
+            Elevation::Launch => Vec::new(),
+            Elevation::Run(words) | Elevation::Capture(words) => {
+                words.iter().map(alloc::string::String::as_str).collect()
+            }
+        };
+        let argv = ElevateArgv::new(&words).map_err(AuthoriseRefusal::NotDone)?;
+        let wire = match request.elevation {
+            Elevation::Launch => ElevateRequest::Launch {
                 username,
                 password,
                 program,
             },
-            &mut reply,
-        )? {
-            ElevateReply::Launched { pid } => Ok(pid),
-            ElevateReply::Refused(err) => Err(err),
-            // Every other reply answers a request this session did not send.
-            // A broker that sent one is not speaking this protocol, and
-            // nothing was started on a reply the session did not understand.
-            ElevateReply::Completed { .. }
-            | ElevateReply::Verified
-            | ElevateReply::Captured { .. }
-            | ElevateReply::Overran { .. } => Err(Errno::OutOfRange),
+            Elevation::Run(_) => ElevateRequest::Run {
+                username,
+                password,
+                program,
+                argv,
+            },
+            Elevation::Capture(_) => ElevateRequest::Capture {
+                username,
+                password,
+                program,
+                argv,
+            },
+        };
+        let mut reply = [0u8; ELEVATE_MAX_REPLY];
+        match tairix_rt::elevate(&wire, &mut reply) {
+            Ok(ElevateReply::Launched { pid }) => Ok(AuthoriseDone::Launched { pid }),
+            Ok(ElevateReply::Completed { exit_code }) => Ok(AuthoriseDone::Ran { exit_code }),
+            Ok(ElevateReply::Captured { exit_code, output }) => Ok(AuthoriseDone::Captured {
+                exit_code,
+                output: output.to_vec(),
+            }),
+            Ok(ElevateReply::Overran { exit_code }) => Ok(AuthoriseDone::Overran { exit_code }),
+            Ok(ElevateReply::Refused(Errno::PermissionDenied)) => Err(AuthoriseRefusal::Refused),
+            Ok(ElevateReply::Refused(err)) => Err(AuthoriseRefusal::NotDone(err)),
+            Ok(ElevateReply::Cooling { retry_after }) => {
+                Err(AuthoriseRefusal::Cooling(retry_after))
+            }
+            // A reply to a question this session did not ask: it was not
+            // spoken to in this protocol, and nothing is taken from it.
+            Ok(ElevateReply::Verified | ElevateReply::Authorisers { .. }) | Err(_) => {
+                Err(AuthoriseRefusal::Unreachable)
+            }
         }
     }
 
-    /// Adopt every answer the broker has given the credential prompt.
+    /// Adopt every answer the broker has given the authorisation prompt.
     fn adopt_elevations(
         elevator: &mut RtElevator,
-        elevate: &mut ElevatePrompt,
-        shell: &mut DesktopShell,
+        elevate: &mut AuthorisePrompt,
+        shell: &DesktopShell,
         compositor: &mut Compositor,
     ) {
         while let Some(answer) = elevator.landed() {
-            report_elevation(elevate.answer(answer, shell, compositor));
+            let now_ns = tairix_rt::clock_get();
+            report_elevation(elevate.answer(answer, now_ns, shell, compositor));
         }
     }
 
@@ -9418,14 +9756,21 @@ mod program {
     /// rather than a special case that leaks.
     ///
     /// A refusal is already stated in the prompt, which stays up for another
-    /// attempt, so nothing is reported for one here. A cancellation is
-    /// reported, since a user who asked to set the clock and saw nothing
-    /// happen deserves to be told nothing was set.
+    /// attempt, so nothing is reported for one here. A request that was not
+    /// allowed is reported, since one that silently came to nothing leaves no
+    /// trace of why.
     fn report_elevation(outcome: PromptOutcome) {
         match outcome {
-            PromptOutcome::Started { .. } | PromptOutcome::Pending => {}
-            PromptOutcome::Cancelled => {
-                io::write_stderr_line("desktop: the clock was not changed");
+            PromptOutcome::Done { .. }
+            | PromptOutcome::Pending
+            | PromptOutcome::Cancelled { request: None } => {}
+            PromptOutcome::Cancelled {
+                request: Some(request),
+            } => {
+                app::report(
+                    APP_NAME,
+                    format_args!("{} was not allowed; nothing was changed", request.program),
+                );
             }
         }
     }
@@ -9499,6 +9844,7 @@ mod program {
                 wallpapers: &mut NoGallery,
                 cursor_sets: &[],
                 clipboard: &mut tairix_desktop_session::clipboard::NoClipboard,
+                authorise: None,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -10217,7 +10563,7 @@ mod program {
             // and each application repaints itself. Without this the desktop
             // would change and every open window would sit there in the
             // appearance and density the user just left.
-            publish_desktop(compositor);
+            publish_desktop(compositor, shell);
         }
     }
 
@@ -11089,6 +11435,42 @@ mod program {
         }
     }
 
+    /// Tell the window that asked for a system task how it ended, tearing its
+    /// owner's windows down when the owner's event port is gone.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_authorisation<S: DirectorySource, F: FnMut() -> S>(
+        concluded: AuthoriseConcluded,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let Some(owner) = server.owner_of(concluded.window_id) else {
+            return;
+        };
+        if let Err(Errno::NotFound) = server.conclude_authorisation(
+            sink,
+            concluded.window_id,
+            concluded.outcome,
+            concluded.output,
+        ) {
+            drop_departed(
+                owner,
+                server,
+                shell,
+                compositor,
+                windows,
+                picker,
+                &mut apps.service,
+                menu,
+            );
+        }
+    }
+
     /// Tell the asking window its preview concluded: drawn into its region,
     /// or refused, so the tile draws its placeholder rather than waiting for a
     /// picture that is not coming. A window that has closed under one is
@@ -11393,8 +11775,8 @@ mod program {
     /// the background, and re-publishes when it re-acquires), is reported and
     /// nothing is published: an application keeps the last state it was given
     /// rather than being handed a guess.
-    fn publish_desktop(compositor: &Compositor) {
-        let desktop = match desktop_info(compositor) {
+    fn publish_desktop(compositor: &Compositor, shell: &DesktopShell) {
+        let desktop = match desktop_info(compositor, shell.machine_zone()) {
             Ok(desktop) => desktop,
             Err(err) => {
                 app::report(
@@ -11511,6 +11893,7 @@ mod program {
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
             clipboard: &mut tairix_desktop_session::clipboard::NoClipboard,
+            authorise: None,
         };
         server.client_exited(&mut bridge, owner);
     }

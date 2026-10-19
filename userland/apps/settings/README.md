@@ -81,8 +81,8 @@ there.
   `SYSTEM_CONFIG` query and parse it with `lib/sysconfig` — the engine
   `configure` writes through — so a row and the tool cannot disagree about
   what the store admits. A choice edits a **working copy**: the pane's action
-  band says how many rows differ, Revert puts them back, and Apply asks for
-  an account once and runs `configure` once with every changed key, so the
+  band says how many rows differ, Revert puts them back, and Apply asks the
+  desktop once to run `configure` with every changed key, so the
   document is rendered a single time and a group can never be left half
   written. A refusal leaves the working copy standing and states why; only a
   run that succeeded makes the window re-read the store. A row with no
@@ -91,8 +91,8 @@ there.
   away rather than silently rewriting their values.
 - **About and Date & Time measure, and say when they could not.** Each figure
   is its own ungated query, so one refusal costs one row. Date & Time's band
-  starts `datetime.app` as an authenticated account and leaves it running —
-  the clock is that application's to set, not this one's.
+  asks the desktop to open `datetime.app` and leaves it running — the clock
+  is that application's to set, not this one's.
 - **Users & Groups composes three readings of different authority, and
   reimplements none of the tools.** The caller's own record comes from the
   ungated self-scoped query — resolved against the uid the kernel attested,
@@ -100,25 +100,22 @@ there.
   group plates from the two ungated directories, which carry names and ids
   and deliberately nothing else. Another account's fields, any lock state and
   any capability ceiling are `CAP_USER_ADMIN`'s, so they arrive only as the
-  relayed output of an authenticated `users --list` run, read back through the
+  relayed output of an authorised `users -l` run, read back through the
   one listing form `lib/useradmin` defines for the tool and this surface
   alike. That listing is dropped when the reader leaves the pane, and a
   capture that lands for a pane the window has since left is dropped rather
-  than installed. Apply is **one** elevated run and refuses to be anything
+  than installed. Apply is **one** authorised run and refuses to be anything
   else: a change spanning two accounts, or a password beside other fields,
-  is stated before a password is asked for rather than half applied. The
+  is stated before anything is asked rather than half applied. The
   password row is masked, the record is built here under a salt drawn from
   the kernel CSPRNG, and no plaintext is ever copied out of the field that
   holds it — `passwd --record` receives the record. Every write elevates a
   *named* account and the kernel decides; the never-widen and
   last-administrator rules remain the only arbiters.
-- **One credential question, shared with the desktop.** The account and
-  password are asked for through `lib/controls::CredentialSheet`, the same
-  surface the session puts up for a command it may not perform: one focus
-  order, one wording, one place the secret lives. It is modal while it is up,
-  so a press behind it cannot change a pane the reader is about to
-  authenticate for, and the offered password is zeroed as soon as the
-  exchange resolves.
+- **No password is asked for here.** Every privileged action is a system task
+  (`window_ipc::SystemTask`) asked of the desktop, which puts up the system's
+  own authorisation prompt naming Settings, decides what runs, and answers
+  what came of it. Settings never sees the account or the password.
 - **One registry table is the whole surface.** `registry::CATEGORIES` is the
   single definition of the sidebar strip, the search index, the location
   trail, the keyboard cursor and the pane dispatch, so a category cannot exist

@@ -78,7 +78,7 @@ pub use catalog::{
     DEFAULT_WALLPAPER, DEFAULT_WALLPAPER_CATEGORY, MAX_WALLPAPER_BYTES,
     MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
-pub use civil::{civil_clock, RegionCode, ZoneName};
+pub use civil::{civil_clock, RegionCode};
 pub use fit::{decode_request, nominal_source_size, place, Placement};
 pub use idle::{DisplayOffAfter, IdleAfter, IdleWait, MAX_WAIT_MINUTES};
 pub use input::{
@@ -101,20 +101,18 @@ pub use settings::{
 };
 pub use sound::{SoundControls, REMEMBERED_LEVELS, REMEMBERED_MUTES};
 pub use tairix_abi::desktop::ScreensaverKind;
+pub use tairix_abi::zone::ZoneName;
 pub use text::{resolve, ResolvedText, TextFamily, TextSize, TEXT_POINTS_MAX, TEXT_POINTS_MIN};
 
-/// The signed bundle identifier of the desktop session — the application
-/// that owns the pinboard settings and publishes them.
+/// The application that owns the pinboard settings and publishes them: the
+/// desktop session.
 ///
-/// The one place the identifier is spelled, because two principals need it
-/// and they must agree: the session names nothing at all (an application
-/// never names its own store — the app-data service derives it from the
-/// identity the kernel attests), and a reader hands exactly this to
-/// `tairix_appdata::read_published` to obtain the desktop's published
-/// document. Getting it wrong reaches a store that publishes nothing, never
-/// another application's private one, because a foreign read is a request
-/// shape with no scope field at all (`plans/APPDATA.md` §3.6).
-pub const PINBOARD_PUBLISHER: &str = "os.tairix.desktop";
+/// A reader hands exactly this to `tairix_appdata::read_published`; the
+/// session names nothing, because the app-data service derives its store
+/// from the identity the kernel attests. Getting it wrong reaches a store
+/// that publishes nothing, never another application's private one
+/// (`plans/APPDATA.md` §3.6).
+pub const PINBOARD_PUBLISHER: &str = tairix_abi::session_ipc::DESKTOP_BUNDLE;
 
 /// The name of the Settings pane where the desktop picture is chosen —
 /// what the backdrop menu's *Change Background…* row hands over as its

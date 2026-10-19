@@ -1,11 +1,14 @@
 //! Boot-time system-configuration loader.
 //!
-//! The operator's boot-time policy lives in one text document on the root
-//! volume, `/System/Settings/Configuration/system.conf`, whose single
-//! definition is the [`tairix_sysconfig`] engine. This module is the kernel's
-//! reader of the cache-policy portion of that store: as the root is mounted
-//! it reads the document off the just-mounted volume, parses it, and
-//! applies the operator's caching switches to the live cache-admission control
+//! The machine's boot-time policy lives in one text document, `system.conf`,
+//! whose single definition is the [`tairix_sysconfig`] engine, in two layers:
+//! the administrator's on the root volume, and the image's default on the
+//! read-only `/System` volume, which stands while the administrator's does
+//! not exist. This module is the kernel's reader of the cache-policy portion
+//! of that document: as the root is mounted it reads the administrator's
+//! layer off the just-mounted volume — the image's, read off the `/System`
+//! volume, where there is none — parses it, and applies its caching switches
+//! to the live cache-admission control
 //! ([`CACHE_CONTROL`](crate::cache_control::CACHE_CONTROL)).
 //!
 //! It mirrors the `/System/Security` database readers ([`crate::users`],
@@ -24,6 +27,7 @@
 //! over the cache policy.
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
+use tairix_abi::driver_store::SystemConfigFile;
 use tairix_log::{FieldValue, Level, Sink};
 use tairix_sysconfig::{CacheClass, SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN};
 
@@ -31,48 +35,73 @@ use crate::audit::{emit, AuditEvent};
 use crate::cache_control::CacheControl;
 use crate::fs::{read_bootstrap_file, BootstrapFile, BoundedReadError, VfsError};
 
-/// `system.conf` as the boot reads it.
+/// `system.conf` as the boot reads it off the root volume.
 pub const SYSTEM_CONFIG: BootstrapFile = BootstrapFile {
     path: CONFIG_PATH,
     max_len: MAX_CONFIG_LEN,
 };
 
-/// Read `system.conf` off the mounted root `fs`, parse it, and apply the
-/// operator's caching switches to `control` and the pointer-button chatter
-/// window to the seat's live control.
-///
-/// Production passes the process-global
-/// [`CACHE_CONTROL`](crate::cache_control::CACHE_CONTROL) — the very control
-/// every cache consults — so the operator's policy takes effect on each
-/// cache's next operation. Called once from the root unlock, right
-/// after the users and groups databases load. The store text carries no
-/// credential bytes (it is the public configuration document), so the read
-/// buffer needs no zeroisation.
-///
-/// Never fails: an absent store applies the [`SystemConfig::default`]
-/// (all caches enabled) and audits [`AuditEvent::SystemConfigApplied`] with
-/// `source: default`; a present-but-malformed store applies the same defaults
-/// and audits [`AuditEvent::SystemConfigRejected`]. A well-formed store is
-/// applied and audited [`AuditEvent::SystemConfigApplied`] with
-/// `source: store`.
-pub fn load_and_apply_system_config<F>(fs: &mut F, control: &CacheControl, audit: &dyn Sink)
+/// `system.conf`'s image default as the boot reads it off the read-only
+/// `/System` volume.
+pub const IMAGE_SYSTEM_CONFIG: BootstrapFile = BootstrapFile {
+    path: SystemConfigFile::System.on_volume_path(),
+    max_len: MAX_CONFIG_LEN,
+};
+
+/// What reading the image's default answered: the document, `None` where the
+/// image carries none, or the refusal.
+pub type ImageConfig = Result<Option<alloc::vec::Vec<u8>>, BoundedReadError>;
+
+/// Read `system.conf`'s image default off the mounted `/System` volume `fs`.
+pub fn read_image_system_config<F>(fs: &mut F) -> ImageConfig
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
+    match read_bootstrap_file(fs, IMAGE_SYSTEM_CONFIG) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(BoundedReadError::Vfs(VfsError::NotFound)) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Read `system.conf` off the mounted root `fs` — the image's default
+/// (`image`) where the root carries none — parse it, and apply the caching
+/// switches to `control` and the pointer-button chatter window to the seat's
+/// live control.
+///
+/// Production passes the process-global
+/// [`CACHE_CONTROL`](crate::cache_control::CACHE_CONTROL) — the very control
+/// every cache consults — so the policy takes effect on each cache's next
+/// operation. Called once from the root unlock, right after the users and
+/// groups databases load. The document carries no credential bytes (it is the
+/// public configuration document), so the read buffer needs no zeroisation.
+///
+/// Never fails: with neither layer it applies the [`SystemConfig::default`]
+/// (all caches enabled) and audits [`AuditEvent::SystemConfigApplied`] with
+/// `source: default`; a layer that cannot be read or parsed applies the same
+/// defaults and audits [`AuditEvent::SystemConfigRejected`] — a root layer
+/// that cannot be read is never replaced by the image's. A well-formed
+/// document is applied and audited [`AuditEvent::SystemConfigApplied`] with
+/// `source: store` or `source: image`.
+pub fn load_and_apply_system_config<F>(
+    fs: &mut F,
+    image: ImageConfig,
+    control: &CacheControl,
+    audit: &dyn Sink,
+) where
+    F: FilesystemRead + FilesystemSecurity + ?Sized,
+{
     let (config, source) = match read_bootstrap_file(fs, SYSTEM_CONFIG) {
-        Ok(buf) => match core::str::from_utf8(&buf).map(SystemConfig::parse) {
-            Ok(Ok(config)) => (config, "store"),
-            Ok(Err(_)) => {
-                audit_rejected(audit, "malformed");
-                (SystemConfig::default(), "default")
-            }
-            Err(_) => {
-                audit_rejected(audit, "not_utf8");
+        Ok(buf) => parsed(&buf, "store", audit),
+        // The administrator's layer is absent: the image's stands, if it has one.
+        Err(BoundedReadError::Vfs(VfsError::NotFound)) => match image {
+            Ok(Some(buf)) => parsed(&buf, "image", audit),
+            Ok(None) => (SystemConfig::default(), "default"),
+            Err(err) => {
+                audit_rejected(audit, read_error_cause(err));
                 (SystemConfig::default(), "default")
             }
         },
-        // A missing store is the normal default case, not a rejection.
-        Err(BoundedReadError::Vfs(VfsError::NotFound)) => (SystemConfig::default(), "default"),
         Err(err) => {
             audit_rejected(audit, read_error_cause(err));
             (SystemConfig::default(), "default")
@@ -84,6 +113,22 @@ where
     // process-global control every seat reads on each button edge.
     crate::seat::CLICK_DEBOUNCE.set_ms(config.input_mouse_debounce_ms);
     audit_applied(audit, &config, source);
+}
+
+/// The configuration `buf` holds, read from `source`, or the defaults with
+/// the refusal audited.
+fn parsed(buf: &[u8], source: &'static str, audit: &dyn Sink) -> (SystemConfig, &'static str) {
+    match core::str::from_utf8(buf).map(SystemConfig::parse) {
+        Ok(Ok(config)) => (config, source),
+        Ok(Err(_)) => {
+            audit_rejected(audit, "malformed");
+            (SystemConfig::default(), "default")
+        }
+        Err(_) => {
+            audit_rejected(audit, "not_utf8");
+            (SystemConfig::default(), "default")
+        }
+    }
 }
 
 /// The stable `cause` string for a bootstrap-read refusal other than a

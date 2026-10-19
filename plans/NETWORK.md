@@ -1752,7 +1752,7 @@ order-independent (retried like `match.mac` until the interface appears).
 #### N9b-3-2-β-2-ii-b-static — the live static-addressing vertical (gate-green) `[x]`
 `tairix-test-netstack-static-qemu-aarch64` boots the production aarch64
 pipeline against a `static-net-root` disk (net-only driver bundle + a planted
-`/System/Settings/Network/network.conf` binding the NIC to the `wan` alias by
+`/System/Defaults/Network/network.conf` binding the NIC to the `wan` alias by
 `match.node` = the QEMU-virt virtio-net register base `0x0a00_3c00`, static
 IPv6 `fd00::2/64`). `devmgr` autoloads the NIC, reads the config, binds `wan`
 by bus location, and `netstack` assigns the static address — all pre-unlock,
@@ -1763,12 +1763,13 @@ Bringing it up surfaced and fixed **two latent defects the config path had never
 exercised live**:
 - **Live config delivery was broken.** `devmgr` read `network.conf` via
   `fs_open`, which returns `NotImplemented` before the root unlock (the VFS is
-  not mounted) and is never retried afterward. Fixed by serving the closed
-  set of `/System/Settings/` config files (`SystemConfigFile{System,Network}`)
-  over the always-mounted read-only `/System` **store endpoint**
-  (`StoreRequest::ReadConfig` in `lib/abi/driver_store`, served by the kernel
-  `driver_store_server` via `SystemFileService::read_system_config` confined to
-  `SYSTEM_VOLUME_SETTINGS_PATH`, read by `devmgr`'s config sources). `devmgr`
+  not mounted) and is never retried afterward. Fixed by serving the image's
+  defaults of the closed set of settings documents
+  (`SystemConfigFile{System,Network}`) over the always-mounted read-only
+  `/System` **store endpoint** (`StoreRequest::ReadConfig` in
+  `lib/abi/driver_store`, served by the kernel `driver_store_server` via
+  `SystemFileService::read_system_config` confined to
+  `SYSTEM_VOLUME_DEFAULTS_PATH`, read by `devmgr`'s config sources). `devmgr`
   also logs the resolved NIC bus location on `NETSTACK_BOUND` (`node` field).
 - **Rename detached the interface pump.** `apply_interface_config` renamed the
   bound interface (`net0`→`wan`) but the driver `Channel` still held the old

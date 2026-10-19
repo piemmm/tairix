@@ -1,6 +1,6 @@
 ## NAME
 
-datetime — set the machine's date and time
+datetime — the machine's date, time and time zone
 
 ## SYNOPSIS
 
@@ -8,50 +8,68 @@ datetime — set the machine's date and time
 
 ## DESCRIPTION
 
-Opens a desktop window showing the machine's clock in six editable fields
-— year, month and day under **Date**, hour, minute and second under
-**Time** — and sets the clock to what they say. Nothing changes until
-**Set** is pressed.
+Opens the **Date & Time** window: what the machine's clock reads, where that
+time came from, and the controls that set it. It is reached from the desktop
+clock's own menu — right-click the clock in the icon bar and choose **Set Date
+& Time…** — and the desktop asks for the password of an account that may
+change these settings before it opens.
 
-The reading is UTC. TAIRiX keeps no timezone offset, so there is no local
-time to show and none to enter.
+The top of the window shows the time to the second, the date, and the time
+zone with its abbreviation and its offset from UTC, all in the machine's own
+zone.
 
-The window is normally reached from the desktop clock's own menu:
-right-click the clock in the icon bar and choose **Set Date & Time…**.
-Setting the
-clock needs an authority a desktop session does not have, so the desktop
-asks for an account that does, and this app is started as that account
-once the password is accepted.
+**Date and Time** holds the clock itself.
 
-Click a field to type in it, or press `Tab` to move to the next one.
-Only digits are accepted, with a leading `-` allowed in the year for a
-date before year 1. `Enter` sets the clock; `Escape` closes the window.
+- **Set date and time automatically** keeps the clock right from time servers
+  on the network. Beneath it the window says where the clock's time came from:
+  set from the network, and when; set by hand; read from the board's clock
+  chip when the machine started; or not set at all. Turning the switch on or
+  off takes effect at once.
+- While the switch is on, the calendar and the time are shown but cannot be
+  changed. Turn it off to set the clock by hand.
+- Choose a day in the calendar and type or step the time, then press **Set**.
+  The arrows move the chosen day by a day and a week, `Page Up` and `Page Down`
+  by a month, and with `Shift` by a year; the buttons beside the month and
+  the year move through them without changing the day. In the time, `Tab` or
+  `:` moves from the hour to the minute to the second, and `Up` and `Down`
+  step the part the cursor is in. On a twelve-hour clock the last part is
+  **AM** or **PM**: click it, or press `A` or `P`. `Enter` sets the clock.
+- Until you choose a day or change the time, the calendar and the time follow
+  the clock as it runs. Once you have, they hold what you chose until you set
+  it or close the window.
 
-Every field is checked before anything is set, and the first fault is
-stated in the window rather than corrected silently: a month outside 1 to
-12, an hour outside 0 to 23, a minute or second outside 0 to 59, or a day
-that does not exist in the month and year entered — 31 April, or 29
-February outside a leap year. Nothing is set when a field is refused.
+The date and time you set are read in the machine's time zone. A time the
+clocks skip when they go forward is refused, and the window says when the
+clocks change. A time the clocks pass twice when they go back is asked about:
+choose whether you mean the one before the change or the one after it. A date
+before this system was made, or more than a century after it was made, is set
+only once you confirm it, because certificates would not be trusted and files
+would look older, or newer, than they are.
 
-Dates before 1970 and long after 2038 are ordinary entries. The clock is
-a signed 64-bit value, so neither is a limit.
+After the clock is set the board's clock chip is set to the same time, so the
+machine keeps it when it restarts. If the machine has no clock chip, the
+window says the time will be lost at the next restart unless network time is
+on.
 
-If the machine's clock has never been set since it started, the fields
-open **empty** and the window says so. They are not filled with the Unix
-epoch, which would be a date the machine never claimed.
+**Time Zone** names the zone the machine keeps, says when its clocks next go
+forward or back and by how much, and offers **Change…**, which opens a list of
+every place the system knows: type part of a city's, a region's or a zone's
+name to narrow it, then choose with `Enter` or a double-click. Each place shows
+the time there now. A new zone takes effect at once.
 
-If the account this app is running as may not set the clock, the attempt
-is refused, the window says so, and the clock is left exactly as it was.
-The reason is also written to the standard error stream. The app keeps
-running: a refused set is an answer, not a failure of the program.
+The machine's zone is the one the login screen shows and the one used by
+every account that has not chosen a zone of its own in **Settings**.
+
+If the account the window runs as may not make a change, the change is
+refused, an alert says why, and the window shows what is really in force.
+`Escape` or **Close** closes the window.
 
 ## EXIT STATUS
 
-Zero after a clean close, including when a set was refused. Non-zero when
-the window could not be opened, the shared frame region was refused, or
-the window channel was lost; the reason is stated on the standard error
-stream.
+Zero when the window is closed, including after a refused change. Non-zero
+when the window could not be opened or its connection to the desktop was
+lost; the reason is stated on the standard error stream.
 
 ## SEE ALSO
 
-`sysinfo`, `uptime`
+`configure`

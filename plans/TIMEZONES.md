@@ -16,9 +16,9 @@ wire or on disk.
 | TZ1 | `tools/tzcompile`: the vendored IANA 2026e rules and zone table and the CLDR-derived regions, resolved with `zic`'s semantics; the `zic` oracle | done |
 | TZ2 | `lib/tz`: the store reader, zones both ways, regions, places, resolution, `CivilClock`, the fuzz harness | done |
 | TZ3 | Every image and the QEMU desktop fixtures plant `/System/Zoneinfo/zones.tzx` | done |
-| TZ4 | The process-wide seam: `TZ`, then the machine setting, then the store's default, then UTC | planned |
+| TZ4 | The machine zone: `system.conf`'s `time.zone`, the desktop's and login screen's clocks reading it; the process-wide `lib/rt` seam lands with TZ7 | in progress |
 | TZ5 | The desktop's clocks read local in the user's region, which Settings chooses; the login screen reads the store's default | done |
-| TZ6 | `datetime.app` sets the machine zone and composes the instant it commits from local fields | planned |
+| TZ6 | `datetime.app` sets the machine zone and composes the instant it commits from local fields | done |
 | TZ7 | Every timestamp a command shows reads local, with GNU's UTC switches | planned |
 | TZ8 | `README.md`'s matrix and the `docs/src/` pages the stages touch | in progress |
 
@@ -169,10 +169,19 @@ arithmetic; TZ4 gives non-desktop programs their resolved clock through
 through `tools/tzcompile` and plants it read-only on every image and every QEMU
 disk that plants the shared bundle set.
 
-**TZ4 — the process-wide seam.** `lib/rt` resolves `TZ`, then
-`/System/Settings/Timezone` (one zone name, `#` comments, a fail-closed
-grammar defined in `lib/tz`), then the store's default, then UTC, once per
-process, and hands out the resolved `CivilClock`.
+**TZ4 — the machine zone.** The machine configuration's `time.zone` key
+(`lib/sysconfig`): `default` or a zone name of the one shape `lib/abi`'s `zone`
+module defines, so the store, `DesktopInfo` and the setting refuse the same
+names. It is written by the settings service and read from the first of the
+configuration's layers that exists. Done: the desktop session watches the
+configuration's directory, re-reads it on a worker when a change names it,
+resolves its clocks by the user's choice, then the machine zone, then the
+store's default, and publishes the machine zone in `DesktopInfo` for
+applications that may open no file — Settings reads its clocks and labels
+*Default* by it; login hands the login screen the machine zone as `TZ`.
+Remaining, with TZ7's first command consumer: `lib/rt` resolves `TZ`, then the
+machine zone, then the store's default, then UTC, once per process, and hands
+out the resolved `CivilClock`.
 
 **TZ5 — the desktop's clocks (done).** The icon-bar clock shows the local time
 and the region's numeric date (beneath it where the bar is deep enough, beside
@@ -182,10 +191,15 @@ Language & Region pane chooses the region and the place and its Date & Time pane
 reads local; the login screen reads the store's default zone and region. The
 unset placeholder is unchanged (`taskbar::clock::UNSET_LABEL`).
 
-**TZ6 — setting the machine zone.** `datetime.app` gains the zone chooser
-beside its date and time fields, composes the instant it commits from local
-fields through `instant_from_local`, and writes the machine setting under the
-elevated account the clock menu already authenticates. Login exports the
+**TZ6 — setting the machine zone (done).** The Date & Time dialog
+(`docs/src/desktop/apps.md`) reads and sets the clock in the machine's zone: a
+hand-set date and time are composed through `instant_from_local`, a skipped
+time refused with the change that skips it, a repeated one asked about by its
+two offsets, an implausible one confirmed. Its zone is changed through the place
+chooser over `lib/tz`'s `listing` and written as `time.zone` by the settings
+service under the account the clock menu authenticates; the zone's next change
+is stated (`Zone::next_change`). Settings' Time zone row opens the same chooser
+for an account's own zone, *This machine's zone* first. Login exports the
 user's own zone as `TZ`, so two people on one machine each read their own local
 time (`§26.2`).
 

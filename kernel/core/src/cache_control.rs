@@ -114,7 +114,7 @@ pub static CACHE_CONTROL: CacheControl = CacheControl::new();
 #[cfg(test)]
 mod tests {
     use super::{CacheClass, CacheControl, CacheMode};
-    use tairix_sysconfig::{CacheSwitch, SystemConfig};
+    use tairix_sysconfig::{Switch, SystemConfig};
 
     #[test]
     fn a_fresh_control_admits_every_class() {
@@ -151,7 +151,7 @@ mod tests {
     fn the_master_switch_off_disables_every_class() {
         let control = CacheControl::new();
         let config = SystemConfig {
-            cache_all: CacheSwitch::Off,
+            cache_all: Switch::Off,
             // A per-class `auto` must not survive the master ceiling.
             cache_block: CacheMode::Auto,
             ..SystemConfig::default()
@@ -166,7 +166,7 @@ mod tests {
     fn apply_is_idempotent_and_re_enables() {
         let control = CacheControl::new();
         control.apply(&SystemConfig {
-            cache_all: CacheSwitch::Off,
+            cache_all: Switch::Off,
             ..SystemConfig::default()
         });
         assert!(!control.admits(CacheClass::Semantic));

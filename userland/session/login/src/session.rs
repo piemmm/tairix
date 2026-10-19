@@ -21,6 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::time::Duration64;
 use tairix_abi::{
     BootSession, Errno, ProcId, SpawnAttach, SpawnSession, DESKTOP_RUN_PATH, ENV_SHOWN_NAME,
 };
@@ -238,9 +239,7 @@ impl<'a> ConfigStore<'a> {
     /// store that is reachable and simply teaches nothing.
     ///
     /// Absence is deliberately **not** inferred from the document's
-    /// directory: `configure` creates that directory on its first write, so
-    /// a machine nobody has configured has none, and reading its absence as
-    /// an offline volume would withhold the compiled default forever.
+    /// directory: one read of the document as it stands is the whole answer.
     #[must_use]
     pub fn from_read(read: Result<&'a [u8], Errno>) -> Self {
         match read {
@@ -368,6 +367,11 @@ pub trait LoginView {
     /// session launches, so whoever is at the console sees every failure
     /// since the last successful login.
     fn note_failure(&self);
+
+    /// Say that the account just named is cooling down after refused
+    /// passwords, for `retry_after`, so its password was not asked for.
+    /// Another account may still log in meanwhile.
+    fn note_cooling(&self, retry_after: Duration64);
 
     /// Hand the terminal over to the launched session: restore the normal
     /// screen and input discipline. The next [`round_begin`]

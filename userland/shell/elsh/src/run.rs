@@ -65,9 +65,10 @@ mod program {
     use tairix_abi::time::Time64;
     use tairix_abi::{CapabilityId, Errno, FileKind, InputMode, LimitKind, ResourceLimit};
     use tairix_elsh::{
-        parse_invocation, Console, DirEntryInfo, DirLister, Elevator, Environment, Invocation,
-        LaunchError, LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire, ProcessHost, PumpTask,
-        ReplInput, ResolvedCommand, ResourceLister, Shell, Signal, WaitOutcome, USAGE,
+        parse_invocation, Console, Denied, DirEntryInfo, DirLister, Elevator, Environment,
+        Invocation, LaunchError, LaunchSpec, LimitStore, Pid, PlannedOpen, PlannedWire,
+        ProcessHost, PumpTask, ReplInput, ResolvedCommand, ResourceLister, Shell, Signal,
+        WaitOutcome, USAGE,
     };
     use tairix_procinfo::{
         cpu_info, for_each_audio_device, for_each_irq, for_each_net_bond_member,
@@ -985,7 +986,7 @@ mod program {
             password: &str,
             program: &str,
             args: &[&str],
-        ) -> Result<i32, Errno> {
+        ) -> Result<i32, Denied> {
             let request = ElevateRequest::Run {
                 username,
                 password,
@@ -997,7 +998,8 @@ mod program {
             let mut reply = [0u8; ELEVATE_MAX_REPLY];
             match tairix_rt::elevate(&request, &mut reply)? {
                 ElevateReply::Completed { exit_code } => Ok(exit_code),
-                ElevateReply::Refused(err) => Err(err),
+                ElevateReply::Refused(err) => Err(Denied::Refused(err)),
+                ElevateReply::Cooling { retry_after } => Err(Denied::Cooling(retry_after)),
                 // The builtin only ever posts a `Run` request, so every
                 // other reply answers a request it did not send. Reachable
                 // only through a protocol mismatch, so all of them fail
@@ -1005,7 +1007,8 @@ mod program {
                 ElevateReply::Verified
                 | ElevateReply::Launched { .. }
                 | ElevateReply::Captured { .. }
-                | ElevateReply::Overran { .. } => Err(Errno::OutOfRange),
+                | ElevateReply::Overran { .. }
+                | ElevateReply::Authorisers { .. } => Err(Denied::Refused(Errno::OutOfRange)),
             }
         }
     }

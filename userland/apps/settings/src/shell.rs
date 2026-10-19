@@ -15,17 +15,17 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::elevate::ElevateArgv;
+use tairix_abi::elevate::ElevateWords;
 use tairix_abi::font_ipc::FamilyEntry;
 use tairix_abi::net_ipc::NetServerAddr;
-use tairix_abi::window_ipc::PreviewSubject;
-use tairix_abi::{BundleId, DATETIME_RUN_PATH};
+use tairix_abi::window_ipc::{PreviewSubject, SystemTask};
+use tairix_abi::zone::ZoneName;
+use tairix_abi::BundleId;
 use tairix_controls::{
-    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
-    CredentialSheet, Crumb, DisclosureSet, FieldGroup, Keystroke, Menu, MenuAction, MenuItem,
-    PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollPart,
-    ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation, TextAction,
-    CREDENTIAL_HEIGHT, CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
+    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, Crumb, DisclosureSet,
+    FieldGroup, Keystroke, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction,
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange, ScrollView, SearchField,
+    Tab, Tabs, TabsAction, TabsOrientation, TextAction,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
@@ -37,7 +37,7 @@ use tairix_tz::ZoneInfo;
 use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
-use crate::accounts::{AccountFacts, Roster};
+use crate::accounts::{AccountFacts, AccountTool, Roster};
 use crate::body::{self, Body};
 use crate::civil::CivilChoices;
 use crate::effects::{EffectsAsk, EffectsReading};
@@ -170,107 +170,28 @@ fn region_at(frame: &ShellFrame, point: Point) -> Option<Under> {
     .find_map(|(rect, region)| inside(rect).then_some(region))
 }
 
-/// What the caller does with the program an offered credential runs.
-///
-/// Three, because three things are wanted of an elevated run and each is a
-/// different exchange with the supervisor: a store write is over in
-/// moments and its exit code is the whole answer, an application the user
-/// then works in is started and left running, and a store *read* is waited
-/// for and answered with what it printed.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum RunMode {
-    /// Wait for it; the exit code is the answer.
-    Wait,
-    /// Start it and leave it running.
-    Leave,
-    /// Wait for it; what it printed is the answer.
-    Capture,
-}
-
-/// What an elevated run came to.
+/// What a system task the desktop was asked to perform came to.
 ///
 /// The caller reports this back verbatim; the shell decides what it means
 /// for the pane that asked.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Elevated {
-    /// The run finished with this exit code.
-    Finished(i32),
-    /// The run finished with this exit code, having printed these bytes.
+pub enum Authorised {
+    /// It ran, and exited with this code.
+    Ran(i32),
+    /// The application it opens was started.
+    Launched,
+    /// It ran, exited with this code, and printed these bytes.
     Printed(i32, Vec<u8>),
-    /// The run happened, but printed more than the supervisor's reply
-    /// carries, so nothing came back. Not a refusal: whatever it did, it
-    /// did.
+    /// It ran, but printed more than one answer carries, so nothing came
+    /// back. Not a refusal: whatever it did, it did.
     Overran,
-    /// Nothing ran, and why.
-    Refused(ElevateRefusal),
+    /// Nothing ran: the system's prompt was cancelled or taken down.
+    Declined,
+    /// The desktop could not be asked, for this reason.
+    Refused(String),
 }
 
-/// The program an offered credential will run, and the arguments to hand
-/// it.
-///
-/// Built by the shell and carried out by the caller: this application holds
-/// no authority and starts nothing. What the caller does with the run is
-/// the shell's to say, in `mode`.
-#[derive(Clone, Eq, PartialEq)]
-pub struct Elevation {
-    /// The account the reader named.
-    pub account: String,
-    /// The password they offered, as bytes.
-    ///
-    /// A secret, and bytes rather than text so its holder can zero it in
-    /// place through the one shared eraser when the exchange resolves — a
-    /// `String`'s contents cannot be overwritten without `unsafe`, and a
-    /// credential left in a freed block is the leak the charter makes the
-    /// holder responsible for.
-    pub password: Vec<u8>,
-    /// The absolute path of the program to run.
-    pub program: &'static str,
-    /// The arguments to hand it, already in the order the program's own
-    /// command line takes them.
-    pub argv: Vec<String>,
-    /// What the caller does with the run.
-    pub mode: RunMode,
-}
-
-impl Elevation {
-    /// Erase the offered secret in place.
-    ///
-    /// The one eraser, run by [`Drop`] and by any holder that outlives the
-    /// exchange and so must erase before it is dropped — a worker desk
-    /// keeps the job it was handed until the next one replaces it, which
-    /// would be the whole time between two authentications.
-    pub fn erase(&mut self) {
-        tairix_util::secret::wipe(&mut self.password);
-    }
-}
-
-impl Drop for Elevation {
-    /// Erase the offered secret.
-    ///
-    /// Every copy ends here — the one the routing carried out of the
-    /// window and the one the worker was handed — so no path out of the
-    /// exchange, taken or refused or cancelled or unwound, can leave a
-    /// password in a freed block.
-    fn drop(&mut self) {
-        self.erase();
-    }
-}
-
-impl core::fmt::Debug for Elevation {
-    /// Redacts the secret: a derived `Debug` would print an offered
-    /// password into whatever rendered it.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Elevation")
-            .field("account", &self.account)
-            .field("password", &"<redacted>")
-            .field("program", &self.program)
-            .field("argv", &self.argv)
-            .field("mode", &self.mode)
-            .finish()
-    }
-}
-
-/// What a captured run answers, and therefore which pane it is for.
+/// What a captured task answers, and therefore which pane it is for.
 ///
 /// Carried explicitly rather than inferred from the pane on show: the
 /// desktop can send the window to another pane while a run is in flight,
@@ -295,14 +216,11 @@ impl Captures {
     }
 }
 
-/// A credential question in a dialog window of its own, and what it is for.
-struct Asking {
-    sheet: CredentialSheet,
-    program: &'static str,
-    argv: Vec<String>,
-    mode: RunMode,
-    /// What a captured run answers, and `None` for a run whose exit code
-    /// is the whole answer.
+/// A system task the desktop is performing for this window, and what its
+/// answer is for.
+struct Authorising {
+    /// What a captured task answers, and `None` for a task whose outcome is
+    /// the whole answer.
     captures: Option<Captures>,
 }
 
@@ -320,15 +238,22 @@ pub enum ShellOutcome {
     /// The shell holds no capability and performs no I/O: it never writes
     /// the desktop's settings, it says what was asked for.
     Apply(String),
-    /// The reader offered an account for a change this application may not
-    /// make: the run to ask the console's elevation broker for.
+    /// The reader asked for a change this application may not make: the
+    /// system task to ask the desktop for, which asks for an account that may
+    /// in its own prompt.
     ///
-    /// The shell authenticates nobody and spawns nothing. It carries the
-    /// offer and renders the verdict it is told.
-    Elevate(Elevation),
+    /// The shell authenticates nobody, sees no password and spawns nothing.
+    /// It names the task and renders what it is told came of it. Boxed: a
+    /// task carries its whole argument vector inline, and every outcome
+    /// would otherwise be that wide.
+    Authorise(Box<SystemTask>),
     /// The reader asked for the screen to be locked now: the request the
     /// caller makes of the desktop session, whose lock it is.
     LockScreen,
+    /// The reader asked to choose the time zone: the caller opens the zone
+    /// chooser over [`Shell::zone_rows`] and hands back what was chosen
+    /// through [`Shell::choose_zone`].
+    ChooseZone,
     /// The reader asked to see the screensaver now: the screensaver keys'
     /// document as the pane shows them, for the caller to hand the desktop
     /// session, which previews it and keeps none of it.
@@ -372,8 +297,9 @@ impl ShellOutcome {
             Self::Apply(document) => Some(document),
             Self::Idle
             | Self::Changed
-            | Self::Elevate(_)
+            | Self::Authorise(_)
             | Self::LockScreen
+            | Self::ChooseZone
             | Self::PreviewScreensaver(_)
             | Self::Sound { .. }
             | Self::Effects(_) => None,
@@ -425,6 +351,9 @@ pub struct Shell {
     /// The delegated zone store's regions and places, kept for the life of
     /// the process; `None` until it has arrived, or where it could not.
     civil: Option<&'static CivilChoices>,
+    /// The machine's own time zone, as the desktop states it: what a reader
+    /// who chose none reads.
+    machine_zone: Option<ZoneName>,
     /// The font store's families and the theme's own text, once listed.
     text: Option<TextChoices>,
     /// The mounted volumes the caller last read for the Storage pane, empty
@@ -468,9 +397,9 @@ pub struct Shell {
     wanted: Wanted,
     /// The action band beneath the pane on show, for a pane that has one.
     footer: Option<Footer>,
-    /// The credential question up in its own dialog window, and what it will
-    /// ask the broker to run once an account is offered.
-    asking: Option<Asking>,
+    /// The system task the desktop is performing for this window, until it
+    /// says what came of it.
+    authorising: Option<Authorising>,
     /// Moved whenever what the pane's pictures want may have: the pane, what
     /// it holds, or an answer landing.
     pictures_epoch: u64,
@@ -513,7 +442,8 @@ impl Shell {
             rows,
             search: SearchField::new().with_placeholder("Search settings"),
             trail: Breadcrumb::new(Vec::new()),
-            strip_scroll: ScrollBar::new(ScrollOrientation::Vertical, empty_scroll()),
+            strip_scroll: ScrollBar::new(ScrollOrientation::Vertical, empty_scroll())
+                .without_edges(),
             scroll: ScrollBar::new(ScrollOrientation::Vertical, empty_scroll()),
             categories: None,
             focus: Focus::Strip,
@@ -526,6 +456,7 @@ impl Shell {
             cursor_sets: Vec::new(),
             output: None,
             civil: None,
+            machine_zone: None,
             text: None,
             volumes: Vec::new(),
             wanted: Wanted::default(),
@@ -542,7 +473,7 @@ impl Shell {
             preview_refusal: None,
             salt: None,
             footer: None,
-            asking: None,
+            authorising: None,
             pictures_epoch: 0,
             pictures_settled: None,
         };
@@ -574,6 +505,78 @@ impl Shell {
     /// process, so they are kept for its life as the store is.
     pub fn adopt_zones(&mut self, zones: Option<&'static ZoneInfo<'static>>) {
         self.civil = zones.map(|zones| &*Box::leak(Box::new(CivilChoices::of(zones))));
+        let reads = matches!(self.body, Body::Facts(_))
+            || self.body.composition() == Some(Composition::Language);
+        if reads {
+            self.restate_body();
+        }
+    }
+
+    /// The zone chooser's rows, each read at `now`, and the one the account
+    /// holds; `None` without the zone store, which the caller states.
+    #[must_use]
+    pub fn zone_rows(
+        &self,
+        now: Option<tairix_abi::time::Time64>,
+    ) -> Option<(Vec<tairix_controls::PlaceRow>, Option<usize>)> {
+        let civil = self.civil?;
+        let settings = self.body.form().map_or(&self.settings, Form::settings);
+        Some(crate::civil::zone_rows(
+            settings,
+            civil,
+            self.machine_zone.as_ref(),
+            now,
+        ))
+    }
+
+    /// Rewrite the zone chooser's readings once the minute its `written`
+    /// holds has turned, reporting what moved in a dialog drawn in `frame`'s
+    /// bounds.
+    pub fn refresh_zone_readings(
+        &self,
+        (dialog, written): (
+            &mut tairix_controls::PlaceDialog,
+            &mut tairix_controls::zone::Minute,
+        ),
+        now: tairix_abi::time::Time64,
+        frame: (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        if let Some(civil) = self.civil {
+            crate::civil::refresh_zone_readings(
+                civil,
+                self.machine_zone.as_ref(),
+                (dialog, written),
+                now,
+                frame,
+                damage,
+            );
+        }
+    }
+
+    /// Take the zone the chooser's `row` names as the account's own — or the
+    /// machine's, for its first — answering the document to post; nothing for
+    /// a row the chooser was not built with, or a pane with no Time zone row.
+    pub fn choose_zone(&mut self, row: usize) -> ShellOutcome {
+        let Some(zone) = self
+            .civil
+            .and_then(|civil| crate::civil::zone_of_row(civil, row))
+        else {
+            return ShellOutcome::Idle;
+        };
+        let Some(form) = self.body.form_mut() else {
+            return ShellOutcome::Idle;
+        };
+        let acted = form.choose_zone(zone.setting());
+        self.concluded(acted)
+    }
+
+    /// Adopt the machine's own zone, as the desktop states it; the panes that
+    /// read the clock or label its *Default* are restated where it moved.
+    pub fn adopt_machine_zone(&mut self, zone: Option<ZoneName>) {
+        if core::mem::replace(&mut self.machine_zone, zone) == zone {
+            return;
+        }
         let reads = matches!(self.body, Body::Facts(_))
             || self.body.composition() == Some(Composition::Language);
         if reads {
@@ -1224,6 +1227,7 @@ impl Shell {
             text: self.text.as_ref(),
             output: self.output,
             civil: self.civil,
+            machine_zone: self.machine_zone,
             volumes: &self.volumes,
             config: self.config.as_ref(),
             machine: &self.machine,
@@ -1757,82 +1761,6 @@ impl Shell {
         }
     }
 
-    /// The client extent of the credential question's dialog window at
-    /// `scale`, while one is up.
-    #[must_use]
-    pub fn question_extent(&self, scale: Scale) -> Option<(u32, u32)> {
-        self.asking.as_ref().map(|_| {
-            (
-                scale.scale_length(CREDENTIAL_WIDTH),
-                scale.scale_length(CREDENTIAL_HEIGHT),
-            )
-        })
-    }
-
-    /// What the credential question's dialog window is titled after the
-    /// application's name.
-    #[must_use]
-    pub const fn question_title(&self) -> &'static str {
-        ASK_TITLE
-    }
-
-    /// Draw the credential question across its dialog window's `client`.
-    pub fn render_question(
-        &self,
-        surface: &mut Surface,
-        client: Rect,
-        scale: Scale,
-        theme: &Theme,
-    ) {
-        if let Some(asking) = &self.asking {
-            asking.sheet.render(surface, client, scale, theme);
-        }
-    }
-
-    /// Route one pointer event that reached the credential question's window,
-    /// whose client is `client`, reporting what it drew in that window's
-    /// pixels.
-    pub fn on_question_pointer(
-        &mut self,
-        event: &InputEvent,
-        client: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> ShellOutcome {
-        self.asked(client, damage, |sheet, bounds, damage| {
-            sheet.on_pointer(event, bounds, scale, theme, damage)
-        })
-    }
-
-    /// Route one key press that reached the credential question's window.
-    pub fn on_question_key(
-        &mut self,
-        stroke: Keystroke,
-        client: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> ShellOutcome {
-        self.asked(client, damage, |sheet, bounds, damage| {
-            sheet.on_key(stroke, bounds, scale, theme, damage)
-        })
-    }
-
-    /// Step the credential question's password marker to `now_ns`, reporting
-    /// what moved in its window's pixels.
-    pub fn advance_question(
-        &mut self,
-        now_ns: u64,
-        client: Rect,
-        scale: Scale,
-        damage: &mut Region,
-    ) {
-        if let Some(asking) = self.asking.as_mut() {
-            asking.sheet.advance(now_ns, client, scale, damage);
-        }
-    }
-
     /// Scroll the pane the least that shows the form's keyboard cursor,
     /// reporting the column and its bar when it moved.
     ///
@@ -2212,17 +2140,11 @@ impl Shell {
         adopt_drawn(outcome, &drew, damage)
     }
 
-    /// When a password marker on show next moves its dots — the credential
-    /// question's, or a masked entry's on the pane — on the clock the
+    /// When a masked entry on the pane next moves its dots, on the clock the
     /// keystrokes were taken by.
     #[must_use]
     pub fn secret_deadline_ns(&self) -> Option<u64> {
-        let asking = self
-            .asking
-            .as_ref()
-            .and_then(|asking| asking.sheet.deadline_ns());
-        let pane = self.body.form().and_then(Form::secret_deadline_ns);
-        asking.into_iter().chain(pane).min()
+        self.body.form().and_then(Form::secret_deadline_ns)
     }
 
     /// Step every password marker on show to `now_ns`, reporting what moved.
@@ -2395,98 +2317,43 @@ impl Shell {
         Some(self.commanded(acted, viewport, scale, theme, damage))
     }
 
-    /// Route one event into the credential question drawn across its
-    /// window's `client`, `answer` being what the sheet made of it.
-    ///
-    /// A cancellation takes it down and changes nothing anywhere. An offer
-    /// is handed to the caller as the one run to ask the broker for, and
-    /// the question stays up, checking, its password erased: only the
-    /// caller's verdict takes it down, so a refusal can be corrected without
-    /// retyping the account.
-    fn asked(
-        &mut self,
-        client: Rect,
-        damage: &mut Region,
-        answer: impl FnOnce(&mut CredentialSheet, Rect, &mut Region) -> Option<CredentialAction>,
-    ) -> ShellOutcome {
-        let Some(asking) = self.asking.as_mut() else {
-            return ShellOutcome::Idle;
-        };
-        match answer(&mut asking.sheet, client, damage) {
-            Some(CredentialAction::Cancelled) => {
-                self.asking = None;
-                ShellOutcome::Changed
-            }
-            // The sheet refuses an unofferable password itself, so this only
-            // ever elevates with one.
-            Some(CredentialAction::Offered) => {
-                let offered = asking.sheet.secret().map(|secret| Elevation {
-                    account: String::from(asking.sheet.account()),
-                    password: secret.as_bytes().to_vec(),
-                    program: asking.program,
-                    argv: asking.argv.clone(),
-                    mode: asking.mode,
-                });
-                match offered {
-                    Some(elevation) => {
-                        asking.sheet.check();
-                        ShellOutcome::Elevate(elevation)
-                    }
-                    None => ShellOutcome::Changed,
-                }
-            }
-            None => ShellOutcome::Changed,
-        }
-    }
-
-    /// Adopt what the elevated run came to.
+    /// Adopt what the system task came to.
     ///
     /// Persist-then-adopt: the rows showed a working copy, and the durable
     /// value is whatever the store answers on the next read, which the
-    /// caller takes as soon as a run succeeds. A refusal leaves the working
+    /// caller takes as soon as a task succeeds. A refusal leaves the working
     /// copy exactly as it was so the reader can correct it rather than
-    /// retype it, and states why.
-    pub fn adopt_elevation(&mut self, outcome: Elevated) {
+    /// retype it, and states why; a declined prompt changed nothing, so it
+    /// says nothing.
+    pub fn adopt_authorisation(&mut self, outcome: Authorised) {
+        let captures = self
+            .authorising
+            .take()
+            .and_then(|authorising| authorising.captures);
         match outcome {
-            Elevated::Finished(0) => {
-                self.asking = None;
-                self.settled();
-            }
-            Elevated::Finished(_) => self.refuse(String::from(
+            Authorised::Ran(0) | Authorised::Launched => self.settled(),
+            Authorised::Ran(_) => self.refuse(String::from(
                 "The command ran but did not accept the change.",
             )),
-            Elevated::Printed(0, output) => {
-                let captures = self.asking.as_ref().and_then(|asking| asking.captures);
-                self.asking = None;
-                match captures {
-                    Some(Captures::Addressing) => {
-                        self.read_addressing(Addressing::from_listing(&output));
-                    }
-                    Some(Captures::Roster) => {
-                        self.read_roster(Roster::from_capture(&output));
-                    }
-                    None => {}
+            Authorised::Printed(0, output) => match captures {
+                Some(Captures::Addressing) => {
+                    self.read_addressing(Addressing::from_listing(&output));
                 }
-            }
-            Elevated::Printed(..) => self.refuse(String::from(
+                Some(Captures::Roster) => self.read_roster(Roster::from_capture(&output)),
+                None => {}
+            },
+            Authorised::Printed(..) => self.refuse(String::from(
                 "The command ran but could not read the configuration.",
             )),
-            // The run happened; the reply could not carry what it printed.
-            // Stated in the pane rather than as a refusal of the question,
-            // because asking again would answer the same.
-            Elevated::Overran => {
-                let captures = self.asking.as_ref().and_then(|asking| asking.captures);
-                self.asking = None;
-                match captures {
-                    Some(Captures::Addressing) => self.read_addressing(Addressing::Overran),
-                    Some(Captures::Roster) => self.read_roster(Roster::Overran),
-                    None => {}
-                }
-            }
-            Elevated::Refused(ElevateRefusal::Credentials) => {
-                self.refuse(String::from(CREDENTIAL_REFUSED_REASON));
-            }
-            Elevated::Refused(ElevateRefusal::NotRun(reason)) => self.refuse(reason),
+            // The task ran; the answer could not carry what it printed.
+            // Stated in the pane, because asking again would answer the same.
+            Authorised::Overran => match captures {
+                Some(Captures::Addressing) => self.read_addressing(Addressing::Overran),
+                Some(Captures::Roster) => self.read_roster(Roster::Overran),
+                None => {}
+            },
+            Authorised::Declined => {}
+            Authorised::Refused(reason) => self.refuse(reason),
         }
     }
 
@@ -2577,29 +2444,17 @@ impl Shell {
             .is_some_and(|composition| captures.asked_by(composition))
     }
 
-    /// State a refusal on the question that is up, or in the band when the
-    /// question has already gone.
+    /// State a refusal in the band.
     fn refuse(&mut self, reason: String) {
-        if let Some(asking) = self.asking.as_mut() {
-            asking.sheet.refuse(&reason);
-        }
         if let Some(band) = self.footer.as_mut() {
             band.state(Standing::Refused(reason));
         }
     }
 
-    /// Whether a credential question is up, in its own dialog window.
+    /// Whether the desktop is performing a system task for this window.
     #[must_use]
-    pub const fn asking(&self) -> bool {
-        self.asking.is_some()
-    }
-
-    /// The credential question's window could not be shown, for `why`: the
-    /// question is turned down and the reason said where the pane states its
-    /// refusals, so nothing waits on a question nobody can see.
-    pub fn decline_question(&mut self, why: &str) {
-        self.asking = None;
-        self.refuse(alloc::format!("No account could be asked for: {why}"));
+    pub const fn authorising(&self) -> bool {
+        self.authorising.is_some()
     }
 
     /// Adopt what the pane's action band reported.
@@ -2622,45 +2477,47 @@ impl Shell {
                 ShellOutcome::Changed
             }
             Some(FooterAction::Apply) => {
-                self.ask_to_apply();
                 damage.add(viewport);
-                ShellOutcome::Changed
+                self.ask_to_apply().map_or(ShellOutcome::Changed, |task| {
+                    ShellOutcome::Authorise(Box::new(task))
+                })
             }
             None => ShellOutcome::Changed,
         }
     }
 
-    /// Put the credential question up for whatever the pane's command
-    /// needs an account for.
+    /// The system task the pane's command asks the desktop for.
     ///
-    /// A staged pane's is the one `configure` run that writes every row
-    /// that differs, together, so the document is rendered once and a
+    /// A staged pane's is the one `configure` run that writes every row that
+    /// differs, together, so the document is rendered once and a
     /// partly-applied store is not a state this can reach. A reading's is
-    /// the application that owns its subject, started and left running.
-    fn ask_to_apply(&mut self) {
-        let asking = if self.stageable() {
-            self.staging()
-        } else {
-            self.reading()
-        };
-        if let Some(asking) = asking {
-            self.asking = Some(asking);
+    /// the read its pane shows, or the application that owns its subject.
+    /// One task is asked at a time.
+    fn ask_to_apply(&mut self) -> Option<SystemTask> {
+        if self.authorising.is_some() {
+            return None;
         }
+        let (task, captures) = if self.stageable() {
+            (self.staging()?, None)
+        } else {
+            self.reading()?
+        };
+        self.authorising = Some(Authorising { captures });
+        Some(task)
     }
 
-    /// The run that applies what the pane on show has staged.
+    /// The task that applies what the pane on show has staged.
     ///
     /// A networking pane's document is checked whole first: an interface
     /// half-moved off a static address is a change the store would refuse,
     /// and saying so here names what is wrong rather than leaving the
     /// reader with a run that failed.
-    fn staging(&mut self) -> Option<Asking> {
+    fn staging(&mut self) -> Option<SystemTask> {
         let composition = self.body.composition()?;
         if composition.reads_roster() {
             return self.staging_account();
         }
-        let reads_addressing = composition.reads_addressing();
-        if reads_addressing {
+        if composition.reads_addressing() {
             if let Some(Err(err)) = self.body.form().and_then(Form::proposal) {
                 self.refuse(alloc::format!("{err}"));
                 return None;
@@ -2670,22 +2527,17 @@ impl Shell {
         if argv.is_empty() {
             return None;
         }
-        let purpose = if reads_addressing {
-            SET_ADDRESSING_PURPOSE
-        } else {
-            SET_MACHINE_PURPOSE
-        };
-        self.carried(CONFIGURE_RUN_PATH, argv, purpose)
+        self.carried(&argv).map(SystemTask::Configure)
     }
 
-    /// The run that applies what the Users pane has staged.
+    /// The task that applies what the Users pane has staged.
     ///
     /// One account and one tool, or nothing: a change spanning two
     /// accounts, or a password together with the fields beside it, needs
     /// two runs — and half of a change made durable is exactly the state
     /// the one-invocation rule exists to prevent. The salt is *consumed*
     /// here, so the next password is hashed under a fresh one.
-    fn staging_account(&mut self) -> Option<Asking> {
+    fn staging_account(&mut self) -> Option<SystemTask> {
         let run = match self.body.form()?.account_run(self.salt)? {
             Ok(run) => run,
             Err(err) => {
@@ -2694,69 +2546,42 @@ impl Shell {
             }
         };
         self.salt = None;
-        self.carried(run.program, run.argv, SET_ACCOUNT_PURPOSE)
-    }
-
-    /// The credential question for a run of `program` with `argv`, or a
-    /// stated refusal where the seam could not carry it.
-    ///
-    /// Checked against the seam's own bound rather than a second copy of
-    /// it, and before the reader has typed a password: a change too large
-    /// for one request is never split across two runs.
-    fn carried(
-        &mut self,
-        program: &'static str,
-        argv: Vec<String>,
-        purpose: &'static str,
-    ) -> Option<Asking> {
-        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
-        if ElevateArgv::new(&borrowed).is_err() {
-            self.refuse(String::from(TOO_MANY_CHANGES));
-            return None;
-        }
-        Some(Asking {
-            sheet: CredentialSheet::new(ASK_TITLE, purpose),
-            program,
-            argv,
-            mode: RunMode::Wait,
-            captures: None,
+        let words = self.carried(&run.argv)?;
+        Some(match run.tool {
+            AccountTool::Fields => SystemTask::ChangeAccount(words),
+            AccountTool::Password => SystemTask::SetPassword(words),
         })
     }
 
-    /// The run behind the one command a pane with no working copy offers.
-    fn reading(&self) -> Option<Asking> {
+    /// `argv` as the words one task carries, or a stated refusal where they
+    /// are more than it can.
+    ///
+    /// Checked against the seam's own bound rather than a second copy of
+    /// it: a change too large for one task is never split across two.
+    fn carried(&mut self, argv: &[String]) -> Option<ElevateWords> {
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let words = ElevateWords::new(&borrowed).ok();
+        if words.is_none() {
+            self.refuse(String::from(TOO_MANY_CHANGES));
+        }
+        words
+    }
+
+    /// The task behind the one command a pane with no working copy offers,
+    /// and what its answer is for.
+    fn reading(&self) -> Option<(SystemTask, Option<Captures>)> {
         match self.pane_row()?.content()? {
-            PaneContent::Clock => Some(Asking {
-                sheet: CredentialSheet::new(ASK_TITLE, SET_CLOCK_PURPOSE),
-                program: DATETIME_RUN_PATH,
-                argv: Vec::new(),
-                mode: RunMode::Leave,
-                captures: None,
-            }),
-            // A read, not a write: the same tool, run with no operand, and
-            // what it prints is the answer. This application may not read
-            // that store itself and never will, so the authenticated run
-            // is the only way the pane can state it.
-            PaneContent::Form(composition) if composition.reads_addressing() => Some(Asking {
-                sheet: CredentialSheet::new(ASK_TITLE, SHOW_ADDRESSING_PURPOSE),
-                program: CONFIGURE_RUN_PATH,
-                argv: Vec::new(),
-                mode: RunMode::Capture,
-                captures: Some(Captures::Addressing),
-            }),
-            // A read on the same terms: the whole account registry is
-            // gated, so what an authenticated listing printed is the only
-            // way this pane can state another account's fields at all. The
-            // interactive session cannot serve it — a captured run has its
-            // standard input closed — so the non-interactive listing is
-            // what is asked for.
-            PaneContent::Form(composition) if composition.reads_roster() => Some(Asking {
-                sheet: CredentialSheet::new(ASK_TITLE, SHOW_ACCOUNTS_PURPOSE),
-                program: USERS_RUN_PATH,
-                argv: alloc::vec![String::from("-l")],
-                mode: RunMode::Capture,
-                captures: Some(Captures::Roster),
-            }),
+            PaneContent::Clock => Some((SystemTask::SetClock, None)),
+            // A read, not a write: this application may not read that store
+            // itself and never will, so the authorised task is the only way
+            // the pane can state it.
+            PaneContent::Form(composition) if composition.reads_addressing() => {
+                Some((SystemTask::ShowAddressing, Some(Captures::Addressing)))
+            }
+            // A read on the same terms: the whole account registry is gated.
+            PaneContent::Form(composition) if composition.reads_roster() => {
+                Some((SystemTask::ShowAccounts, Some(Captures::Roster)))
+            }
             PaneContent::Form(_) | PaneContent::About | PaneContent::Volumes => None,
         }
     }
@@ -3475,34 +3300,6 @@ fn place(bounds: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> FormPlace
     }
 }
 
-/// Why an elevated run did not change anything.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ElevateRefusal {
-    /// The account and password were not accepted. One answer for a wrong
-    /// password, an unknown account, and a locked one — the broker gives
-    /// no more, and this repeats exactly what it was told.
-    Credentials,
-    /// The account was accepted and the program did not run, with the
-    /// reason the caller was given.
-    NotRun(String),
-}
-
-/// The title every credential question this surface asks carries.
-const ASK_TITLE: &str = "Authenticate";
-
-/// What the question says a machine setting needs an account for.
-const SET_MACHINE_PURPOSE: &str =
-    "Changing this machine's configuration needs an account that may write it.";
-
-/// What the question says the clock needs an account for.
-const SET_CLOCK_PURPOSE: &str = "Setting the date and time needs an account that may.";
-
-/// What the question says reading the machine's addressing needs an
-/// account for.
-const SHOW_ADDRESSING_PURPOSE: &str =
-    "This machine's network addressing names its hardware and its addresses, so reading it needs \
-     an account that may.";
-
 /// What the band says when a change is larger than one request carries.
 ///
 /// The seam bounds what an unprivileged caller may hand a privileged run,
@@ -3511,29 +3308,6 @@ const SHOW_ADDRESSING_PURPOSE: &str =
 /// enough.
 const TOO_MANY_CHANGES: &str =
     "More changes than one command can carry. Apply one interface at a time.";
-
-/// What the question says reading the accounts needs an account for.
-const SHOW_ACCOUNTS_PURPOSE: &str =
-    "An account's own fields, whether it may log in, and what it is allowed to do are not public, \
-     so reading them needs an account that may administer users.";
-
-/// What the question says changing an account needs an account for.
-///
-/// The whole registry is gated, so this is asked even of a reader editing
-/// their own record: an unprivileged self-service change would be a new
-/// authority path rather than a wider gate, and this surface offers none.
-const SET_ACCOUNT_PURPOSE: &str = "Changing an account needs an account that may administer users.";
-
-/// What the question says the machine's addressing needs an account for.
-const SET_ADDRESSING_PURPOSE: &str =
-    "Changing how this machine's interfaces are addressed needs an account that may write it.";
-
-/// The tool that owns the machine's boot-time configuration store, which is
-/// the only thing that writes it.
-const CONFIGURE_RUN_PATH: &str = "/System/Commands/configure.app/Run";
-
-/// The tool that answers the account and group listing.
-const USERS_RUN_PATH: &str = "/System/Commands/users.app/Run";
 
 /// The command line that applies everything `form` has staged: one
 /// `<key> <value>` pair per row that differs, in registry order.
@@ -3560,6 +3334,7 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
         }
         FormOutcome::Apply(document) => ShellOutcome::Apply(document),
         FormOutcome::LockScreen => ShellOutcome::LockScreen,
+        FormOutcome::ChooseZone => ShellOutcome::ChooseZone,
         FormOutcome::PreviewScreensaver(document) => ShellOutcome::PreviewScreensaver(document),
         FormOutcome::Sound {
             device_id,

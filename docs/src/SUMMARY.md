@@ -183,6 +183,7 @@
 - [System Information service](./userland/sysinfod.md)
 - [Font service](./userland/fontd.md)
 - [App-data service (`confd`)](./userland/confd.md)
+- [Machine-settings service (`settingsd`)](./userland/settingsd.md)
 - [Seat-manager service](./userland/seatmgr.md)
 - [Network-stack service](./userland/netstack.md)
 - [Link-local service discovery (`discoveryd`)](./userland/discoveryd.md)

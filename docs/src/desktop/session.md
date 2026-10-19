@@ -481,11 +481,26 @@ a read-only delegation of that descriptor (`WindowRequest::TakeZoneStore`,
 answered to Settings alone), so handing it over costs no filesystem operation
 on the serve loop. `DesktopShell` holds the icon bar clock (`SessionClock`) and resolves it
 with `civil_clock`: the `time.zone` and `region` keys where the store holds
-them, else the store's own zone and region (Europe/London and the United
-Kingdom as shipped). A stored choice the store does not hold reads as the
-default and is said so once. An apply that *changes* either key to one the
-store does not hold is refused (`PinboardRefusal::NotInStore`), so a mistyped
-choice is rejected while the person making it is looking at it.
+them; for the zone, else the machine's own; else the store's own zone and
+region (Europe/London and the United Kingdom as shipped). A stored choice the
+store does not hold is passed over and said so once. An apply that *changes*
+either key to one the store does not hold is refused
+(`PinboardRefusal::NotInStore`), so a mistyped choice is rejected while the
+person making it is looking at it.
+
+The machine's own zone is the machine configuration's `time.zone`
+(`lib/sysconfig`), read from the first of the configuration's layers that
+exists — the administrator's, else the image's. The session arms a watch on
+the administrator's configuration directory before it reads the zone at
+bring-up, so no change falls between; when the watch reports, a worker drains
+it and re-reads the configuration only where a change named it, and the
+session adopts what it read — the clock moves at once, and the desktop's
+description (`DesktopInfo::machine_zone`) is published again, so Settings,
+which may open no file, labels *Default* with the machine's zone and reads its
+clock in it. A configuration that cannot be read or understood is stated and
+the zone held before it is kept. The login screen reads no file either: login
+hands it the machine's zone as `TZ`, which it reads before the store's
+default.
 
 The clock is read in its own zone and written in its region's conventions
 (`CivilClock`): the time, the numeric date, and a heading for the clock's menu
@@ -932,12 +947,13 @@ backdrop menu's sort and arrangement, the remembered sound controls — is made
 over the newest settings it has asked to publish, not the last ones adopted,
 so one change never undoes another still on its way to the store.
 
-Every session prompt — this one, the confirmation and the credential prompt —
-opens at `shell::prompt_origin`: centred across the screen, a third of the way
-down, and wholly on any screen it fits. The two-button prompts, this one and
-the confirmation, are one `choice::ChoicePrompt`, drawn no wider than the
-screen with their message wrapped to fit, so a small desktop at a large scale
-strands neither button. The credential prompt keeps its fixed layout.
+Every session prompt — this one, the confirmation and the authorisation
+sheet — opens at `shell::prompt_origin`: centred across the screen, a third of
+the way down, and wholly on any screen it fits. The two-button prompts, this
+one and the confirmation, are one `choice::ChoicePrompt`, drawn no wider than
+the screen with their message wrapped to fit, so a small desktop at a large
+scale strands neither button. The authorisation sheet is as tall as what it
+asks.
 
 ## The clipboard
 
@@ -1616,7 +1632,7 @@ absorbed rather than announced twice.
 
 The look is also a generation the shell keeps (`style_generation`), which is
 how a surface that retains its pixels follows a change: the serve loop
-repaints a standing confirmation or credential prompt once per change, before
+repaints a standing confirmation or authorisation prompt once per change, before
 the frame is presented, whichever path the change came in by.
 
 ### And a resolution trial's three
@@ -1841,9 +1857,13 @@ wakes the loop (`ScreenLock::answer`); only the answer to the offer it is
 waiting on is adopted. A kernel that grants no thread leaves the exchange on
 the serve loop, stated once on `stderr`: slower, never wrong. A refusal, a transport failure, a
 broker that is not there, and a reply it cannot parse are all one answer:
-still locked (`AGENTS.md` §5.4). It deliberately keeps no attempt counter and
-no rate limit — the broker owns that policy and audits every attempt, and a
-second copy here would be a second place to get it wrong (`AGENTS.md` §2.2).
+still locked (`AGENTS.md` §5.4). It keeps no attempt policy of its own — the
+broker meters every attempt, with the budget the login screen charges, and
+audits each — but it does show the broker's answer: a lockout the broker
+reports (`UnlockAnswer::retry_after`, from its `Cooling` reply) is counted
+down with `tairix_greeter::Cooldown`, stated under the field, and refuses to
+submit until it has run out, so a correct password typed during it is never
+mistaken for a wrong one.
 
 Until it is offered, the password lives in exactly one place, the masked
 field's own bounded, pre-reserved buffer, which is erased the moment the
@@ -1858,8 +1878,9 @@ nobody reads back.
 The lock screen is the login screen's own surface, so it animates like it:
 the session hands it the real monotonic clock on every event and steps it
 with `ScreenLock::advance` once a frame, and `ScreenLock::park_deadline_ns`
-folds whatever the surface asks for into the loop's park through the same
-`park_within` the desktop's reveal uses. A refused unlock therefore shakes
+folds whatever the surface asks for, and the moment a lockout's shown second
+turns over, into the loop's park through the same `park_within` the
+desktop's reveal uses. A refused unlock therefore shakes
 the question as it does at login. An idle lock screen asks for nothing and
 arms no timer.
 
@@ -2178,64 +2199,105 @@ each one does.
 
 ## Asking for an account that may
 
-Some commands a desktop offers are ones the session itself may not perform.
-Setting the machine's date and time needs `CAP_TIME_SET`, which is not in a
-session's manifest and must never be. So the session does not perform it: it
-asks for an account that may, and the per-console elevation broker does the
-rest (`elevate::ElevatePrompt`, `plans/NEW-TASKBAR.md` T17).
+Some programs need authority the signed-in account may not hold. Setting the
+machine's date and time needs `CAP_TIME_SET`, which is not in a session's
+manifest and must never be. So the session does not perform it: it asks the
+per-console elevation broker — the login supervisor that started it — and
+shows the **system authorisation prompt** (`elevate::AuthorisePrompt`, drawn
+by `tairix_greeter::AuthoriseSheet`).
+
+### What it asks
 
 Choosing *Set Date & Time…* in the [clock's
-menu](taskbar.md#the-clocks-menu) opens the session's own credential prompt —
-a session-owned compositor window, drawn with the shared dialog, a shared
-text field for the account and the shared masked entry for its password, so a
-password is typed into desktop chrome and never into an application. One
-prompt shows at a time; a second request while one is up is refused rather
-than stacking a question over the one already asked. While it is showing, the
-prompt consumes its own window's keys and clicks, so no keystroke of a
-password reaches whatever held focus behind it. The password field says
-`[input active...]` as the console's prompt does: the session stamps each key
-with its monotonic clock, folds `ElevatePrompt::park_deadline_ns` into the
-loop's park, and steps the dots with `ElevatePrompt::advance` on the timed
-wake, repainting only the field.
+menu](taskbar.md#the-clocks-menu) makes a request: the program, how it runs
+(started and left running, or run and waited for, or run with its output
+handed back), who is asking and what it does, in words. The session first asks
+the broker which accounts may allow the program (`ElevateRequest::Authorisers`,
+on the elevation worker), with the sheet saying it is finding them; nothing is
+typed until it has answered. Then the sheet asks only what it must:
 
-What the prompt does with an offer is post it, and nothing more. It sends
-`ElevateRequest::Launch` through the one shared client, `tairix_rt::elevate`;
-the broker re-authenticates the named account exactly as a fresh login would,
-audits the attempt, and starts `datetime.app` **as that account**. The
-exchange runs on the session's elevation worker, never the serve loop: the
-password is copied into an `ElevateAsk` and erased from the sheet, which says
-it is checking and takes no input — not even a cancel, which could not recall
-a launch already under way — until the answer wakes the loop
-(`ElevatePrompt::answer`). The
-session learns the started pid or the refusal, and never the reason behind a
-refusal — the broker answers a wrong password, an unknown account, and a
-locked account indistinguishably. The blocking `Run` exchange would not do
-here: its reply arrives only once the elevated program has exited, so a
-desktop posting it would stop serving windows to the very program it is
-waiting for. The started program is *login's* child, so login reaps it; the
-desktop could not wait on it in any case.
+- the **signed-in account may**: its disc, its name, and a field for its
+  password — with *Use another account…* when others may too;
+- it **may not**: the accounts that may, each a row with its disc, chosen by
+  click or arrow keys and Enter; choosing one asks for that account's password,
+  and *Back* (or Escape) returns to the list;
+- **none may**: it says so, and offers only *Close*.
 
-Every path out of the prompt fails closed or states itself:
+The broker lists the signed-in account first when it may, and the session
+takes that first entry as the signed-in account's only when its login name is
+the session's own, so a listing that left it out can never show someone else
+as you.
 
-- An **empty field is never offered**. There is nothing to check, and asking
-  would spend an audited attempt against the account; the keyboard moves to
-  whichever field is still empty.
-- A **refusal keeps the prompt up** with the reason stated and the password
-  cleared — the masked field zeroises what it discards — so a retry starts
-  from empty with the account name kept, which is not a secret.
-- A **refused authentication and a program that would not start read
-  differently**, so a user whose account *was* accepted is never sent back to
-  re-check a password that worked.
-- A **cancellation says so** on `stderr`: a user who asked to set the clock
-  and saw nothing happen is told that nothing was set.
-- The prompt is **abandoned unanswered** when the screen locks, the session
-  steps aside for another user, or it ends — and the secret goes with it,
-  since the field zeroises its buffer as it is dropped.
+### Why it is the system's, and only the system's
 
-The password is held in exactly the same one place, and by the same shared
-masked field, as the screen lock's (above), until the same kind of erased
-hand-over carries it off the loop: there is no second text entry anywhere in
-the session.
+- **The live desktop is seen dimmed behind it.** A scrim covers everything the
+  session shows, the icon bar included, and the sheet stands on it. No
+  application can reproduce the live desktop behind a fake: none may read
+  another's pixels.
+- **The seat is the prompt's.** While it is up the session drains every
+  pointer and keyboard event into it (`drain_authorising`) and routes none to
+  the window manager, the icon bar or an application; it is raised above every
+  window but the screensaver before each composite.
+- **Ctrl+Alt+Delete always reaches the system.** No holder of the seat routes
+  it to an application. Pressed at the prompt, the sheet's band answers and the
+  keyboard goes to the password; pressed anywhere else, the system's own notice
+  comes up — *Nothing from the system is waiting for a password* — so an
+  application's imitation is exposed by the one key the sheet tells the user
+  always reaches the system.
+- **The requester is the one attested**, named and pictured from its bundle,
+  resolved through the session's artwork cache off the paint path.
+
+### What becomes of a password
+
+What the prompt does with a password is post it, and nothing more: the
+password is copied into an `ElevateAsk`, erased from the field, and carried to
+the broker on the worker, which re-authenticates the account, checks its
+authority over the program, audits the attempt, and runs the program **as that
+account**; the sheet says it is checking and takes nothing — not even a cancel,
+which could not recall what may already be under way — until the answer wakes
+the loop (`AuthorisePrompt::answer`). Every answer states itself:
+
+- **Allowed**: the prompt is down, and the outcome (started, ran, or printed)
+  goes back to whoever asked.
+- **Refused**: the question shakes, says the password was not accepted, and
+  asks again over an empty field.
+- **Cooling down**: the broker's lockout is counted down under the field with
+  `tairix_greeter::Cooldown` and nothing is offered until it runs out; the loop
+  wakes when the shown second turns over.
+- **Accepted but not done**, and **not reachable**, read differently, so a
+  user whose password was right is never told to check it.
+- **Cancelled** or **abandoned** — on lock, on stepping aside, on the session
+  ending — offers nothing, and the field zeroises its buffer as it is dropped.
+
+The password is held in exactly one place, the shared masked field, until the
+erased hand-over carries it off the loop: there is no second text entry
+anywhere in the session.
+
+### Asked for by Settings
+
+No application collects a password. The desktop's own Settings — and only it:
+its bundle under the desktop's publisher — asks through its window for one of a
+closed set of system tasks (`window_ipc::SystemTask`, `WindowRequest::Authorise`),
+and the session maps each to what it runs (`systask::request_for`):
+
+| Task | Runs | The prompt says Settings… |
+|---|---|---|
+| `Configure` | `configure` with the pairs staged | wants to change the settings of this computer, or its network settings when every key is the network's |
+| `ChangeAccount` | `usermod`, its words ending `--` and one account | wants to change the account “*name*” |
+| `SetPassword` | `passwd --record RECORD -- ACCOUNT` | wants to set a new password for the account “*name*” |
+| `ShowAddressing` | `configure`'s listing, captured | wants to read the network addressing of this computer |
+| `ShowAccounts` | `users -l`, captured | wants to read the accounts and groups on this computer |
+| `SetClock` | `datetime.app`, started and left running | wants to change the date, time and time zone of this computer |
+
+Words not in the program's form are refused before the prompt comes up, and an
+account change names one well-formed account — the account its program acts
+on — so the prompt never says one thing while the task does another. The
+request names Settings' window: the window engine holds one authorisation per
+window and concludes it exactly once with `WindowEvent::Authorised` (ran,
+launched, captured, overran, or declined), queued by the prompt as it ends and
+delivered before the loop next parks; a captured listing is held for the
+window's `TakeAuthorisedOutput`. A window that closes takes its question down
+unanswered.
 
 ## Routing one seat's input to the taskbar and the window manager
 
@@ -2444,7 +2506,7 @@ the loop composite and present once a deadline arrives.
   frame that changed no pixels.
 - **What the session animates is stepped only on a frame that is due.**
   `animate` steps the screen fade, the pointer aids, the lock screen, a
-  credential prompt, the screensaver and a dissolving backdrop only when
+  authorisation prompt, the screensaver and a dissolving backdrop only when
   `FramePacer::due`, so a burst of input between frames costs no animation
   step at all. What each owes next is folded through
   `FramePacer::step_deadline_ns`, which never parks to before that frame, so
@@ -2901,7 +2963,7 @@ structurally rather than by trusting its holder:
 | Capture a keystroke | Never in the focus rotation, never routed a key. |
 | Clickjack | Catches the pointer only on its own opaque pixels. |
 | Cover what the user acts through | `Above` is `stack_below(surface, icon bar)`, never the front; a menu raises over it. |
-| Watch a credential | Hidden with both feeds stopped whenever the lock screen, the trusted picker, or the elevation prompt is up. A suppressed sample is dropped, never queued for replay. |
+| Watch a credential | Hidden with both feeds stopped whenever the lock screen, the trusted picker, or the authorisation prompt is up. A suppressed sample is dropped, never queued for replay. |
 
 **The two feeds** are resolved once a frame. Terrain is *pulled*: the event
 carries a generation, so a burst of window movement costs one small event and

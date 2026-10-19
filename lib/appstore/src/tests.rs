@@ -8,9 +8,9 @@ use tairix_abi::{
 };
 
 use crate::{
-    bundle_of_entry, entry_path, identity_roots, manifest_path, store_roots, user_roots, walk,
-    Bundle, DirEntry, StoreReader, Verdict, WalkError, IDENTITY_MACHINE_ROOTS, MACHINE_ROOTS,
-    MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
+    bundle_of_entry, entry_path, identity_roots, is_machine_bundle, manifest_path, store_roots,
+    user_roots, walk, Bundle, DirEntry, StoreReader, Verdict, WalkError, IDENTITY_MACHINE_ROOTS,
+    MACHINE_ROOTS, MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
 };
 
 /// A decodable manifest naming bundle `id`.
@@ -199,6 +199,29 @@ fn the_entry_binary_sits_inside_the_bundle_directory_and_names_it_back() {
         None,
         "no bundle directory is named"
     );
+}
+
+#[test]
+fn a_machine_bundle_lies_in_a_system_store_and_cannot_spell_its_way_out() {
+    for bundle in [
+        "/System/Commands/configure.app",
+        "/System/Applications/view.app",
+        "/System/Services/timed.app",
+        "/System/Components/datetime.app",
+    ] {
+        assert!(is_machine_bundle(bundle), "{bundle}");
+    }
+    for bundle in [
+        "/Users/ada/Commands/configure.app",
+        "/System/Commands",
+        "/System/Commandsx/configure.app",
+        "/System/Commands/../../Users/ada/Commands/evil.app",
+        "/System/Commands/./configure.app",
+        "/System/Commands//configure.app",
+        "System/Commands/configure.app",
+    ] {
+        assert!(!is_machine_bundle(bundle), "{bundle}");
+    }
 }
 
 #[test]

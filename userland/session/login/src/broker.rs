@@ -46,13 +46,15 @@ use tairix_abi::session_ipc::{
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
+use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_users::{
-    AccountState, UserRecord, UsersDb, GREETER_UID, MAX_DISPLAY_NAME_LEN, MAX_USERNAME_LEN,
+    AccountState, Uid, UserRecord, UsersDb, GREETER_UID, MAX_DISPLAY_NAME_LEN, MAX_USERNAME_LEN,
 };
 
 use crate::budget::AttemptBudget;
 use crate::decfmt::DecBuf;
+use crate::elevate::{AuthoriserPage, ElevateDirectory};
 use crate::events;
 use crate::session::{Authenticator, Credentials};
 use crate::table::LiveSessions;
@@ -132,15 +134,14 @@ impl<'a> DbAccounts<'a> {
                     && record.shell().is_some()
             })
     }
-}
 
-impl SessionDirectory for DbAccounts<'_> {
-    fn total(&self) -> u32 {
-        u32::try_from(self.login_able().count()).unwrap_or(u32::MAX)
-    }
-
-    fn page(&self, offset: u32) -> Vec<SessionAccount> {
-        self.login_able()
+    /// The tiles of `records` from the `offset`th, at most a page of them.
+    fn tiles<'r>(
+        &self,
+        records: impl Iterator<Item = &'r UserRecord>,
+        offset: u32,
+    ) -> Vec<SessionAccount> {
+        records
             .skip(usize::try_from(offset).unwrap_or(usize::MAX))
             .take(SESSION_ACCOUNTS_PER_PAGE)
             .filter_map(|record| {
@@ -156,10 +157,55 @@ impl SessionDirectory for DbAccounts<'_> {
             })
             .collect()
     }
+}
+
+impl SessionDirectory for DbAccounts<'_> {
+    fn total(&self) -> u32 {
+        count(self.login_able())
+    }
+
+    fn page(&self, offset: u32) -> Vec<SessionAccount> {
+        self.tiles(self.login_able(), offset)
+    }
 
     fn background(&mut self, peer_uid: u32) -> bool {
         self.live.background(peer_uid)
     }
+}
+
+impl ElevateDirectory for DbAccounts<'_> {
+    fn login_name(&self, uid: u32) -> Option<&str> {
+        self.db?.lookup_uid(Uid(uid)).map(UserRecord::username)
+    }
+
+    fn presenting(&self) -> Option<u32> {
+        self.live.presenting()
+    }
+
+    fn authorisers(&self, requested: &CapabilitySet, caller: u32, offset: u32) -> AuthoriserPage {
+        let covers = |record: &&UserRecord| requested.is_subset_of(&record.capabilities());
+        let own = self
+            .login_able()
+            .filter(covers)
+            .find(|record| record.uid().0 == caller);
+        let listed = || {
+            own.into_iter().chain(
+                self.login_able()
+                    .filter(covers)
+                    .filter(|record| record.uid().0 != caller),
+            )
+        };
+        AuthoriserPage {
+            own: own.is_some(),
+            total: count(listed()),
+            accounts: self.tiles(listed(), offset),
+        }
+    }
+}
+
+/// How many `records` there are, as the wire counts them.
+fn count<'r>(records: impl Iterator<Item = &'r UserRecord>) -> u32 {
+    u32::try_from(records.count()).unwrap_or(u32::MAX)
 }
 
 /// How the authority hands the login screen the shipped civil-time store: a
@@ -342,17 +388,37 @@ fn send_page(
     } else {
         Vec::new()
     };
-    let page = &page[..page.len().min(SESSION_ACCOUNTS_PER_PAGE)];
-    let count = u32::try_from(page.len()).unwrap_or(0);
-    // A directory that disagreed with its own total would encode a frame a
-    // client must distrust; send the empty one instead of a partial truth.
-    let (offset, page) = if u64::from(offset) + u64::from(count) > u64::from(total) {
-        (offset.min(total), &[][..])
-    } else {
-        (offset, page)
-    };
+    let (offset, page) = consistent(total, offset, &page);
     audit_accounts_sent(sink, total, offset, page.len());
     encode_account_page(reply, total, offset, page).unwrap_or(0)
+}
+
+/// Encode one page of a `total`-account listing from `offset`.
+///
+/// The one framing of an account page every listing shares, so a page that
+/// disagrees with its total is sent as the empty one rather than as a
+/// partial truth, whichever listing produced it.
+pub(crate) fn encode_listing(
+    reply: &mut [u8],
+    total: u32,
+    offset: u32,
+    page: &[SessionAccount],
+) -> usize {
+    let (offset, page) = consistent(total, offset, page);
+    encode_account_page(reply, total, offset, page).unwrap_or(0)
+}
+
+/// What of `page` a frame may carry: at most a page, and nothing — at the
+/// offset clamped to the total — when it would run past `total`, since a
+/// client must distrust such a frame.
+fn consistent(total: u32, offset: u32, page: &[SessionAccount]) -> (u32, &[SessionAccount]) {
+    let page = &page[..page.len().min(SESSION_ACCOUNTS_PER_PAGE)];
+    let count = u32::try_from(page.len()).unwrap_or(0);
+    if u64::from(offset) + u64::from(count) > u64::from(total) {
+        (offset.min(total), &[])
+    } else {
+        (offset, page)
+    }
 }
 
 /// Decide an authorised [`SessionRequest::Authenticate`] request.

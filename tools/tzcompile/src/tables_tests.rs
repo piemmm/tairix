@@ -1,6 +1,7 @@
 //! Host tests of the two tables' readers.
 
 use super::{places, regions, TableError};
+use tairix_tz::Weekday;
 
 #[test]
 fn a_zone_table_row_places_a_zone_in_a_region() {
@@ -33,26 +34,38 @@ fn a_zone_table_row_places_a_zone_in_a_region() {
 }
 
 #[test]
-fn a_region_row_states_its_name_and_patterns() {
-    let rows = regions("# code\tname\tdate\ttime\nGB\tUnited Kingdom\tdd/MM/y\tHH:mm\n")
-        .expect("the table reads");
-    let [region] = &rows[..] else {
-        panic!("one region");
+fn a_region_row_states_its_name_patterns_and_week() {
+    let rows = regions(
+        "# code\tname\tdate\ttime\tweek\nGB\tUnited Kingdom\tdd/MM/y\tHH:mm\tmon\n\
+         US\tUnited States\tM/d/y\th:mm a\tsun\n",
+    )
+    .expect("the table reads");
+    let [gb, us] = &rows[..] else {
+        panic!("two regions");
     };
     assert_eq!(
         (
-            region.code.as_str(),
-            region.name.as_str(),
-            region.date.as_str(),
-            region.time.as_str()
+            gb.code.as_str(),
+            gb.name.as_str(),
+            gb.date.as_str(),
+            gb.time.as_str(),
+            gb.first_weekday
         ),
-        ("GB", "United Kingdom", "dd/MM/y", "HH:mm")
+        ("GB", "United Kingdom", "dd/MM/y", "HH:mm", Weekday::Monday)
     );
+    assert_eq!(us.first_weekday, Weekday::Sunday);
     assert_eq!(
-        regions("\n\nGB\tUnited Kingdom\tdd/MM/y\n").map(|_| ()),
+        regions("\n\nGB\tUnited Kingdom\tdd/MM/y\tHH:mm\n").map(|_| ()),
         Err(TableError {
             line: 3,
-            reason: "a region row is a code, a name, a date and a time",
+            reason: "a region row is a code, a name, a date, a time and a week",
+        })
+    );
+    assert_eq!(
+        regions("GB\tUnited Kingdom\tdd/MM/y\tHH:mm\tMon\n").map(|_| ()),
+        Err(TableError {
+            line: 1,
+            reason: "a week begins on mon, tue, wed, thu, fri, sat or sun",
         })
     );
 }

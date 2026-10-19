@@ -6,11 +6,13 @@ Stability tier: **experimental**.
 principal in the system granted `CAP_TIME_SET`, so every path that sets the
 clock from a network source runs through it (`plans/TIMESYNC.md`).
 
-The installed binary lives at `/System/Services/timed.app/Run`. It is a
-**boot-floor** service: a Raspberry Pi 3/4 has no RTC at all, so without this
-service such a machine boots with `WallTimeState::Unset` for ever — and the
-audit log's hash chains, ARXFS `Time64` metadata, and certificate lifetimes all
-rest on the clock it establishes.
+The installed binary lives at `/System/Services/timed.app/Run`, started by PID 1
+from the enrolled tier before the root is mounted. A Raspberry Pi 3/4 has no RTC
+at all, so without this service such a machine boots with
+`WallTimeState::Unset` for ever — and the audit log's hash chains, ARXFS
+`Time64` metadata, and certificate lifetimes all rest on the clock it
+establishes. Disabling the service stops the clock chip being read as well as
+the network being asked; turning network time off alone is `time.network`.
 
 ## What it holds, and what it deliberately does not
 
@@ -52,41 +54,54 @@ uptime** — so a machine that reboots ten times an hour still queries once a da
 which is the whole point of trusting a working RTC.
 
 The persisted record is `/System/Settings/Time/state`, a fixed-length
-checksummed document. A missing or corrupt one resolves to "time was never
-seen", which makes the stale-boot and went-backwards rules simply not fire
-rather than fire on a fiction.
+checksummed document. A missing, corrupt, short or long one resolves to "time
+was never seen", which makes the stale-boot and went-backwards rules simply not
+fire rather than fire on a fiction. It lives on the root, which is usually
+mounted after the service starts, so it is read again once the root is reached:
+a reason it then gives to distrust a believed clock brings the first query
+forward, and a sync made before it was reachable is written then.
 
 ## Configuration
 
-Two keys in `/System/Settings/Configuration/system.conf`
-(`tairix_sysconfig`):
+Three keys of the machine configuration (`tairix_sysconfig`), read from the
+administrator's layer at `/System/Settings/Configuration/system.conf`, else the
+image's default under `/System/Defaults`, and changed through the settings
+service:
 
+* `time.network` — `on` (the default) or `off`. Off drops everything that asks
+  the network — no query, no name lookup, no socket — and keeps the clock chip,
+  which is read at every start either way.
 * `time.servers` — `none` (the default) or a comma-separated list of at most
-  eight host names or address literals.
+  eight host names or address literals. `none` leaves the lower tiers: the
+  server DHCP named, else the public pool.
 * `time.refresh` — `6h`, `12h`, `1d` (the default), `2d`, or `7d`.
 
-The default names no server. TAIRiX has no NTP-pool vendor zone, and RFC 8633
-§3.1 asks a vendor not to point a fleet at the public pool without one, so a
-machine that has been given no server simply never queries and says so in the
-log. Naming one is the operator's or the installer's decision.
+The service follows the document while it runs. A watch on its directory — on
+`/System/Settings` until that directory exists — wakes the reactor, which reads
+it again and applies only what changed: switching network time off abandons the
+query in flight, switching it on queries as promptly as an unset clock would, a
+changed server list replaces the servers in use, and a changed cadence applies
+in place, keeping what the engine learned of its servers. A replacement's first
+request waits out the poll floor after the last one sent, so flipping the
+switch cannot flood a server. A document that cannot be read or fully
+understood changes nothing: the settings in use stand, and the refusal is
+recorded.
 
 The store lives on the root volume and this is a boot-floor service, so its
-first read normally happens before that root is mounted. There is no userland
-event for "the root is mounted", so the store is re-read on a bounded, doubling
-schedule folded into the reactor's own deadline — about seventeen minutes of
-attempts, parking between them, never a spin and never a wait on the start-up
-path. The service then either has a server or says it has none and exits;
-configuring one after that means restarting the service.
+first read normally happens before that root is mounted, and until it is the
+defaults apply — network time on, whatever the document says. There is no
+userland event for "the root is mounted", so the service looks for the store
+again on a bounded, doubling schedule folded into the reactor's own deadline —
+about seventeen minutes of attempts, parking between them, never a spin and
+never a wait on the start-up path. The same schedule picks up a DHCP lease
+acquired later; it stops once the operator has named a server or switched
+network time off, there being nothing better to look for.
 
-A machine with no store *backing* at all (a volume-less boot) is distinguished
-from one whose document is merely absent: the first arms no schedule, because
-waiting cannot make a filesystem appear.
-
-A service with nothing left to wait for — every configured server retired by a
-Kiss-o'-Death, or none configured and the ladder spent — **exits** rather than
-holding a task and a bound delivery port for the rest of the boot doing
-nothing. Restarting it is the recovery path either way, and PID 1 audits the
-exit.
+With nothing due, the service parks on the configuration watch, since the
+configuration may yet switch network time on or name a server. Only with no
+watch either — the store never reached, or one that cannot be watched — does it
+**exit** rather than hold a task and a bound delivery port doing nothing; PID 1
+audits the exit.
 
 ## Politeness
 

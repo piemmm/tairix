@@ -1,33 +1,29 @@
-//! The Date & Time application's host-tested engine: six editable civil
-//! fields, their validation, the instant they compose, and the one status
-//! line every surface states a result through.
+//! The Date & Time dialog's host-tested engine: what the clock reads and
+//! where that came from, when the zone's clocks next change, the instant a
+//! hand-set date and time name, and the words every outcome is stated in.
 //!
-//! # No calendar arithmetic of its own
+//! # No calendar or zone arithmetic of its own
 //!
-//! Seeding the fields decomposes an instant with [`CivilTime::from_time64`]
-//! and committing composes one with [`days_from_civil`] — the exact inverse,
-//! from the same shared calendar the desktop clock and `ls`'s date column
-//! read. There is no second day-counting rule here to drift from theirs, and
-//! no leap-year table of this app's own.
+//! Local time is read and composed through `lib/tz` — the zone engine and the
+//! region's spellings every clock on the desktop draws through — and dates
+//! through `lib/fsmeta`'s calendar, so the dialog can never disagree with the
+//! desktop clock beside it.
 //!
 //! # An unset clock shows nothing, never `1970-01-01`
 //!
-//! A machine whose wall time has never been established this boot reports
-//! [`WallTimeState::Unset`](tairix_abi::time::WallTimeState::Unset), whose
-//! instant is the Unix-epoch placeholder and means nothing. The fields are
-//! then left **empty**: the epoch presented as a reading would be a
-//! fabricated date, and a user asked to correct it would be correcting a
-//! fiction. Empty fields still compose nothing until the user types a whole
-//! date, so an unset clock cannot be committed by accident.
+//! A machine whose wall time has not been established this boot reports
+//! [`WallTimeState::Unset`], whose instant is the Unix-epoch placeholder and
+//! means nothing. The dialog then says the clock is not set rather than
+//! presenting the placeholder as a reading a user might "correct".
 //!
-//! # Every field is checked, and a refusal is stated
+//! # A local time names one instant, or is refused in words
 //!
-//! Committing validates all six fields and refuses the whole edit on the
-//! first fault, naming it — never clamping, wrapping, or saturating a value
-//! into range, which would set a time the user did not ask for. Day-of-month
-//! is checked against the month *and* the year, so 29 February is accepted
-//! exactly in leap years. Years before 1970 and far past 2038 are ordinary
-//! inputs: the instant is a 64-bit `Time64`, so neither is a boundary here.
+//! A hand-set date and time are local to the machine's zone, so they are
+//! composed through [`Zone::instant_from_local`]: a time the clocks skip is
+//! refused with the change that skips it, and one they pass twice is answered
+//! only once the user has said which of its two offsets is meant. A time
+//! outside the plausible window ([`is_plausible_wall_time`]) is confirmed
+//! before it is set.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -35,439 +31,590 @@
 
 extern crate alloc;
 
+pub mod calendar;
+pub mod time_entry;
 pub mod view;
 
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use tairix_abi::time::{days_from_civil, CivilTime};
-use tairix_abi::time::{Time64, WallClockReading};
+use tairix_abi::time::{
+    days_from_civil, is_plausible_wall_time, CivilTime, Time64, WallClockReading, WallTimeState,
+    SECS_PER_DAY,
+};
+use tairix_abi::zone::ZoneName;
+use tairix_abi::Errno;
+use tairix_fsmeta::calendar::{full_date, month_name, weekday_name};
+use tairix_sysconfig::{Key, Switch, SystemConfig, DEFAULT_ZONE};
+use tairix_tz::{CivilClock, Disambiguation, LocalError, LocalTime, Weekday, Zone, ZoneOffset};
 
-/// Seconds in one minute.
-const SECS_PER_MIN: i64 = 60;
-/// Seconds in one hour.
-const SECS_PER_HOUR: i64 = 60 * SECS_PER_MIN;
-/// Seconds in one day.
-const SECS_PER_DAY: i64 = 24 * SECS_PER_HOUR;
+use crate::calendar::Date;
+use crate::time_entry::TimeOfDay;
 
-/// Widest year the app accepts in either direction.
+/// Widest year the calendar offers in either direction.
 ///
-/// A bound on *typing*, not on `Time64`: the ABI instant is 64-bit and the
-/// calendar is proleptic, so this only keeps a mistyped run of digits from
-/// composing an instant no clock could mean. Wide enough that no real date a
-/// user wants is out of reach.
+/// A bound on what a person can pick, not on `Time64`: the instant is 64-bit
+/// and the calendar proleptic, so this only keeps the steppers from walking
+/// to a year no clock could mean.
 pub const YEAR_MAX: i64 = 9999;
 
-/// Narrowest year the app accepts. Negative years are representable in the
-/// calendar and are not a boundary of the timestamp.
+/// Narrowest year the calendar offers.
 pub const YEAR_MIN: i64 = -9999;
 
-/// Longest run of characters any one field holds. A year is the longest
-/// legitimate entry (a sign and four digits); anything longer is a mistype.
-pub const FIELD_MAX: usize = 5;
-
-/// Which civil field an edit or a fault refers to.
-///
-/// [`Field::ALL`] is the single definition of the fields and their order;
-/// the surface's rows, the tab order, and every loop over the six read it
-/// rather than restating a list.
+/// The machine's time settings, as `system.conf` holds them.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum Field {
-    /// Proleptic-Gregorian year.
-    #[default]
-    Year,
-    /// Month of the year, `1..=12`.
-    Month,
-    /// Day of the month, valid for the entered month and year.
-    Day,
-    /// Hour of the day, `0..=23`.
-    Hour,
-    /// Minute of the hour, `0..=59`.
-    Minute,
-    /// Second of the minute, `0..=59`.
-    Second,
+pub struct MachineTime {
+    /// Whether the clock is kept from the network (`time.network`).
+    pub network: bool,
+    /// The zone the machine keeps, or `None` for the zone store's own default
+    /// (`time.zone`).
+    pub zone: Option<ZoneName>,
 }
 
-impl Field {
-    /// The six fields, in the order they are presented and tabbed through.
-    pub const ALL: [Self; 6] = [
-        Self::Year,
-        Self::Month,
-        Self::Day,
-        Self::Hour,
-        Self::Minute,
-        Self::Second,
-    ];
-
-    /// The field's label.
+impl MachineTime {
+    /// The time settings `config` holds.
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Year => "Year",
-            Self::Month => "Month",
-            Self::Day => "Day",
-            Self::Hour => "Hour",
-            Self::Minute => "Minute",
-            Self::Second => "Second",
+    pub fn of(config: &SystemConfig) -> Self {
+        Self {
+            network: config.time_network == Switch::On,
+            zone: config.time_zone,
         }
     }
 
-    /// The field's index within [`Field::ALL`].
+    /// The setting that turns network time `on` or off, as the settings
+    /// service is asked for it.
     #[must_use]
-    pub const fn index(self) -> usize {
-        match self {
-            Self::Year => 0,
-            Self::Month => 1,
-            Self::Day => 2,
-            Self::Hour => 3,
-            Self::Minute => 4,
-            Self::Second => 5,
-        }
+    pub const fn network_setting(on: bool) -> (&'static str, &'static str) {
+        let switch = if on { Switch::On } else { Switch::Off };
+        (Key::TimeNetwork.name(), switch.as_str())
     }
 
-    /// The field at `index` within [`Field::ALL`], or `None` past the end —
-    /// an index that names no field never resolves to the nearest one.
+    /// The setting that keeps the machine on `zone`, or on the store's own
+    /// default for `None`.
     #[must_use]
-    pub fn at(index: usize) -> Option<Self> {
-        Self::ALL.get(index).copied()
-    }
-
-    /// The next field in tab order, wrapping.
-    #[must_use]
-    pub fn next(self) -> Self {
-        Self::at((self.index() + 1) % Self::ALL.len()).unwrap_or(Self::Year)
+    pub fn zone_setting(zone: Option<&ZoneName>) -> (&'static str, &str) {
+        (
+            Key::TimeZone.name(),
+            zone.map_or(DEFAULT_ZONE, ZoneName::as_str),
+        )
     }
 }
 
-/// Why an edit cannot be committed.
-///
-/// Every variant names the offending field, so the surface states *which*
-/// entry is wrong rather than that something is.
+/// What the machine's clock says, as far as the dialog knows it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Fault {
-    /// The field is empty, or holds no number at all.
-    Missing(Field),
-    /// The field holds something that is not a number in the accepted
-    /// spelling (digits, with an optional leading sign on the year).
-    NotANumber(Field),
-    /// The field holds a number outside the field's own range.
-    OutOfRange(Field),
-    /// The day is a real number but does not exist in the entered month and
-    /// year — 31 April, or 29 February outside a leap year.
-    NoSuchDay,
+pub enum Clock {
+    /// The clock could not be read.
+    Unreadable,
+    /// The clock's reading, and when the network last set it, if ever.
+    Read {
+        /// The reading.
+        reading: WallClockReading,
+        /// When the time service last set the clock.
+        last_sync: Option<Time64>,
+    },
 }
 
-impl Fault {
-    /// The field the fault is about. [`Fault::NoSuchDay`] is the day's.
+impl Clock {
+    /// The instant the clock holds, where it holds one.
     #[must_use]
-    pub const fn field(self) -> Field {
+    pub fn now(&self) -> Option<Time64> {
         match self {
-            Self::Missing(field) | Self::NotANumber(field) | Self::OutOfRange(field) => field,
-            Self::NoSuchDay => Field::Day,
+            Self::Read { reading, .. } if reading.state().is_set() => Some(reading.time()),
+            _ => None,
         }
     }
+}
 
-    /// The terse sentence a surface states.
+/// What the dialog's first block states about the clock now.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Readout {
+    /// The time of day to the second, or what stands in for one.
+    pub time: String,
+    /// The date written out, or why there is none.
+    pub date: String,
+    /// The zone: the place, and its abbreviation and offset now.
+    pub zone: String,
+    /// Where the clock's time came from.
+    pub source: String,
+    /// When the zone's clocks next change.
+    pub change: String,
+}
+
+/// What the dialog states about `clock`, read by `civil` in the zone named
+/// `place`, on a machine keeping network time when `network`.
+#[must_use]
+pub fn readout(clock: Clock, network: bool, place: &str, civil: &CivilClock<'_>) -> Readout {
+    let Clock::Read { reading, last_sync } = clock else {
+        return Readout {
+            time: String::from("Unknown"),
+            date: String::from("The machine's clock could not be read."),
+            zone: String::from(place),
+            ..Readout::default()
+        };
+    };
+    if !reading.state().is_set() {
+        return Readout {
+            time: String::from("Not set"),
+            date: String::from("The clock has not been set since the machine started."),
+            zone: String::from(place),
+            source: String::from(if network {
+                "Waiting for a time server on the network to answer."
+            } else {
+                "Set the date and time below, or turn on network time."
+            }),
+            change: String::new(),
+        };
+    }
+    let now = reading.time();
+    let local = civil.local(now);
+    let mut time = String::new();
+    // A `String` takes any write, so there is no failure to keep.
+    let _ = civil.write_time_with_seconds(&local, &mut time);
+    Readout {
+        time,
+        date: full_date(&local.civil),
+        zone: zone_line(place, local.offset),
+        source: source(reading.state(), last_sync, now, civil),
+        change: next_change(civil, now),
+    }
+}
+
+/// The zone as the first block names it: the place, then its abbreviation and
+/// offset now where they say anything the place does not.
+#[must_use]
+pub fn zone_line(place: &str, offset: ZoneOffset<'_>) -> String {
+    let mut line = String::from(place);
+    let numeric = offset.abbreviation.starts_with(['+', '-']);
+    if offset.abbreviation == place || numeric {
+        if offset.utc_offset == 0 && offset.abbreviation == place {
+            return line;
+        }
+        line.push_str(" \u{b7} ");
+    } else {
+        line.push_str(" \u{b7} ");
+        line.push_str(offset.abbreviation);
+        line.push_str(", ");
+    }
+    // A `String` takes any write, so there is no failure to keep.
+    let _ = offset.write_from_utc(&mut line);
+    line
+}
+
+/// Where the clock's time came from, in words.
+fn source(
+    state: WallTimeState,
+    last_sync: Option<Time64>,
+    now: Time64,
+    civil: &CivilClock<'_>,
+) -> String {
+    match state {
+        WallTimeState::Unset => String::from("Not set."),
+        WallTimeState::Firmware => {
+            String::from("From the clock chip, read when the machine started.")
+        }
+        WallTimeState::Adjusted => String::from("Set by hand."),
+        WallTimeState::Trusted => match last_sync.filter(|at| *at <= now) {
+            Some(at) => {
+                let mut line = String::from("Set automatically from the network ");
+                when(at, now, civil, &mut line);
+                line.push('.');
+                line
+            }
+            None => String::from("Set automatically from the network."),
+        },
+    }
+}
+
+/// When the zone's clocks next change, in words.
+fn next_change(civil: &CivilClock<'_>, now: Time64) -> String {
+    let Some(change) = civil.zone().next_change(now) else {
+        return String::from("No change of the clocks is scheduled here.");
+    };
+    let delta = change.after.utc_offset - change.before.utc_offset;
+    let mut line = String::from(if delta > 0 {
+        "Clocks go forward "
+    } else {
+        "Clocks go back "
+    });
+    amount(delta.unsigned_abs(), &mut line);
+    line.push(' ');
+    let before = LocalTime {
+        civil: CivilTime::at_offset(change.at.secs(), change.before.utc_offset),
+        offset: change.before,
+    };
+    on_day(&before.civil, &civil.local(now).civil, &mut line);
+    line.push_str(" at ");
+    // A `String` takes any write, so there is no failure to keep.
+    let _ = civil.write_time(&before, &mut line);
+    line.push('.');
+    line
+}
+
+/// How far a change moves the clocks: `an hour`, `30 minutes`.
+fn amount(secs: u32, out: &mut String) {
+    let (hours, minutes) = (secs / 3600, secs % 3600 / 60);
+    // A `String` takes any write, so there is no failure to keep.
+    match hours {
+        0 => {}
+        1 => out.push_str("an hour"),
+        _ => {
+            let _ = write!(out, "{hours} hours");
+        }
+    }
+    if hours > 0 && minutes > 0 {
+        out.push_str(" and ");
+    }
+    match minutes {
+        0 if hours == 0 => out.push_str("no time"),
+        0 => {}
+        1 => out.push_str("a minute"),
+        _ => {
+            let _ = write!(out, "{minutes} minutes");
+        }
+    }
+}
+
+/// `at` as a reader places it from `now`: `today at 14:02`, `yesterday at
+/// 14:02`, `on Saturday 17 October at 14:02`.
+fn when(at: Time64, now: Time64, civil: &CivilClock<'_>, out: &mut String) {
+    let local = civil.local(at);
+    on_day(&local.civil, &civil.local(now).civil, out);
+    out.push_str(" at ");
+    // A `String` takes any write, so there is no failure to keep.
+    let _ = civil.write_time(&local, out);
+}
+
+/// `day` named from `today`: `today`, `tomorrow`, `yesterday`, else `on` the
+/// date, its year only where it is not this one.
+fn on_day(day: &CivilTime, today: &CivilTime, out: &mut String) {
+    let days = |civil: &CivilTime| days_from_civil(civil.year, civil.month, civil.day);
+    let (Some(of_day), Some(of_today)) = (days(day), days(today)) else {
+        return;
+    };
+    match of_day - of_today {
+        0 => out.push_str("today"),
+        1 => out.push_str("tomorrow"),
+        -1 => out.push_str("yesterday"),
+        _ => {
+            // A `String` takes any write, so there is no failure to keep.
+            let _ = write!(
+                out,
+                "on {} {} {}",
+                weekday_name(Weekday::of_days(of_day).iso()),
+                day.day,
+                month_name(day.month)
+            );
+            if day.year != today.year {
+                let _ = write!(out, " {}", day.year);
+            }
+        }
+    }
+}
+
+/// What a hand-set date and time came to in a zone.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Composed<'a> {
+    /// The one instant they name.
+    At(Time64),
+    /// The clocks skip them: they go forward at `from` to `to`, local.
+    Skipped {
+        /// The local time the clocks leave.
+        from: LocalTime<'a>,
+        /// The local time they arrive at.
+        to: LocalTime<'a>,
+    },
+    /// The clocks pass them twice, first at `earlier` and then at `later`,
+    /// going back at `at`.
+    Repeated {
+        /// The offset in force the first time round.
+        earlier: ZoneOffset<'a>,
+        /// The offset in force the second time.
+        later: ZoneOffset<'a>,
+        /// The local time the clocks go back from.
+        at: LocalTime<'a>,
+    },
+}
+
+/// The instant `date` at `time` names in `zone`, `choice` deciding between
+/// two.
+#[must_use]
+pub fn compose(
+    zone: Zone<'_>,
+    date: Date,
+    time: TimeOfDay,
+    choice: Disambiguation,
+) -> Composed<'_> {
+    let local = civil_of(date, time);
+    match zone.instant_from_local(&local, choice) {
+        Ok(at) => Composed::At(at),
+        Err(LocalError::Overlap) => repeated(zone, &local),
+        Err(LocalError::Gap | LocalError::Invalid) => skipped(zone, &local),
+    }
+}
+
+/// The fields of `date` at `time`.
+fn civil_of(date: Date, time: TimeOfDay) -> CivilTime {
+    CivilTime {
+        year: date.year,
+        month: date.month,
+        day: date.day,
+        hour: time.hour,
+        minute: time.minute,
+        second: time.second,
+    }
+}
+
+/// The change that skips `local`, found among those near it.
+fn skipped<'a>(zone: Zone<'a>, local: &CivilTime) -> Composed<'a> {
+    let wall = local.to_unix_secs().unwrap_or(0);
+    let mut after = Time64::from_secs(wall.saturating_sub(SECS_PER_DAY));
+    for _ in 0..NEARBY_CHANGES {
+        let Some(change) = zone.next_change(after) else {
+            break;
+        };
+        let from = change
+            .at
+            .secs()
+            .saturating_add(i64::from(change.before.utc_offset));
+        let to = change
+            .at
+            .secs()
+            .saturating_add(i64::from(change.after.utc_offset));
+        if (from..to).contains(&wall) {
+            return Composed::Skipped {
+                from: LocalTime {
+                    civil: CivilTime::at_offset(change.at.secs(), change.before.utc_offset),
+                    offset: change.before,
+                },
+                to: LocalTime {
+                    civil: CivilTime::at_offset(change.at.secs(), change.after.utc_offset),
+                    offset: change.after,
+                },
+            };
+        }
+        after = change.at;
+    }
+    let offset = zone.offset_at(Time64::from_secs(wall));
+    let local = LocalTime {
+        civil: *local,
+        offset,
+    };
+    Composed::Skipped {
+        from: local,
+        to: local,
+    }
+}
+
+/// The two offsets `local` reads at, the earlier first, and the change
+/// between them.
+fn repeated<'a>(zone: Zone<'a>, local: &CivilTime) -> Composed<'a> {
+    let first = zone.instant_from_local(local, Disambiguation::Earlier);
+    let second = zone.instant_from_local(local, Disambiguation::Later);
+    let (Ok(first), Ok(second)) = (first, second) else {
+        return skipped(zone, local);
+    };
+    let Some(change) = zone.next_change(first).filter(|change| change.at <= second) else {
+        return skipped(zone, local);
+    };
+    Composed::Repeated {
+        earlier: zone.offset_at(first),
+        later: zone.offset_at(second),
+        at: LocalTime {
+            civil: CivilTime::at_offset(change.at.secs(), change.before.utc_offset),
+            offset: change.before,
+        },
+    }
+}
+
+/// How many changes of offset [`skipped`] looks through: those within a day
+/// either side of a time are far fewer.
+const NEARBY_CHANGES: usize = 8;
+
+/// Why `time`, skipped, cannot be set, in words.
+#[must_use]
+pub fn skipped_reason(
+    date: Date,
+    time: TimeOfDay,
+    from: &LocalTime<'_>,
+    to: &LocalTime<'_>,
+    civil: &CivilClock<'_>,
+) -> String {
+    let local = LocalTime {
+        civil: civil_of(date, time),
+        offset: from.offset,
+    };
+    let mut line = String::new();
+    // A `String` takes any write, so there is no failure to keep.
+    let _ = civil.write_time_with_seconds(&local, &mut line);
+    line.push_str(" does not happen on ");
+    on_date(&local.civil, &mut line);
+    line.push_str(": the clocks go forward from ");
+    let _ = civil.write_time(from, &mut line);
+    line.push_str(" to ");
+    let _ = civil.write_time(to, &mut line);
+    line.push('.');
+    line
+}
+
+/// The question a twice-passed `time` asks: its headline and detail, and its
+/// two answers' labels, the earlier first. The clocks go back at `at`.
+#[must_use]
+pub fn repeated_question(
+    date: Date,
+    time: TimeOfDay,
+    (earlier, later, at): (&ZoneOffset<'_>, &ZoneOffset<'_>, &LocalTime<'_>),
+    civil: &CivilClock<'_>,
+) -> (String, String, [String; 2]) {
+    let local = LocalTime {
+        civil: civil_of(date, time),
+        offset: *earlier,
+    };
+    let mut spelled = String::new();
+    // A `String` takes any write, so there is no failure to keep.
+    let _ = civil.write_time_with_seconds(&local, &mut spelled);
+    let mut headline = spelled.clone();
+    headline.push_str(" happens twice on ");
+    on_date(&local.civil, &mut headline);
+    let mut detail = String::from("The clocks go back ");
+    amount(
+        (earlier.utc_offset - later.utc_offset).unsigned_abs(),
+        &mut detail,
+    );
+    detail.push_str(" at ");
+    let _ = civil.write_time(at, &mut detail);
+    let _ = write!(
+        detail,
+        ", so {spelled} comes round twice: once before the change and once after. Which do \
+         you mean?"
+    );
+    let label = |first: bool, offset: &ZoneOffset<'_>| {
+        let mut label = String::from(if first { "Before: " } else { "After: " });
+        if !offset.abbreviation.starts_with(['+', '-']) {
+            label.push_str(offset.abbreviation);
+            label.push_str(", ");
+        }
+        let _ = offset.write_from_utc(&mut label);
+        label
+    };
+    (
+        headline,
+        detail,
+        [label(true, earlier), label(false, later)],
+    )
+}
+
+/// The question a time outside the plausible window asks before it is set:
+/// its headline and detail.
+#[must_use]
+pub fn implausible_question(at: Time64, civil: &CivilClock<'_>) -> Option<(String, String)> {
+    if is_plausible_wall_time(at) {
+        return None;
+    }
+    let local = civil.local(at);
+    let mut headline = String::from("Set the clock to ");
+    headline.push_str(&full_date(&local.civil));
+    headline.push('?');
+    let detail = if at < Time64::from_secs(tairix_abi::time::RELEASE_EPOCH_SECS) {
+        "That is before this system was made, so certificates will not be trusted and new \
+         files will look older than files made before them."
+    } else {
+        "That is more than a century after this system was made, which no working clock reads, \
+         so certificates will not be trusted and files will look as if they come from the future."
+    };
+    Some((headline, String::from(detail)))
+}
+
+/// `civil`'s date as a person reads it: `Sunday 29 March 2026`.
+fn on_date(civil: &CivilTime, out: &mut String) {
+    out.push_str(&full_date(civil));
+}
+
+/// What stepping the clock by hand came to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ClockSet {
+    /// The kernel's answer to the step.
+    pub clock: Result<(), Errno>,
+    /// The clock chip's answer, where the step was made and the chip asked.
+    pub chip: Option<Result<(), Errno>>,
+}
+
+impl ClockSet {
+    /// The headline and detail an alert states a refused step in, or `None`
+    /// where the clock was set.
     #[must_use]
-    pub const fn message(self) -> &'static str {
+    pub fn refusal(&self) -> Option<(&'static str, String)> {
+        let Err(err) = self.clock else {
+            return None;
+        };
+        let detail = if err == Errno::PermissionDenied {
+            String::from("This account may not set the clock. Nothing was changed.")
+        } else {
+            alloc::format!("The system refused it ({err}). Nothing was changed.")
+        };
+        Some(("The clock was not set", detail))
+    }
+
+    /// What the dialog states after a step that took but whose clock chip
+    /// did not, or `None` where there is nothing to add.
+    #[must_use]
+    pub fn note(&self) -> Option<String> {
+        match (self.clock, self.chip?) {
+            (Ok(()), Err(Errno::NotFound)) => Some(String::from(
+                "The clock was set. This machine has no clock chip to keep it, so it is lost at \
+                 the next restart unless network time is on.",
+            )),
+            (Ok(()), Err(err)) => Some(alloc::format!(
+                "The clock was set, but the clock chip refused it ({err}), so the time may be \
+                 wrong after a restart."
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// A change to the machine's time settings the dialog asks for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SettingChange {
+    /// Turn network time on or off.
+    Network(bool),
+    /// Keep the machine on this zone, or the store's default for `None`.
+    Zone(Option<ZoneName>),
+}
+
+impl SettingChange {
+    /// The setting the settings service is asked for.
+    #[must_use]
+    pub fn setting(&self) -> (&'static str, &str) {
         match self {
-            Self::Missing(field) => match field {
-                Field::Year => "Enter a year.",
-                Field::Month => "Enter a month.",
-                Field::Day => "Enter a day.",
-                Field::Hour => "Enter an hour.",
-                Field::Minute => "Enter a minute.",
-                Field::Second => "Enter a second.",
-            },
-            Self::NotANumber(field) => match field {
-                Field::Year => "The year must be a number.",
-                Field::Month => "The month must be a number.",
-                Field::Day => "The day must be a number.",
-                Field::Hour => "The hour must be a number.",
-                Field::Minute => "The minute must be a number.",
-                Field::Second => "The second must be a number.",
-            },
-            Self::OutOfRange(field) => match field {
-                Field::Year => "That year is out of range.",
-                Field::Month => "The month must be 1 to 12.",
-                Field::Day => "The day must be 1 to 31.",
-                Field::Hour => "The hour must be 0 to 23.",
-                Field::Minute => "The minute must be 0 to 59.",
-                Field::Second => "The second must be 0 to 59.",
-            },
-            Self::NoSuchDay => "That day does not exist in that month.",
-        }
-    }
-}
-
-/// What the app is telling the user about its last action.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub enum Status {
-    /// Nothing has been attempted since the fields were last seeded.
-    #[default]
-    Idle,
-    /// The clock reports no wall time this boot, so the fields are empty and
-    /// there is nothing to correct until one is entered.
-    Unset,
-    /// The edit was refused before anything was set.
-    Rejected(Fault),
-    /// The clock was stepped to the composed instant.
-    Applied,
-    /// The clock could not be read, stated verbatim rather than guessed at.
-    Failed(&'static str),
-}
-
-impl Status {
-    /// The terse sentence a surface states, or `None` when there is nothing
-    /// to say.
-    #[must_use]
-    pub const fn message(&self) -> Option<&'static str> {
-        match *self {
-            Self::Idle => None,
-            Self::Unset => Some("The clock has not been set on this machine."),
-            Self::Rejected(fault) => Some(fault.message()),
-            Self::Applied => Some("The clock was set."),
-            Self::Failed(reason) => Some(reason),
+            Self::Network(on) => MachineTime::network_setting(*on),
+            Self::Zone(zone) => MachineTime::zone_setting(zone.as_ref()),
         }
     }
 
-    /// Whether the status reports a failure, so a surface can colour it.
+    /// The headline and detail an alert states a refused change in.
     #[must_use]
-    pub const fn is_fault(&self) -> bool {
-        matches!(*self, Self::Rejected(_) | Self::Failed(_) | Self::Unset)
-    }
-}
-
-/// The six editable fields and the status line beneath them.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Editor {
-    year: String,
-    month: String,
-    day: String,
-    hour: String,
-    minute: String,
-    second: String,
-    status: Status,
-    focus: Field,
-}
-
-impl Editor {
-    /// An editor with every field empty and nothing stated.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Seed the fields from `reading`.
-    ///
-    /// A set reading fills all six from the shared calendar decomposition. An
-    /// unset one clears them and says so: the epoch placeholder is not a
-    /// reading, and presenting it as one would invite the user to "correct" a
-    /// date the machine never claimed.
-    pub fn seed(&mut self, reading: WallClockReading) {
-        if !reading.state().is_set() {
-            self.clear();
-            self.status = Status::Unset;
-            return;
-        }
-        let civil = CivilTime::from_time64(reading.time());
-        self.year = spell(civil.year);
-        self.month = spell(i64::from(civil.month));
-        self.day = spell(i64::from(civil.day));
-        self.hour = spell(i64::from(civil.hour));
-        self.minute = spell(i64::from(civil.minute));
-        self.second = spell(i64::from(civil.second));
-        self.status = Status::Idle;
-    }
-
-    /// The text of one field.
-    #[must_use]
-    pub fn text(&self, field: Field) -> &str {
-        match field {
-            Field::Year => &self.year,
-            Field::Month => &self.month,
-            Field::Day => &self.day,
-            Field::Hour => &self.hour,
-            Field::Minute => &self.minute,
-            Field::Second => &self.second,
-        }
-    }
-
-    /// Replace one field's text, bounded by [`FIELD_MAX`] and accepting only
-    /// the spellings a civil field can have: digits, and a leading `-` on the
-    /// year alone. Anything else is dropped rather than stored to be rejected
-    /// later, so a field can never hold a character the commit would fault
-    /// on.
-    pub fn set_text(&mut self, field: Field, text: &str) {
-        let mut kept = String::new();
-        for (at, ch) in text.chars().enumerate() {
-            if kept.chars().count() >= FIELD_MAX {
-                break;
+    pub fn refusal(&self, err: Errno) -> (&'static str, String) {
+        let headline = match self {
+            Self::Network(true) => "Network time was not turned on",
+            Self::Network(false) => "Network time was not turned off",
+            Self::Zone(_) => "The time zone was not changed",
+        };
+        let detail = match err {
+            Errno::PermissionDenied => {
+                String::from("This account may not change the machine's settings.")
             }
-            let allowed = ch.is_ascii_digit() || (at == 0 && ch == '-' && field == Field::Year);
-            if allowed {
-                kept.push(ch);
-            }
-        }
-        *self.field_mut(field) = kept;
-    }
-
-    /// Append one typed character to `field`, honouring the same spelling and
-    /// bound as [`set_text`](Self::set_text).
-    pub fn push(&mut self, field: Field, ch: char) {
-        let current = self.text(field);
-        let allowed =
-            ch.is_ascii_digit() || (current.is_empty() && ch == '-' && field == Field::Year);
-        if !allowed || current.chars().count() >= FIELD_MAX {
-            return;
-        }
-        self.field_mut(field).push(ch);
-    }
-
-    /// Remove the last character of `field`, if it has one.
-    pub fn backspace(&mut self, field: Field) {
-        let _ = self.field_mut(field).pop();
-    }
-
-    /// Empty every field.
-    pub fn clear(&mut self) {
-        for field in Field::ALL {
-            self.field_mut(field).clear();
-        }
-    }
-
-    /// The field holding the keyboard.
-    #[must_use]
-    pub const fn focus(&self) -> Field {
-        self.focus
-    }
-
-    /// Give the keyboard to `field`.
-    pub fn set_focus(&mut self, field: Field) {
-        self.focus = field;
-    }
-
-    /// Move the keyboard to the next field in tab order.
-    pub fn focus_next(&mut self) {
-        self.focus = self.focus.next();
-    }
-
-    /// What the app is currently stating.
-    #[must_use]
-    pub const fn status(&self) -> &Status {
-        &self.status
-    }
-
-    /// Adopt `status`, so the surface states the outcome of a set the caller
-    /// performed.
-    pub fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
-
-    /// Validate all six fields and compose the instant they name.
-    ///
-    /// The composed instant has zero sub-second part: the fields carry
-    /// whole seconds, so inventing nanoseconds would claim a precision the
-    /// user never entered.
-    ///
-    /// # Errors
-    ///
-    /// The first [`Fault`] found, in field order, with nothing composed and
-    /// nothing set. The whole edit is refused, never partially applied.
-    pub fn compose(&self) -> Result<Time64, Fault> {
-        let year = self.number(Field::Year)?;
-        let month = self.number(Field::Month)?;
-        let day = self.number(Field::Day)?;
-        let hour = self.number(Field::Hour)?;
-        let minute = self.number(Field::Minute)?;
-        let second = self.number(Field::Second)?;
-
-        if !(YEAR_MIN..=YEAR_MAX).contains(&year) {
-            return Err(Fault::OutOfRange(Field::Year));
-        }
-        let month = in_range(month, 1, 12, Field::Month)?;
-        let day = in_range(day, 1, 31, Field::Day)?;
-        let hour = in_range(hour, 0, 23, Field::Hour)?;
-        let minute = in_range(minute, 0, 59, Field::Minute)?;
-        let second = in_range(second, 0, 59, Field::Second)?;
-        if day > days_in_month(year, month) {
-            return Err(Fault::NoSuchDay);
-        }
-
-        let secs = days_from_civil(year, month, day)
-            .and_then(|days| days.checked_mul(SECS_PER_DAY))
-            .and_then(|d| d.checked_add(i64::from(hour) * SECS_PER_HOUR))
-            .and_then(|s| s.checked_add(i64::from(minute) * SECS_PER_MIN))
-            .and_then(|s| s.checked_add(i64::from(second)))
-            .ok_or(Fault::OutOfRange(Field::Year))?;
-        // Whole seconds only, so the sub-second part is always in range and
-        // the construction cannot refuse a value the fields produced.
-        Time64::new(secs, 0).map_err(|_| Fault::OutOfRange(Field::Year))
-    }
-
-    /// The parsed number in `field`.
-    fn number(&self, field: Field) -> Result<i64, Fault> {
-        let text = self.text(field);
-        if text.is_empty() || text == "-" {
-            return Err(Fault::Missing(field));
-        }
-        text.parse::<i64>().map_err(|_| Fault::NotANumber(field))
-    }
-
-    /// Mutable access to one field's text.
-    fn field_mut(&mut self, field: Field) -> &mut String {
-        match field {
-            Field::Year => &mut self.year,
-            Field::Month => &mut self.month,
-            Field::Day => &mut self.day,
-            Field::Hour => &mut self.hour,
-            Field::Minute => &mut self.minute,
-            Field::Second => &mut self.second,
-        }
+            Errno::NotFound => String::from("The settings service is not running."),
+            Errno::BadMagic => String::from(
+                "The machine's settings could not be read, so they were left as they are.",
+            ),
+            err => alloc::format!("The settings service refused it ({err})."),
+        };
+        (headline, detail)
     }
 }
 
-/// `value` if it lies within `low..=high`, else the field's range fault.
-fn in_range(value: i64, low: i64, high: i64, field: Field) -> Result<u32, Fault> {
-    if !(low..=high).contains(&value) {
-        return Err(Fault::OutOfRange(field));
-    }
-    u32::try_from(value).map_err(|_| Fault::OutOfRange(field))
-}
-
-/// Days in `month` of `year`, February following the proleptic-Gregorian
-/// leap rule.
-#[must_use]
-pub fn days_in_month(year: i64, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        // Never reached: the month is range-checked before this is asked.
-        // Answering zero refuses every day rather than inventing a length.
-        _ => 0,
-    }
-}
-
-/// Whether `year` is a leap year in the proleptic Gregorian calendar, which
-/// is the calendar the shared day count uses.
-#[must_use]
-pub const fn is_leap_year(year: i64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}
-
-/// One field's value as the text the user sees and edits.
-///
-/// Unpadded: a field is an edit box, not a formatted reading, and a leading
-/// zero the user did not type would be text they then have to delete.
-fn spell(value: i64) -> String {
-    let mut out = String::new();
-    // Writing into a `String` never fails; the `Result` is discarded
-    // deliberately rather than unwrapped.
-    let _ = write!(out, "{value}");
-    out
-}
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 #[path = "tests.rs"]

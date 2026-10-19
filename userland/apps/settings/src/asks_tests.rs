@@ -31,7 +31,19 @@ fn a_second_ask_of_a_kind_waits_for_the_first_to_be_answered() {
     asks.withdraw(&preview());
     assert!(asks.ask(&preview()), "withdrawn, so free again");
     let mut fresh = DesktopAsks::new();
-    let kinds = [DesktopAsk::Lock, preview(), DesktopAsk::NotifySources];
+    let kinds = [
+        DesktopAsk::Lock,
+        preview(),
+        DesktopAsk::NotifySources,
+        DesktopAsk::Authorise {
+            window_id: 3,
+            task: SystemTask::SetClock,
+        },
+        DesktopAsk::TakeOutput {
+            window_id: 3,
+            exit_code: 0,
+        },
+    ];
     let submitted = kinds.iter().filter(|ask| fresh.ask(ask)).count();
     assert_eq!(submitted, MOST_OUTSTANDING, "one of each kind at most");
     assert!(kinds.iter().all(|ask| !fresh.ask(ask)));
@@ -89,6 +101,67 @@ fn an_answer_is_adopted_into_the_pane_that_asked() {
     assert_eq!(
         DesktopAnswer::Preview(Err(Errno::SeatBusy)).refusal(),
         Some(("show the screensaver", Errno::SeatBusy))
+    );
+}
+
+/// A task asked while the last one's acceptance is still outstanding — its
+/// outcome event read before the worker handed the acceptance back — is held,
+/// the newest replacing any held before it, and handed back once that
+/// acceptance lands; a withdrawal drops it.
+#[test]
+fn a_task_asked_behind_an_outstanding_acceptance_is_held_not_dropped() {
+    let task = |window_id| DesktopAsk::Authorise {
+        window_id,
+        task: SystemTask::ShowAccounts,
+    };
+    let held = |ask: Option<DesktopAsk>| match ask {
+        Some(DesktopAsk::Authorise { window_id, .. }) => Some(window_id),
+        _ => None,
+    };
+    let mut asks = DesktopAsks::new();
+    assert!(asks.ask(&task(1)));
+    assert!(!asks.ask(&task(2)), "held behind the acceptance");
+    assert!(!asks.ask(&task(3)), "the newest replaces it");
+    assert_eq!(
+        held(asks.answered(&DesktopAnswer::Authorise(Ok(())))),
+        Some(3)
+    );
+    assert!(!asks.ask(&task(4)), "the one handed back is outstanding");
+    asks.withdraw(&task(4));
+    assert!(asks.ask(&task(5)), "a withdrawal frees the kind");
+    assert_eq!(held(asks.answered(&DesktopAnswer::Authorise(Ok(())))), None);
+}
+
+/// A refused acceptance ends the task with the reason in the band, and a
+/// fetched output is read as what the task printed.
+#[test]
+fn a_task_answer_is_adopted_into_the_pane_that_asked() {
+    let mut shell = showing("ethernet");
+    assert!(matches!(
+        crate::test_support::asked_task(&mut shell, 0),
+        SystemTask::ShowAddressing
+    ));
+    let refused = DesktopAnswer::Authorise(Err(Errno::SeatBusy));
+    assert_eq!(
+        refused.refusal(),
+        Some(("ask for authorisation", Errno::SeatBusy))
+    );
+    refused.adopt(&mut shell);
+    assert!(!shell.authorising());
+    assert!(crate::test_support::band_line(&shell).contains("Something else holds the screen"));
+
+    let _ = crate::test_support::asked_task(&mut shell, 0);
+    DesktopAnswer::Authorise(Ok(())).adopt(&mut shell);
+    assert!(shell.authorising(), "accepted, and still being performed");
+    DesktopAnswer::Output {
+        exit_code: 0,
+        output: Ok(b"wan.ipv4.method dhcp\nwan.match.mac 52:54:00:12:34:56\n".to_vec()),
+    }
+    .adopt(&mut shell);
+    assert!(!shell.authorising());
+    assert!(
+        shell.addressing_for_test().document().is_some(),
+        "the listing landed"
     );
 }
 

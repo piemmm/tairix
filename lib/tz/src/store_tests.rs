@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Time64;
 
-use crate::layout::{HEADER_LEN, NAME_LEN, TRANSITION_LEN, ZONE_LEN};
+use crate::layout::{HEADER_LEN, NAME_LEN, TRANSITION_LEN, VERSION, ZONE_LEN};
 use crate::testkit::{reseal, store, store_input, utc, HOUR};
 use crate::write::{build, BuildError};
 use crate::{is_region_code, is_zone_name, StoreError, ZoneInfo};
@@ -53,6 +53,11 @@ fn a_built_store_reads_back_what_it_was_built_from() {
     assert_eq!(
         (us.name, us.date.as_str(), us.time.as_str()),
         ("United States", "M/d/y", "h:mm a")
+    );
+    assert_eq!(us.first_weekday, crate::Weekday::Sunday);
+    assert_eq!(
+        info.region("GB").map(|gb| gb.first_weekday),
+        Some(crate::Weekday::Monday)
     );
     assert!(info.region("ZZ").is_none());
     let places: Vec<(&str, &str, &str)> = info
@@ -111,6 +116,30 @@ fn a_places_city_is_its_names_last_part_read_with_spaces() {
     );
 }
 
+#[test]
+fn a_place_is_found_by_its_zone_and_named_with_its_region() {
+    let bytes = store();
+    let info = ZoneInfo::parse(&bytes).expect("the fixture parses");
+    let label = |name: &str| {
+        info.place(name).map(|place| {
+            let mut label = String::new();
+            place
+                .write_label(&info, &mut label)
+                .expect("a String takes any write");
+            label
+        })
+    };
+    assert_eq!(
+        label("Europe/London").as_deref(),
+        Some("London, United Kingdom")
+    );
+    assert_eq!(
+        label("America/New_York").as_deref(),
+        Some("New York, United States")
+    );
+    assert_eq!(label("Europe/Atlantis"), None, "no place lists it");
+}
+
 /// `bytes` altered by `edit` with its checksum recomputed, and what parsing
 /// it answers.
 fn parsed_after(edit: impl FnOnce(&mut Vec<u8>)) -> Result<(), StoreError> {
@@ -149,11 +178,14 @@ fn a_store_whose_frame_is_wrong_is_refused() {
         Err(StoreError::Header),
         "magic"
     );
-    assert_eq!(
-        parsed_after(|b| b[4] = 2),
-        Err(StoreError::Header),
-        "version"
-    );
+    for other in [VERSION - 1, VERSION + 1] {
+        let other = u8::try_from(other).expect("a small version");
+        assert_eq!(
+            parsed_after(|b| b[4] = other),
+            Err(StoreError::Header),
+            "version {other}"
+        );
+    }
     assert_eq!(parsed_after(|b| b[6] = 1), Err(StoreError::Header), "flags");
     assert_eq!(ZoneInfo::parse(&[]).map(|_| ()), Err(StoreError::Header));
 }
@@ -302,6 +334,18 @@ fn a_store_holding_a_value_outside_its_domain_is_refused() {
         parsed_after(|b| b[sections.regions] = b'g'),
         Err(StoreError::Value),
         "a region code in lower case"
+    );
+    for weekday in [0, 8] {
+        assert_eq!(
+            parsed_after(|b| b[sections.regions + 2] = weekday),
+            Err(StoreError::Value),
+            "a week beginning on day {weekday}"
+        );
+    }
+    assert_eq!(
+        parsed_after(|b| b[sections.regions + 3] = 1),
+        Err(StoreError::Value),
+        "a region's pad byte"
     );
     assert_eq!(
         parsed_after(|b| {

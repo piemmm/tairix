@@ -469,7 +469,7 @@ impl Form {
     #[must_use]
     pub fn rect(&self, origin: Point, scale: Scale, theme: &Theme) -> Rect {
         let width = scale.scale_length(FORM_WIDTH);
-        let band = Dialog::content_width(width, scale, theme);
+        let band = self.dialog.content_width(width, scale, theme);
         let column = self.group.slot_column(band, scale, theme);
         let content = self.group.measured_height(band, column, scale, theme);
         let height = self.dialog.height_for_content(content, width, scale, theme);

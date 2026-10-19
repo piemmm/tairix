@@ -2,7 +2,7 @@
 //! `tairix-kernel` pipeline against the shared `dhcp-net-root` whole-disk
 //! image — whose read-only `/System` volume carries the **kernel-signed
 //! virtio-net driver bundle** (cross-compiled for x86_64) and a planted
-//! `/System/Settings/Network/network.conf` — with a `virtio-net-pci` device
+//! `/System/Defaults/Network/network.conf` — with a `virtio-net-pci` device
 //! attached on the PCI bus and the harness-side **DHCP-server** link peer on
 //! the QEMU `dgram` netdev, and prove RFC 2131 dynamic IPv4 addressing end to
 //! end over the x86_64 virtio-**PCI** + MSI-X device-IRQ path.

@@ -1,79 +1,43 @@
-# tairix-datetime — the Date & Time app (`datetime.app`)
+# tairix-datetime — the Date & Time dialog (`datetime.app`)
 
 Stability: **experimental**
 
-The windowed application that shows the machine's wall clock in six
-editable civil fields and steps the clock to what they say
-(`plans/NEW-TASKBAR.md` T17).
+The machine's Date & Time dialog (`plans/TIMEZONES.md` TZ6): the clock to the
+second and where its time came from, network time on or off, the date and time
+set by hand in the machine's zone, and the zone itself. The design is
+`docs/src/desktop/apps.md` (*Date & Time*).
 
 ## What is where
 
-- **`src/lib.rs` — the engine.** The six fields, their per-field
-  validation, the `Time64` instant they compose, and the one `Status` line
-  every surface states a result through. `no_std` + `alloc`, so it links
-  unchanged into the freestanding binary and is unit-tested on the host.
-- **`src/view.rs` — the window.** Its geometry and its paint, composed
-  from the shared `lib/controls` dialog and the form-field family: two
-  captioned `FieldGroup`s — the date above, the time below — each holding
-  one `FieldRow` per field with a `TextField` in its slot. The family owns
-  the row chrome, the slot column the fields line up in, and the
-  label/field arithmetic, so this module holds only which fields each
-  group carries. The window's extent is *measured* from what those groups
-  need at the active density and type ladder rather than fixed, so a wider
-  ladder is seated rather than pushed under the action band.
-- **`src/run.rs` — the `Run` binary.** The on-disk bundle's entry point:
-  one granted frame region, one event mailbox parked on a wait-set, and
-  the `WindowClient` calls. An inert stub on the host.
+- **`src/lib.rs` — the engine.** The readout and its provenance, the zone's
+  next change, a hand-set instant composed through `Zone::instant_from_local`
+  (skipped, repeated and implausible times), and the words every outcome is
+  stated in. `no_std` + `alloc`, host-tested.
+- **`src/calendar.rs`, `src/time_entry.rs` — the two controls only this
+  dialog has.** A calendar month on the region's first weekday, and hours,
+  minutes and seconds (and AM/PM on a twelve-hour clock) composed from the
+  shared number field and button.
+- **`src/view.rs` — the window.** A dialog window's client sized to its
+  content: its layout, its paint, the keyboard's walk and the routing of every
+  input, one layout for all three.
+- **`src/run.rs` — the `Run` binary.** The window and its owned zone chooser,
+  one event mailbox, a tick on the clock's own second, and one worker on a
+  queued desk for every read and write. An inert stub on the host.
 
-## The authority, and why it is asked for elsewhere
+## The authority it is given
 
-Stepping the clock needs `CAP_TIME_SET`. This bundle's signed manifest
-requests it, and the kernel grants `manifest ∩ the launching account's
-ceiling` — so what the app can actually do depends on *who started it*.
-
-A desktop session holds no such capability and must never hold one. It
-re-authenticates an account that does through its console's elevation
-broker, and the broker starts this program as that account
-(`plans/CAPABILITY_USE.md` CU5). The app itself performs no
-authentication and asks for no elevation.
-
-A refused set is therefore an ordinary outcome, not a defect: the app
-states it in its window **and** on `stderr`, leaves the clock untouched,
-and keeps running. It never reports a clock it did not change as changed.
-
-## No calendar of its own
-
-Seeding decomposes an instant with `CivilTime::from_time64`; committing
-composes one with `days_from_civil` — the exact inverse, from the same
-`lib/fsmeta` calendar the desktop clock and `ls`'s date column read.
-There is no second day-counting rule here and no leap-year table of this
-app's own.
-
-## An unset clock shows nothing
-
-A machine whose wall time has never been established reports
-`WallTimeState::Unset`, whose instant is the epoch placeholder and means
-nothing. The fields are left empty and the window says so, rather than
-presenting `1970-01-01` as a reading the user is invited to correct.
-
-## Refusals are stated, never smoothed over
-
-Validation refuses the whole edit on the first fault and names it — a
-month outside 1–12, an hour outside 0–23, a minute or second outside
-0–59, a day that does not exist in the entered month and year. Nothing is
-clamped, wrapped, or saturated into range, because that would set a time
-the user did not ask for. Dates before 1970 and beyond 2038 are ordinary
-input: the instant is a 64-bit `Time64`.
+`CAP_TIME_SET` steps the clock and sets the clock chip; `CAP_SETTINGS_WRITE`
+asks the settings service to turn network time on or off and to change the
+machine's zone; `CAP_FS_ACCESS` reads the zone store and the time service's
+record; `CAP_SHM` and `CAP_CONSOLE_WRITE` serve the window and its
+diagnostics. The kernel grants `manifest ∩ the launching account's ceiling`,
+so a refused change is an answer the dialog states, never a failure it hides.
 
 ## Tests
 
-`cargo test -p tairix-datetime` covers the engine: seeding from a set and
-an unset reading, the seed → compose round trip (including 1900, 2100,
-the 2^32-second instant in 2106, and year 9999), a negative year, every
-missing and out-of-range field, the leap-day and leap-century rules, the
-character filter, the typing bound, the tab cycle, and every fault and
-status stating a reason.
-
-The freestanding `Run` body is not compiled by the host tooling, so it is
-checked with
-`cargo clippy -p tairix-datetime --target aarch64-unknown-none -Zbuild-std=core,alloc`.
+`cargo test -p tairix-datetime` covers the engine, both controls, the
+chooser's rows and the window: its layout under every theme, ladder and scale,
+the keyboard's walk, network time taking the hand-set controls away, a chosen
+day and a typed time made the user's own and set, and the damage a tick
+reports. The freestanding `Run` body is linted with
+`cargo clippy -p tairix-datetime --target aarch64-unknown-none -- -D warnings`.

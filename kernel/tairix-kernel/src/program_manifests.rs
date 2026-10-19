@@ -1199,16 +1199,17 @@ mod tests {
     const PURE_TOOL_REQUEST: &[CapabilityId] =
         &[CapabilityId::CONSOLE_WRITE, CapabilityId::FS_ACCESS];
 
-    // `configure` is a store-only tool plus one thing: a changed `net.*`
-    // key must reach the *running* network stack over its admin endpoint
-    // (CAP_NET_ADMIN), because the store write alone would only take
-    // effect at the next boot and the stack holds no filesystem
-    // capability to read the store itself. A caller whose ceiling
-    // withholds it still saves the setting and is told the running stack
-    // did not take it.
+    // `configure` reads the machine configuration and its own Help/
+    // (CAP_FS_ACCESS), asks the settings service to change either document
+    // and to read the closed network one (CAP_SETTINGS_WRITE), and hands a
+    // changed `net.*` key or interface to the *running* network stack over
+    // its admin endpoint (CAP_NET_ADMIN), since a saved change alone takes
+    // effect at the next boot. A caller whose ceiling withholds the last
+    // still saves the setting and is told the running stack did not take it.
     const CONFIGURE_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
+        CapabilityId::SETTINGS_WRITE,
         CapabilityId::NET_ADMIN,
     ];
 
@@ -1338,19 +1339,22 @@ mod tests {
         CapabilityId::SHM,
     ];
 
-    // The windowed Date & Time app `datetime` (plans/NEW-TASKBAR.md T17):
-    // console write for its fail-loud diagnostics, `CAP_SHM` to create and
-    // grant the zero-copy window frame region the desktop session maps, and
-    // `CAP_TIME_SET`, which *is* its job — the kernel's `wall_time_set` path
-    // re-checks it, and an account whose ceiling strips it runs the app with
-    // the set refused, which the app states rather than pretending to have
-    // changed the clock. No filesystem reach: it reads and writes the clock
-    // only, never a file. Not an embedded spawn-floor program, so the list
-    // lives only in this pin.
+    // The Date & Time dialog `datetime` (plans/TIMEZONES.md TZ6): console
+    // write for its fail-loud diagnostics, `CAP_SHM` to create and grant the
+    // zero-copy window frame region the desktop session maps, `CAP_TIME_SET`
+    // to set the wall clock and the clock chip, `CAP_SETTINGS_WRITE` to ask
+    // the settings service to change network time and the machine's zone,
+    // and `CAP_FS_ACCESS` to read the machine configuration and what the time
+    // service last did. The kernel and the service re-check each, and an
+    // account whose ceiling strips one runs the dialog with that change
+    // refused, which it states. Not an embedded spawn-floor program, so the
+    // list lives only in this pin.
     const DATETIME_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::SHM,
         CapabilityId::TIME_SET,
+        CapabilityId::SETTINGS_WRITE,
+        CapabilityId::FS_ACCESS,
     ];
 
     // The volume-detach tool `unmount` (plans/DEVICES.md D4b): the
@@ -1567,6 +1571,18 @@ mod tests {
         CapabilityId::FS_ACCESS,
     ];
 
+    // The `settingsd` machine-settings service: the reserved settings
+    // rendezvous, both layers of its two documents, and its audit records.
+    // It enforces `CAP_SETTINGS_WRITE` and never holds it. Launched by init
+    // from its on-disk bundle, never as an embedded spawn-floor program, so
+    // the list lives only in this pin; the effective set is this request
+    // intersected with `SETTINGSD_CEILING`, the same three.
+    const SETTINGSD_REQUEST: &[CapabilityId] = &[
+        CapabilityId::IPC_BIND_PRIVILEGED,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::LOG_EMIT,
+    ];
+
     // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):
     // `CAP_DISPLAY` holds the seat's lease, configures the display service
     // and switches the display off while the login screen sleeps,
@@ -1668,6 +1684,7 @@ mod tests {
         ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
         ("settings", ProgramKind::Component, WINDOWED_APP_REQUEST),
+        ("settingsd", ProgramKind::Service, SETTINGSD_REQUEST),
         ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("soundd", ProgramKind::Service, SOUNDD_REQUEST),
         ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
@@ -1707,6 +1724,12 @@ mod tests {
         ("wintersun", ProgramKind::Application, WINTERSUN_REQUEST),
         ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
     ];
+
+    #[test]
+    fn the_settings_service_requests_exactly_its_ceiling() {
+        assert_eq!(set(SETTINGSD_REQUEST), set(tairix_users::SETTINGSD_CEILING));
+        assert!(!SETTINGSD_REQUEST.contains(&CapabilityId::SETTINGS_WRITE));
+    }
 
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the

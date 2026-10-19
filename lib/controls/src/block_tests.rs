@@ -150,6 +150,31 @@ fn a_ruled_title_draws_the_hairline_and_reports_the_baseline_below_it() {
     );
 }
 
+/// A title row barely taller than its line still draws its rule, inside the
+/// row: a plated block's title row is inset from its band's top, which left
+/// the full gap no room and dropped the rule from every pane block.
+#[test]
+fn a_title_row_barely_taller_than_its_line_still_draws_its_rule() {
+    let theme = theme();
+    let line =
+        BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, Scale::ONE).line_height();
+    let height = line + 2;
+    let mut surface = ground(200, height, &theme);
+    let rect = Rect::new(0, 0, 200, height);
+
+    let below = title(&mut surface, rect, Scale::ONE, &theme, "PROCESSOR");
+
+    let border = theme.palette().border;
+    let rule = (0..height)
+        .find(|y| pixel(&surface, 100, *y) == border)
+        .expect("the hairline rule under the title");
+    assert!(
+        rule >= line,
+        "the rule is drawn under the title's line, not through it"
+    );
+    assert!(to_i32(rule) < below);
+}
+
 /// A block whose body brings its own plates draws no rule: the cells' own
 /// rims already separate the title from the readings, and the boards draw no
 /// second line there.

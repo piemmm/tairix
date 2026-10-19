@@ -1015,7 +1015,13 @@ first finds it still counting.
   log, or `stdinfo`.
 - **Enumeration.** The account list is disclosed only to the attested
   greeter account. A machine that would rather not disclose it uses the
-  `Other…` tile only; that is a store setting, not a second code path.
+  `Other…` tile only; that is a store setting, not a second code path. The
+  one other disclosure is the elevation broker's: the accounts that may
+  allow a system program, told only to the desktop session presenting on
+  the console (`plans/CAPABILITY_USE.md` CU5).
+- **One meter.** The login screen, the text prompt, and every elevation
+  form charge the same per-account budget, so guesses at one account cannot
+  be spread across surfaces.
 - **Denial of service.** A greeter that cannot start, cannot acquire the
   seat, or repeatedly dies degrades the round to the text login. The
   machine is always loggable-into.

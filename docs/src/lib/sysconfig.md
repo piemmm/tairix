@@ -1,13 +1,11 @@
 # `tairix-sysconfig` — the boot-time system-configuration store engine
 
-`lib/sysconfig` is the single definition of TAIRiX's administrator-settable
-boot-time configuration store: the document at
-`/System/Settings/Configuration/system.conf`
-(`tairix_sysconfig::CONFIG_PATH`). It owns the line grammar, the **closed**
-key registry, each key's typed value set, the bounded fail-closed parser,
-and the canonical render. The `configure` command app
-(`userland/apps/configure`) writes the store through this engine and every
-boot-time consumer reads it through the same engine, so producer and
+`lib/sysconfig` is the single definition of TAIRiX's machine configuration,
+`system.conf`: the line grammar, the **closed** key registry, each key's
+typed value set, the bounded fail-closed parser, and the canonical render.
+The settings service (`docs/src/userland/settingsd.md`) writes the document
+through this engine, `configure` checks a change through it before asking the
+service, and every consumer reads it through the same engine, so producer and
 consumer can never diverge.
 
 ## The store
@@ -17,17 +15,26 @@ and blank lines are ignored; every key appears at most once. The document
 is bounded (`MAX_CONFIG_LEN`, 4 KiB) and the parser refuses — never guesses
 at — anything it does not fully understand: an unknown key, a value outside
 its key's set, a duplicate, an oversized document (`ConfigError`). An
-**absent** store is not an error: it means every key is at its documented
-default (`SystemConfig::default`), which is how a fresh installation and a
-pre-unlock boot behave.
+**absent** document is not an error: it means every key is at its documented
+default (`SystemConfig::default`), which is how a fresh installation
+behaves.
 
-The store lives inside `/System/Settings` on the root volume, so it can only
-be read once the root is mounted — after its passphrase, when the root is
-encrypted — and a boot-time consumer therefore parses it post-mount by
-construction, running on defaults before that. Write authority is the
-existing `/System/Settings` per-inode policy under the caller's
-kernel-attested identity: no new capability exists for it, and an ordinary
-account can read the settings but not change them.
+## Two layers
+
+The document has two layers (`tairix_sysconfig::LAYERS`): the image's own
+default, read-only at `/System/Defaults/Configuration/system.conf`, and the
+administrator's at `/System/Settings/Configuration/system.conf`
+(`tairix_sysconfig::CONFIG_PATH`), which replaces the image's whole once it
+exists. A reader takes the first that exists, and one that exists but cannot
+be read is the answer, never a reason to read the next. The administrator's
+layer is on the root volume, so a consumer that runs before the root is
+mounted has only the image's — the device manager reads it over the
+pre-unlock store endpoint — and one that can reach neither runs on defaults.
+
+Every account reads the document. Changing it is the settings service's
+alone, which admits only a caller holding `CAP_SETTINGS_WRITE` — an
+administrator's elevated program — and makes every change to the document as
+it stands, so the first change keeps every setting the image shipped.
 
 ## The registry
 
@@ -46,6 +53,13 @@ account can read the settings but not change them.
 | `net.tcp.keepalive` | `true` \| `false`   | the network stack (`netstack`): RFC 9293 §3.8.4 TCP keepalive probing on idle connections |
 | `net.tcp.ecn`     | `true` \| `false`     | the network stack (`netstack`): RFC 3168 Explicit Congestion Notification negotiation |
 | `net.sockets.mem` | `auto` \| a byte size   | the network stack (`netstack`): the socket-memory budget — `auto` derives it from the machine's RAM |
+| `time.servers`    | `none` \| a server list | the clock service (`timed`): the operator's time servers, outranking DHCP's and the public-pool fallback |
+| `time.refresh`    | `6h` \| `12h` \| `1d` \| `2d` \| `7d` | the clock service (`timed`): the uptime between steady-state re-queries |
+| `time.network`    | `on` \| `off`         | the clock service (`timed`): whether the clock is kept from the network at all; the clock chip is read either way |
+| `time.zone`       | `default` \| a zone name | the desktop session's clocks for a user who chose none, and the login screen (`TZ`): the machine's own time zone; `default` is the zone store's |
+| `input.mouse.debounce` | milliseconds, `0`–`100` | the kernel seat (`kernel/core::seat`): the pointer-button chatter window |
+| `audio.output`, `audio.input` | `auto` \| an endpoint location | the device manager (`devmgr`), for the audio service: the machine's default sink and source |
+| `audio.level`     | decibels, at most `0dB` | the device manager (`devmgr`), for the audio service: the level every sink and source starts at |
 
 Adding a key is adding a `Key` variant (plus its `SystemConfig` field and
 match arms) **and** its consumer in the same change — the compiler then
@@ -135,8 +149,14 @@ closed), never a silent drop.
 - `SystemConfig::effective_cache(CacheClass) -> CacheMode` — the master
   `cache.all` ceiling folded over a class's own switch, the one
   interpretation the kernel cache-admission control applies.
-- `CacheClass::{ALL, key}` / `CacheMode` / `CacheSwitch` — the closed
-  cache-switch vocabulary the kernel reuses (no duplicate enum).
+- `CacheClass::{ALL, key}` / `CacheMode` / `Switch` — the closed
+  cache-switch vocabulary the kernel reuses (no duplicate enum); `Switch` is
+  also `time.network`'s.
+- `SystemConfig::time_zone` — the machine's zone, `None` for `default`; a
+  name needs only a zone name's shape here, and a reader passes over one its
+  zone store does not hold.
+- `CONFIG_PATH` / `LAYERS` — the administrator's layer, and both layers in
+  the order a reader takes them.
 - `NetToggle` (`true`/`false`, `is_enabled`) / `SynCookies`
   (`auto`/`always`) — the closed `net.*` value vocabulary the network
   stack reuses (no duplicate enum).

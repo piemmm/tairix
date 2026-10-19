@@ -80,6 +80,7 @@ mod program {
     use core::cell::{Cell, RefCell};
     use core::time::Duration;
     use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
+    use tairix_abi::driver_store::SystemConfigFile;
     use tairix_abi::elevate::{
         elevate_endpoint, ElevateArgv, ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
     };
@@ -92,8 +93,8 @@ mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, Time64, WaitSetOp, WaitSourceKind,
-        ORIGIN_CONSOLE_NONE,
+        AppIdentity, Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, Time64, WaitSetOp,
+        WaitSourceKind, ORIGIN_CONSOLE_NONE,
     };
     use tairix_caps::CapabilitySet;
     use tairix_curses::{Screen, Size, StreamTty};
@@ -105,11 +106,12 @@ mod program {
         audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
         effective_session_kind, elevated_attach, end_live_sessions, events, forget_ended_sessions,
         handle_elevate_request, handle_session_request, session_attach, session_environment,
-        session_program, supervise, AttemptBudget, AuthenticatedUser, Authenticator, Captured,
-        ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad, InputWait,
-        InputWake, LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView,
-        SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
-        ZoneStoreGrant, GREETER_SERVICE_PATH,
+        session_program, supervise, AttemptBudget, AuthenticatedUser, Authenticator, Authority,
+        Caller, Captured, ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad,
+        ElevateDirectory, GuessMeter, InputWait, InputWake, LiveSessions, Login, LoginConfig,
+        LoginError, LoginStatus, LoginView, ProgramRequests, SessionDirectory, SessionKind,
+        SessionLauncher, SessionOutcome, SessionWaker, StatusSource, ZoneStoreGrant,
+        GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -408,6 +410,9 @@ mod program {
         /// Login's own kernel-attested console index: the placement every
         /// requester's attested console is checked against.
         own_console: u64,
+        /// The bundle login itself runs, whose publisher the desktop session
+        /// must share to be told who may allow a program.
+        own_app: Option<AppIdentity>,
         /// This console's `elevate_endpoint` id, when it could be bound.
         elevate: Option<u64>,
         /// The reserved `session-v1` endpoint, when it could be bound.
@@ -436,7 +441,8 @@ mod program {
         /// one `None` and must never be "recovered" by serving elsewhere;
         /// the caller audits each absence.
         fn bind() -> Option<Self> {
-            let own_console = tairix_rt::self_origin().ok()?.console();
+            let own = tairix_rt::self_origin().ok()?;
+            let own_console = own.console();
             if own_console == ORIGIN_CONSOLE_NONE {
                 return None;
             }
@@ -449,6 +455,7 @@ mod program {
             let mut server = Self {
                 waitset,
                 own_console,
+                own_app: own.app().copied(),
                 elevate: None,
                 session: None,
                 launched: RefCell::new(Vec::new()),
@@ -514,7 +521,12 @@ mod program {
         /// (the poster's `ipc_call` observes its error); a reply failure is
         /// dropped likewise — the decision and its audit record already
         /// stand.
-        fn serve_elevate(&self, endpoint: u64, authenticator: &dyn Authenticator, sink: LogSink) {
+        fn serve_elevate(
+            &self,
+            endpoint: u64,
+            broker: &Broker<'_>,
+            directory: &dyn ElevateDirectory,
+        ) {
             let mut request = [0u8; ELEVATE_MAX_REQUEST];
             let mut ticket = 0u64;
             let Ok(len) = tairix_rt::call_recv_nonblock(endpoint, &mut request, &mut ticket) else {
@@ -522,20 +534,31 @@ mod program {
                 return;
             };
             let peer = attest(endpoint, ticket);
-            // The scratch a captured run's output is drained into; every
-            // other request form leaves it untouched.
+            // The scratch a captured run's output, or an account page, is
+            // written into.
             let mut output = [0u8; ELEVATE_MAX_OUTPUT];
+            let launcher = RtElevateLauncher {
+                server: self,
+                requester: peer.instance,
+            };
             let reply = handle_elevate_request(
                 &request[..len],
-                peer.console,
-                peer.uid,
-                self.own_console,
-                authenticator,
-                &RtElevateLauncher {
-                    server: self,
-                    requester: peer.instance,
+                &Caller {
+                    console: peer.console,
+                    uid: peer.uid,
+                    app: peer.app.as_ref(),
                 },
-                &sink,
+                &Authority {
+                    console: self.own_console,
+                    app: self.own_app.as_ref(),
+                    authenticator: broker.authenticator,
+                    launcher: &launcher,
+                    programs: &RtProgramRequests,
+                    directory,
+                    sink: &broker.sink,
+                },
+                &mut broker.meter.borrow_mut(),
+                monotonic_now(),
                 &mut output,
             );
             wipe(&mut request);
@@ -563,8 +586,7 @@ mod program {
             endpoint: u64,
             directory: &mut dyn SessionDirectory,
             authenticator: &dyn Authenticator,
-            budget: &mut AttemptBudget,
-            sink: LogSink,
+            broker: &Broker<'_>,
         ) -> Watch {
             let mut request = [0u8; SESSION_MAX_REQUEST];
             let mut ticket = 0u64;
@@ -582,9 +604,9 @@ mod program {
                 directory,
                 authenticator,
                 &RtZoneGrant { to: peer.instance },
-                budget,
+                &mut broker.meter.borrow_mut(),
                 monotonic_now(),
-                &sink,
+                &broker.sink,
                 &mut reply,
             );
             wipe(&mut request);
@@ -612,13 +634,12 @@ mod program {
             &self,
             directory: &mut dyn SessionDirectory,
             authenticator: &dyn Authenticator,
-            budget: &mut AttemptBudget,
-            sink: LogSink,
+            broker: &Broker<'_>,
         ) {
             if let Some(endpoint) = self.session {
                 // No child is under supervision here, so a step-aside
                 // verdict has nothing to hand back to.
-                let _ = self.serve_session(endpoint, directory, authenticator, budget, sink);
+                let _ = self.serve_session(endpoint, directory, authenticator, broker);
             }
         }
 
@@ -763,26 +784,48 @@ mod program {
         console: u64,
         uid: Option<u32>,
         instance: ProcId,
+        app: Option<AppIdentity>,
     }
 
     /// Attest the caller of `ticket`.
     ///
-    /// A failed read fails closed to "no console", "no attested uid" and no
-    /// instance, which every broker refuses, rather than a guessed or
-    /// defaulted real identity.
+    /// A failed read fails closed to "no console", "no attested uid", no
+    /// instance and no bundle, which every broker refuses, rather than a
+    /// guessed or defaulted real identity.
     fn attest(endpoint: u64, ticket: u64) -> Peer {
         tairix_rt::peer_origin(endpoint, ticket).map_or(
             Peer {
                 console: ORIGIN_CONSOLE_NONE,
                 uid: None,
                 instance: ProcId::KERNEL,
+                app: None,
             },
             |origin| Peer {
                 console: origin.console(),
                 uid: Some(origin.uid()),
                 instance: origin.proc_id(),
+                app: origin.app().copied(),
             },
         )
+    }
+
+    /// Reads a program's manifest under login's own identity, bounded by the
+    /// manifest ceiling, and answers what it requests as the load gate reads
+    /// it.
+    struct RtProgramRequests;
+
+    impl ProgramRequests for RtProgramRequests {
+        fn requested(&self, program: &str) -> Result<CapabilitySet, Errno> {
+            let bundle = tairix_appstore::bundle_of_entry(program).ok_or(Errno::NotFound)?;
+            let manifest = tairix_rt::read_path_to_end(
+                tairix_appstore::manifest_path(bundle).as_bytes(),
+                tairix_abi::APPINFO_WIRE_MAX,
+            )
+            .map_err(Errno::from_syscall)?;
+            let header = tairix_appstore::decode_manifest(&manifest).ok_or(Errno::OutOfRange)?;
+            tairix_appload::requested_capabilities(&manifest, &header)
+                .map_err(tairix_appload::RequestRefused::errno)
+        }
     }
 
     /// Delegates the zone store to the caller `to` from a descriptor opened
@@ -869,6 +912,18 @@ mod program {
             Reap::Exited(code) => Some(code),
             Reap::Running | Reap::Gone => None,
         }
+    }
+
+    /// `TZ=` the machine's own zone (`time.zone`), or `None` where it is the
+    /// default or the machine configuration is refused — the login screen
+    /// then reads the zone store's default.
+    fn machine_zone_variable() -> Option<String> {
+        let mut buf = [0u8; tairix_sysconfig::MAX_CONFIG_LEN + 1];
+        let text = core::str::from_utf8(read_config_document(&mut buf).ok()?).ok()?;
+        let zone = tairix_sysconfig::SystemConfig::parse(text)
+            .ok()?
+            .time_zone?;
+        Some(alloc::format!("TZ={}", zone.as_str()))
     }
 
     /// Start `user`'s session program for `kind` as that user, returning its
@@ -1070,8 +1125,39 @@ mod program {
     /// startup.
     struct RtLauncher<'a> {
         server: Option<&'a ConsoleServer>,
+        broker: &'a Broker<'a>,
+        directory: &'a dyn ElevateDirectory,
+    }
+
+    /// What every endpoint login serves decides through: the authenticator,
+    /// the one per-account guess meter, and the audit sink.
+    ///
+    /// The meter is charged by the login screen, every elevation, and the
+    /// text prompt alike, so guesses cannot be spread between surfaces, and
+    /// it outlives every round: a cooldown earned in one survives the next.
+    struct Broker<'a> {
         authenticator: &'a dyn Authenticator,
+        meter: &'a RefCell<AttemptBudget>,
         sink: LogSink,
+    }
+
+    /// The broker's meter as the text prompt charges it, on the monotonic
+    /// clock.
+    struct RtMeter<'a>(&'a RefCell<AttemptBudget>);
+
+    impl GuessMeter for RtMeter<'_> {
+        fn retry_after(&self, account: &str) -> Duration64 {
+            self.0.borrow().retry_after(account, monotonic_now())
+        }
+
+        fn charge(&self, account: &str, accepted: bool) {
+            let mut meter = self.0.borrow_mut();
+            if accepted {
+                meter.note_success(account);
+            } else {
+                meter.note_failure(account, monotonic_now());
+            }
+        }
     }
 
     impl SessionLauncher for RtLauncher<'_> {
@@ -1093,7 +1179,7 @@ mod program {
             let watched = match self.server.filter(|server| server.elevate.is_some()) {
                 Some(server) => server.supervise_child(pid, |token| {
                     if let (TOKEN_ELEVATE, Some(endpoint)) = (token, server.elevate) {
-                        server.serve_elevate(endpoint, self.authenticator, self.sink);
+                        server.serve_elevate(endpoint, self.broker, self.directory);
                     }
                     Watch::Keep
                 })?,
@@ -1170,30 +1256,24 @@ mod program {
     struct GraphicalRound<'a> {
         server: &'a ConsoleServer,
         session_endpoint: u64,
-        authenticator: &'a dyn Authenticator,
-        sink: LogSink,
+        broker: &'a Broker<'a>,
     }
 
     impl GraphicalRound<'_> {
         /// Run the round: restart a login screen that reaches no verdict,
         /// and degrade to the text login once the budget is spent.
-        fn run(
-            &self,
-            db: Option<&UsersDb>,
-            live: &mut LiveSessions,
-            budget: &mut AttemptBudget,
-        ) -> GraphicalOutcome {
+        fn run(&self, db: Option<&UsersDb>, live: &mut LiveSessions) -> GraphicalOutcome {
             for _ in 0..GREETER_ATTEMPTS {
-                forget_ended_sessions(live, session_gone, &self.sink);
-                let accepted = Accepted::new(self.authenticator);
+                forget_ended_sessions(live, session_gone, &self.broker.sink);
+                let accepted = Accepted::new(self.broker.authenticator);
                 // The chooser's account list reads the session table for its
                 // live flags and a served request may write it, so this borrow
                 // ends before the table is used below.
                 let served = {
                     let mut accounts = DbAccounts::new(db, &mut *live);
                     self.server
-                        .drain_session(&mut accounts, &accepted, budget, self.sink);
-                    self.serve_greeter(&mut accounts, &accepted, budget)
+                        .drain_session(&mut accounts, &accepted, self.broker);
+                    self.serve_greeter(&mut accounts, &accepted)
                 };
                 let Some(user) = accepted.take() else {
                     match served {
@@ -1207,7 +1287,7 @@ mod program {
                     }
                     continue;
                 };
-                self.present(&user, live, db, budget);
+                self.present(&user, live, db);
                 return GraphicalOutcome::Completed;
             }
             // A broken login screen must never leave the machine
@@ -1228,16 +1308,20 @@ mod program {
         /// Start one login screen and serve `session-v1` until it exits.
         fn serve_greeter(
             &self,
-            directory: &mut dyn SessionDirectory,
+            directory: &mut DbAccounts<'_>,
             accepted: &Accepted<'_>,
-            budget: &mut AttemptBudget,
         ) -> Result<(), Errno> {
             // The login screen runs as its own service account: it draws and
             // types, and holds no authority to read the user database or
-            // start a process.
-            let ret = tairix_rt::spawn_in(
+            // start a process. It reads no file either, so the machine's zone
+            // reaches its clock as data, the way `TZ` reaches any program.
+            let zone = machine_zone_variable();
+            let env: Vec<&[u8]> = zone.iter().map(String::as_bytes).collect();
+            let ret = tairix_rt::spawn_attached(
                 GREETER_SERVICE_PATH.as_bytes(),
                 &session_attach(GREETER_UID.0),
+                &[],
+                &env,
             );
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
@@ -1253,14 +1337,12 @@ mod program {
                             self.session_endpoint,
                             directory,
                             accepted,
-                            budget,
-                            self.sink,
+                            self.broker,
                         );
                     }
                     TOKEN_ELEVATE => {
                         if let Some(endpoint) = self.server.elevate {
-                            self.server
-                                .serve_elevate(endpoint, self.authenticator, self.sink);
+                            self.server.serve_elevate(endpoint, self.broker, directory);
                         }
                     }
                     _ => {}
@@ -1286,13 +1368,7 @@ mod program {
         /// **stepped aside** keeps both its processes and its entry, so the
         /// next round offers it as live and can resume it; the broker already
         /// audited that decision, so nothing is recorded twice.
-        fn present(
-            &self,
-            user: &AuthenticatedUser,
-            live: &mut LiveSessions,
-            db: Option<&UsersDb>,
-            budget: &mut AttemptBudget,
-        ) {
+        fn present(&self, user: &AuthenticatedUser, live: &mut LiveSessions, db: Option<&UsersDb>) {
             let mut resumed = None;
             if let Some((task, mailbox)) = live
                 .get(&user.username)
@@ -1361,15 +1437,13 @@ mod program {
                             return self.server.serve_session(
                                 self.session_endpoint,
                                 &mut accounts,
-                                self.authenticator,
-                                budget,
-                                self.sink,
+                                self.broker.authenticator,
+                                self.broker,
                             );
                         }
                         TOKEN_ELEVATE => {
                             if let Some(endpoint) = self.server.elevate {
-                                self.server
-                                    .serve_elevate(endpoint, self.authenticator, self.sink);
+                                self.server.serve_elevate(endpoint, self.broker, &accounts);
                             }
                         }
                         _ => {}
@@ -1399,7 +1473,7 @@ mod program {
                 "login: the login screen could not be started: {reason}"
             ));
             log(
-                &self.sink,
+                &self.broker.sink,
                 &Event {
                     level: Level::Warn,
                     id: events::GREETER_FAILED,
@@ -1414,7 +1488,7 @@ mod program {
 
         fn audit(&self, level: Level, id: EventId, message: &str, user: &str) {
             log(
-                &self.sink,
+                &self.broker.sink,
                 &Event {
                     level,
                     id,
@@ -1510,15 +1584,29 @@ mod program {
         configured_session_kind(ConfigStore::from_read(read_config_document(&mut buf)))
     }
 
-    /// Read the configuration document into `buf`, yielding the bytes it
-    /// holds or the refusal that stopped the read.
+    /// Read the machine configuration as it stands into `buf`, yielding the
+    /// bytes it holds or the refusal that stopped the read:
+    /// [`Errno::NotFound`] where neither layer exists, and the administrator's
+    /// layer's own refusal — never the image's layer in its place — where that
+    /// one exists but cannot be read.
     ///
     /// `buf` is one byte longer than the parse ceiling, so a read that fills
     /// it proves the file is over-long and is refused
     /// ([`Errno::LengthOutOfRange`]) — a truncated prefix could otherwise
     /// parse as a valid but partial document.
     fn read_config_document(buf: &mut [u8]) -> Result<&[u8], Errno> {
-        let ret = tairix_rt::fs_open(tairix_sysconfig::CONFIG_PATH.as_bytes(), OpenFlags::READ);
+        let read = SystemConfigFile::System.read_effective(|path| match read_layer(path, buf) {
+            Ok(len) => Ok(Some(len)),
+            Err(Errno::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        })?;
+        let len = read.ok_or(Errno::NotFound)?;
+        buf.get(..len).ok_or(Errno::OutOfRange)
+    }
+
+    /// Read the configuration layer at `path` into `buf`, answering its length.
+    fn read_layer(path: &str, buf: &mut [u8]) -> Result<usize, Errno> {
+        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }
@@ -1531,7 +1619,7 @@ mod program {
         if len >= buf.len() {
             return Err(Errno::LengthOutOfRange);
         }
-        buf.get(..len).ok_or(Errno::OutOfRange)
+        Ok(len)
     }
 
     /// Whether a graphical session can be launched on this round, and what
@@ -1631,17 +1719,11 @@ mod program {
     fn login_round(
         view: &dyn LoginView,
         server: Option<&ConsoleServer>,
-        authenticator: &dyn Authenticator,
+        broker: &Broker<'_>,
         db: Option<&UsersDb>,
         live: &mut LiveSessions,
-        budget: &mut AttemptBudget,
-        sink: LogSink,
     ) -> bool {
-        let launcher = RtLauncher {
-            server,
-            authenticator,
-            sink,
-        };
+        let sink = broker.sink;
         // Both re-read each round: a graphical login when this round can
         // start one and the resolved default asks for it, else text — never
         // an error.
@@ -1660,10 +1742,9 @@ mod program {
             let round = GraphicalRound {
                 server,
                 session_endpoint: endpoint,
-                authenticator,
-                sink,
+                broker,
             };
-            if matches!(round.run(db, live, budget), GraphicalOutcome::Completed) {
+            if matches!(round.run(db, live), GraphicalOutcome::Completed) {
                 return true;
             }
         }
@@ -1671,6 +1752,13 @@ mod program {
         // is reaped and forgotten here, as the graphical round does before
         // each login screen.
         forget_ended_sessions(live, session_gone, &sink);
+        let accounts = DbAccounts::new(db, live);
+        let launcher = RtLauncher {
+            server,
+            broker,
+            directory: &accounts,
+        };
+        let meter = RtMeter(broker.meter);
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
             graphical_available: graphical == Graphical::Available,
@@ -1681,7 +1769,8 @@ mod program {
             // the display.
             may_give_way: session.is_some() && !wants_graphical,
             view,
-            authenticator,
+            authenticator: broker.authenticator,
+            meter: &meter,
             launcher: &launcher,
             sink: &sink,
         });
@@ -1787,12 +1876,11 @@ mod program {
                 "session endpoint unavailable; rounds use the text login",
             );
         }
-        // The machine's live desktop sessions and the per-account guess
-        // meter both outlive a round: switching between two logged-in
-        // accounts, and a cooldown earned at the login screen, must survive
-        // the round that created them.
+        // The machine's live desktop sessions and the guess meter outlive a
+        // round: switching between two logged-in accounts, and a cooldown
+        // earned in one round, must survive into the next.
         let mut live = LiveSessions::new();
-        let mut budget = AttemptBudget::new();
+        let meter = RefCell::new(AttemptBudget::new());
         // While the database read is `Pending` (the root is still being
         // mounted) `supervise` calls this to **block** until the
         // database becomes available, so the in-kernel unlock kthread runs
@@ -1818,15 +1906,12 @@ mod program {
                 let _ = tairix_rt::users_db_wait(DB_WAIT_TIMEOUT_NS);
             },
             |authenticator, db| {
-                login_round(
-                    &view,
-                    server.as_ref(),
+                let broker = Broker {
                     authenticator,
-                    db,
-                    &mut live,
-                    &mut budget,
+                    meter: &meter,
                     sink,
-                )
+                };
+                login_round(&view, server.as_ref(), &broker, db, &mut live)
             },
         );
         // The console is dead and this process is about to go, and every

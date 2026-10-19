@@ -2465,6 +2465,87 @@ fn a_footnoted_plate_as_tall_as_it_measures_draws_every_row_at_every_width() {
     }
 }
 
+#[test]
+fn an_owners_band_sits_beneath_the_rows_and_above_the_footnote_in_a_plate_that_measures_it() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut group = FieldGroup::new("DATE AND TIME", vec![toggle_row("Automatically", true)])
+        .with_footnote("A footnote beneath the owner's band.");
+    let without = own_height(&group, W, scale, &theme);
+    assert!(group.set_band(120));
+    assert!(!group.set_band(120), "the same band is no change");
+    let height = own_height(&group, W, scale, &theme);
+    assert!(
+        height >= without + 120,
+        "the plate measures the band and its gap"
+    );
+    let bounds = Rect::new(0, 0, W, height);
+    let layout = own_layout(&group, bounds, scale, &theme);
+    let band = group
+        .band_rect(layout, scale, &theme)
+        .expect("a plate as tall as it measures draws its band");
+    let row = group
+        .row_rect(0, layout, scale, &theme)
+        .expect("the row is drawn");
+    assert_eq!(band.height, 120);
+    assert!(band.top() >= row.bottom(), "beneath the rows");
+    assert!(
+        band.bottom() < bounds.bottom(),
+        "the footnote stands beneath it"
+    );
+    assert!(band.left() > bounds.left() && band.right() < bounds.right());
+
+    let painted = |group: &FieldGroup| {
+        let mut surface = Surface::new(W, height).expect("a surface");
+        group.render(&mut surface, layout, scale, &theme);
+        surface
+    };
+    let with_note = painted(&group);
+    let mut silent = group.clone();
+    let _ = silent.set_footnote(None);
+    let without_note = painted(&silent);
+    let rows_differ = |from: i32, to: i32| {
+        (u32::try_from(from).expect("on the surface")..u32::try_from(to).expect("on it"))
+            .flat_map(|y| (0..W).map(move |x| (x, y)))
+            .any(|(x, y)| with_note.get(x, y) != without_note.get(x, y))
+    };
+    assert!(
+        !rows_differ(band.top(), band.bottom()),
+        "nothing is drawn in the band"
+    );
+    assert!(
+        rows_differ(band.bottom(), bounds.bottom()),
+        "the footnote is drawn beneath the band"
+    );
+
+    assert!(group.set_band(0));
+    assert_eq!(group.band_rect(layout, scale, &theme), None);
+    assert_eq!(own_height(&group, W, scale, &theme), without);
+}
+
+#[test]
+fn a_band_alone_beneath_the_caption_takes_no_gap_for_rows_it_lacks() {
+    let theme = Theme::dark();
+    let mut bare = FieldGroup::new("CALENDAR", Vec::new());
+    let caption_only = own_height(&bare, W, Scale::ONE, &theme);
+    let _ = bare.set_band(90);
+    assert_eq!(own_height(&bare, W, Scale::ONE, &theme), caption_only + 90);
+}
+
+#[test]
+fn a_replaced_footnote_is_measured_afresh() {
+    let theme = Theme::dark();
+    let mut group = FieldGroup::new("GENERAL", vec![toggle_row("A", true)]).with_footnote("Short");
+    let once = group.measured_height(240, 40, Scale::ONE, &theme);
+    assert!(!group.set_footnote(Some(String::from("Short"))));
+    assert!(group.set_footnote(Some(String::from(
+        "A footnote long enough to wrap onto a second line in a narrow plate like this one",
+    ))));
+    assert!(group.measured_height(240, 40, Scale::ONE, &theme) > once);
+    assert!(group.set_footnote(None));
+    assert_eq!(group.footnote(), None);
+}
+
 /// The centre of row `row`'s drawn control in `group` laid out as `layout`.
 fn control_centre(group: &FieldGroup, row: usize, layout: FieldLayout, theme: &Theme) -> Point {
     let rect = group

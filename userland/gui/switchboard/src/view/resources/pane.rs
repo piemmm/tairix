@@ -219,6 +219,13 @@ impl BlockBody {
     pub const fn self_plating(&self) -> bool {
         matches!(self, BlockBody::Cores(_))
     }
+
+    /// Whether the body's last row closes the plate's bottom edge itself, as
+    /// a trend's chart box does, so the block claims no row past it.
+    #[must_use]
+    pub const fn closes_its_plate(&self) -> bool {
+        matches!(self, BlockBody::Trend { .. })
+    }
 }
 
 /// One named part of a composition's measured whole.
@@ -599,11 +606,10 @@ fn push_block(
         }
     }
     // A plated block's rows are inset from the top of its band, so its last
-    // row would otherwise end level with the band — running its content over
-    // the plate's own rim and margin, which is what put the hero's share bar
-    // outside its plate. The block claims one row past its content instead, so
-    // the plate closes below the last reading rather than through it.
-    if plated {
+    // row would otherwise end level with the band and run its content over the
+    // plate's rim; the block claims one row past it unless that row closes
+    // the edge itself.
+    if plated && !block.body.closes_its_plate() {
         row = row.saturating_add(1);
     }
     if let Some(slot) = plate.and_then(|slot| items.get_mut(slot)) {

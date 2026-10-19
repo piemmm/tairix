@@ -1,6 +1,6 @@
 ## NAME
 
-datetime — Datum und Uhrzeit des Rechners einstellen
+datetime — Datum, Uhrzeit und Zeitzone des Rechners
 
 ## SYNOPSIS
 
@@ -8,54 +8,85 @@ datetime — Datum und Uhrzeit des Rechners einstellen
 
 ## DESCRIPTION
 
-Öffnet ein Desktop-Fenster, das die Uhr des Rechners in sechs
-bearbeitbaren Feldern zeigt — Jahr, Monat und Tag in der ersten Zeile,
-Stunde, Minute und Sekunde in der zweiten — und stellt die Uhr auf das
-ein, was dort steht. Nichts ändert sich, bis **Set** gedrückt wird.
+Öffnet das Fenster **Date & Time** (Datum & Uhrzeit): Es zeigt den Stand
+der Uhr des Rechners und woher diese Zeit stammt, und es enthält die
+Bedienelemente, mit denen sie gestellt wird. Erreicht wird es über das
+Menü der Desktop-Uhr selbst: Klicken Sie mit der rechten Maustaste auf
+die Uhr in der Symbolleiste und wählen Sie **Set Date & Time…** (Datum &
+Uhrzeit einstellen…). Bevor sich das Fenster öffnet, fragt der Desktop
+nach dem Kennwort eines Kontos, das diese Einstellungen ändern darf.
 
-Die Anzeige ist UTC. TAIRiX führt keinen Zeitzonen-Versatz, es gibt also
-keine Ortszeit anzuzeigen und keine einzugeben.
+Oben im Fenster stehen die sekundengenaue Uhrzeit, das Datum und die
+Zeitzone mit ihrer Abkürzung und ihrem Versatz gegenüber UTC, alles in
+der Zeitzone des Rechners.
 
-Das Fenster wird normalerweise über das Menü der Desktop-Uhr erreicht:
-auf die Uhr in der Symbolleiste klicken und **Set Date & Time…** wählen.
-Das Stellen der Uhr erfordert eine Berechtigung, die eine
-Desktop-Sitzung nicht besitzt; der Desktop fragt daher nach einem Konto,
-das sie besitzt, und diese Anwendung wird als jenes Konto gestartet,
-sobald das Kennwort angenommen wurde.
+**Date and Time** (Datum und Uhrzeit) enthält die Uhr selbst.
 
-Zum Tippen ein Feld anklicken oder mit `Tab` zum nächsten wechseln.
-Angenommen werden nur Ziffern, im Jahr zusätzlich ein führendes `-` für
-ein Datum vor dem Jahr 1. `Enter` stellt die Uhr, `Escape` schließt das
+- **Set date and time automatically** (Datum und Uhrzeit automatisch
+  einstellen) hält die Uhr mithilfe von Zeitservern im Netzwerk genau.
+  Darunter nennt das Fenster, woher die Zeit der Uhr stammt: aus dem
+  Netzwerk gestellt, und wann; von Hand gestellt; beim Start des Rechners
+  vom Uhrenbaustein der Platine gelesen; oder überhaupt nicht gestellt.
+  Das Ein- oder Ausschalten des Schalters wirkt sofort.
+- Solange der Schalter eingeschaltet ist, werden Kalender und Uhrzeit
+  angezeigt, lassen sich aber nicht ändern. Schalten Sie ihn aus, um die
+  Uhr von Hand zu stellen.
+- Wählen Sie im Kalender einen Tag, geben Sie die Uhrzeit ein oder
+  stellen Sie sie schrittweise ein, und drücken Sie dann **Set**. Die
+  Pfeiltasten verschieben den gewählten Tag um einen Tag bzw. eine
+  Woche, `Page Up` und `Page Down` um einen Monat und zusammen mit
+  `Shift` um ein Jahr; die Schaltflächen neben Monat und Jahr blättern
+  durch Monate und Jahre, ohne den Tag zu ändern. Im Uhrzeitfeld wechselt
+  `Tab` oder `:` von der Stunde zur Minute und weiter zur Sekunde, und
+  `Up` und `Down` zählen den Teil, in dem der Cursor steht, hoch oder
+  herunter. Im Zwölf-Stunden-Format ist der letzte Teil **AM** oder
+  **PM**: Klicken Sie darauf oder drücken Sie `A` oder `P`. `Enter`
+  stellt die Uhr.
+- Bis Sie einen Tag wählen oder die Uhrzeit ändern, laufen Kalender und
+  Uhrzeit mit der Uhr mit. Danach halten sie Ihre Auswahl fest, bis Sie
+  die Uhr stellen oder das Fenster schließen.
+
+Datum und Uhrzeit, die Sie einstellen, gelten in der Zeitzone des
+Rechners. Eine Uhrzeit, die beim Vorstellen der Uhren übersprungen wird,
+wird abgelehnt, und das Fenster nennt, wann die Uhren umgestellt werden.
+Bei einer Uhrzeit, die beim Zurückstellen der Uhren zweimal durchlaufen
+wird, fragt das Fenster nach: Wählen Sie, ob Sie die vor oder die nach
+der Umstellung meinen. Ein Datum vor der Entstehung dieses Systems oder
+mehr als ein Jahrhundert nach seiner Entstehung wird erst gestellt, wenn
+Sie es bestätigen, denn Zertifikate würden dann nicht als vertrauenswürdig
+gelten, und Dateien sähen älter oder neuer aus, als sie sind.
+
+Nach dem Stellen der Uhr wird der Uhrenbaustein der Platine auf dieselbe
+Zeit gestellt, damit der Rechner sie über einen Neustart hinweg behält.
+Hat der Rechner keinen Uhrenbaustein, weist das Fenster darauf hin, dass
+die Zeit beim nächsten Neustart verloren geht, sofern die Netzwerkzeit
+nicht eingeschaltet ist.
+
+**Time Zone** (Zeitzone) nennt die Zeitzone, die der Rechner führt, sagt,
+wann die Uhren dort das nächste Mal vor- oder zurückgestellt werden und
+um wie viel, und bietet die Schaltfläche **Change…** an, die eine Liste
+aller Orte öffnet, die das System kennt: Tippen Sie einen Teil des
+Namens einer Stadt, einer Region oder einer Zeitzone ein, um sie
+einzugrenzen, und wählen Sie dann mit `Enter` oder einem Doppelklick. Zu
+jedem Ort wird die Uhrzeit angezeigt, die dort gerade gilt. Eine neue
+Zeitzone gilt sofort.
+
+Die Zeitzone des Rechners zeigt der Anmeldebildschirm, und sie gilt für
+jedes Konto, das in **Settings** (Einstellungen) keine eigene Zeitzone
+gewählt hat.
+
+Darf das Konto, unter dem das Fenster läuft, eine Änderung nicht
+vornehmen, wird sie abgelehnt, eine Meldung nennt den Grund, und das
+Fenster zeigt, was tatsächlich gilt. `Escape` oder **Close** schließt das
 Fenster.
-
-Jedes Feld wird geprüft, bevor etwas gestellt wird, und der erste Fehler
-wird im Fenster genannt statt still korrigiert: ein Monat außerhalb von 1
-bis 12, eine Stunde außerhalb von 0 bis 23, eine Minute oder Sekunde
-außerhalb von 0 bis 59 oder ein Tag, den es im eingegebenen Monat und
-Jahr nicht gibt — der 31. April oder der 29. Februar außerhalb eines
-Schaltjahres. Wird ein Feld abgelehnt, wird nichts gestellt.
-
-Daten vor 1970 und weit nach 2038 sind gewöhnliche Eingaben. Die Uhr ist
-ein vorzeichenbehafteter 64-Bit-Wert, keines von beiden ist eine Grenze.
-
-Wurde die Uhr seit dem Start des Rechners noch nie gestellt, öffnen die
-Felder **leer** und das Fenster sagt es. Sie werden nicht mit der
-Unix-Epoche gefüllt, die ein Datum wäre, das der Rechner nie behauptet
-hat.
-
-Darf das Konto, unter dem diese Anwendung läuft, die Uhr nicht stellen,
-wird der Versuch abgelehnt, das Fenster sagt es, und die Uhr bleibt
-genau wie sie war. Der Grund wird zusätzlich auf den Standard-Fehlerkanal
-geschrieben. Die Anwendung läuft weiter: eine abgelehnte Einstellung ist
-eine Antwort, kein Fehler des Programms.
 
 ## EXIT STATUS
 
-Null nach sauberem Schließen, auch wenn eine Einstellung abgelehnt wurde.
-Nicht null, wenn das Fenster nicht geöffnet, der gemeinsame
-Bildspeicherbereich abgelehnt oder der Fensterkanal verloren wurde; der
-Grund steht auf dem Standard-Fehlerkanal.
+Null, wenn das Fenster geschlossen wird, auch nach einer abgelehnten
+Änderung. Nicht null, wenn das Fenster nicht geöffnet werden konnte oder
+seine Verbindung zum Desktop verloren ging; der Grund steht auf dem
+Standardfehlerstrom.
 
 ## SEE ALSO
 
-`sysinfo`, `uptime`
+`configure`

@@ -16,6 +16,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, LimitKind, ResourceLimit};
 use tairix_resref::{ResourceRef, TargetClass};
 
@@ -299,8 +300,10 @@ pub trait Elevator {
     ///
     /// # Errors
     ///
-    /// Returns the supervisor's refusal verbatim: an indistinguishable
-    /// [`Errno::PermissionDenied`] for a failed re-authentication or a
+    /// [`Denied::Cooling`] when the account is still cooling down after
+    /// refused passwords; otherwise the supervisor's refusal verbatim: an
+    /// indistinguishable [`Errno::PermissionDenied`] for a failed
+    /// re-authentication, an account that may not allow the program, or a
     /// foreign console, the spawn's [`Errno`] for a launch failure,
     /// [`Errno::LengthOutOfRange`] for an argument vector past the
     /// protocol's bounds, or [`Errno::NotFound`] when this console has no
@@ -311,7 +314,23 @@ pub trait Elevator {
         password: &str,
         program: &str,
         args: &[&str],
-    ) -> Result<i32, Errno>;
+    ) -> Result<i32, Denied>;
+}
+
+/// Why an elevation ran nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Denied {
+    /// Refused, with this code.
+    Refused(Errno),
+    /// The account is cooling down after refused passwords, for this long;
+    /// the password was not checked.
+    Cooling(Duration64),
+}
+
+impl From<Errno> for Denied {
+    fn from(err: Errno) -> Self {
+        Self::Refused(err)
+    }
 }
 
 /// A fail-closed [`Elevator`]: every operation reports
@@ -333,8 +352,8 @@ impl Elevator for NullElevator {
         _password: &str,
         _program: &str,
         _args: &[&str],
-    ) -> Result<i32, Errno> {
-        Err(Errno::NotImplemented)
+    ) -> Result<i32, Denied> {
+        Err(Denied::Refused(Errno::NotImplemented))
     }
 }
 

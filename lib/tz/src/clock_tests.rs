@@ -6,7 +6,7 @@ use alloc::string::String;
 use tairix_abi::time::Time64;
 
 use crate::testkit::{store, utc};
-use crate::{resolve_region, resolve_zone, CivilClock, Decided, ZoneInfo};
+use crate::{resolve_region, resolve_zone, CivilClock, Decided, HourCycle, Weekday, ZoneInfo};
 
 #[test]
 fn the_first_preference_the_store_holds_decides_the_zone() {
@@ -95,5 +95,25 @@ fn a_clock_reads_its_zone_in_its_regions_conventions() {
         reading(&kolkata_in_gb, afternoon),
         (String::from("18/10/2026"), String::from("18:35")),
         "the zone and the conventions are each their own choice"
+    );
+}
+
+#[test]
+fn a_clock_counts_hours_and_weeks_as_its_region_does() {
+    let bytes = store();
+    let info = ZoneInfo::parse(&bytes).expect("parses");
+    let zone = info.default_zone();
+    let us = CivilClock::new(zone, info.region("US").as_ref());
+    assert_eq!(us.hour_cycle(), HourCycle::Twelve);
+    assert_eq!(us.first_weekday(), Weekday::Sunday);
+    let gb = CivilClock::new(zone, info.region("GB").as_ref());
+    assert_eq!(gb.hour_cycle(), HourCycle::TwentyFour);
+    assert_eq!(gb.first_weekday(), Weekday::Monday);
+    assert_eq!(CivilClock::UTC.hour_cycle(), HourCycle::TwentyFour);
+    assert_eq!(CivilClock::UTC.first_weekday(), Weekday::Monday);
+    assert_eq!(
+        CivilClock::new(zone, None).first_weekday(),
+        Weekday::Monday,
+        "no region: ISO 8601's week"
     );
 }

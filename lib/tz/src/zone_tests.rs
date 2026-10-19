@@ -396,3 +396,102 @@ fn a_zone_turns_its_minutes_on_its_own_seconds() {
         "the change, ahead of the local minute at 00:01:00"
     );
 }
+
+#[test]
+fn the_next_change_names_its_instant_and_the_offsets_either_side() {
+    let bytes = store();
+    let info = ZoneInfo::parse(&bytes).expect("parses");
+    let london = info.zone("Europe/London").expect("London");
+    // An explicit transition, then the trailing rule beyond it.
+    let summer = Time64::from_secs(utc(2026, 7, 1, 12, 0));
+    let change = london.next_change(summer).expect("the autumn change");
+    assert_eq!(change.at, Time64::from_secs(utc(2026, 10, 25, 1, 0)));
+    assert_eq!(
+        (change.before.utc_offset, change.before.abbreviation),
+        (HOUR, "BST")
+    );
+    assert_eq!(
+        (change.after.utc_offset, change.after.abbreviation),
+        (0, "GMT")
+    );
+    let spring = london.next_change(change.at).expect("the spring change");
+    assert_eq!(spring.at, Time64::from_secs(utc(2027, 3, 28, 1, 0)));
+    assert_eq!(spring.after.utc_offset, HOUR);
+    // At the instant itself the change has happened: the next is later.
+    assert!(london.next_change(spring.at).expect("autumn").at > spring.at);
+}
+
+#[test]
+fn a_zone_that_keeps_its_offset_has_no_next_change() {
+    let bytes = store();
+    let info = ZoneInfo::parse(&bytes).expect("parses");
+    let kolkata = info.zone("Asia/Kolkata").expect("Kolkata");
+    assert_eq!(
+        kolkata.next_change(Time64::from_secs(utc(2026, 1, 1, 0, 0))),
+        None
+    );
+    assert_eq!(Zone::UTC.next_change(Time64::from_secs(0)), None);
+}
+
+#[test]
+fn a_renaming_that_moves_no_clock_is_not_a_change() {
+    // The offset holds while the abbreviation changes, then moves.
+    let renamed = utc(2026, 4, 1, 0, 0);
+    let moved = utc(2026, 9, 1, 0, 0);
+    let bytes = store_with(crate::write::ZoneInput {
+        name: String::from("Test/Renamed"),
+        transitions: vec![
+            transition(i64::MIN, HOUR, "OLD", false),
+            transition(renamed, HOUR, "NEW", true),
+            transition(moved, 2 * HOUR, "MOV", false),
+        ],
+        trailing: None,
+    });
+    let info = ZoneInfo::parse(&bytes).expect("parses");
+    let zone = info.zone("Test/Renamed").expect("the zone");
+    let change = zone
+        .next_change(Time64::from_secs(utc(2026, 1, 1, 0, 0)))
+        .expect("the move");
+    assert_eq!(change.at, Time64::from_secs(moved));
+    assert_eq!(change.before.abbreviation, "NEW");
+    assert_eq!(change.after.utc_offset, 2 * HOUR);
+}
+
+#[test]
+fn a_negative_saving_is_a_change_however_the_flag_reads() {
+    let bytes = store();
+    let info = ZoneInfo::parse(&bytes).expect("parses");
+    let dublin = info.zone("Europe/Dublin").expect("Dublin");
+    let change = dublin
+        .next_change(Time64::from_secs(utc(2030, 1, 15, 12, 0)))
+        .expect("the spring change");
+    assert_eq!(
+        (change.before.utc_offset, change.after.utc_offset),
+        (0, HOUR)
+    );
+    assert!(change.before.daylight, "Irish winter is the saved phase");
+}
+
+#[test]
+fn an_offset_is_written_from_utc_to_the_minute() {
+    let written = |utc_offset| {
+        let mut out = String::new();
+        crate::ZoneOffset {
+            utc_offset,
+            abbreviation: "",
+            daylight: false,
+        }
+        .write_from_utc(&mut out)
+        .expect("a String takes any write");
+        out
+    };
+    assert_eq!(written(HOUR), "UTC+01:00");
+    assert_eq!(written(0), "UTC+00:00");
+    assert_eq!(written(5 * HOUR + 1800), "UTC+05:30");
+    assert_eq!(written(-(3 * HOUR + 1800)), "UTC-03:30");
+    assert_eq!(
+        written(-75),
+        "UTC-00:01",
+        "a local mean time's seconds are dropped"
+    );
+}

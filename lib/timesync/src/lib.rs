@@ -88,18 +88,8 @@ pub const INITIAL_DELAY_SPAN: Duration64 = Duration64::from_secs(8);
 /// An audit classification only — it never changes the recorded provenance.
 pub const STEP_THRESHOLD: Duration64 = Duration64::from_secs(1);
 
-/// The directory holding the persisted [`SyncRecord`], under one of the two
-/// writable paths beneath the read-only `/System`.
-pub const RECORD_DIR: &str = "/System/Settings/Time";
-
-/// Name of the [`RECORD_DIR`] directory within `/System/Settings`.
-///
-/// The image builder authors that directory owned by the time service, since
-/// `/System/Settings` itself is system-user-owned and the service must be able
-/// to rewrite its record. Pinned against [`RECORD_DIR`] by a unit test.
-pub const RECORD_SUBDIR: &str = "Time";
-
-/// The persisted [`SyncRecord`] document.
+/// The persisted [`SyncRecord`] document, in the time service's own
+/// directory ([`tairix_abi::time::TIME_STATE_DIR`]).
 pub const RECORD_PATH: &str = "/System/Settings/Time/state";
 
 /// Magic of the [`SyncRecord`] document, carrying its format version
@@ -137,6 +127,9 @@ pub enum SyncReason {
     /// More than [`STALE_BOOT_GAP`] separates the reading from the last
     /// instant time was seen at.
     StaleBoot,
+    /// Network time was switched on while the clock was kept by hand or by
+    /// the clock chip: the network's reading is what was asked for.
+    SwitchedOn,
 }
 
 /// What to do about the clock at start-up.
@@ -377,15 +370,72 @@ impl TimeSync {
             Decision::SyncNow(reason) => (Some(reason), jitter(INITIAL_DELAY_SPAN, entropy)),
             Decision::RefreshAfter(after) => (None, jitter(after, entropy)),
         };
-        let first = Duration64::from_nanos(
-            now.saturating_total_nanos()
-                .saturating_add(delay.saturating_total_nanos()),
-        );
         Self {
-            ntp: NtpClient::new(servers, refresh, first),
+            ntp: NtpClient::new(servers, refresh, after(now, delay)),
             urgency,
             refresh,
         }
+    }
+
+    /// Build a client for network time switched on at `now`: its first query
+    /// is as prompt as an unset clock's, whatever the reading.
+    #[must_use]
+    pub fn switched_on(servers: u8, refresh: Duration64, now: Duration64, entropy: u64) -> Self {
+        Self {
+            ntp: NtpClient::new(
+                servers,
+                refresh,
+                after(now, jitter(INITIAL_DELAY_SPAN, entropy)),
+            ),
+            urgency: Some(SyncReason::SwitchedOn),
+            refresh,
+        }
+    }
+
+    /// This client with its first query held back to `at` at the earliest, so
+    /// one built to replace another never asks sooner after the last request
+    /// than the poll floor allows.
+    #[must_use]
+    pub fn not_before(mut self, at: Duration64) -> Self {
+        self.ntp.hold_until(at);
+        self
+    }
+
+    /// Decide again from `record`, read only after this client was built, and
+    /// bring a first query not yet sent forward if it now gives a reason to
+    /// distrust the clock; answers that reason.
+    ///
+    /// A machine's record lives on the root, which is usually mounted after
+    /// the service starts: without this, a clock chip that lost its time to a
+    /// plausible date would be believed until the next refresh.
+    pub fn reconsider(
+        &mut self,
+        reading: WallClockReading,
+        record: SyncRecord,
+        now: Duration64,
+        entropy: u64,
+    ) -> Option<SyncReason> {
+        if self.urgency.is_some() {
+            return None;
+        }
+        let Decision::SyncNow(reason) = decide(reading, record, self.refresh) else {
+            return None;
+        };
+        if !self
+            .ntp
+            .expedite_first(after(now, jitter(INITIAL_DELAY_SPAN, entropy)))
+        {
+            return None;
+        }
+        self.urgency = Some(reason);
+        Some(reason)
+    }
+
+    /// Change the refresh cadence at `now`, keeping the engine's servers and
+    /// what it learned of them.
+    pub fn set_refresh(&mut self, refresh: Duration64, now: Duration64) {
+        self.refresh = refresh;
+        self.ntp.set_poll_interval(refresh, now);
     }
 
     /// Why the first query of this boot is urgent, or `None` when the clock
@@ -475,6 +525,14 @@ impl TimeSync {
             Outcome::Unsolicited => Event::Ignored,
         }
     }
+}
+
+/// The monotonic instant `delay` after `now`.
+fn after(now: Duration64, delay: Duration64) -> Duration64 {
+    Duration64::from_nanos(
+        now.saturating_total_nanos()
+            .saturating_add(delay.saturating_total_nanos()),
+    )
 }
 
 /// Turn a validated sample into the clock update to apply, measuring the

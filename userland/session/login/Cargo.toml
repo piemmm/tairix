@@ -63,6 +63,13 @@ tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # Where the civil-time store is planted: the authority opens it to delegate
 # to the login screen and never reads it, so it links none of the reader.
 tairix-tz = { path = "../../../lib/tz", version = "=0.0.0" }
+# The program-store spellings: which bundle a program is the entry of, where
+# its manifest sits, whether it lies in a read-only system store, and the
+# bounded manifest decode.
+tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
+# The load gate's own reading of what a manifest requests, so who may allow
+# a program is decided on exactly the request the kernel grants from.
+tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 
 # The pure-Rust userland runtime: `tairix-rt` provides the
 # `Run` binary's `_start`, stack canary, panic handler, allocator, and

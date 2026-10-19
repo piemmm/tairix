@@ -44,6 +44,10 @@ use tairix_abi::driver::display::{DamageList, DisplayFormat, DisplayMode};
 use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
+    encode_authorised_output_reply, AuthorisedOutcome, SystemTask,
+    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+};
+use tairix_abi::window_ipc::{
     encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
     encode_drag_spot_reply, encode_drop_target_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
@@ -105,7 +109,13 @@ pub const WINDOW_REPLY_MAX: usize = {
                                         WINDOW_PICKED_NAME_REPLY_MAX,
                                         WINDOW_PICKED_FILE_REPLY_MAX,
                                     ),
-                                    wider(WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_DRAG_SPOT_REPLY_MAX),
+                                    wider(
+                                        wider(
+                                            WINDOW_DROP_TARGET_REPLY_MAX,
+                                            WINDOW_DRAG_SPOT_REPLY_MAX,
+                                        ),
+                                        WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
+                                    ),
                                 ),
                             ),
                         ),
@@ -170,6 +180,7 @@ pub enum DragConclusion {
 /// so the one buffer above already holds it.
 const _: () = assert!(WINDOW_MINTED_ID_REPLY_LEN <= WINDOW_REPLY_MAX);
 const _: () = assert!(WINDOW_CLIPBOARD_REPLY_LEN <= WINDOW_REPLY_MAX);
+const _: () = assert!(WINDOW_AUTHORISED_OUTPUT_REPLY_MAX <= WINDOW_REPLY_MAX);
 
 /// The share of the machine's RAM one attested client may hold mapped in the
 /// session as window frames: a quarter of it.
@@ -993,6 +1004,32 @@ pub trait WindowHost {
         let _ = (to, caller);
         Err(Errno::NotSupported)
     }
+
+    /// Put the system's authorisation prompt up for `task`, asked by
+    /// `caller`, the application the kernel attests is asking, for its own
+    /// window `window_id`.
+    ///
+    /// The engine has checked the window is the caller's and has no
+    /// authorisation pending; who may ask, what the task runs and what the
+    /// prompt says are the host's. Its outcome is answered through
+    /// [`WindowServer::conclude_authorisation`]. The default refuses, because
+    /// a host with no prompt cannot ask.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a caller the host does not honour,
+    /// [`Errno::OutOfRange`] for a task it will not perform as asked,
+    /// [`Errno::SeatBusy`] while anything else holds the seat, and
+    /// [`Errno::NotSupported`] from a host with no prompt.
+    fn authorise_requested(
+        &mut self,
+        caller: Option<&AppIdentity>,
+        window_id: u64,
+        task: &SystemTask,
+    ) -> Result<(), Errno> {
+        let _ = (caller, window_id, task);
+        Err(Errno::NotSupported)
+    }
 }
 
 /// What a `RenderPreview` names: the picture and the size it is rendered at,
@@ -1431,6 +1468,11 @@ struct WindowRecord<R> {
     /// so the two can never disagree: an operation reserved for a layer
     /// surface refuses any window whose answer here is `None`.
     layer: Option<LayerDepth>,
+    /// An `Authorise` was accepted and its `Authorised` is still owed.
+    authorising: bool,
+    /// What the last captured task printed, until the owner takes it or asks
+    /// for another task.
+    authorised_output: Option<Vec<u8>>,
 }
 
 /// The window a transient hangs from, and what it is to that window.
@@ -1653,6 +1695,15 @@ impl<M: ShmMapper> WindowServer<M> {
                     .and_then(|app| host.zone_store(caller, app.as_ref()));
                 return minted_id_reply(reply, granted);
             }
+            WindowRequest::Authorise {
+                window_id,
+                ref task,
+            } => {
+                let accepted = identity
+                    .caller_app(ticket)
+                    .and_then(|app| self.authorise(host, caller, app.as_ref(), window_id, task));
+                return status(reply, accepted);
+            }
             _ => {}
         }
         self.dispatch(host, sink, caller, &decoded, reply)
@@ -1726,6 +1777,9 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::TakeOpenTarget => {
                 let taken = self.take_open_target(caller);
                 open_target_reply(reply, Ok(taken.as_ref().map(OpenEntry::as_wire)))
+            }
+            WindowRequest::TakeAuthorisedOutput { window_id } => {
+                self.take_authorised_output(caller, window_id, reply)
             }
             WindowRequest::QueryWallpapers { from } => wallpapers_reply(reply, host, from),
             WindowRequest::QueryCursorSets => cursor_sets_reply(reply, host),
@@ -2010,13 +2064,15 @@ impl<M: ShmMapper> WindowServer<M> {
             // ...and a catalog page, likewise.
             WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
             WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
-            // ...and the three requests `serve` decides against the attested
-            // application before dispatch is reached, and a pick, which has
-            // its own group.
+            // ...and the requests answered before this is reached: those
+            // `serve` decides against the attested application, and those
+            // `dispatch` routes to their own groups.
             WindowRequest::QueryNotifySources => {
                 notify_sources_reply(reply, Err(Errno::NotSupported))
             }
             WindowRequest::LockScreen
+            | WindowRequest::Authorise { .. }
+            | WindowRequest::TakeAuthorisedOutput { .. }
             | WindowRequest::Close { .. }
             | WindowRequest::CloseAlert { .. }
             | WindowRequest::PreviewScreensaver { .. }
@@ -2110,6 +2166,8 @@ impl<M: ShmMapper> WindowServer<M> {
                 menu_text: None,
                 transient: None,
                 layer: None,
+                authorising: false,
+                authorised_output: None,
             },
         );
         Ok(window_id)
@@ -2290,6 +2348,8 @@ impl<M: ShmMapper> WindowServer<M> {
                     kind,
                 }),
                 layer: None,
+                authorising: false,
+                authorised_output: None,
             },
         );
         Ok(window_id)
@@ -2350,6 +2410,8 @@ impl<M: ShmMapper> WindowServer<M> {
                 menu_text: None,
                 transient: None,
                 layer: Some(spec.depth),
+                authorising: false,
+                authorised_output: None,
             },
         );
         Ok(window_id)
@@ -2535,6 +2597,41 @@ impl<M: ShmMapper> WindowServer<M> {
         host.pick_requested(window_id, purpose)?;
         record.pick_pending = Some(*purpose);
         record.picked_name = None;
+        Ok(())
+    }
+
+    /// Answer `caller`'s take of what window `window_id`'s last task
+    /// printed: once, and only to the window's owner.
+    fn take_authorised_output(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        let taken = owned_window_mut(&mut self.windows, caller, window_id)
+            .and_then(|record| record.authorised_output.take().ok_or(Errno::NotFound));
+        authorised_output_reply(reply, taken.as_deref().map_err(|&err| err))
+    }
+
+    /// Accept an authorisation of `task` for `caller`'s window `window_id`,
+    /// asked by the attested application `app`: at most one pends per window,
+    /// and the host must bring its prompt up before anything is recorded
+    /// (fail closed — a refused request leaves no pending state).
+    fn authorise(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        app: Option<&AppIdentity>,
+        window_id: u64,
+        task: &SystemTask,
+    ) -> Result<(), Errno> {
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
+        if record.authorising {
+            return Err(Errno::AlreadyExists);
+        }
+        host.authorise_requested(app, window_id, task)?;
+        record.authorising = true;
+        record.authorised_output = None;
         Ok(())
     }
 
@@ -3262,6 +3359,57 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
+    /// Conclude window `window_id`'s pending authorisation with `outcome`,
+    /// holding `output` — exactly what a captured task printed, and nothing
+    /// for any other outcome — for the owner's `TakeAuthorisedOutput`.
+    ///
+    /// The one way an authorisation concludes, so exactly one `Authorised`
+    /// follows each accepted `Authorise` and a conclusion no one asked for is
+    /// refused, not delivered.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window.
+    /// * [`Errno::OutOfRange`] — no authorisation is pending on it, or an
+    ///   output that is not the one `outcome` states.
+    /// * Any [`Errno`] the sink surfaces; the authorisation is still owed.
+    pub fn conclude_authorisation(
+        &mut self,
+        sink: &mut dyn EventSink,
+        window_id: u64,
+        outcome: AuthorisedOutcome,
+        output: Vec<u8>,
+    ) -> Result<(), Errno> {
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        let captured = match outcome {
+            AuthorisedOutcome::Captured { len, .. } => {
+                if usize::try_from(len).ok() != Some(output.len()) {
+                    return Err(Errno::OutOfRange);
+                }
+                true
+            }
+            AuthorisedOutcome::Ran { .. }
+            | AuthorisedOutcome::Launched
+            | AuthorisedOutcome::Overran { .. }
+            | AuthorisedOutcome::Declined => {
+                if !output.is_empty() {
+                    return Err(Errno::OutOfRange);
+                }
+                false
+            }
+        };
+        if !record.authorising {
+            return Err(Errno::OutOfRange);
+        }
+        sink.deliver(
+            record.event_endpoint,
+            &WindowEvent::Authorised { window_id, outcome },
+        )?;
+        record.authorising = false;
+        record.authorised_output = captured.then_some(output);
+        Ok(())
+    }
+
     /// Tell the owner of window `window_id`, whose drag is carried, where it
     /// now is: `report` numbered `serial`, with `shift` held or not.
     ///
@@ -3391,9 +3539,9 @@ impl<M: ShmMapper> WindowServer<M> {
     /// validate it against the live window, encode it, and hand it to
     /// `sink` for the window's event endpoint.
     ///
-    /// A pick or drag conclusion is refused: each goes through its own
-    /// conclusion ([`Self::conclude_pick`], [`Self::conclude_drag`]), which
-    /// holds what it ended with.
+    /// A pick, drag or authorisation conclusion is refused: each goes through
+    /// its own conclusion ([`Self::conclude_pick`], [`Self::conclude_drag`],
+    /// [`Self::conclude_authorisation`]), which holds what it ended with.
     ///
     /// A `MenuClosed` outcome must name the window's *own* unanswered open:
     /// an open that was never accepted, one already answered, or another
@@ -3434,6 +3582,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 | WindowEvent::FolderPicked { .. }
                 | WindowEvent::DragOver { .. }
                 | WindowEvent::DragEnded { .. }
+                | WindowEvent::Authorised { .. }
         ) {
             return Err(Errno::OutOfRange);
         }
@@ -3703,6 +3852,19 @@ fn picked_file_reply(
     let len = encode_picked_file_reply(&mut frame, result);
     reply[..len].copy_from_slice(&frame[..len]);
     len
+}
+
+/// Write a `TakeAuthorisedOutput` outcome into `reply`, answering its
+/// length: the frame is encoded in place, so the widest output costs one
+/// write rather than a second buffer and a copy.
+fn authorised_output_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<&[u8], Errno>,
+) -> usize {
+    match reply.first_chunk_mut::<WINDOW_AUTHORISED_OUTPUT_REPLY_MAX>() {
+        Some(frame) => encode_authorised_output_reply(frame, result),
+        None => status(reply, Err(Errno::BufferTooSmall)),
+    }
 }
 
 /// Write a `TakePickedName` outcome into `reply`, answering its length.

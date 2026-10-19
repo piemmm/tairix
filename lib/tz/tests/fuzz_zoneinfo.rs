@@ -22,7 +22,7 @@ use tairix_tz::write::{
     build, PhaseInput, PlaceInput, RegionInput, StoreInput, TrailingInput, TransitionInput,
     ZoneInput,
 };
-use tairix_tz::{resolve_region, resolve_zone, CivilClock, Disambiguation, ZoneInfo};
+use tairix_tz::{resolve_region, resolve_zone, CivilClock, Disambiguation, Weekday, ZoneInfo};
 
 /// Fixed-iteration sweep run once by a plain `cargo test`.
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -145,6 +145,7 @@ fn store_input(rng: &mut Prng) -> StoreInput {
         .map(|&(code, name, date, time)| RegionInput {
             code: String::from(code),
             name: String::from(name),
+            first_weekday: *rng.pick(&Weekday::ALL),
             date: String::from(date),
             time: String::from(time),
         })
@@ -194,6 +195,15 @@ fn exercise(info: &ZoneInfo<'_>, rng: &mut Prng) {
                 "{}: the minute after {at:?} turns at {next:?}",
                 zone.name()
             );
+            if let Some(change) = zone.next_change(at) {
+                assert!(
+                    change.at > at,
+                    "{}: a change at or before {at:?}",
+                    zone.name()
+                );
+                assert_ne!(change.before.utc_offset, change.after.utc_offset);
+                assert_eq!(zone.offset_at(change.at), change.after);
+            }
         }
         let civil = CivilTime {
             year: signed(rng, 3000),
@@ -213,6 +223,8 @@ fn exercise(info: &ZoneInfo<'_>, rng: &mut Prng) {
     }
     for region in info.regions() {
         let clock = CivilClock::new(info.default_zone(), Some(&region));
+        assert_eq!(clock.first_weekday(), region.first_weekday);
+        let _ = clock.hour_cycle();
         let reading = clock.local(Time64::from_secs(instant(rng)));
         text.clear();
         let _ = clock.write_date(&reading, &mut text);

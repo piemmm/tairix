@@ -40,6 +40,7 @@
 mod program {
     extern crate alloc;
 
+    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -47,7 +48,6 @@ mod program {
 
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
-    use tairix_abi::elevate::{ElevateArgv, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
@@ -59,14 +59,18 @@ mod program {
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, Uptime};
-    use tairix_abi::window_ipc::{DialogModality, PreviewOutcome, PreviewSubject, WindowEvent};
+    use tairix_abi::time::{Time64, NANOS_PER_SEC};
+    use tairix_abi::window_ipc::{
+        AuthorisedOutcome, DialogModality, PreviewOutcome, PreviewSubject, SystemTask, WindowEvent,
+    };
     use tairix_abi::{Errno, ProcId};
     use tairix_abi::{NoticeTopic, WaitSetOp, WaitSourceKind};
     use tairix_appconf::Registry;
     use tairix_appdata::RtHost;
     use tairix_audio::live::{live_captures, RtAudio};
     use tairix_audio::stream::{devices, set_control, ControlQueue, DeviceControl};
-    use tairix_controls::Keystroke;
+    use tairix_controls::zone::{self, Minute};
+    use tairix_controls::{Keystroke, PlaceDialog, PlaceOutcome, PressTiming};
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
@@ -77,10 +81,9 @@ mod program {
     use tairix_reclaim::PressureBand;
     use tairix_settings::SoundReading;
     use tairix_settings::{
-        notified, win_sizing, AccountFacts, DesktopAnswer, DesktopAsk, DesktopAsks, ElevateRefusal,
-        Elevated, Elevation, MachineFacts, OwnAccount, Pane, PictureWanted, Renders, Roster,
-        RunMode, Shell, ShellOutcome, VolumeReading, MOST_OUTSTANDING, WINDOW_GROUND, WIN_HEIGHT,
-        WIN_WIDTH,
+        notified, win_sizing, AccountFacts, Authorised, DesktopAnswer, DesktopAsk, DesktopAsks,
+        MachineFacts, OwnAccount, Pane, PictureWanted, Renders, Roster, Round, Shell, ShellOutcome,
+        VolumeReading, MOST_OUTSTANDING, WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_settings::{EffectsAsk, EffectsAsks, EffectsReading, EffectsTrip};
     use tairix_sysconfig::SystemConfig;
@@ -88,10 +91,10 @@ mod program {
     use tairix_tz::ZoneInfo;
     use tairix_users::{Salt, SALT_LEN};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
-    use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Fitted, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
-        Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target,
+        Desktop, EventDrain, EventError, EventMailbox, EventSource, Owed, Parked, Repaint, Target,
         WindowEvents,
     };
 
@@ -114,22 +117,13 @@ mod program {
     /// facts has landed.
     const MACHINE_TOKEN: u64 = app::FIRST_APP_TOKEN + 2;
 
-    /// The wait-set token of the elevated-run desk's wake: readable exactly
-    /// when the console's broker has answered an offered account.
-    ///
-    /// Its own desk because it is the one round trip that blocks for as
-    /// long as another program takes to run — a window that waited on it
-    /// would stop answering for the whole of an authentication and a store
-    /// write.
-    const ELEVATE_TOKEN: u64 = app::FIRST_APP_TOKEN + 3;
-
     /// The wait-set token of the network-reading desk's wake: readable
     /// exactly when a fresh reading of the stack's resolver set has landed.
     ///
     /// Its own desk rather than the machine desk's: the two are wanted by
     /// different panes, and folding them together would spend a network
     /// round trip every time the About pane came on show.
-    const NETWORK_TOKEN: u64 = app::FIRST_APP_TOKEN + 4;
+    const NETWORK_TOKEN: u64 = app::FIRST_APP_TOKEN + 3;
 
     /// The wait-set token of the account-reading desk's wake: readable
     /// exactly when a fresh reading of the caller's own record, the two
@@ -138,28 +132,28 @@ mod program {
     /// Its own desk for the same reason the network one is: it is wanted by
     /// one pane, and folding it into another's would spend three round
     /// trips every time that other pane came on show.
-    const ACCOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 5;
+    const ACCOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 4;
 
     /// The wait-set token of the preview asker's wake: readable exactly when
     /// the desktop has answered a render this window asked for.
-    const ASK_TOKEN: u64 = app::FIRST_APP_TOKEN + 6;
+    const ASK_TOKEN: u64 = app::FIRST_APP_TOKEN + 5;
 
     /// The wait-set token of the desktop asker's wake: readable exactly when
-    /// the session has answered a lock, a screensaver preview, or which
-    /// sources have notified.
-    const DESKTOP_TOKEN: u64 = app::FIRST_APP_TOKEN + 7;
+    /// the session has answered a lock, a screensaver preview, which sources
+    /// have notified, a system task, or a task's output.
+    const DESKTOP_TOKEN: u64 = app::FIRST_APP_TOKEN + 6;
 
     /// The wait-set token of the sound desk's wake: a round trip to the audio
     /// service has come back.
-    const SOUND_TOKEN: u64 = app::FIRST_APP_TOKEN + 8;
+    const SOUND_TOKEN: u64 = app::FIRST_APP_TOKEN + 7;
 
     /// The wait-set token both audio notices are watched under: a device, a
     /// control or a recording moved, whoever moved it.
-    const AUDIO_NOTICE_TOKEN: u64 = app::FIRST_APP_TOKEN + 9;
+    const AUDIO_NOTICE_TOKEN: u64 = app::FIRST_APP_TOKEN + 8;
 
     /// The wait-set token of the sound-choices desk's wake: a round trip to
     /// the desktop session about the user's sounds has come back.
-    const EFFECTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 10;
+    const EFFECTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 9;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -565,16 +559,6 @@ mod program {
         tairix_rt::wall_time().ok()
     }
 
-    /// The elevated run: the console broker's round trip, carried out on a
-    /// worker thread.
-    ///
-    /// The broker re-authenticates the offered account, runs the program as
-    /// it, and answers only once that program has exited — which is exactly
-    /// as long as an authentication and a store write take. The loop
-    /// submits and collects the answer on the wake it nudges, so the window
-    /// keeps drawing throughout.
-    type Elevator = tairix_rt::work::Worker<(), Elevation, Elevated>;
-
     /// A render asked of the desktop for a pane's picture, and the grant of the
     /// region it is drawn into.
     #[derive(Copy, Clone)]
@@ -639,18 +623,45 @@ mod program {
                         .map(|answered| notified(&answered)),
                 )
             }
+            DesktopAsk::Authorise { window_id, task } => {
+                DesktopAnswer::Authorise(client.authorise(*window_id, task))
+            }
+            DesktopAsk::TakeOutput {
+                window_id,
+                exit_code,
+            } => DesktopAnswer::Output {
+                exit_code: *exit_code,
+                output: client.take_authorised_output(*window_id),
+            },
+        }
+    }
+
+    /// What the desktop said a system task came to, as the pane adopts it, or
+    /// `None` for a capture, whose output is fetched first.
+    const fn authorised_of(outcome: AuthorisedOutcome) -> Option<Authorised> {
+        match outcome {
+            AuthorisedOutcome::Ran { exit_code } => Some(Authorised::Ran(exit_code)),
+            AuthorisedOutcome::Launched => Some(Authorised::Launched),
+            AuthorisedOutcome::Overran { .. } => Some(Authorised::Overran),
+            AuthorisedOutcome::Declined => Some(Authorised::Declined),
+            AuthorisedOutcome::Captured { .. } => None,
         }
     }
 
     /// Adopt what the desktop answered into `shell`, stating a refusal.
     fn adopt_desktop_answer(shell: &mut Shell, answer: DesktopAnswer) {
+        report_desktop(&answer);
+        answer.adopt(shell);
+    }
+
+    /// State what the desktop refused.
+    fn report_desktop(answer: &DesktopAnswer) {
         if let Some((what, err)) = answer.refusal() {
             app::report(
                 APP_NAME,
                 format_args!("the desktop would not {what} ({err})"),
             );
         }
-        answer.adopt(shell);
     }
 
     /// The desktop asker's client half: its desk, and which kinds of request
@@ -703,75 +714,13 @@ mod program {
                 None => landed,
             }
         }
-    }
 
-    /// The elevated run's body: one posted request, one verdict.
-    ///
-    /// The offered password is wiped as soon as the exchange resolves,
-    /// whichever way it went: the request it was encoded into is erased by
-    /// the runtime's own wiped buffer, and the copy this desk was handed is
-    /// erased here.
-    fn send_elevate(_: &mut (), asked: &mut Elevation) -> Elevated {
-        let argv: Vec<&str> = asked.argv.iter().map(String::as_str).collect();
-        let verdict = elevate_once(asked, &argv);
-        // Before the desk's own drop, because it keeps the job it was
-        // handed until the next one replaces it.
-        asked.erase();
-        verdict
-    }
-
-    /// Post one elevation request and turn the reply into a verdict.
-    fn elevate_once(asked: &Elevation, argv: &[&str]) -> Elevated {
-        // A secret that is not text was never one the broker could check,
-        // so it is refused here rather than put on the wire.
-        let Ok(password) = core::str::from_utf8(&asked.password) else {
-            return Elevated::Refused(ElevateRefusal::Credentials);
-        };
-        let Ok(carried) = ElevateArgv::new(argv) else {
-            return Elevated::Refused(ElevateRefusal::NotRun(String::from(
-                "That is more than one command can carry.",
-            )));
-        };
-        let request = match asked.mode {
-            RunMode::Wait => ElevateRequest::Run {
-                username: &asked.account,
-                password,
-                program: asked.program,
-                argv: carried,
-            },
-            RunMode::Capture => ElevateRequest::Capture {
-                username: &asked.account,
-                password,
-                program: asked.program,
-                argv: carried,
-            },
-            RunMode::Leave => ElevateRequest::Launch {
-                username: &asked.account,
-                password,
-                program: asked.program,
-            },
-        };
-        let mut reply = [0u8; ELEVATE_MAX_REPLY];
-        match tairix_rt::elevate(&request, &mut reply) {
-            Ok(ElevateReply::Completed { exit_code }) => Elevated::Finished(exit_code),
-            Ok(ElevateReply::Captured { exit_code, output }) => {
-                Elevated::Printed(exit_code, output.to_vec())
+        /// Wait out every request already handed over. One held behind it is
+        /// not asked: each names the window, which is gone.
+        fn see_out(&self) {
+            while let Some(answer) = self.worker.wait() {
+                report_desktop(&answer);
             }
-            Ok(ElevateReply::Overran { .. }) => Elevated::Overran,
-            // A launch is started and left running; there is no exit code
-            // to wait for and none is invented.
-            Ok(ElevateReply::Launched { .. }) => Elevated::Finished(0),
-            Ok(ElevateReply::Refused(Errno::PermissionDenied)) => {
-                Elevated::Refused(ElevateRefusal::Credentials)
-            }
-            Ok(ElevateReply::Refused(err)) => Elevated::Refused(ElevateRefusal::NotRun(
-                alloc::format!("The account was accepted, but nothing ran ({err})."),
-            )),
-            // A reply to a request this program did not send: nothing ran
-            // on an answer it does not understand.
-            Ok(ElevateReply::Verified) | Err(_) => Elevated::Refused(ElevateRefusal::NotRun(
-                String::from("This console has no way to ask for an account."),
-            )),
         }
     }
 
@@ -956,17 +905,6 @@ mod program {
         }
     }
 
-    /// Ask the console's broker to run what an offered account authorises,
-    /// off the event loop.
-    fn submit_elevate(elevator: &Elevator, asked: Elevation) -> Option<Elevated> {
-        // With no worker the call was made on this thread and its answer is
-        // already on the desk.
-        if elevator.submit(asked) {
-            return elevator.collect();
-        }
-        None
-    }
-
     /// Adopt what the desktop answered: state a refusal, then show what the
     /// store holds.
     ///
@@ -975,6 +913,15 @@ mod program {
     /// a refusal puts the row back rather than leaving a value on screen the
     /// next login would not restore.
     fn adopt_apply(shell: &mut Shell, Applied { outcome, in_effect }: Applied) {
+        report_apply(&outcome);
+        match in_effect {
+            Some(settings) => shell.adopt_settings(settings),
+            None => shell.revert_settings(),
+        }
+    }
+
+    /// State an apply the desktop did not make.
+    fn report_apply(outcome: &ApplyOutcome) {
         match outcome {
             ApplyOutcome::Applied | ApplyOutcome::Applying => {}
             ApplyOutcome::Refused(reason) => {
@@ -986,10 +933,6 @@ mod program {
             ApplyOutcome::NoDesktop => {
                 app::report(APP_NAME, "no desktop session answered; nothing was changed");
             }
-        }
-        match in_effect {
-            Some(settings) => shell.adopt_settings(settings),
-            None => shell.revert_settings(),
         }
     }
 
@@ -1341,21 +1284,6 @@ mod program {
         /// The built-in pictures the shell draws — the categories' badges —
         /// rasterised once per side rather than once per frame.
         artwork: ArtworkCache,
-        /// Where the window's events are sent, and the session that serves
-        /// it, once it is open: what the question's window opens with.
-        opened: Option<(u64, ProcId)>,
-        /// The credential question's dialog window, while one is up.
-        question: Option<QuestionWindow>,
-    }
-
-    /// The credential question's dialog window: its pane and the surface the
-    /// question is drawn on.
-    struct QuestionWindow {
-        pane: WindowPane,
-        surface: Surface,
-        /// The extent it was last asked to be, which the desktop may have
-        /// fitted to a smaller screen: only a change of this resizes it.
-        asked: DisplayMode,
     }
 
     impl SettingsWindow {
@@ -1374,7 +1302,6 @@ mod program {
                 .window
                 .open(event_endpoint, &self.mode, self.title, win_sizing(scale))
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
-            self.opened = Some((event_endpoint, server));
             // Before the first present, so no frame is shown unfrosted.
             self.apply_backdrop(themes);
             if self
@@ -1389,119 +1316,7 @@ mod program {
 
         /// Close the open window, leaving the app on the icon bar.
         fn close(&mut self) {
-            if let Some(question) = self.question.take() {
-                let _ = question.pane.close(self.window.client());
-            }
             let _ = self.window.close();
-        }
-
-        /// The session's id for the question's dialog window, while it is up.
-        fn question_id(&self) -> Option<u64> {
-            self.question.as_ref().map(|question| question.pane.id())
-        }
-
-        /// The question window's client, in its own pixels.
-        fn question_client(&self) -> Option<Rect> {
-            let mode = self.question.as_ref()?.pane.mode();
-            Some(Rect::new(0, 0, mode.width_px, mode.height_px))
-        }
-
-        /// Bring the question's dialog window into line with the shell: open
-        /// it for a question just asked, fit it to a density that moved, and
-        /// close it once the question is answered. One newly opened or fitted
-        /// is presented whole. A window the desktop will not open turns the
-        /// question down with the reason said, rather than leave it unseen.
-        fn settle_question(&mut self, shell: &mut Shell, themes: &ThemeRegistry, scale: Scale) {
-            let wanted = shell.question_extent(scale);
-            let Some((width, height)) = wanted else {
-                if let Some(question) = self.question.take() {
-                    let _ = question.pane.close(self.window.client());
-                }
-                return;
-            };
-            let mode = app::mode_for(width, height);
-            let fitted = match self.question.as_mut() {
-                Some(question) if question.asked == mode => return,
-                Some(question) => {
-                    question.asked = mode;
-                    question
-                        .pane
-                        .resize_with(self.window.client(), &mode, &mut question.surface)
-                }
-                None => match self.open_question(shell, &mode) {
-                    Ok(()) => app::Fitted::Adopted,
-                    Err(why) => {
-                        shell.decline_question(&why);
-                        app::report(APP_NAME, format_args!("the question was not shown: {why}"));
-                        return;
-                    }
-                },
-            };
-            if fitted == app::Fitted::Kept {
-                app::report(APP_NAME, app::SIZE_KEPT);
-            }
-            if self.present_question(shell, themes, scale, None).is_err() {
-                app::report(APP_NAME, "the question's window refused its frame");
-            }
-        }
-
-        /// Open the question's dialog window at `mode`, holding the settings
-        /// window until it is answered.
-        fn open_question(&mut self, shell: &Shell, mode: &DisplayMode) -> Result<(), String> {
-            let (Some(owner), Some((endpoint, server))) = (self.window.window_id(), self.opened)
-            else {
-                return Err(String::from("the settings window is not open"));
-            };
-            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-                return Err(String::from("no memory to draw it"));
-            };
-            let pane = WindowPane::open_dialog(
-                self.window.client(),
-                (owner, server),
-                endpoint,
-                mode,
-                DialogModality::OwnerModal,
-                shell.question_title(),
-            )
-            .map_err(|err| alloc::format!("{err}"))?;
-            self.question = Some(QuestionWindow {
-                pane,
-                surface,
-                asked: *mode,
-            });
-            Ok(())
-        }
-
-        /// Draw the question and present `damage` of its window, or the
-        /// whole of it for `None`.
-        fn present_question(
-            &mut self,
-            shell: &Shell,
-            themes: &ThemeRegistry,
-            scale: Scale,
-            damage: Option<&Region>,
-        ) -> Result<(), Errno> {
-            let Some(question) = self.question.as_mut() else {
-                return Ok(());
-            };
-            let mode = *question.pane.mode();
-            let repaint = match damage {
-                Some(_) => Repaint::Reported,
-                None => Repaint::Whole,
-            };
-            let empty = Region::new();
-            let Some(area) = present_damage(&mode, repaint, damage.unwrap_or(&empty)) else {
-                return Ok(());
-            };
-            let client = Rect::new(0, 0, mode.width_px, mode.height_px);
-            question
-                .surface
-                .with_clip(area.x, area.y, area.width_px, area.height_px, |surface| {
-                    shell.render_question(surface, client, scale, themes.active());
-                });
-            question
-                .pane
-                .present(self.window.client(), &question.surface, area)
         }
 
         /// Ask the compositor for the blur the window's ground is drawn over.
@@ -1570,9 +1385,10 @@ mod program {
         /// The reader chose a setting: ask the desktop to adopt it, then
         /// re-read what it holds.
         Apply(String),
-        /// The reader offered an account: ask the console's broker to run
-        /// what it authorises, then adopt the verdict.
-        Elevate(Elevation),
+        /// The reader asked for a system task: ask the desktop to perform it.
+        Authorise(Box<SystemTask>),
+        /// The desktop said what came of the task it was asked for.
+        Authorised(AuthorisedOutcome),
         /// The desktop queued a target: drain the queue and show what it
         /// named.
         Opened,
@@ -1598,6 +1414,8 @@ mod program {
         },
         /// The reader asked for the screen to be locked: ask the desktop.
         LockScreen,
+        /// The reader asked to choose the time zone: open the chooser.
+        ChooseZone,
         /// The reader asked to see the screensaver: ask the desktop to show
         /// this document's.
         PreviewScreensaver(String),
@@ -1655,6 +1473,7 @@ mod program {
             )),
             // The desktop queued at least one target for this instance.
             WindowEvent::OpenRequested => Acted::Opened,
+            WindowEvent::Authorised { outcome, .. } => Acted::Authorised(*outcome),
             // A picture a pane asked for. Answered by the loop, which holds
             // the region it was rendered into.
             WindowEvent::PreviewRendered {
@@ -1760,108 +1579,20 @@ mod program {
         }
     }
 
-    /// Apply one delivered event to the window it names: the credential
-    /// question's, or the settings window's.
-    fn apply_delivered(
-        surface: &mut SettingsWindow,
-        shell: &mut Shell,
-        themes: &ThemeRegistry,
-        scale: Scale,
-        event: &WindowEvent,
-        damage: &mut Region,
-    ) -> Acted {
-        if event.window_id().is_some() && event.window_id() == surface.question_id() {
-            apply_question_event(surface, shell, themes, scale, event)
-        } else {
-            apply_event(surface, shell, themes.active(), scale, event, damage)
-        }
-    }
-
     /// What the loop does with what the shell concluded.
     fn acted_of(outcome: ShellOutcome) -> Acted {
         match outcome {
             ShellOutcome::Idle => Acted::Idle,
             ShellOutcome::Changed => Acted::Changed,
             ShellOutcome::Apply(document) => Acted::Apply(document),
-            ShellOutcome::Elevate(asked) => Acted::Elevate(asked),
+            ShellOutcome::Authorise(task) => Acted::Authorise(task),
             ShellOutcome::LockScreen => Acted::LockScreen,
+            ShellOutcome::ChooseZone => Acted::ChooseZone,
             ShellOutcome::PreviewScreensaver(document) => Acted::PreviewScreensaver(document),
             ShellOutcome::Sound {
                 device_id, control, ..
             } => Acted::Sound { device_id, control },
             ShellOutcome::Effects(ask) => Acted::Effects(ask),
-        }
-    }
-
-    /// Apply one event delivered to the credential question's window,
-    /// presenting what it drew there. Only what the question asks for is
-    /// the loop's to carry out: its drawing never reaches the settings
-    /// window.
-    fn apply_question_event(
-        surface: &mut SettingsWindow,
-        shell: &mut Shell,
-        themes: &ThemeRegistry,
-        scale: Scale,
-        event: &WindowEvent,
-    ) -> Acted {
-        let Some(client) = surface.question_client() else {
-            return Acted::Idle;
-        };
-        let theme = themes.active();
-        let mut damage = tairix_controls::damage::sink();
-        let outcome = match event {
-            WindowEvent::Key {
-                key: pressed @ KeyInput::Pressed { .. },
-                ..
-            } => Keystroke::pressed(key_input_event(*pressed), tairix_rt::clock_get())
-                .map(|stroke| shell.on_question_key(stroke, client, scale, theme, &mut damage)),
-            WindowEvent::Pointer { x, y, action, .. } => Some(apply_pointer(
-                pointer_input_events(*action, pointer_point(*x, *y)),
-                &mut damage,
-                |input, damage| shell.on_question_pointer(input, client, scale, theme, damage),
-            )),
-            WindowEvent::Scrolled { x, y, dx, dy, .. } => Some(apply_pointer(
-                scroll_input_events(pointer_point(*x, *y), *dx, *dy),
-                &mut damage,
-                |input, damage| shell.on_question_pointer(input, client, scale, theme, damage),
-            )),
-            // The desktop fitted it to the screen: the question is drawn
-            // across what it was given.
-            WindowEvent::Resized {
-                width_px,
-                height_px,
-                ..
-            } => {
-                if let Some(question) = surface.question.as_mut() {
-                    let mode = app::mode_for(*width_px, *height_px);
-                    let window = &mut surface.window;
-                    if question
-                        .pane
-                        .resize_with(window.client(), &mode, &mut question.surface)
-                        == app::Fitted::Kept
-                    {
-                        app::report(APP_NAME, app::SIZE_KEPT);
-                    }
-                }
-                None
-            }
-            WindowEvent::RedrawRequested { .. } => None,
-            WindowEvent::ContentReleased { .. } => {
-                if let Some(question) = surface.question.as_mut() {
-                    question.pane.release_frames();
-                }
-                return Acted::Idle;
-            }
-            _ => return Acted::Idle,
-        };
-        let whole = outcome.is_none();
-        let shown = surface.present_question(shell, themes, scale, (!whole).then_some(&damage));
-        if shown.is_err() {
-            app::report(APP_NAME, "the question's window refused its frame");
-        }
-        match outcome.map_or(Acted::Idle, acted_of) {
-            Acted::Changed => Acted::Idle,
-            acted => acted,
         }
     }
 
@@ -1886,8 +1617,9 @@ mod program {
                 matches!(
                     outcome,
                     ShellOutcome::Apply(_)
-                        | ShellOutcome::Elevate(_)
+                        | ShellOutcome::Authorise(_)
                         | ShellOutcome::LockScreen
+                        | ShellOutcome::ChooseZone
                         | ShellOutcome::PreviewScreensaver(_)
                 )
             };
@@ -1913,6 +1645,7 @@ mod program {
         match app::adopt_desktop(desktop, themes) {
             Ok(changed) => {
                 shell.adopt_output(output_of(desktop));
+                shell.adopt_machine_zone(desktop.info().machine_zone());
                 changed
             }
             Err(err) => {
@@ -1972,6 +1705,8 @@ mod program {
     /// shell it routes into, and the channels it answers on.
     struct Session<'a> {
         surface: &'a mut SettingsWindow,
+        /// The endpoint the session delivers this application's events to.
+        endpoint: u64,
         desktop: &'a mut Desktop,
         themes: &'a mut ThemeRegistry,
         shell: &'a mut Shell,
@@ -1999,8 +1734,6 @@ mod program {
         /// The account readings the Users pane states, and the salt a new
         /// password is hashed under.
         accounts: AccountRead<'a>,
-        /// The broker round trip an offered account costs.
-        elevator: &'a Elevator,
         /// The render requests the panes' pictures cost.
         asker: &'a Asker,
         /// What only the desktop answers.
@@ -2032,7 +1765,6 @@ mod program {
                     worker: &workers.accounts,
                     pending: false,
                 },
-                elevator: &workers.elevator,
                 asker: &workers.asker,
                 desktop: DesktopDesk {
                     worker: &workers.desktop,
@@ -2050,6 +1782,19 @@ mod program {
                     asks: EffectsAsks::new(),
                 },
             }
+        }
+
+        /// See every change still owed out before the program ends, so one
+        /// made just before it ended is never dropped with its worker. Only
+        /// what is refused is stated, on `stderr`, the window being gone; the
+        /// desks that only read are left to stop.
+        fn see_out(&mut self) {
+            while let Some(Applied { outcome, .. }) = self.applier.wait() {
+                report_apply(&outcome);
+            }
+            self.sound.see_out();
+            self.effects.see_out();
+            self.desktop.see_out();
         }
     }
 
@@ -2133,12 +1878,7 @@ mod program {
                         shell.adopt_effects(reading.ok().map(|reading| *reading));
                     }
                     EffectsDone::Asked(result) => {
-                        if let Err(err) = result {
-                            app::report(
-                                APP_NAME,
-                                format_args!("the desktop would not change its sounds ({err})"),
-                            );
-                        }
+                        report_effects(result);
                         asks.landed();
                         changed = true;
                     }
@@ -2150,6 +1890,40 @@ mod program {
                 landed |= self.start(shell);
             }
             landed
+        }
+
+        /// Make every change still waiting, each in turn. A pick is not
+        /// started: it asks the reader to choose a file, and the window it
+        /// would be asked over is gone.
+        fn see_out(&mut self) {
+            loop {
+                while let Some(done) = self.worker.wait() {
+                    if let EffectsDone::Asked(result) = done {
+                        report_effects(result);
+                        self.asks.landed();
+                    }
+                }
+                match self.asks.next_trip() {
+                    Some(EffectsTrip::Pick(_)) => self.asks.landed(),
+                    Some(trip) => {
+                        if self.worker.submit(EffectsJob::Ask(trip)).is_err() {
+                            app::report(APP_NAME, "a change to the desktop's sounds was not made");
+                            self.asks.landed();
+                        }
+                    }
+                    None => return,
+                }
+            }
+        }
+    }
+
+    /// State a change to the desktop's sounds it did not make.
+    fn report_effects(result: Result<(), Errno>) {
+        if let Err(err) = result {
+            app::report(
+                APP_NAME,
+                format_args!("the desktop would not change its sounds ({err})"),
+            );
         }
     }
 
@@ -2209,6 +1983,22 @@ mod program {
             }
             landed
         }
+
+        /// Apply every control still waiting, a trip at a time. A trip owed
+        /// only for a listing is not made: nothing is left to show it.
+        fn see_out(&mut self) {
+            loop {
+                while self.worker.wait().is_some() {
+                    self.queue.landed();
+                }
+                match self.queue.next_trip() {
+                    Some(controls) if !controls.is_empty() => {
+                        let _ = self.worker.submit(controls);
+                    }
+                    _ => return,
+                }
+            }
+        }
     }
 
     /// Adopt whatever a worker answered while the loop was parked, and
@@ -2233,10 +2023,6 @@ mod program {
         landed |= desks.machine.settle(shell);
         landed |= desks.network.settle(shell);
         landed |= desks.accounts.settle(shell);
-        if let Some(verdict) = desks.elevator.collect() {
-            shell.adopt_elevation(verdict);
-            landed = true;
-        }
         landed |= desks.desktop.settle(shell);
         landed |= desks.sound.settle(shell);
         landed |= desks.effects.settle(shell);
@@ -2272,17 +2058,6 @@ mod program {
         }
         let mut damage = tairix_controls::damage::sink();
         let place = (desktop.scale(), themes.active());
-        if let Some(client) = surface.question_client() {
-            let mut asked = tairix_controls::damage::sink();
-            shell.advance_question(now_ns, client, desktop.scale(), &mut asked);
-            if !asked.is_empty()
-                && surface
-                    .present_question(shell, themes, desktop.scale(), Some(&asked))
-                    .is_err()
-            {
-                app::report(APP_NAME, "the question's window refused its frame");
-            }
-        }
         shell.advance_secrets(now_ns, surface.viewport(), place, &mut damage);
         if damage.is_empty() {
             return true;
@@ -2360,16 +2135,44 @@ mod program {
                 surface.close();
                 return Carried::Quit;
             }
-            Acted::Elevate(asked) => {
-                // Submitted, not awaited: the broker answers only once the
-                // program it started has exited, and a window that waited
-                // would stop drawing for the whole of it.
-                let verdict = submit_elevate(desks.elevator, asked.clone());
-                let landed = verdict.is_some();
-                if let Some(verdict) = verdict {
-                    shell.adopt_elevation(verdict);
+            Acted::Authorise(task) => {
+                // Submitted, not awaited: the desktop puts its prompt up from
+                // its own loop, and what the task came to arrives as an event.
+                let Some(window_id) = surface.window.window_id() else {
+                    shell.adopt_authorisation(Authorised::Refused(String::from(
+                        "The settings window is not open.",
+                    )));
+                    return Carried::Answered;
+                };
+                Carried::answered_if(desks.desktop.submit(
+                    shell,
+                    &DesktopAsk::Authorise {
+                        window_id,
+                        task: **task,
+                    },
+                ))
+            }
+            Acted::Authorised(AuthorisedOutcome::Captured { exit_code, .. }) => {
+                // What it printed is fetched before the pane is told.
+                let Some(window_id) = surface.window.window_id() else {
+                    shell.adopt_authorisation(Authorised::Refused(String::from(
+                        "The settings window is not open.",
+                    )));
+                    return Carried::Answered;
+                };
+                Carried::answered_if(desks.desktop.submit(
+                    shell,
+                    &DesktopAsk::TakeOutput {
+                        window_id,
+                        exit_code: *exit_code,
+                    },
+                ))
+            }
+            Acted::Authorised(outcome) => {
+                if let Some(authorised) = authorised_of(*outcome) {
+                    shell.adopt_authorisation(authorised);
                 }
-                Carried::answered_if(landed)
+                Carried::Answered
             }
             Acted::Apply(document) => {
                 // Submitted, not awaited: the answer arrives on the wake
@@ -2426,7 +2229,8 @@ mod program {
                 );
                 Carried::Nothing
             }
-            Acted::Idle | Acted::Changed | Acted::Whole => Carried::Nothing,
+            // The loop opens the chooser: it holds the window.
+            Acted::Idle | Acted::Changed | Acted::Whole | Acted::ChooseZone => Carried::Nothing,
         };
         if carried != Carried::Nothing {
             shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
@@ -2487,10 +2291,386 @@ mod program {
         true
     }
 
+    /// The wall clock's reading, where it has been set.
+    fn wall_now() -> Option<Time64> {
+        tairix_rt::wall_time()
+            .ok()
+            .filter(|reading| reading.state().is_set())
+            .map(|reading| reading.time())
+    }
+
+    /// The zone chooser: an owned dialog window over the zone store's places,
+    /// the machine's zone first.
+    struct ZoneChooser {
+        pane: WindowPane,
+        surface: Surface,
+        dialog: PlaceDialog,
+        owed: Owed,
+        written: Minute,
+    }
+
+    impl ZoneChooser {
+        /// Open the chooser over the shell's zone rows, held by the settings
+        /// window, and draw it; a chooser that cannot open says why in an
+        /// alert.
+        fn open(
+            shell: &Shell,
+            window: &mut SettingsWindow,
+            endpoint: u64,
+            (themes, desktop): (&ThemeRegistry, &Desktop),
+        ) -> Option<Self> {
+            let mut opened =
+                Self::opened(shell, window, endpoint, (themes.active(), desktop.scale()));
+            if let Some(chooser) = opened.as_mut() {
+                if chooser
+                    .present(window.window.client(), desktop.scale(), themes.active())
+                    .is_err()
+                {
+                    app::report(APP_NAME, "the zone chooser could not be drawn");
+                }
+            }
+            opened
+        }
+
+        /// The chooser's window, opened and owing its whole first frame.
+        fn opened(
+            shell: &Shell,
+            window: &mut SettingsWindow,
+            endpoint: u64,
+            (theme, scale): (&Theme, Scale),
+        ) -> Option<Self> {
+            let owner = window.window.window_id();
+            let refused = |window: &mut SettingsWindow, detail: &str| {
+                let _ = app::refuse(
+                    window.window.client(),
+                    (APP_NAME, endpoint),
+                    owner,
+                    "The time zone cannot be chosen",
+                    detail,
+                );
+            };
+            let now = wall_now();
+            let Some((rows, held)) = shell.zone_rows(now) else {
+                refused(
+                    window,
+                    "The desktop's list of time zones could not be read.",
+                );
+                return None;
+            };
+            let dialog = zone::dialog(rows, held);
+            let (width, height) = dialog.opening_extent(scale, theme);
+            let (Some(owner), Some(server), Some(surface)) = (
+                owner,
+                window.window.client().session(),
+                Surface::new(width, height),
+            ) else {
+                refused(window, "The settings window is not open.");
+                return None;
+            };
+            let opened = WindowPane::open_dialog(
+                window.window.client(),
+                (owner, server),
+                endpoint,
+                &app::mode_for(width, height),
+                DialogModality::OwnerModal,
+                dialog.title(),
+            );
+            match opened {
+                Ok(pane) => {
+                    let mut owed = Owed::new();
+                    owed.owe_whole();
+                    Some(Self {
+                        pane,
+                        surface,
+                        dialog,
+                        owed,
+                        written: Minute::of(now),
+                    })
+                }
+                Err(err) => {
+                    refused(window, &alloc::format!("{err}"));
+                    None
+                }
+            }
+        }
+
+        /// Route one of the chooser's own events, answering what it came to.
+        fn route(
+            &mut self,
+            event: &WindowEvent,
+            client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+            desktop: &Desktop,
+            theme: &Theme,
+        ) -> Option<PlaceOutcome> {
+            let scale = desktop.scale();
+            let mode = *self.pane.mode();
+            let bounds = Rect::new(0, 0, mode.width_px, mode.height_px);
+            let timing = PressTiming {
+                now_ns: tairix_rt::clock_get(),
+                double_click: desktop.info().double_click(),
+            };
+            let mut damage = tairix_controls::damage::sink();
+            let mut outcome = None;
+            match *event {
+                WindowEvent::Pointer { x, y, action, .. } => {
+                    for input in pointer_input_events(action, pointer_point(x, y)) {
+                        outcome = outcome.or(self.dialog.on_pointer(
+                            &input,
+                            timing,
+                            bounds,
+                            scale,
+                            theme,
+                            &mut damage,
+                        ));
+                    }
+                }
+                WindowEvent::Scrolled { x, y, dx, dy, .. } => {
+                    for input in scroll_input_events(pointer_point(x, y), dx, dy) {
+                        outcome = outcome.or(self.dialog.on_pointer(
+                            &input,
+                            timing,
+                            bounds,
+                            scale,
+                            theme,
+                            &mut damage,
+                        ));
+                    }
+                }
+                WindowEvent::Key { key, .. } => {
+                    if let InputEvent::KeyPressed { key, modifiers } = key_input_event(key) {
+                        outcome =
+                            self.dialog
+                                .on_key(key, modifiers, bounds, scale, theme, &mut damage);
+                    }
+                }
+                WindowEvent::Focus { focused: false, .. } => {
+                    self.dialog.pointer_left(bounds, scale, theme, &mut damage);
+                }
+                WindowEvent::CloseRequested { .. } => outcome = Some(PlaceOutcome::Cancelled),
+                WindowEvent::Resized {
+                    width_px,
+                    height_px,
+                    ..
+                } => {
+                    let mode = app::mode_for(width_px, height_px);
+                    match self.pane.resize_with(client, &mode, &mut self.surface) {
+                        Fitted::Adopted => self.owed.owe_whole(),
+                        Fitted::Deferred => {}
+                        Fitted::Kept => app::report(APP_NAME, app::SIZE_KEPT),
+                    }
+                }
+                WindowEvent::ContentReleased { .. } => self.pane.release_frames(),
+                WindowEvent::RedrawRequested { .. } => self.owed.owe_whole(),
+                _ => {}
+            }
+            self.owed.owe(&mode, Repaint::Reported, &damage);
+            outcome
+        }
+
+        /// Paint and present what the chooser owes; nothing while the
+        /// session holds none of its pixels.
+        fn present(
+            &mut self,
+            client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+            scale: Scale,
+            theme: &Theme,
+        ) -> Result<(), Errno> {
+            if self.pane.content_released() {
+                return Ok(());
+            }
+            let mode = *self.pane.mode();
+            let Some(parts) = self.owed.take(&mode) else {
+                return Ok(());
+            };
+            let bounds = Rect::new(0, 0, mode.width_px, mode.height_px);
+            for rect in parts.rects() {
+                let dialog = &self.dialog;
+                self.surface
+                    .with_clip(rect.x, rect.y, rect.width_px, rect.height_px, |surface| {
+                        dialog.render(surface, bounds, scale, theme);
+                    });
+            }
+            self.pane.present_list(client, &self.surface, &parts)
+        }
+
+        /// Rewrite the readings once the minute has turned and present what
+        /// that moved, answering the monotonic instant the next minute turns
+        /// at; nothing while the clock is not set.
+        fn keep_current(
+            &mut self,
+            shell: &Shell,
+            client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+            (theme, scale): (&Theme, Scale),
+        ) -> Option<u64> {
+            let now = wall_now()?;
+            let mode = *self.pane.mode();
+            let bounds = Rect::new(0, 0, mode.width_px, mode.height_px);
+            let mut damage = tairix_controls::damage::sink();
+            shell.refresh_zone_readings(
+                (&mut self.dialog, &mut self.written),
+                now,
+                (bounds, scale, theme),
+                &mut damage,
+            );
+            self.owed.owe(&mode, Repaint::Reported, &damage);
+            if self.present(client, scale, theme).is_err() {
+                app::report(APP_NAME, "the zone chooser could not be drawn");
+            }
+            let into = u64::try_from(now.secs().rem_euclid(60))
+                .unwrap_or(0)
+                .saturating_mul(u64::from(NANOS_PER_SEC))
+                .saturating_add(u64::from(now.subsec_nanos()));
+            let minute = 60 * u64::from(NANOS_PER_SEC);
+            Some(tairix_rt::clock_get().saturating_add(minute.saturating_sub(into)))
+        }
+
+        /// Take the chooser off the screen.
+        fn close(self, client: &mut tairix_window::WindowClient<app::RtWindowTransport>) {
+            if let Err(err) = self.pane.close(client) {
+                app::report(
+                    APP_NAME,
+                    format_args!("the zone chooser would not close ({err})"),
+                );
+            }
+        }
+    }
+
+    /// Serve `event` where it is the zone chooser's own, answering `None`
+    /// where it is not: what the chooser chose is posted as any other choice
+    /// is, and it closes on a choice or a cancel. A desktop that `redrew`
+    /// owes the chooser its whole frame too.
+    ///
+    /// The `Err` is the settings window's refused present, which ends the
+    /// program.
+    fn serve_chooser(
+        (event, redrew): (&WindowEvent, bool),
+        zones: &mut Option<ZoneChooser>,
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+        (desks, pictures): (&mut Desks<'_>, &mut Pictures),
+    ) -> Option<Result<(), Errno>> {
+        let chooser = zones.as_mut()?;
+        if redrew {
+            chooser.owed.owe_whole();
+        }
+        if event.window_id() != Some(chooser.pane.id()) {
+            return None;
+        }
+        let chosen = match chooser.route(event, surface.window.client(), desktop, themes.active()) {
+            Some(PlaceOutcome::Chose { row }) => Some(row),
+            Some(PlaceOutcome::Cancelled) => None,
+            None => {
+                present_chooser(zones, surface, desktop, themes);
+                return Some(Ok(()));
+            }
+        };
+        if let Some(chooser) = zones.take() {
+            chooser.close(surface.window.client());
+        }
+        let Some(ShellOutcome::Apply(document)) = chosen.map(|row| shell.choose_zone(row)) else {
+            return Some(Ok(()));
+        };
+        let mut damage = tairix_controls::damage::sink();
+        let _ = act(
+            &Acted::Apply(document),
+            (surface, shell),
+            (themes, desktop),
+            (desks, pictures),
+            &mut damage,
+        );
+        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+        let whole = DamageRect::full(&surface.mode);
+        Some(surface.present(shell, themes, desktop.scale(), whole))
+    }
+
+    /// Present what the zone chooser owes, if one is open; a refusal is
+    /// stated and the chooser stays.
+    fn present_chooser(
+        zones: &mut Option<ZoneChooser>,
+        surface: &mut SettingsWindow,
+        desktop: &Desktop,
+        themes: &ThemeRegistry,
+    ) {
+        if let Some(chooser) = zones.as_mut() {
+            if chooser
+                .present(surface.window.client(), desktop.scale(), themes.active())
+                .is_err()
+            {
+                app::report(APP_NAME, "the zone chooser could not be drawn");
+            }
+        }
+    }
+
+    /// What waiting for the loop's next event came to.
+    enum Waited {
+        /// An event to apply.
+        Event(WindowEvent),
+        /// Nothing to apply: wait again.
+        Again,
+        /// The program ends with this status.
+        Ended(i32),
+    }
+
+    /// Wait for the next event. A wait that ended without one is the desktop
+    /// notice, and a malformed frame from the authenticated session is
+    /// refused rather than guessed at: either way the round is the re-theme
+    /// alone.
+    fn wait_event(
+        events: &mut WindowEvents<RtEventSource<'_>>,
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&mut ThemeRegistry, &mut Desktop),
+        (desktop_moved, pictures): (&Cell<bool>, &mut Pictures),
+    ) -> Waited {
+        match events.wait(surface.window.client()) {
+            Ok(Some(event)) => Waited::Event(event),
+            Ok(None) | Err(EventError::Undecodable(_)) => {
+                if adopt_desktop_round(surface, shell, themes, desktop, desktop_moved, pictures) {
+                    Waited::Again
+                } else {
+                    Waited::Ended(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"))
+                }
+            }
+            Err(EventError::Refused(refused)) => {
+                app::report(APP_NAME, refused);
+                Waited::Again
+            }
+            Err(EventError::Mailbox(_)) => {
+                Waited::Ended(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost"))
+            }
+        }
+    }
+
+    /// When the window next has something timed to do: a password marker's
+    /// next step, a held scrollbar press's, or the zone chooser's next minute,
+    /// whose readings are brought up to date here first.
+    fn next_due(
+        shell: &mut Shell,
+        zones: &mut Option<ZoneChooser>,
+        surface: &mut SettingsWindow,
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+    ) -> Option<u64> {
+        // A verdict that landed while parked may have answered it.
+        let held = shell.repeat_deadline(tairix_rt::clock_get());
+        let turn = zones.as_mut().and_then(|chooser| {
+            chooser.keep_current(
+                shell,
+                surface.window.client(),
+                (themes.active(), desktop.scale()),
+            )
+        });
+        shell
+            .secret_deadline_ns()
+            .into_iter()
+            .chain(held)
+            .chain(turn)
+            .min()
+    }
+
     /// The event loop: park, apply, repaint.
     fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
         let Session {
             surface,
+            endpoint,
             desktop,
             themes,
             shell,
@@ -2500,45 +2680,26 @@ mod program {
             pictures,
             mut desks,
         } = session;
-        loop {
+        let mut zones: Option<ZoneChooser> = None;
+        let code = 'serve: loop {
             if !catch_up(
                 (surface, shell),
                 (themes, desktop),
                 (pictures, &mut desks),
                 pressure_moved,
             ) {
-                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+                break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
-            // A verdict that landed while parked may have answered it.
-            surface.settle_question(shell, themes, desktop.scale());
-            let held = shell.repeat_deadline(tairix_rt::clock_get());
-            timed_due.set(shell.secret_deadline_ns().into_iter().chain(held).min());
-            let event = match events.wait(surface.window.client()) {
-                Ok(Some(event)) => event,
-                // A wait that ended without an event is the desktop notice; a
-                // malformed frame from the authenticated session is refused
-                // rather than guessed at. Either way the round is the
-                // re-theme alone.
-                Ok(None) | Err(EventError::Undecodable(_)) => {
-                    if !adopt_desktop_round(
-                        surface,
-                        shell,
-                        themes,
-                        desktop,
-                        desktop_moved,
-                        pictures,
-                    ) {
-                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
-                    }
-                    continue;
-                }
-                Err(EventError::Refused(refused)) => {
-                    app::report(APP_NAME, refused);
-                    continue;
-                }
-                Err(EventError::Mailbox(_)) => {
-                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
-                }
+            timed_due.set(next_due(shell, &mut zones, surface, (themes, desktop)));
+            let event = match wait_event(
+                &mut events,
+                (surface, shell),
+                (themes, desktop),
+                (desktop_moved, pictures),
+            ) {
+                Waited::Event(event) => event,
+                Waited::Again => continue,
+                Waited::Ended(code) => break 'serve code,
             };
 
             let redraw = adopt_desktop(shell, desktop, themes, desktop_moved);
@@ -2546,9 +2707,28 @@ mod program {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 pictures.restart();
             }
+            match serve_chooser(
+                (&event, redraw),
+                &mut zones,
+                (surface, shell),
+                (themes, desktop),
+                (&mut desks, pictures),
+            ) {
+                Some(Ok(())) => continue,
+                Some(Err(_)) => {
+                    break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused")
+                }
+                None => {}
+            }
             let mut damage = tairix_controls::damage::sink();
-            let acted =
-                apply_delivered(surface, shell, themes, desktop.scale(), &event, &mut damage);
+            let acted = apply_event(
+                surface,
+                shell,
+                themes.active(),
+                desktop.scale(),
+                &event,
+                &mut damage,
+            );
             let carried = act(
                 &acted,
                 (surface, shell),
@@ -2557,40 +2737,46 @@ mod program {
                 &mut damage,
             );
             if carried == Carried::Quit {
-                return 0;
+                break 'serve 0;
             }
-            surface.settle_question(shell, themes, desktop.scale());
+            if acted == Acted::ChooseZone && zones.is_none() {
+                zones = ZoneChooser::open(shell, surface, endpoint, (themes, desktop));
+            }
             let landed = request_readings(shell, &mut desks);
-            if landed {
-                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-            }
             if matches!(event, WindowEvent::ContentReleased { .. }) {
                 surface.window.release_frames();
                 continue;
             }
-            // An answer adopted at once rebuilt the pane's rows, which report
-            // nothing of their own; another pane moves the trail and the strip
-            // too.
-            if landed || carried == Carried::Answered {
-                damage.add(shell.pane_region(surface.viewport(), desktop.scale(), themes.active()));
-            }
-            let repaint = if redraw || carried == Carried::Moved || matches!(acted, Acted::Whole) {
-                Repaint::Whole
-            } else {
-                // A round that changed something but reported no rectangle
-                // presents the whole window rather than leave a stale frame.
-                Repaint::reported_if(!matches!(acted, Acted::Idle) || !damage.is_empty())
+            let round = Round {
+                whole: redraw || carried == Carried::Moved || matches!(acted, Acted::Whole),
+                acted: !matches!(acted, Acted::Idle),
+                answered: landed || carried == Carried::Answered,
             };
-            let Some(area) = present_damage(&surface.mode, repaint, &damage) else {
-                continue;
-            };
-            if surface
-                .present(shell, themes, desktop.scale(), area)
-                .is_err()
-            {
-                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+            if present_round(round, &mut damage, (surface, shell), (themes, desktop)).is_err() {
+                break 'serve app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
+        };
+        desks.see_out();
+        code
+    }
+
+    /// Present what one round changed: the pane laid out again where its rows
+    /// moved, then the damage reported or the pane reshaped.
+    fn present_round(
+        round: Round,
+        damage: &mut Region,
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+    ) -> Result<(), Errno> {
+        if round.relays() {
+            shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
         }
+        let pane = shell.pane_region(surface.viewport(), desktop.scale(), themes.active());
+        let repaint = round.repaint(damage, pane);
+        let Some(area) = present_damage(&surface.mode, repaint, damage) else {
+            return Ok(());
+        };
+        surface.present(shell, themes, desktop.scale(), area)
     }
 
     /// Read everything the window's first frame needs, before it opens.
@@ -2613,6 +2799,8 @@ mod program {
         shell.adopt_zones(fetch_zones(surface.window.client()));
         // The resolutions on offer are what the output can show.
         shell.adopt_output(output_of(desktop));
+        // And *Default* is the machine's own zone, as the desktop states it.
+        shell.adopt_machine_zone(desktop.info().machine_zone());
         // The font store is read once per boot, so its families are too.
         shell.adopt_text_choices(tairix_font::families(), *themes.selected().fonts());
         // A pane the launch named, if it named one: a fresh process is
@@ -2663,7 +2851,6 @@ mod program {
         machine: Arc<Machine>,
         network: Arc<Network>,
         accounts: Arc<Accounts>,
-        elevator: Arc<Elevator>,
         asker: Arc<Asker>,
         desktop: Arc<DesktopAsker>,
         sound: Arc<SoundDesk>,
@@ -2739,10 +2926,6 @@ mod program {
                     Accounts::new(read_accounts, (), tairix_rt::sync::WorkerWake::create()),
                     "account-readings",
                 ),
-                elevator: started(
-                    Elevator::new(send_elevate, (), tairix_rt::sync::WorkerWake::create()),
-                    "elevated-run",
-                ),
                 asker: started(asker, "preview-request"),
                 desktop: started(desktop, "desktop-request"),
                 sound: started(
@@ -2760,7 +2943,7 @@ mod program {
 
         /// Each desk's wake, the token it is watched under, and how a refused
         /// watch is stated.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 10] {
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 9] {
             [
                 (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
                 (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
@@ -2778,11 +2961,6 @@ mod program {
                     self.accounts.wake(),
                     ACCOUNTS_TOKEN,
                     "account-readings wake refused",
-                ),
-                (
-                    self.elevator.wake(),
-                    ELEVATE_TOKEN,
-                    "elevated-run wake refused",
                 ),
                 (self.asker.wake(), ASK_TOKEN, "preview-request wake refused"),
                 (
@@ -2862,10 +3040,10 @@ mod program {
             self.machine.stop();
             self.network.stop();
             self.accounts.stop();
-            self.elevator.stop();
             self.asker.stop();
             self.sound.stop();
             self.desktop.stop();
+            self.effects.stop();
         }
     }
 
@@ -2951,8 +3129,6 @@ mod program {
             mode,
             title: "",
             artwork: icon_cache(frame_bytes),
-            opened: None,
-            question: None,
         };
 
         let binding = match app::bind_event_mailbox() {
@@ -2999,6 +3175,7 @@ mod program {
         run_event_loop(
             Session {
                 surface: &mut surface,
+                endpoint: event_endpoint,
                 desktop: &mut desktop,
                 themes: &mut themes,
                 shell: &mut shell,

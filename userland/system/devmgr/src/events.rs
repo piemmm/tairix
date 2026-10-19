@@ -97,12 +97,12 @@ pub const NETWORK_IFCONFIG_REJECTED: EventId = EventId(13_016);
 /// A readable `/System/Settings/` configuration document could not be
 /// parsed, so nothing was delivered from it.
 ///
-/// The administrator-writable override is hand-editable, and a document the
-/// engine cannot fully understand is refused whole rather than half-applied.
+/// A settings document the engine cannot fully understand is refused whole
+/// rather than half-applied; the `path` names the layer that was read.
 /// Recorded at `Warn`: staying on the safe defaults is correct, but silently
-/// ignoring an operator's edit is not — without this the file would simply
-/// appear to have no effect. (`configure` renders canonically, so this
-/// surfaces a hand edit.)
+/// ignoring the document is not — without this it would simply appear to
+/// have no effect. (The settings service renders canonically, so this
+/// surfaces an image built wrong or a document damaged on disk.)
 pub const CONFIG_DOCUMENT_MALFORMED: EventId = EventId(13_017);
 
 /// A discovered audio device-channel node (`compatible = "tairix,audiochan"`,
@@ -156,6 +156,11 @@ pub const NODE_DRIVER_ENDED: EventId = EventId(13_029);
 /// meet, so it is reloaded after `delay_ms`, restart `attempt` of the
 /// node's budget. Recorded at `Warn`.
 pub const NODE_DRIVER_RESTARTING: EventId = EventId(13_030);
+/// The administrator's layer of a settings document exists but could not be
+/// read, so nothing is delivered from either layer: falling back to the
+/// image's would act on settings the administrator replaced. Carries the
+/// `path` and the `errno`. Recorded at `Warn`.
+pub const CONFIG_DOCUMENT_UNREADABLE: EventId = EventId(13_031);
 
 /// A decision about one node, so every one is recorded with its own id and
 /// message.
@@ -257,7 +262,7 @@ mod tests {
     use super::*;
     use crate::testsink::RecordingSink;
 
-    const ALL: [EventId; 30] = [
+    const ALL: [EventId; 31] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -288,6 +293,7 @@ mod tests {
         READINESS_REFUSED,
         NODE_DRIVER_ENDED,
         NODE_DRIVER_RESTARTING,
+        CONFIG_DOCUMENT_UNREADABLE,
     ];
 
     #[test]

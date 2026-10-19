@@ -12,13 +12,14 @@ use tairix_controls::PressureKind;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{SignalRole, Theme};
 
 use super::{
     cell_width, compile, grid_columns, render, BlockBody, CoreCell, ItemBody, PaneBlock, PaneHero,
     PaneWindow,
 };
 use crate::view::reading::Reading;
+use crate::view::resources::Trace;
 
 /// A grid of `count` cores, each with a reading of its own.
 fn cores(count: usize) -> PaneBlock {
@@ -414,6 +415,40 @@ fn a_traces_axis_row_states_its_own_span_and_that_its_edge_is_now() {
         "the window is {seconds} s, so a hard-coded -60 s would be a fabricated span"
     );
     assert_eq!(super::AXIS_NOW, "now");
+}
+
+/// A trend's chart box closes its plate's bottom edge itself, so its block
+/// claims no row past it. The regression: the scheduler graph's plate ran a
+/// whole empty row under its axis.
+#[test]
+fn a_trend_block_closes_its_plate_with_its_chart() {
+    let hero = PaneHero::facts(Reading::measured("8.5"), "/ 16.0 GiB");
+    let block = super::PaneBlock::full(
+        "SCHEDULER — PER SECOND",
+        BlockBody::Trend {
+            trace: Trace::Within {
+                whole: SignalRole::Cpu,
+                part: SignalRole::Workload,
+                totals: alloc::vec![500, 900],
+                parts: alloc::vec![100, 200],
+            },
+            caption: alloc::string::String::from("1024 /s full scale"),
+        },
+    );
+    let items = compile(&hero, core::slice::from_ref(&block), PressureKind::Cpu, 6);
+    let plate = items
+        .iter()
+        .find(|item| matches!(item.body, super::ItemBody::Plate) && item.row > 0)
+        .expect("the block plates itself");
+    let trend = items
+        .iter()
+        .find(|item| matches!(item.body, super::ItemBody::Trend { .. }))
+        .expect("the block draws its trend");
+    assert_eq!(
+        plate.row + plate.rows,
+        trend.row + trend.rows,
+        "the plate ends where the trend does"
+    );
 }
 
 /// A block's plate closes below its last reading rather than through it: the

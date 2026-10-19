@@ -7,13 +7,14 @@ use core::fmt::{self, Write};
 use crate::layout::{
     record, store_checksum, Header, NameRecord, PlaceRecord, RegionRecord, Sections,
     TrailingRecord, TransitionRecord, TypeRecord, ZoneRecord, ABBREV_LEN, MAX_ABBREV, MAX_COMMENT,
-    MAX_OFFSET, MAX_REGION_NAME, MAX_RELEASE, MAX_RULE_TIME, MAX_STORE_LEN, MAX_ZONE_NAME,
-    NAME_LEN, NO_TRAILING, PLACE_LEN, REGION_LEN, TRAILING_LEN, TRANSITION_LEN, TYPE_LEN, ZONE_LEN,
+    MAX_OFFSET, MAX_REGION_NAME, MAX_RELEASE, MAX_RULE_TIME, MAX_STORE_LEN, NAME_LEN, NO_TRAILING,
+    PLACE_LEN, REGION_LEN, TRAILING_LEN, TRANSITION_LEN, TYPE_LEN, ZONE_LEN,
 };
 use tairix_util::utf8::is_hidden;
 
 use crate::pattern::Pattern;
 use crate::zone::Zone;
+use crate::Weekday;
 
 /// Why a store was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -99,6 +100,8 @@ pub struct Region<'a> {
     pub code: &'a str,
     /// Its English name.
     pub name: &'a str,
+    /// The day its calendar week begins on.
+    pub first_weekday: Weekday,
     /// Its numeric date.
     pub date: Pattern<'a>,
     /// Its time of day.
@@ -134,22 +137,23 @@ impl Place<'_> {
         }
         Ok(())
     }
+
+    /// Write the place as a reader names it: its city, then the name of the
+    /// region `info` holds it under.
+    ///
+    /// # Errors
+    ///
+    /// The writer's own failure.
+    pub fn write_label(&self, info: &ZoneInfo<'_>, out: &mut dyn Write) -> fmt::Result {
+        self.write_city(out)?;
+        match info.region(self.region) {
+            Some(region) => write!(out, ", {}", region.name),
+            None => Ok(()),
+        }
+    }
 }
 
-/// Whether `text` has a zone name's shape: one to [`MAX_ZONE_NAME`] bytes of
-/// ASCII letters, digits, `_`, `-` and `+`, in components joined by single
-/// `/`s.
-#[must_use]
-pub fn is_zone_name(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= MAX_ZONE_NAME
-        && text.split('/').all(|component| {
-            !component.is_empty()
-                && component
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+'))
-        })
-}
+pub use tairix_abi::zone::is_zone_name;
 
 /// Whether `text` is an ISO 3166-1 alpha-2 code's shape.
 #[must_use]
@@ -442,6 +446,13 @@ impl<'a> ZoneInfo<'a> {
         self.region(code)
     }
 
+    /// The place the zone table lists zone `name` as, by that name; `None`
+    /// for a zone it lists nowhere, such as a link or `Etc/UTC`.
+    #[must_use]
+    pub fn place(&'a self, name: &str) -> Option<Place<'a>> {
+        self.places().find(|place| place.zone.name() == name)
+    }
+
     /// Every place, as the IANA zone table lists them.
     pub fn places(&'a self) -> impl Iterator<Item = Place<'a>> + 'a {
         (0..self.header.place_count).filter_map(move |index| {
@@ -519,6 +530,7 @@ impl<'a> ZoneInfo<'a> {
         Some(Region {
             code: self.stored_code(index)?,
             name: self.string(region.name)?,
+            first_weekday: region.first_weekday,
             date: Pattern::date(self.string(region.date)?)?,
             time: Pattern::time(self.string(region.time)?)?,
         })

@@ -635,9 +635,9 @@ fn signal_file() -> Result<AppStoreFile, String> {
     AppStoreFile::at(tairix_test_audio_wire::SIGNAL_FILE, bytes)
 }
 
-/// A planted `/System/Settings/` configuration file, addressed by the ABI's
-/// own volume-relative path so a fixture and the pre-unlock reader that
-/// resolves it can never name different files.
+/// The image's default of a settings document, planted at the ABI's own
+/// volume-relative path so a fixture and the readers that resolve it can never
+/// name different files.
 fn planted_config(which: SystemConfigFile, document: &str) -> AppStoreFile {
     AppStoreFile {
         components: which
@@ -652,7 +652,7 @@ fn planted_config(which: SystemConfigFile, document: &str) -> AppStoreFile {
 /// The composed store files the ECN vertical's disk plants: the stream
 /// vertical's `tcpecho`-augmented set (so the client fixture and the standard
 /// service bundles are on disk exactly as the stream vertical plants them)
-/// **plus** a planted `/System/Settings/Configuration/system.conf`
+/// **plus** a planted `/System/Defaults/Configuration/system.conf`
 /// ([`tairix_test_netstack_wire::ECN_SYSTEM_CONF`]) that turns `net.tcp.ecn`
 /// on stack-wide (`plans/NETWORK.md` N13). `devmgr` reads the planted store
 /// pre-unlock over the read-only `/System` endpoint and delivers `tcp_ecn =
@@ -712,7 +712,7 @@ pub fn tcpserve_store_files(
 /// The composed store files the static-addressing vertical's disk plants:
 /// the shared [`app_store_files`] set (so the `netstack`/`devmgr` service
 /// bundles are on disk exactly as a real image ships them) **plus** the
-/// planted `/System/Settings/Network/network.conf`
+/// planted `/System/Defaults/Network/network.conf`
 /// ([`tairix_test_netstack_wire::STATIC_NETWORK_CONF_AARCH64`]) that binds the NIC
 /// by `match.node` and assigns it a static IPv6 address (`plans/NETWORK.md`
 /// N9b-3-2-β-2-ii-b). No test-only *bundle* is added — the config file is
@@ -753,7 +753,7 @@ pub fn static_net_store_files(
 
 /// The composed store files the bond-failover vertical's disk plants: the
 /// shared [`app_store_files`] set **plus** the planted
-/// `/System/Settings/Network/network.conf`
+/// `/System/Defaults/Network/network.conf`
 /// ([`tairix_test_netstack_wire::BOND_NETWORK_CONF`]) that binds two NICs by
 /// `match.mac` as the members of one active-backup bond carrying a static
 /// IPv6 address (`plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond). The sibling of
@@ -786,7 +786,7 @@ pub fn bond_net_store_files(
 
 /// The composed store files the DHCPv4 vertical's disk plants: the shared
 /// [`app_store_files`] set **plus** the planted
-/// `/System/Settings/Network/network.conf` (the per-arch
+/// `/System/Defaults/Network/network.conf` (the per-arch
 /// `tairix_test_netstack_wire::DHCP_NETWORK_CONF_*`) that binds the
 /// NIC by `match.node`, selects `ipv4.method dhcp`, and disables IPv6 (DHCP
 /// D3). The sibling of [`static_net_store_files`] — same shape, a different
@@ -830,7 +830,7 @@ pub fn dhcp_net_store_files(
 
 /// The composed store files the DHCPv6 vertical's disk plants: the shared
 /// [`app_store_files`] set **plus** the planted
-/// `/System/Settings/Network/network.conf` (the per-arch
+/// `/System/Defaults/Network/network.conf` (the per-arch
 /// `tairix_test_netstack_wire::DHCP6_NETWORK_CONF_*`) that binds the NIC by
 /// `match.node`, selects `ipv6.method dhcp`, and disables IPv4 (DHCP D4c).
 /// The IPv6 sibling of [`dhcp_net_store_files`] — same shape, a different

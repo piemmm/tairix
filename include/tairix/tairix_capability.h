@@ -70,5 +70,6 @@
 #define TAIRIX_CAP_AUDIO_DEVICE ((uint16_t)48u)
 #define TAIRIX_CAP_AUDIO_CAPTURE ((uint16_t)49u)
 #define TAIRIX_CAP_NET_DISCOVER_ALL ((uint16_t)50u)
+#define TAIRIX_CAP_SETTINGS_WRITE ((uint16_t)51u)
 
 #endif /* TAIRIX_CAPABILITY_H */

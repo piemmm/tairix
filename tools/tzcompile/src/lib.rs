@@ -57,7 +57,7 @@ const ZONE_TAB: Pinned = Pinned {
 const REGIONS: Pinned = Pinned {
     path: "data/cldr/regions.tsv",
     bytes: include_bytes!("../data/cldr/regions.tsv"),
-    sha256: "0ddbaf6e9e3334bf76be29a42d6449d3c500633acf4d7e5d33b79b427836d71e",
+    sha256: "0e3b5bfbc001d790cf6b35c8c42956549f475ba48f135cf50bf1b17c8b3d1719",
 };
 
 /// Why the store could not be compiled.

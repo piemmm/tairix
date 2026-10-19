@@ -34,7 +34,8 @@ use crate::cursor::Cursor;
 use crate::frame::{Present, Scanout};
 use crate::scene::Scene;
 use crate::verify::{Answer, Checked};
-use crate::wait::{frame_budget, park_timeout, Cooldown, Idle};
+use crate::wait::{frame_budget, park_timeout, Idle};
+use tairix_greeter::Cooldown;
 
 /// What adopting one of the authority's answers did, beyond what it owes the
 /// frame ([`draw`](LoginScreen::draw)).

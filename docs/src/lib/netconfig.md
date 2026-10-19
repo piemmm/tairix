@@ -1,22 +1,31 @@
 # `tairix-netconfig` — the network interface-configuration store engine
 
-`lib/netconfig` is the single definition of TAIRiX's administrator-settable
-per-interface network configuration store: the document at
-`/System/Settings/Network/network.conf` (`tairix_netconfig::CONFIG_PATH`).
-It owns the per-interface line grammar, the **closed** key registry, each
-key's typed value set, the bounded fail-closed parser, and the canonical
-render. The image builder and the installer write the store through this
-engine, and the `configure` command app reads it through the same one as
-its second key registry; the one runtime reader — the device manager, which maps it into the
+`lib/netconfig` is the single definition of TAIRiX's per-interface network
+configuration, `network.conf`: the per-interface line grammar, the **closed**
+key registry, each key's typed value set, the bounded fail-closed parser, and
+the canonical render. The settings service writes the document through this
+engine, `configure` checks an edit through it before asking the service, and
+the one runtime reader — the device manager, which maps it into the
 per-interface admin messages `netstack` applies — reads it through the same
 engine, so producer and consumer can never diverge.
 
-`CONFIG_PATH` is the document's `/System` **view** path. The bytes live on
-the read-only `/System` volume at the volume-relative path the ABI's closed
-`SystemConfigFile` set names, because the device manager reads it over the
-pre-unlock store endpoint (see `docs/src/userland/netstack.md`); at runtime
-the view path resolves to the writable sub-mount on the root volume,
-which no bootstrap client can reach.
+## Two layers
+
+The document has two layers (`tairix_netconfig::LAYERS`):
+
+- the image's own default, read-only on the `/System` volume at
+  `/System/Defaults/Network/network.conf`, which the device manager also reads
+  before the root is mounted, over the pre-unlock store endpoint (see
+  `docs/src/userland/netstack.md`);
+- the administrator's, at `/System/Settings/Network/network.conf`
+  (`tairix_netconfig::CONFIG_PATH`) on the writable root, which only the
+  settings service writes (`docs/src/userland/settingsd.md`).
+
+The administrator's layer replaces the image's whole once it exists, and the
+service makes every change to the document as it stands. Both layers are
+readable by the services group alone, because the document names the
+machine's hardware and its addresses; an elevated administrator reads it
+through the settings service.
 
 ## The store
 
@@ -26,17 +35,16 @@ at most once. The document is bounded (`MAX_CONFIG_LEN`, 16 KiB;
 `MAX_INTERFACES`; `MAX_BOND_MEMBERS`) and the parser refuses — never
 guesses at — anything it does not fully understand, returning a
 `ParseError` that carries the offending 1-based line where one is
-meaningful. An **absent** store is not an error: it means "no managed
-interfaces beyond loopback" (`NetworkConfig::default`), which is how a
-fresh installation and a pre-unlock boot behave.
+meaningful. Neither layer existing is not an error: it means "no managed
+interfaces beyond loopback" (`NetworkConfig::default`).
 
-The store lives inside `/System/Settings` on the root volume, so it can only
-be read once the root is mounted — after its passphrase, when the root is
-encrypted — and `netstack` therefore parses it post-mount by construction. Write
-authority is the existing `/System/Settings` per-inode policy under the
-caller's kernel-attested identity: no new capability exists for the file
-itself; applying a changed store to the live stack is the `CAP_NET_ADMIN`
-admin reload.
+An edit is a `ConfigDraft`: `ConfigDraft::apply` takes a value or, as the
+empty value, clears the key, and `commit` checks the result whole, so a
+change spanning keys — a static interface moved to DHCP — is never refused
+for a half that is inconsistent alone. `resolve_name` splits a
+`<iface>.<suffix>` name by the rule the parser reads a line with. Applying a
+saved change to the running stack is the `CAP_NET_ADMIN` admin reload, which
+the tool that asked for the change performs.
 
 ## Interfaces are aliases bound by identity
 

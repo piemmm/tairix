@@ -82,6 +82,11 @@ use tairix_abi::session_ipc::{
     SessionRequest, SessionVerdict, SESSION_MAX_REPLY, SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
     SESSION_ZONE_STORE_LEN,
 };
+use tairix_abi::settings_ipc::{
+    decode_reply as decode_settings_reply, encode_read, encode_reply as encode_settings_reply,
+    encode_set, SettingsRequest, DOCUMENT_MAX, MAX_SETTINGS, NAME_MAX, SETTINGS_REPLY_MAX,
+    SETTINGS_REQUEST_MAX,
+};
 use tairix_abi::sound_cue::{
     decode_cue_reply, encode_cue_reply, names_policy, Answer, CueOutcome, CueRequest, Silence,
     SoundEvent, CUE_REQUEST_MAX,
@@ -109,6 +114,10 @@ use tairix_abi::touch::{
 };
 use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
+};
+use tairix_abi::window_ipc::{
+    decode_authorised_output_reply, encode_authorised_output_reply, AuthorisedOutcome, SystemTask,
+    WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
 };
 use tairix_abi::window_ipc::{
     decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
@@ -814,6 +823,12 @@ fn exercise_window_ipc(bytes: &[u8]) {
         assert_eq!(&frame[..len], bytes);
     }
     let _ = decode_menu_text_reply(bytes);
+    // A captured output re-encodes to exactly the frame it was read from.
+    if let Ok(output) = decode_authorised_output_reply(bytes) {
+        let mut frame = [0u8; WINDOW_AUTHORISED_OUTPUT_REPLY_MAX];
+        let len = encode_authorised_output_reply(&mut frame, Ok(output));
+        assert_eq!(&frame[..len], bytes);
+    }
     let _ = decode_hand_over_reply(bytes);
     // A catalog page walks a length-prefixed body, so a frame lying about
     // its own entries must refuse rather than read past it.
@@ -864,6 +879,45 @@ fn exercise_sound_cue(bytes: &[u8]) {
     }
     let answer = decode_cue_reply(bytes);
     assert_eq!(decode_cue_reply(&encode_cue_reply(answer)), answer);
+}
+
+/// Drive the settings protocol's decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted request holds only what the module admits and
+/// re-encodes to exactly the bytes accepted, as does an accepted read reply.
+fn exercise_settings_ipc(bytes: &[u8]) {
+    match SettingsRequest::decode(bytes) {
+        Ok(SettingsRequest::Read { document }) => {
+            let mut frame = [0u8; 16];
+            let len = encode_read(document, &mut frame).expect("an accepted read re-encodes");
+            assert_eq!(&frame[..len], bytes, "a read has one spelling");
+        }
+        Ok(SettingsRequest::Set { document, settings }) => {
+            let settings: std::vec::Vec<(&str, &str)> = settings.iter().collect();
+            assert!(!settings.is_empty() && settings.len() <= MAX_SETTINGS);
+            let mut values = 0;
+            for (name, value) in &settings {
+                assert!(!name.is_empty() && name.len() <= NAME_MAX, "{name:?}");
+                assert!(
+                    !name.chars().chain(value.chars()).any(char::is_control),
+                    "{name:?} = {value:?}"
+                );
+                values += value.len();
+            }
+            assert!(values <= DOCUMENT_MAX);
+            let mut frame = std::vec![0u8; SETTINGS_REQUEST_MAX];
+            let len =
+                encode_set(document, &settings, &mut frame).expect("an accepted change re-encodes");
+            assert_eq!(&frame[..len], bytes, "a change has one spelling");
+        }
+        Err(_) => {}
+    }
+    let answer = decode_settings_reply(bytes);
+    if let Ok(document) = answer {
+        let mut frame = std::vec![0u8; SETTINGS_REPLY_MAX];
+        let len =
+            encode_settings_reply(Ok(document), &mut frame).expect("an accepted reply re-encodes");
+        assert_eq!(&frame[..len], bytes, "a reply has one spelling");
+    }
 }
 
 /// Drive the pinboard channel's decoders on `bytes` (one arm of
@@ -1117,6 +1171,7 @@ fn exercise(bytes: &[u8]) {
     exercise_notify_ipc(bytes);
     exercise_pinboard_ipc(bytes);
     exercise_sound_cue(bytes);
+    exercise_settings_ipc(bytes);
     exercise_appdata_ipc(bytes);
     exercise_switchboard_ipc(bytes);
     exercise_net_socket(bytes);
@@ -1602,6 +1657,35 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
 }
 
 #[test]
+fn structured_settings_frames_with_corrupted_fields_never_panic() {
+    let network = tairix_abi::driver_store::SystemConfigFile::Network;
+    let mut change = std::vec![0u8; SETTINGS_REQUEST_MAX];
+    let len = encode_set(
+        network,
+        &[("wan.ipv4.method", "static"), ("wan.ipv4.gateway", "")],
+        &mut change,
+    )
+    .expect("the change encodes");
+    change.truncate(len);
+    let mut read = [0u8; 16];
+    let len = encode_read(network, &mut read).expect("the read encodes");
+    let mut reply = std::vec![0u8; SETTINGS_REPLY_MAX];
+    let reply_len =
+        encode_settings_reply(Ok("wan.kind ethernet\n"), &mut reply).expect("the reply encodes");
+    for seed in [change, read[..len].to_vec(), reply[..reply_len].to_vec()] {
+        let mut base = seed;
+        exercise_settings_ipc(&base);
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
+#[test]
 fn structured_discovery_inputs_with_corrupted_fields_never_panic() {
     use tairix_abi::discovery_ipc::{
         Answer, Change, CollectWriter, DiscoveryRequest, Entry, Families, Query, ServiceTypeField,
@@ -1785,6 +1869,23 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
     }
 }
 
+/// A captured task's output reply, seeded and bit-flipped: a random input
+/// rarely lands a success status word, so its length check is reached only
+/// from a seed.
+#[test]
+fn structured_authorised_output_replies_with_corrupted_fields_never_panic() {
+    let mut frame = [0u8; WINDOW_AUTHORISED_OUTPUT_REPLY_MAX];
+    let len = encode_authorised_output_reply(&mut frame, Ok(b"wan.ipv4.method dhcp\n"));
+    let base = &mut frame[..len];
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(base);
+            base[byte] ^= 1 << bit;
+        }
+    }
+}
+
 /// Every touch frame shape, seeded and bit-flipped a byte at a time: a
 /// random input never lands the magic, so the field validation — surface,
 /// buttons, count, each contact's flags and the zeroed slots past it — is
@@ -1895,6 +1996,10 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
         ElevateRequest::Verify {
             password: "hunter2",
         },
+        ElevateRequest::Authorisers {
+            program: tairix_abi::DATETIME_RUN_PATH,
+            offset: 16,
+        },
     ] {
         let len = seed
             .encode(&mut base)
@@ -1920,8 +2025,23 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
 #[test]
 fn structured_elevate_replies_with_corrupted_fields_never_panic() {
     let widest = [b'z'; ELEVATE_MAX_OUTPUT];
+    let accounts = [
+        tairix_abi::session_ipc::SessionAccount::new("Ada Lovelace", "ada", false)
+            .expect("an account"),
+        tairix_abi::session_ipc::SessionAccount::new("Root", "root", true).expect("an account"),
+    ];
+    let mut page = std::vec![0u8; tairix_abi::session_ipc::SESSION_MAX_REPLY];
+    let page_len =
+        tairix_abi::session_ipc::encode_account_page(&mut page, 2, 0, &accounts).expect("a page");
     let mut base = std::vec![0u8; ELEVATE_MAX_REPLY];
     for seed in [
+        ElevateReply::Authorisers {
+            own: true,
+            page: &page[..page_len],
+        },
+        ElevateReply::Cooling {
+            retry_after: tairix_abi::time::Duration64::from_secs(30),
+        },
         ElevateReply::Completed { exit_code: 0 },
         ElevateReply::Verified,
         ElevateReply::Launched { pid: 4210 },
@@ -2299,6 +2419,18 @@ fn window_request_alert_seeds() -> std::vec::Vec<WindowRequest> {
             .expect("a four-answer alert"),
         },
         WindowRequest::CloseAlert { alert_id: 5 },
+        WindowRequest::Authorise {
+            window_id: 3,
+            task: SystemTask::Configure(
+                tairix_abi::elevate::ElevateWords::new(&["os.loginType", "text"])
+                    .expect("within bounds"),
+            ),
+        },
+        WindowRequest::Authorise {
+            window_id: 3,
+            task: SystemTask::ShowAccounts,
+        },
+        WindowRequest::TakeAuthorisedOutput { window_id: 3 },
     ]
 }
 
@@ -2479,6 +2611,19 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         WindowEvent::AlertClosed {
             alert_id: 5,
             outcome: AlertOutcome::Dismissed,
+        }
+        .to_le_bytes(),
+        WindowEvent::Authorised {
+            window_id: 3,
+            outcome: AuthorisedOutcome::Captured {
+                exit_code: 1,
+                len: 64,
+            },
+        }
+        .to_le_bytes(),
+        WindowEvent::Authorised {
+            window_id: 3,
+            outcome: AuthorisedOutcome::Declined,
         }
         .to_le_bytes(),
         WindowEvent::FolderPicked {

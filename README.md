@@ -98,7 +98,9 @@ for filesystems, the feature section below.
 | Network map (`netmap.app`): topology, advertised services, hardware makers, passive device and OS inference | ✓ | ✓ | ✓ | — |
 | Network map active reachability probing (`netmap.app`: polite ICMP-echo sweep + TCP well-known-port check, posture-configurable, audited) | ✓ | ✓ | ✓ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
-| Civil time zones (`lib/tz`, the IANA 2026e store held to `zic`): the desktop's and login screen's clocks local, in the region's date and time formats, chosen in Settings | ✓ | ✓ | ✓ | ▢ |
+| Machine settings changed by an elevated administrator through one service (`settingsd`), each change made to the image's defaults as they stand | ✓ | ✓ | ✓ | — |
+| Civil time zones (`lib/tz`, the IANA 2026e store held to `zic`): the desktop's and login screen's clocks local, in the region's date and time formats, chosen in Settings and, for the machine, in Date & Time | ✓ | ✓ | ✓ | ▢ |
+| Date & Time dialog (`datetime.app`): the clock set by hand in the machine's zone, skipped and repeated local times answered, the clock chip set with it, network time on and off, the zone's next change stated | ✓ | ✓ | ✓ | ▢ |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |
 | DMA-engine drivers (cyclic channels, `dmaengine-v1`) | — | ◐ bcm2835 | — | — |
@@ -192,6 +194,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Per-app blob store handed over as a bounded delegation (§16.3, §24.4) | An app reading or overwriting another app's bulk data; one app filling the volume through a store no per-user quota can see | ✓ | ✓ | ✓ | ✓ |
 | Per-app scratch the service names, that nothing can open (§16.3) | An app reading another app's temporary files — or its own from an earlier run — through a name it could ask for | ✓ | ✓ | ✓ | ✓ |
 | Descriptor delegation attenuates by mode *and* byte extent, never widens (§5.2) | A delegated descriptor conveying more access than its grantor opened, or growing a file without limit | ✓ | ✓ | ✓ | ✓ |
+| Machine settings written by one service behind `CAP_SETTINGS_WRITE`, which only an elevated administrator holds (§5.2, §16.2) | Any program of a session — or a compromised one — rewriting the login policy, the clock's sources or the interfaces' addresses; the network addressing read by an account it does not concern | ✓ | ✓ | ✓ | — |
 | Capability gate guards an inode's name, not only its content (§5.3) | Unlinking or renaming a gated directory aside and planting an ungated replacement | ✓ | ✓ | ✓ | ✓ |
 | Speculation hardening at every user entry and return: registers scrubbed, buffers cleared, straight-line speculation trapped (§19.1) | A speculative kernel gadget fed user-chosen registers; MDS / MMIO-stale-data sampling of kernel data; speculation past the return | ✓ | ✓ | ✓ in-order | ✓ host |
 | Branch-free clamp of user-chosen table indices (§19.1) | Spectre-v1 bounds-check bypass into kernel memory | ◐ syscall number | ◐ syscall number | ◐ syscall number | ◐ syscall number |

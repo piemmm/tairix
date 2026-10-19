@@ -1,28 +1,28 @@
 //! The scaffolding every pane's host tests drive the shell through.
 //!
 //! One definition of "a shell showing this pane", "what its rows say",
-//! "press the band" and "offer an account", rather than a copy per test
+//! "press the band" and "the task it asked for", rather than a copy per test
 //! module: six modules exercise the same seams, and six copies of the
 //! pointer sequence a band press is made of would drift the moment the
 //! band's anatomy moved.
 //!
-//! No transport and no broker anywhere. The shell is *told* what a reading
-//! answered and what an elevated run came to, which is exactly the seam
-//! the production caller drives it through.
+//! No transport and no desktop anywhere. The shell is *told* what a reading
+//! answered and what a system task came to, which is exactly the seam the
+//! production caller drives it through.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::testkit::keystroke;
+use tairix_abi::window_ipc::SystemTask;
 use tairix_controls::{FieldControl, FieldRow};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_input::{InputEvent, PointerButton};
 use tairix_theme::{Grounds, Theme};
 use tairix_wallpaper::DesktopSettings;
 
 use crate::registry::{Pane, PaneRow, CATEGORIES};
-use crate::shell::{Elevation, Shell, ShellOutcome};
+use crate::shell::{Shell, ShellOutcome};
 
 /// A window wide enough to seat the strip and a full content column.
 pub(crate) const WIDE: Rect = Rect::new(0, 0, 900, 640);
@@ -177,34 +177,20 @@ pub(crate) fn click(shell: &mut Shell, at: Point, viewport: Rect, theme: &Theme)
     let _ = clicked(shell, at, viewport, theme, &mut damage());
 }
 
-/// The client of the credential question's own window, while one is up.
-pub(crate) fn question_client(shell: &Shell) -> Rect {
-    let (width, height) = shell.question_extent(Scale::ONE).expect("a question is up");
-    Rect::new(0, 0, width, height)
-}
-
-/// Press `key` in the credential question's own window.
-pub(crate) fn question_key(shell: &mut Shell, key: Key) -> ShellOutcome {
-    let client = question_client(shell);
-    shell.on_question_key(keystroke(key), client, Scale::ONE, &theme(), &mut damage())
-}
-
-/// Offer an account to the question up in its own window, and hand back
-/// the elevation the shell asked for.
-pub(crate) fn offer_account(shell: &mut Shell) -> Elevation {
-    assert!(shell.asking(), "the pane asks for an account");
-    let mut key = |key: Key| question_key(shell, key);
-    for ch in "root".chars() {
-        key(Key::Char(ch));
-    }
-    key(Key::Named(NamedKey::Tab));
-    for ch in "hunter2".chars() {
-        key(Key::Char(ch));
-    }
-    let ShellOutcome::Elevate(asked) = key(Key::Named(NamedKey::Enter)) else {
-        panic!("offering an account asks for the run");
+/// Press the band's command at `index` and hand back the system task the
+/// shell asked the desktop for.
+pub(crate) fn asked_task(shell: &mut Shell, index: usize) -> SystemTask {
+    let ShellOutcome::Authorise(task) = press_band(shell, index) else {
+        panic!("the band asks the desktop for a task");
     };
-    asked
+    *task
+}
+
+/// The words `task` hands its program.
+pub(crate) fn task_words(task: &SystemTask) -> Vec<String> {
+    task.words()
+        .map(|words| words.argv().iter().map(String::from).collect())
+        .unwrap_or_default()
 }
 
 /// What the pane's action band is saying.

@@ -1832,7 +1832,7 @@ it or the reverse):
 | Row | Resolved by | Backing |
 |---|---|---|
 | the reading the bar is drawing | nothing — a statement | the heading the session wrote with the bar's lines |
-| Set Date & Time… | session → `ElevateRequest::Launch` | the per-console elevation broker, then `datetime.app` under `CAP_TIME_SET` |
+| Set Date & Time… | session → the system authorisation prompt (`Elevation::Launch`) | the per-console elevation broker, then the Date & Time dialog as the account allowed, under `CAP_TIME_SET` and `CAP_SETTINGS_WRITE` |
 
 **Design decisions**
 
@@ -1857,12 +1857,13 @@ it or the reverse):
   instead of hunting for a row that is not there.
 - **The desktop never sets the clock, and never gains the capability.**
   `CAP_TIME_SET` is not in a session's manifest and must not be. The session
-  asks for an account that holds it through its own trusted credential prompt
-  (`userland/gui/session/src/elevate.rs` — a session-owned window, so a
-  password is typed into desktop chrome and never into an application), and
-  the console's broker re-authenticates that account, audits the attempt, and
-  starts the application as it. The session learns only the pid, or the
-  refusal.
+  asks through the system authorisation prompt
+  (`userland/gui/session/src/elevate.rs`, `docs/src/desktop/session.md`):
+  the signed-in account's password when it may allow the program, or a
+  chooser of the accounts that may, on a scrim over the whole desktop with
+  the seat held. The console's broker re-authenticates the account, checks
+  its authority over the program, audits the attempt, and starts the
+  application as it. The session learns only the pid, or the refusal.
 - **The launch cannot block the compositor.** A graphical caller cannot use
   the broker's blocking `Run` exchange: its reply arrives only once the
   elevated program has *exited*, so a desktop posting it would stop serving

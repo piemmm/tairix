@@ -322,6 +322,47 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
     }
 }
 
+/// The machine configuration as it stands, read through `filesystem`: empty
+/// where neither of its layers exists — the fresh installation, whose
+/// documented defaults apply.
+fn system_config_of(filesystem: &(dyn FilesystemService + '_)) -> Result<Vec<u8>, Errno> {
+    tairix_abi::driver_store::SystemConfigFile::System
+        .read_effective(|path| system_config_layer(filesystem, path))
+        .map(Option::unwrap_or_default)
+}
+
+/// The machine configuration's layer at `path`, or `None` where it does not
+/// exist.
+fn system_config_layer(
+    filesystem: &(dyn FilesystemService + '_),
+    path: &str,
+) -> Result<Option<Vec<u8>>, Errno> {
+    // The kernel's own uid-0 bootstrap identity holds no capability, so the
+    // read passes the per-inode owner/mode/ACL check on its merits: the
+    // document is the machine's public configuration and world-readable, and
+    // nothing here could reach a node that is not.
+    let cred = NoCapabilities;
+    let mut document = Vec::new();
+    let mut buf = [0u8; CONFIG_READ_CHUNK];
+    loop {
+        let read = match filesystem.read(0, &cred, path, document.len() as u64, &mut buf) {
+            Ok(read) => read,
+            Err(Errno::NotFound) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        if read == 0 {
+            return Ok(Some(document));
+        }
+        if document.len().saturating_add(read) > SYSTEM_CONFIG_MAX_LEN {
+            // The document's own parser refuses an over-long one whole, so
+            // serving a prefix would only turn a refusal into data that reads
+            // as the truth.
+            return Err(Errno::LengthOutOfRange);
+        }
+        document.extend_from_slice(buf.get(..read).ok_or(Errno::OutOfRange)?);
+    }
+}
+
 impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     fn processes(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
         let caps = self.state.caps.read();
@@ -465,38 +506,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     }
 
     fn system_config(&self) -> Result<Vec<u8>, Errno> {
-        // The kernel's own uid-0 bootstrap identity holds no capability, so
-        // the read passes the per-inode owner/mode/ACL check on its merits:
-        // the document is the machine's public configuration and world-
-        // readable, and nothing here could reach a node that is not.
-        let cred = NoCapabilities;
-        let mut document = Vec::new();
-        let mut buf = [0u8; CONFIG_READ_CHUNK];
-        loop {
-            let read = match self.filesystem.read(
-                0,
-                &cred,
-                tairix_sysconfig::CONFIG_PATH,
-                document.len() as u64,
-                &mut buf,
-            ) {
-                Ok(read) => read,
-                // No store is the fresh-installation case: the documented
-                // defaults apply, and answering nothing says exactly that.
-                Err(Errno::NotFound) => return Ok(Vec::new()),
-                Err(err) => return Err(err),
-            };
-            if read == 0 {
-                return Ok(document);
-            }
-            if document.len().saturating_add(read) > SYSTEM_CONFIG_MAX_LEN {
-                // The store's own parser refuses an over-long document
-                // whole, so serving a prefix would only turn a refusal into
-                // data that reads as the truth.
-                return Err(Errno::LengthOutOfRange);
-            }
-            document.extend_from_slice(buf.get(..read).ok_or(Errno::OutOfRange)?);
-        }
+        system_config_of(self.filesystem)
     }
 
     fn identity(&self) -> Result<Vec<u8>, Errno> {
@@ -1423,25 +1433,49 @@ mod tests {
     }
 
     #[test]
+    fn the_machine_configuration_is_served_as_it_stands() {
+        use crate::test_bundle::MemFs;
+        use tairix_abi::driver_store::SystemConfigFile;
+
+        let [administrator, image] = SystemConfigFile::System.layers();
+        let neither = MemFs::new(&[]);
+        assert_eq!(super::system_config_of(&neither), Ok(Vec::new()));
+        let shipped = MemFs::new(&[(image, b"cache.block off\n")]);
+        assert_eq!(
+            super::system_config_of(&shipped).as_deref(),
+            Ok(&b"cache.block off\n"[..])
+        );
+        let replaced = MemFs::new(&[
+            (image, b"cache.block off\n"),
+            (administrator, b"cache.all off\n"),
+        ]);
+        assert_eq!(
+            super::system_config_of(&replaced).as_deref(),
+            Ok(&b"cache.all off\n"[..]),
+            "the administrator's layer replaces the image's whole"
+        );
+    }
+
+    #[test]
     fn the_user_directory_pages_across_the_compiled_and_human_halves() {
         let cell = human_db();
         // The whole directory: compiled rows first, then the human half.
         let all = rows(&user_directory_page(&cell, 0, 64).expect("page encodes"));
-        assert_eq!(all.len(), 14);
+        assert_eq!(all.len(), 15);
         assert_eq!(all[0], (0, String::from("system")));
-        assert_eq!(all[13], (1000, String::from("root")));
+        assert_eq!(all[14], (1000, String::from("root")));
         // A page straddling the seam carries the tail of the compiled half
         // and the head of the human half.
-        let seam = rows(&user_directory_page(&cell, 12, 2).expect("page encodes"));
+        let seam = rows(&user_directory_page(&cell, 13, 2).expect("page encodes"));
         assert_eq!(
             seam,
             alloc::vec![
-                (tairix_users::SOUNDD_UID.0, String::from("soundd")),
+                (tairix_users::SETTINGSD_UID.0, String::from("settingsd")),
                 (1000, String::from("root")),
             ]
         );
         // An offset past the end is the empty paging terminator.
-        assert!(rows(&user_directory_page(&cell, 14, 64).expect("page encodes")).is_empty());
+        assert!(rows(&user_directory_page(&cell, 15, 64).expect("page encodes")).is_empty());
     }
 
     /// Decode a group page's packed records into owned `(gid, name)` rows.

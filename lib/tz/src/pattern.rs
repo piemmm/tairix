@@ -151,15 +151,44 @@ impl<'a> Pattern<'a> {
         self.0
     }
 
+    /// Whether it holds an hour on a 12-hour clock.
+    pub(crate) fn twelve_hour(&self) -> bool {
+        Census::of(self.0).is_some_and(|census| census.hour12 == 1)
+    }
+
     /// Write `civil` as this pattern spells it.
     ///
     /// # Errors
     ///
     /// The writer's own failure.
     pub fn write(&self, civil: &CivilTime, out: &mut dyn Write) -> fmt::Result {
+        self.write_fields(civil, false, out)
+    }
+
+    /// Write `civil`'s time of day with its seconds after the minutes, set off
+    /// by whatever sets the minutes off from the hour: what a clock ticking
+    /// each second shows, as CLDR's medium time spells it.
+    ///
+    /// # Errors
+    ///
+    /// The writer's own failure.
+    pub fn write_with_seconds(&self, civil: &CivilTime, out: &mut dyn Write) -> fmt::Result {
+        self.write_fields(civil, true, out)
+    }
+
+    fn write_fields(&self, civil: &CivilTime, seconds: bool, out: &mut dyn Write) -> fmt::Result {
+        let mut separator = "";
         for token in tokens(self.0).flatten() {
             match token {
-                Token::Literal(text) => out.write_str(text)?,
+                Token::Literal(text) => {
+                    separator = text;
+                    out.write_str(text)?;
+                }
+                Token::Field('m', width) if seconds => {
+                    number(out, civil.minute, width)?;
+                    out.write_str(separator)?;
+                    number(out, civil.second, 2)?;
+                }
                 Token::Field('y', 4) if civil.year < 0 => {
                     write!(out, "-{:04}", civil.year.unsigned_abs())?;
                 }

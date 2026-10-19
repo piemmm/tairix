@@ -6609,6 +6609,46 @@ pub fn read_path_to_end(path: &[u8], cap: usize) -> Result<alloc::vec::Vec<u8>, 
     read_fd_to_end(file.fd(), cap)
 }
 
+/// Read the text document at `path` whole under the caller's own identity:
+/// `None` where nothing is there.
+///
+/// # Errors
+///
+/// The open's or the read's refusal; [`tairix_abi::Errno::LengthOutOfRange`]
+/// for a document past `cap` bytes, and [`tairix_abi::Errno::OutOfRange`]
+/// for one that is not UTF-8. A parser bounded at `cap` is handed the whole
+/// document or nothing, never a prefix.
+pub fn read_document(
+    path: &[u8],
+    cap: usize,
+) -> Result<Option<alloc::string::String>, tairix_abi::Errno> {
+    document_of(read_path_to_end(path, cap), cap)
+}
+
+/// [`read_document`]'s answer to what reading the file answered.
+fn document_of(
+    read: Result<alloc::vec::Vec<u8>, i64>,
+    cap: usize,
+) -> Result<Option<alloc::string::String>, tairix_abi::Errno> {
+    use tairix_abi::Errno;
+
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(raw) => {
+            return match Errno::from_syscall(raw) {
+                Errno::NotFound => Ok(None),
+                err => Err(err),
+            };
+        }
+    };
+    if bytes.len() > cap {
+        return Err(Errno::LengthOutOfRange);
+    }
+    alloc::string::String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| Errno::OutOfRange)
+}
+
 /// [`read_fd_to_end`]'s policy over the positional reader `read` of a file
 /// whose descriptor stated its size as `stated`.
 fn read_to_end_from(
@@ -9346,6 +9386,31 @@ mod tests {
         let flags = OpenFlags::from_bits(u32::try_from(args[2]).expect("flag bits fit u32"))
             .expect("open_dir requests a legal flag combination");
         assert!(flags.contains(OpenFlags::DIRECTORY));
+    }
+
+    #[test]
+    fn a_document_is_whole_text_and_nothing_there_is_not_an_error() {
+        use tairix_abi::Errno;
+
+        let raw = |err: Errno| -i64::from(err.as_i32());
+        assert_eq!(super::document_of(Err(raw(Errno::NotFound)), 8), Ok(None));
+        assert_eq!(
+            super::document_of(Err(raw(Errno::PermissionDenied)), 8),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            super::document_of(Ok(b"a = b\n".to_vec()), 8),
+            Ok(Some(alloc::string::String::from("a = b\n")))
+        );
+        assert_eq!(
+            super::document_of(Ok(b"123456789".to_vec()), 8),
+            Err(Errno::LengthOutOfRange),
+            "one byte past the ceiling proves the document over-long"
+        );
+        assert_eq!(
+            super::document_of(Ok(alloc::vec![0xFF]), 8),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

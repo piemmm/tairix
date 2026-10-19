@@ -19,8 +19,8 @@ use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_controls::damage::Repaint;
 
 use crate::menu::{
-    ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, ModelRefused, SurfaceKind,
-    SUBMENU_SETTLE_NS,
+    ChainAction, ChainGeometry, ChainIconWant, ChainOutcome, ChainOwner, ChainPicture, MenuChain,
+    ModelRefused, SurfaceKind, SUBMENU_SETTLE_NS,
 };
 
 const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
@@ -1685,6 +1685,85 @@ fn the_information_panel_owes_its_pixels_once() {
         covering(&[]),
         "a pointer over facts changes nothing"
     );
+}
+
+/// The bundle the sheet's picture is resolved from, in the tests below.
+const SHEET_BUNDLE: &str = "/System/Applications/Editor.app";
+
+/// The sheet names its picture rather than carrying one, so the session
+/// resolves it as the chain presents. The regression: a sheet opened before
+/// its decode landed kept the built-in glyph for good.
+#[test]
+fn the_information_sheets_picture_is_wanted_until_it_arrives() {
+    let theme = theme();
+    let g = geom(&theme);
+    let source = tairix_controls::RowIcon::Bundle(String::from(SHEET_BUNDLE));
+    let mut model = info_model();
+    model.set_info_source(&source);
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, model, Point::new(40, 40), &g);
+    assert!(
+        chain.icon_wants(&g).is_empty(),
+        "a sheet nobody opened decodes nothing"
+    );
+
+    settle_on(&mut chain, 0, 1, &g);
+    present_all(&mut chain);
+    let side = g.scale.scale_length(tairix_controls::ABOUT_ICON_SIDE);
+    let wanted = ChainIconWant {
+        target: ChainPicture::Info,
+        side,
+        source,
+    };
+    assert_eq!(chain.icon_wants(&g), core::slice::from_ref(&wanted));
+    chain.set_info_artwork(None);
+    assert_eq!(
+        owed(&chain, SurfaceKind::Info),
+        covering(&[]),
+        "a picture still in flight owes nothing"
+    );
+    assert_eq!(chain.icon_wants(&g), [wanted], "and is asked for again");
+
+    let art = tairix_raster::Surface::new(side, side).expect("a picture");
+    chain.set_info_artwork(Some(&art));
+    assert_eq!(owed(&chain, SurfaceKind::Info), Repaint::Whole);
+    assert!(chain.icon_wants(&g).is_empty());
+
+    settle_on(&mut chain, 0, 0, &g);
+    settle_on(&mut chain, 0, 1, &g);
+    assert!(
+        chain.icon_wants(&g).is_empty(),
+        "the sheet opened again draws the picture the model kept"
+    );
+}
+
+/// A row whose picture is still in flight is asked about before every
+/// present, so an answer of nothing must cost nothing.
+#[test]
+fn a_row_still_waiting_for_its_picture_owes_no_repaint() {
+    let theme = theme();
+    let g = geom(&theme);
+    let mut model = ChainModel::new("Open With");
+    model.push(
+        ChainRow::item(id(1), AppMenuSymbol::Open, MenuItem::new("Editor"))
+            .from_bundle(SHEET_BUNDLE),
+    );
+    let mut chain = MenuChain::new();
+    open(&mut chain, APP, model, Point::new(40, 40), &g);
+    present_all(&mut chain);
+    let [want] = chain
+        .icon_wants(&g)
+        .try_into()
+        .expect("the row asks for one picture");
+    assert_eq!(want.target, ChainPicture::Row(0));
+
+    chain.set_row_artwork(0, None);
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), covering(&[]));
+
+    let art = tairix_raster::Surface::new(want.side, want.side).expect("a picture");
+    chain.set_row_artwork(0, Some(&art));
+    assert_eq!(owed(&chain, SurfaceKind::Plate(0)), Repaint::Whole);
+    assert!(chain.icon_wants(&g).is_empty());
 }
 
 /// A partial repaint lands exactly the pixels a whole one would. The session

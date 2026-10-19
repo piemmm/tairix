@@ -30,7 +30,7 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, No
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_abi::{stored_root_entries, DriverError};
 use tairix_drv_fs_arxfs::{plant_nested_file, EntropySource, Keying, Security, ARXFS};
-use tairix_users::provision_home_shape;
+use tairix_users::{provision_default_dirs, provision_home_shape, provision_settings_dirs};
 
 use crate::device::MemBlock;
 use crate::MkimageError;
@@ -41,7 +41,7 @@ use crate::MkimageError;
 /// `Users`/`Groups` databases inside it are installer-authored data, not
 /// image content. `Commands`, `Applications`, `Services` and `Components` are
 /// the program stores the image pipeline plants each OS-provided bundle into.
-pub const SYSTEM_SUBDIRS: [&str; 16] = [
+pub const SYSTEM_SUBDIRS: [&str; 17] = [
     "Kernel",
     "Commands",
     "Applications",
@@ -56,6 +56,7 @@ pub const SYSTEM_SUBDIRS: [&str; 16] = [
     "Zoneinfo",
     "Logs",
     "Settings",
+    "Defaults",
     "Services",
     "Components",
 ];
@@ -113,22 +114,6 @@ pub const LOG_ATTESTATION_KEY_NAME: &str = "LogAttestation";
 /// unreadable by any ordinary principal until the journal/attestation
 /// principal exists.
 const LOG_ATTESTATION_KEY_MODE: u32 = 0o600;
-
-/// Mode for the time service's state directory: owner read/write/search,
-/// world-readable (`0o755`).
-///
-/// The record says only when the machine last knew the time, so it is not a
-/// secret; the ownership is what matters. `timed` owns the directory because
-/// it rewrites its record on every sync, and nothing else writes there —
-/// `/System/Settings` itself is system-user-owned, so without this the service
-/// could not create its own state (a defect the QEMU vertical surfaced as a
-/// denied `mkdir`).
-const TIME_STATE_DIR_MODE: u32 = 0o755;
-
-/// Mode of `/System/Settings/Services`: the system user writes the
-/// administrator's enrolment overrides, everyone reads which services are
-/// enrolled (public configuration, not a secret).
-const SERVICE_OVERRIDES_DIR_MODE: u32 = 0o755;
 
 /// Everything seeded onto the root volume beyond the directory
 /// skeleton. Every image profile seeds both account databases (the
@@ -211,7 +196,7 @@ fn create_home_dir(
     let home = fs
         .create(users, username.as_bytes(), NodeKind::Directory)
         .map_err(MkimageError::RootPartition)?;
-    provision_home_shape(fs, home, uid, gid).map_err(MkimageError::HomeShape)
+    provision_home_shape(fs, home, uid, gid).map_err(MkimageError::Shape)
 }
 
 /// Author the read-only, signed-bundle `/System` partition, sized by
@@ -258,6 +243,7 @@ pub fn build_system_partition(
             .map_err(MkimageError::SystemPartition)?;
         let root = fs.root();
         create_system_subdirs(&mut fs, root, MkimageError::SystemPartition)?;
+        provision_default_dirs(&mut fs, root).map_err(MkimageError::Shape)?;
         Ok(SystemVolume { fs, root })
     })
 }
@@ -319,8 +305,10 @@ fn populate_system_subtree(
     write_security_file(fs, security, USERS_DB_NAME, seed.users_db)?;
     write_security_file(fs, security, GROUPS_DB_NAME, seed.groups_db)?;
     write_library_config(fs, system, seed.library_conf)?;
-    create_time_state_dir(fs, system)?;
-    create_service_overrides_dir(fs, system)?;
+    let settings = fs
+        .lookup(system, b"Settings")
+        .map_err(MkimageError::RootPartition)?;
+    provision_settings_dirs(fs, settings).map_err(MkimageError::Shape)?;
     if let Some(key_bytes) = seed.log_attestation_key {
         let keys = fs
             .lookup(security, b"Keys")
@@ -407,38 +395,6 @@ fn write_security_file(
         .map_err(MkimageError::RootPartition)
 }
 
-/// Create `/System/Settings/Services` on the writable root, owned by the
-/// system user.
-///
-/// PID 1 rewrites the administrator's enrolment `overrides` there on every
-/// `enable`/`disable`. `/System/Settings` is system-user-owned, so an image
-/// that did not author this directory would leave the manager unable to create
-/// it and every enrolment change would be refused rather than recorded.
-fn create_service_overrides_dir(
-    fs: &mut ARXFS<MemBlock>,
-    system: NodeId,
-) -> Result<(), MkimageError> {
-    let settings = fs
-        .lookup(system, b"Settings")
-        .map_err(MkimageError::RootPartition)?;
-    let leaf = tairix_abi::SERVICE_OVERRIDES_DIR
-        .rsplit('/')
-        .next()
-        .unwrap_or(tairix_abi::SERVICE_OVERRIDES_DIR);
-    let dir = fs
-        .create(settings, leaf.as_bytes(), NodeKind::Directory)
-        .map_err(MkimageError::RootPartition)?;
-    fs.set_security(
-        dir,
-        Security::new(
-            SERVICE_OVERRIDES_DIR_MODE,
-            tairix_users::SYSTEM_UID.0,
-            tairix_users::SYSTEM_GID.0,
-        ),
-    )
-    .map_err(MkimageError::RootPartition)
-}
-
 /// Lay out the program-library store on the writable root: create
 /// `/System/Settings/ProgramLibrary` and write the machine-wide catalog
 /// document the desktop's Program Library reads.
@@ -451,35 +407,6 @@ fn create_service_overrides_dir(
 /// catalog but only the system identity rewrites it; a user personalises
 /// through their own overlay instead. The text is stored whole, never a
 /// truncated store.
-/// Create `/System/Settings/Time`, owned by the time service.
-///
-/// The service rewrites `state` there after every successful synchronisation.
-/// `/System/Settings` is system-user-owned, so an image that did not author
-/// this directory would leave `timed` unable to create it — the record would
-/// be lost on every boot and a future boot could not tell a short power-off
-/// from a long one.
-fn create_time_state_dir(fs: &mut ARXFS<MemBlock>, system: NodeId) -> Result<(), MkimageError> {
-    let settings = fs
-        .lookup(system, b"Settings")
-        .map_err(MkimageError::RootPartition)?;
-    let dir = fs
-        .create(
-            settings,
-            tairix_timesync::RECORD_SUBDIR.as_bytes(),
-            NodeKind::Directory,
-        )
-        .map_err(MkimageError::RootPartition)?;
-    fs.set_security(
-        dir,
-        Security::new(
-            TIME_STATE_DIR_MODE,
-            tairix_users::TIMED_UID.0,
-            tairix_users::SERVICES_GID.0,
-        ),
-    )
-    .map_err(MkimageError::RootPartition)
-}
-
 fn write_library_config(
     fs: &mut ARXFS<MemBlock>,
     system: NodeId,
@@ -540,6 +467,7 @@ fn write_key_file(
 mod tests {
     use super::*;
     use crate::device::SECTOR_BYTES;
+    use tairix_abi::driver::filesystem::FilesystemSecurity;
     use tairix_abi::home::{HOME_FILES_DIR, HOME_FILES_SUBDIRS};
     use tairix_users::{
         appdata_root_security, appdata_transit_security, APPDATA_ROOT, APPDATA_ROOT_PARENTS,
@@ -699,6 +627,31 @@ mod tests {
         assert_eq!(wan.ipv4_method(), tairix_netconfig::Ipv4Method::Dhcp);
     }
 
+    #[test]
+    fn each_image_default_sits_in_a_directory_with_its_document_s_reach() {
+        // The network document names the machine's hardware and addresses, so
+        // its image default must be as closed as the administrator's layer.
+        let bytes = build_system_partition(&mut TestEntropy(11), &[], &[], TEST_NETWORK)
+            .expect("the volume builds");
+        let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
+        let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("the system volume mounts");
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+            let mut dirs: Vec<&str> = which.volume_path().split('/').collect();
+            dirs.pop();
+            let mut node = fs.root();
+            for dir in dirs {
+                node = fs.lookup(node, dir.as_bytes()).expect("laid out");
+            }
+            let found = fs.security(node).expect("a record");
+            let wanted = tairix_users::default_dir_security(which);
+            assert_eq!(
+                (found.mode & 0o7777, found.uid, found.gid),
+                (wanted.mode, wanted.uid, wanted.gid),
+                "{which:?}"
+            );
+        }
+    }
+
     /// Content the payload's own volume has no room for costs one more grain
     /// instead of failing the build, and still reads back intact.
     #[test]
@@ -759,19 +712,37 @@ mod tests {
     }
 
     #[test]
-    fn the_writable_root_ships_no_network_config() {
-        // A second copy on the root volume would be read by nothing while
-        // looking authoritative: an operator editing it would see no effect.
+    fn the_writable_root_lays_out_each_service_s_settings_and_no_document() {
+        // The image's defaults are on the read-only volume; the administrator's
+        // layer exists only once a change has been made.
         let bytes = build();
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("mounts");
         let root = fs.root();
         let system = fs.lookup(root, b"System").expect("/System exists");
         let settings = fs.lookup(system, b"Settings").expect("Settings exists");
-        assert!(
-            fs.lookup(settings, b"Network").is_err(),
-            "the network store belongs on the read-only /System volume alone"
-        );
+        for dir in tairix_users::SETTINGS_DIRS {
+            let node = fs
+                .lookup(settings, dir.name().as_bytes())
+                .unwrap_or_else(|_| panic!("{} is laid out", dir.path));
+            let security = fs.security(node).expect("a record");
+            assert_eq!(
+                (security.mode & 0o7777, security.uid, security.gid),
+                (dir.mode, dir.uid.0, dir.gid.0),
+                "{}",
+                dir.path
+            );
+        }
+        for which in [SystemConfigFile::System, SystemConfigFile::Network] {
+            let dir = fs
+                .lookup(
+                    settings,
+                    tairix_users::document_dir(which).name().as_bytes(),
+                )
+                .expect("laid out");
+            let name = which.path().rsplit('/').next().expect("a file name");
+            assert!(fs.lookup(dir, name.as_bytes()).is_err(), "{which:?}");
+        }
     }
 
     #[test]

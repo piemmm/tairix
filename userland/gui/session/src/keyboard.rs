@@ -270,11 +270,26 @@ const fn key(value: KeyValue) -> Key {
     }
 }
 
+/// Whether `event` is the secure attention key: Ctrl+Alt+Delete pressed.
+///
+/// The session takes it before any holder of the seat routes a key, so no
+/// application ever receives it.
+#[must_use]
+pub fn is_secure_attention(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::KeyPressed {
+            key: Key::Named(NamedKey::Delete),
+            modifiers,
+        } if modifiers.ctrl && modifiers.alt
+    )
+}
+
 /// Translate a decoded ABI [`KeyInput`] into the desktop [`InputEvent`].
 ///
 /// The one translation from the wire vocabulary to the routing one, so a
-/// surface the serve loop hands a raw record (the credential prompt, which
-/// the router reaches by window id rather than through this source) reads it
+/// surface the serve loop hands a raw record (the trusted picker, which the
+/// router reaches by window id rather than through this source) reads it
 /// exactly as every other event was read.
 pub(crate) fn to_input_event(record: KeyInput) -> InputEvent {
     let modifiers = modifiers_from_abi(record.modifiers());

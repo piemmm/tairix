@@ -138,17 +138,19 @@ pub fn title(surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme, tex
     let y = bare_title(surface, rect, scale, theme, text);
     let thickness = plate_border(theme, scale);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1) / 2;
-    let top = y.saturating_add(to_i32(gap));
-    if let (Ok(x), Ok(ry)) = (u32::try_from(rect.left()), u32::try_from(top)) {
-        if top.saturating_add(to_i32(thickness)) <= rect.bottom() {
-            surface.fill_rect(
-                x,
-                ry,
-                rect.width,
-                thickness,
-                Color::from(theme.palette().border),
-            );
-        }
+    // A row too short for the whole gap closes it up rather than losing the
+    // rule, which is dropped only where it cannot clear the title's line.
+    let top = y
+        .saturating_add(to_i32(gap))
+        .min(rect.bottom().saturating_sub(to_i32(thickness)));
+    if let (Ok(x), Ok(ry), true) = (u32::try_from(rect.left()), u32::try_from(top), top >= y) {
+        surface.fill_rect(
+            x,
+            ry,
+            rect.width,
+            thickness,
+            Color::from(theme.palette().border),
+        );
     }
     top.saturating_add(to_i32(thickness.saturating_add(gap)))
 }

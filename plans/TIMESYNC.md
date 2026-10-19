@@ -15,6 +15,18 @@ Time app deliberately shows empty fields, and audit-log hash chains, ARXFS
 `Time64` metadata, and certificate validity all rest on a clock a human has to
 set by hand.
 
+| Item | What it is | Status |
+|---|---|---|
+| TS-1 | `lib/net::ntp` and `lib/timesync`: the engine and the policy | done |
+| TS-2 | `timed`: the service, the sandboxed evaluation, the persisted record | done |
+| TS-3 | The RTC class and the QEMU-emulable RTCs | done |
+| TS-4 | Pi RTC support | done |
+| TS-5a | The service-control transport and `servicectl start`/`stop` | done |
+| TS-5b | Enrolment: `servicectl enable`/`disable` | done |
+| TS-5c | `servicectl list` / `status SERVICE` | planned |
+| TS-6 | Network time on and off: `time.network`, followed live by `timed`, switched from the Date & Time dialog | done |
+| TS-7 | The server tiers: a built-in default and the DHCP-supplied server | done |
+
 ## 0. Scope and decisions (binding)
 
 - **Two independent sources, one arbiter.** An RTC (when the machine has one)
@@ -345,26 +357,40 @@ the first tier.
 
 ## 6. Enable and disable
 
-Automatic time-setting is on by default: the image's vendor enrolment layer
-names `timed`. Turning it off is *unenrolment*, which is the service manager's
-job, so both surfaces drive the one control path rather than inventing a second
-switch (§2.2).
+Two switches, because there are two things to switch: whether the network is
+asked, and whether the clock service runs at all.
 
-- **Command line.** `userland/shell/servicectl` is the tool — the `systemctl`
-  analogue this plan's dependency (`plans/NEW-SERVICEMANAGER.md` SVC-8)
-  specifies. `enable`/`disable` reach PID 1 on its own reserved enrolment
-  endpoint (TS-5b: deliberately *not* the running-state control one) and write
-  through the pure `lib/enrolment` record transforms, which decide eligibility
-  only, so enrolment can never widen authority.
-- **Desktop.** The taskbar clock's menu gains a *Set Date & Time
-  Automatically* toggle, derived from `clock_menu::ROWS` like every other row
-  so a row cannot exist without a command behind it. The session holds no
-  authority to change service enrolment, exactly as it holds none to set the
-  clock, so the row reuses the re-authentication broker path the existing
-  *Set Date & Time…* row already uses; a console with no broker renders the
-  row non-actionable with the reason stated rather than offering a command
-  that could only fail. The Date & Time settings pane exposes the same
-  toggle over the same control path.
+- **Network time is `time.network = on|off`** in the machine configuration
+  (`lib/sysconfig`), on by default. Off drops the half of `timed` that asks the
+  network and keeps the clock chip, which is read at every start either way —
+  unenrolling the service instead would leave a machine with a healthy
+  battery-backed clock `Unset` at every boot. `timed` follows the
+  configuration while it runs (a directory watch, `timed` README) and applies a
+  change at once: off abandons the query in flight; on queries as promptly as
+  an unset clock would (`SyncReason::SwitchedOn`); a changed server list
+  replaces the servers in use; a changed cadence applies in place, keeping
+  what the engine learned of its servers. A replacement's first request waits
+  out `MIN_POLL` after the last one sent, so a switch flipped repeatedly
+  cannot make the service ask more often than the poll floor allows.
+- **The setting is unreadable before the root is mounted**, so until then the
+  default applies, as every reader of the store runs on defaults pre-mount.
+  An encrypted machine whose network time is off can therefore ask the
+  fallback pool before it is unlocked. The pre-unlock store read the device
+  manager uses reads the image's default, never the administrator's layer, so
+  no earlier read of the administrator's choice exists.
+- **Enrolment stays the service's own switch.** `servicectl disable timed`
+  stops the clock service entirely, the chip included — an administrator's
+  act, over the one control path `plans/NEW-SERVICEMANAGER.md` SVC-8 defines.
+- **Who changes it.** The settings service, for a caller holding
+  `CAP_SETTINGS_WRITE` (`docs/src/userland/settingsd.md`): `configure
+  time.network off`, run elevated, or the Date & Time dialog. The
+  `timed-switch` QEMU vertical drives both changes through `elevate` and the
+  service, and passes only on a clock set after `timed` recorded each.
+- **Desktop.** The Date & Time dialog (`plans/TIMEZONES.md` TZ6) carries *Set
+  date and time automatically*, asking the settings service for
+  `time.network`. The taskbar clock's menu and the Settings Date & Time
+  pane each open that dialog, so the switch has one surface and no second
+  path.
 
 Landing `servicectl` requires the control **transport** —
 `plans/NEW-SERVICEMANAGER.md` SVC-8's remaining item: a per-manager wait-set
@@ -379,7 +405,7 @@ not stubbed (§2.19).
 
 Each stage leaves the whole-project §7 gate green before it is reported done.
 
-### TS-1 — `lib/net::ntp` and `lib/timesync`: the engine and the policy — DONE
+### TS-1 — `lib/net::ntp` and `lib/timesync`: the engine and the policy
 - `tairix_abi::time::{RELEASE_EPOCH_SECS, PLAUSIBLE_FUTURE_SECS,
   is_plausible_wall_time}` — the plausibility window, defined once, re-exported
   at the crate root, and mirrored into the generated C header beside the
@@ -423,7 +449,7 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   encoding, the `time.*` configuration keys, and the sandboxed decode all
   belong with the service that owns the I/O.
 
-### TS-2 — `timed`: the service — DONE
+### TS-2 — `timed`: the service
 - `lib/net::ntp` gains `NtpClient::on_reply` and `lib/timesync` gains
   `TimeSync::on_reply` / `TimeSync::outstanding`: the transaction machine is
   reachable from an *already-evaluated* verdict, so a caller holding
@@ -457,12 +483,13 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   `AppInfo.toml`, and the boot-floor registration in PID 1's startup config
   and the x86_64/riscv64 embedded spawn floor.
 - **Config availability is a boot-order fact, not a bug.** The store lives on
-  the root volume and this is a boot-floor service, so the first read
-  normally precedes the mount. With no userland "root mounted" event, the
-  reactor re-selects on a bounded doubling one-shot ladder (8 attempts, ~17
+  the root volume and the service starts before it is mounted, so the first
+  read normally precedes the mount. With no userland "root mounted" event, the
+  reactor looks again on a bounded doubling one-shot ladder (8 attempts, ~17
   minutes, parking between them). TS-7 made that ladder also the mechanism
-  that picks up a DHCP lease acquired after start-up; configuring a server
-  after the ladder is spent means restarting the service.
+  that picks up a DHCP lease acquired after start-up; TS-6 made its first rung
+  that reaches the root arm the configuration watch, which carries every later
+  change.
 - **Every socket client's delivery port is process-private.** The kernel's
   port registry is machine-wide, so a fixed well-known id would let a
   long-lived process deny another its deliveries for the boot;
@@ -525,7 +552,7 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   from the enrolled startup-config tier and changed through the enrolment
   endpoint.
 
-### TS-3 — RTC class + the QEMU-emulable RTCs — DONE
+### TS-3 — RTC class + the QEMU-emulable RTCs
 
 **The clock authority stays with `timed`.** An RTC driver holds no clock
 capability: it serves the `Rtc` class over `tairix_abi::rtc_ipc`'s
@@ -645,7 +672,7 @@ already boot `boot_x86_64::boot` against a planted whole disk over virtio-PCI,
 so a clock vertical here is an enrolment entry plus a witness sink, exactly as
 on the two MMIO ports.
 
-### TS-4 — Pi RTC support — DONE
+### TS-4 — Pi RTC support
 
 **The mailbox tier.** `lib/vcmailbox` carries the RTC property tags — get
 `0x0003_0087`, set `0x0003_8087`, with a two-word value buffer holding a
@@ -730,7 +757,7 @@ chips:
   unit test) through an exhaustive-match name function, so a kind cannot reach a
   C consumer's header as an unnamed discriminant again.
 
-### TS-5a — Service-control transport + `servicectl start`/`stop` — DONE
+### TS-5a — Service-control transport + `servicectl start`/`stop`
 The PID 1 wait-set control reactor and its one-shot timers,
 `CAP_SERVICE_CONTROL` with its enforcement point (the restricted-sender
 endpoint bind) and its first holder, and the `servicectl` tool with its bundle
@@ -743,7 +770,7 @@ The tool's icon is authored as **SVG**, the charter's preferred form for an
 icon expressible in the vector subset — one file serves every slot and UI
 scale, so no slot ever upscales a raster.
 
-### TS-5b — Enablement: `Enable`/`Disable` — DONE
+### TS-5b — Enablement: `Enable`/`Disable`
 The enrolment ops, over the *enrolment* path rather than the control endpoint:
 `Enable`/`Disable` write through the pure `lib/enrolment` record transforms,
 which decide eligibility only; the kernel derives authority at spawn. This is also
@@ -758,7 +785,7 @@ it is a separate query with its own capability gate rather than a third
 enrolment op.
 
 ### TS-5c — `servicectl list` / `status SERVICE`
-Not started. One paged System Information query behind both verbs — `list` is
+One paged System Information query behind both verbs — `list` is
 the walk with no name filter, `status` the same walk looking for one row — so
 the two can never disagree about a service's state, and a second singular
 query is not added. A new `SysinfoQueryId` at the end of `SYSINFO_QUERIES`,
@@ -863,26 +890,19 @@ exactly that machine, so gating admission on the network would deny a
 no-NIC board its `Firmware` clock. The metadata is
 `activation: permanent`, `restart: on-failure`, no `requires`.
 
-**Open, and deliberately not answered here: what the desktop row *means* now
-that `timed` also reads the RTC.** §6 fixed the switch as `timed`'s enrolment
-while `timed` was purely an NTP client, so "disable automatic time-setting"
-and "unenrol `timed`" were the same act. TS-3/TS-4 gave the same service the
-RTC, so unenrolling it now also stops the chip being read and written back —
-a machine with a healthy battery-backed clock would boot `Unset`. The switch
-stays enrolment (a `time.*` key would be the second switch §2.2 and §6
-forbid), and whether the row should instead mean "network time only" is a
-product question for TS-6 to settle, not a defect in the mechanism.
+### TS-6 — Network time on and off
 
-**TS-6 depends on TS-5b, not TS-5a.** The desktop toggle is *automatic
-time-setting on or off*, which is enrolment; the running-state control TS-5a
-landed is not the switch that row needs.
+§6 states the design. `Key::TimeNetwork`, `timed`'s replaceable network half
+(`Timed::replace_network`, `Timed::set_refresh`), the configuration watch and
+`tairix_timed::retune`, the poll floor across replacements
+(`TimeSync::not_before`), and the record read again once the root is reached
+(`Timed::store_reachable`, `TimeSync::reconsider`), which also gives the
+went-backwards and stale-boot rules the record they never saw before. The Date &
+Time dialog's switch asks the settings service for `time.network`, takes the
+hand-set controls away while it is on, and states where the clock's time came
+from: the wall clock's provenance and the record's `last_sync`.
 
-### TS-6 — The desktop toggle
-The taskbar clock menu row and the Date & Time settings pane entry over the
-one control path, through the existing elevation broker. QEMU desktop
-vertical: toggle off, confirm `timed` is disabled.
-
-### TS-7 — The server tiers: a built-in default and the DHCP-supplied server — DONE
+### TS-7 — The server tiers: a built-in default and the DHCP-supplied server
 
 Replaced TS-2's empty default server list with the three-tier §3.1 policy, so
 a stock installation keeps time with no configuration.
@@ -957,8 +977,8 @@ a stock installation keeps time with no configuration.
   platform surface the Pi RTC tiers sit on.
 - `plans/SYSLOG.md` — the hash-chained audit log whose timestamps depend on
   the clock this plan establishes.
-- `plans/NEW-DESKTOP-SETTINGS.md` — the Date & Time pane the TS-6 toggle
-  joins.
+- `plans/NEW-DESKTOP-SETTINGS.md` — the Date & Time pane, which opens the
+  dialog the TS-6 switch lives in.
 - `plans/NEW-TASKBAR.md` — the clock and its menu.
 - `kernel/core/src/wallclock.rs`, `lib/abi/src/time.rs` — the wall clock, its
   provenance ladder, and `Time64`.

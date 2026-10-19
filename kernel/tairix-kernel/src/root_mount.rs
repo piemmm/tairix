@@ -41,14 +41,17 @@ use tairix_drv_fs_arxfs::{
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::boot_session::{LateBootSession, LATE_BOOT_SESSION};
 use tairix_kernel_core::{
-    build_identity_table, load_groups_db, load_users_db_source, read_bootstrap_file, ConsoleRead,
-    ConsoleWrite, GroupsLoadError, HeldUsersDbSource, LateGroupsDb, LateIdentity, LateUsersAdmin,
-    LateUsersDb, SleepLock, UserAdminEngine, UsersDbSource, UsersLoadError, GROUPS_DB,
-    SYSTEM_CONFIG, USERS_DB,
+    build_identity_table, load_groups_db, load_users_db_source, read_bootstrap_file,
+    read_image_system_config, BoundedReadError, ConsoleRead, ConsoleWrite, GroupsLoadError,
+    HeldUsersDbSource, ImageConfig, LateGroupsDb, LateIdentity, LateUsersAdmin, LateUsersDb,
+    SleepLock, UserAdminEngine, UsersDbSource, UsersLoadError, VfsError, GROUPS_DB, SYSTEM_CONFIG,
+    USERS_DB,
 };
 use tairix_kernel_sec::{GroupId, IdentityTable};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
-use tairix_partition::{parse_partition_table, PartitionBlock, PartitionError, PartitionType};
+use tairix_partition::{
+    parse_partition_table, PartitionBlock, PartitionError, PartitionTable, PartitionType,
+};
 use tairix_supervisor::{
     run_supervisor, MountOutcome, Report as SupReport, RootLock as SupervisorRootLock, SupInput,
     SupervisorExit, SupervisorHost,
@@ -413,6 +416,7 @@ impl core::fmt::Debug for UnlockedRoot {
 fn load_root<B: Block>(
     block: B,
     keying: RootKeying,
+    image: ImageConfig,
     audit: &dyn Sink,
 ) -> Result<UnlockedRoot, RootMountError> {
     let mut fs = match ARXFS::open(block, keying.keying()) {
@@ -449,6 +453,7 @@ fn load_root<B: Block>(
     // never fails the mount — the caches are accelerators, never the truth.
     tairix_kernel_core::load_and_apply_system_config(
         &mut fs,
+        image,
         &tairix_kernel_core::CACHE_CONTROL,
         audit,
     );
@@ -610,8 +615,23 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
             }
         },
     };
+    let image = image_system_config(&mut disk, &table);
     let root = partition_window(&mut disk, &root_extent, audit)?;
-    load_root(root, keying, audit)
+    load_root(root, keying, image, audit)
+}
+
+/// The image's default of the machine configuration, off `disk`'s read-only
+/// `/System` volume, read before the root is: it stands only where the root
+/// carries no administrator's layer. A disk with no `/System` volume carries
+/// no default.
+fn image_system_config<Disk: Block>(disk: &mut Disk, table: &PartitionTable) -> ImageConfig {
+    let Some(extent) = table.first_of_type(PartitionType::ARXFSSystem) else {
+        return Ok(None);
+    };
+    let unreadable = |_| BoundedReadError::Vfs(VfsError::Io);
+    let window = PartitionBlock::from_partition(disk, &extent).map_err(unreadable)?;
+    let mut fs = ARXFS::open_read_only(window, Keying::Plaintext).map_err(unreadable)?;
+    read_image_system_config(&mut fs)
 }
 
 /// Read what mounting `disk`'s root will read, so the mount after the
@@ -2167,6 +2187,35 @@ mod tests {
     fn plaintext_disk() -> FatVecBlock {
         let bytes = disk_image::build_plaintext_image().expect("the plaintext image assembles");
         FatVecBlock { store: bytes }
+    }
+
+    #[test]
+    fn the_root_mount_finds_the_image_s_machine_configuration_on_the_system_volume() {
+        let which = tairix_abi::driver_store::SystemConfigFile::System;
+        let components: alloc::vec::Vec<&[u8]> =
+            which.volume_path().split('/').map(str::as_bytes).collect();
+        let shipped: &[u8] = b"cache.block off\n";
+        let bytes = disk_image::build_image_with_contents(
+            &[],
+            &[(&components, shipped)],
+            &[],
+            disk_image::RootProtection::Plaintext,
+        )
+        .expect("the whole-disk image assembles");
+        let mut disk = FatVecBlock { store: bytes };
+        let table = parse_partition_table(&mut disk).expect("the table parses");
+        let read = super::image_system_config(&mut disk, &table);
+        assert!(
+            matches!(&read, Ok(Some(found)) if found.as_slice() == shipped),
+            "{read:?}"
+        );
+
+        let mut bare = plaintext_disk();
+        let table = parse_partition_table(&mut bare).expect("the table parses");
+        assert!(matches!(
+            super::image_system_config(&mut bare, &table),
+            Ok(None)
+        ));
     }
 
     /// The bytes `ty`'s partition occupies on `disk`.

@@ -228,6 +228,10 @@ fn build_system_partition(
         fs.create(security, b"Keys", NodeKind::Directory)?;
         fs.create(security, b"Policy", NodeKind::Directory)?;
         fs.create(root, b"Drivers", NodeKind::Directory)?;
+        tairix_users::provision_default_dirs(&mut fs, root).map_err(|err| match err {
+            tairix_users::ShapeError::Driver(err) => err,
+            tairix_users::ShapeError::Occupied => DriverError::Unsupported,
+        })?;
         Ok(SystemVolume { fs, root })
     })
 }

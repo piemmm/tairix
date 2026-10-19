@@ -697,6 +697,8 @@ pub struct NtpClient {
     phase: Phase,
     failures: u32,
     poll_interval: u128,
+    /// Whether a request has ever left this client.
+    sent: bool,
 }
 
 impl NtpClient {
@@ -724,6 +726,48 @@ impl NtpClient {
             phase,
             failures: 0,
             poll_interval: nanos(poll_interval).max(nanos(MIN_POLL)),
+            sent: false,
+        }
+    }
+
+    /// Hold the next query back to monotonic `at` at the earliest. A request
+    /// in flight, or a client every server has retired, is left alone.
+    pub fn hold_until(&mut self, at: Duration64) {
+        if let Phase::Scheduled(due) = self.phase {
+            self.phase = Phase::Scheduled(due.max(nanos(at)));
+        }
+    }
+
+    /// Bring the first query forward to monotonic `at`, never later; answers
+    /// whether one was still waiting to be sent.
+    ///
+    /// Only the first: once a request has left, the cadence, the backoff and
+    /// every server's hold decide alone, so nothing a caller does here can
+    /// shorten the interval between two requests.
+    pub fn expedite_first(&mut self, at: Duration64) -> bool {
+        let Phase::Scheduled(due) = self.phase else {
+            return false;
+        };
+        if self.sent {
+            return false;
+        }
+        self.phase = Phase::Scheduled(due.min(nanos(at)));
+        true
+    }
+
+    /// Change the steady-state cadence at monotonic `now`, floored at
+    /// [`MIN_POLL`] as the one the client was built with is.
+    ///
+    /// A query waiting out the old cadence is brought within the new one of
+    /// `now`, never pushed later. One waiting out a failure's backoff, and one
+    /// in flight, is left alone.
+    pub fn set_poll_interval(&mut self, poll_interval: Duration64, now: Duration64) {
+        self.poll_interval = nanos(poll_interval).max(nanos(MIN_POLL));
+        if let Phase::Scheduled(due) = self.phase {
+            if self.failures == 0 {
+                let within = nanos(now).saturating_add(self.poll_interval);
+                self.phase = Phase::Scheduled(due.min(within));
+            }
         }
     }
 
@@ -787,6 +831,7 @@ impl NtpClient {
         }
         let server = self.claim_server(now_ns)?;
         let nonce = NtpTimestamp::from_raw(entropy);
+        self.sent = true;
         self.phase = Phase::Awaiting {
             txn: Transaction {
                 server,

@@ -2,7 +2,7 @@
 //! `tairix-kernel` pipeline on the `virt` board against the shared
 //! `time-net-root` whole-disk image — whose read-only `/System` volume carries
 //! the **kernel-signed virtio-net driver bundle** and a planted
-//! `/System/Settings/Network/network.conf`, and whose **encrypted root**
+//! `/System/Defaults/Network/network.conf`, and whose **encrypted root**
 //! carries a planted `/System/Settings/Configuration/system.conf` naming the
 //! host peer as the one time server — with a `virtio-net-device` attached and
 //! the harness-side **NTP-server** link peer on the QEMU `dgram` netdev, and

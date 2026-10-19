@@ -39,7 +39,7 @@ use tairix_log::EventId;
 use tairix_wm::{Compositor, Point, PointerCatch, Rect, WindowId};
 
 /// That a layer surface is too small to reproduce any surface the session
-/// draws for a trusted decision: the credential prompt, or any alert.
+/// draws for a trusted decision: the authorisation sheet, or any alert.
 ///
 /// The bound is the defence; this is the proof it still holds. Shrinking a
 /// trusted prompt below the bound would let a holder render it at its own

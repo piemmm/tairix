@@ -22,10 +22,14 @@ use tairix_wm::{Compositor, InputEvent, InputResponse, Point};
 use crate::clipboard::SessionClipboard;
 use crate::drag::{DragEnd, DragPlace, DragSurface, OwedReport, SlotAnswer};
 use crate::drain::{
-    adopt_unlocks, drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake,
+    adopt_unlocks, drain_authorising, drain_away, drain_locked, Routed, Seat, SeatDrain,
+    SeatRouter, SeatWake,
+};
+use crate::elevate::{
+    AuthorisePrompt, Elevation, Elevator, PromptOutcome, Request as AuthoriseRequest,
 };
 use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
-use crate::lock::{LockOutcome, ScreenLock};
+use crate::lock::{LockOutcome, ScreenLock, UnlockAnswer};
 use crate::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
 use crate::saver::Waking;
 use crate::shell::{DesktopShell, ShellOutcome};
@@ -56,6 +60,8 @@ struct Program {
     drags: Vec<DragEnd>,
     /// How many times a place was resolved into what is there.
     surfaces_built: usize,
+    /// How many times the secure attention key reached the router.
+    attended: usize,
 }
 
 impl Program {
@@ -70,6 +76,7 @@ impl Program {
             reports: Vec::new(),
             drags: Vec::new(),
             surfaces_built: 0,
+            attended: 0,
         }
     }
 
@@ -171,6 +178,10 @@ impl SeatRouter for Program {
 
     fn settle_drag(&mut self, _seat: &mut Seat<'_>, ended: DragEnd) {
         self.drags.push(ended);
+    }
+
+    fn attend(&mut self, _seat: &mut Seat<'_>, _now_ns: u64) {
+        self.attended += 1;
     }
 }
 
@@ -282,7 +293,7 @@ struct Broker {
 }
 
 impl Courier for Broker {
-    type Answer = (Ticket, Verdict);
+    type Answer = UnlockAnswer;
 
     fn send(&mut self, ticket: Ticket, _account: &str, password: &str) -> Result<(), Self::Answer> {
         self.offered.push(String::from(password));
@@ -292,7 +303,7 @@ impl Courier for Broker {
 
     fn receive(&mut self) -> Option<Self::Answer> {
         let ticket = self.held.pop_front()?;
-        Some((
+        Some(UnlockAnswer::of(
             ticket,
             self.verdicts.pop_front().unwrap_or(Verdict::Refused),
         ))
@@ -1089,4 +1100,90 @@ fn a_refused_unlock_keeps_the_screen_locked() {
 
     assert_eq!(outcome, LockOutcome::Pending);
     assert!(desk.lock.is_locked());
+}
+
+/// Ctrl+Alt+Delete pressed.
+fn secure_attention() -> KeyInput {
+    KeyInput::Pressed {
+        key: KeyValue::Named(NamedKeyCode::Delete),
+        modifiers: AbiModifiers {
+            ctrl: true,
+            alt: true,
+            ..AbiModifiers::default()
+        },
+    }
+}
+
+#[test]
+fn the_secure_attention_key_reaches_the_session_and_never_the_shell() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let mut keys = keyboard(&[char_key('a'), secure_attention(), char_key('b')]);
+    let mut program = Program::new();
+
+    desk.wake(&mut MemoryInput::new(&[]), &mut keys, &mut program)
+        .expect("in-memory sources do not fault");
+
+    assert_eq!(program.attended, 1);
+    assert_eq!(program.routed.len(), 1, "only the key before it was routed");
+    assert_eq!(program.routed[0].1, Some(char_key('a')));
+    assert_eq!(
+        queued_keys(&keys),
+        1,
+        "what follows is for whatever it brought up"
+    );
+}
+
+/// A stand-in broker for the prompt: it records each question and answers
+/// none, so what reaches it is all a test needs to see.
+#[derive(Default)]
+struct Asked {
+    listings: usize,
+    offers: Vec<String>,
+    tickets: tairix_greeter::Tickets,
+}
+
+impl Elevator for Asked {
+    fn authorisers(&mut self, _program: &str) -> Ticket {
+        self.listings += 1;
+        self.tickets.issue()
+    }
+
+    fn offer(&mut self, _username: &str, password: &str, _request: &AuthoriseRequest) -> Ticket {
+        self.offers.push(String::from(password));
+        self.tickets.issue()
+    }
+}
+
+#[test]
+fn while_the_prompt_is_up_every_key_is_its_and_the_attention_key_answers_on_it() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let mut prompt = AuthorisePrompt::new();
+    let mut asked = Asked::default();
+    let request = AuthoriseRequest {
+        program: String::from(tairix_abi::DATETIME_RUN_PATH),
+        elevation: Elevation::Launch,
+        requester: String::from("Date & Time"),
+        bundle: None,
+        purpose: String::from("wants to change the date and time."),
+        window: None,
+    };
+    assert!(prompt.ask(request, &mut asked, &desk.shell, &mut desk.comp));
+    let mut keys = keyboard(&[secure_attention(), char_key('p')]);
+
+    let outcome = drain_authorising(
+        &mut desk.seat(),
+        (&mut MemoryInput::new(&[]), &mut keys),
+        &mut prompt,
+        &mut asked,
+        0,
+    )
+    .expect("in-memory sources do not fault");
+
+    assert_eq!(outcome, PromptOutcome::Pending);
+    assert_eq!(queued_keys(&keys), 0, "every key was the prompt's");
+    assert!(
+        asked.offers.is_empty(),
+        "nothing is offered before the listing lands"
+    );
+    assert!(prompt.is_up());
 }

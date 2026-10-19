@@ -253,6 +253,30 @@ no clock: the remaining time is a `Duration64` the embedder supplies from the
 authority's own answer, so there is exactly one attempt policy on the machine
 and it lives behind the verifier.
 
+`Cooldown` is what an embedder counts that answer down with: it holds the
+lockout against the account it was reported for, answers what is left of it
+for the account a surface asks about (none for any other), and `tick_of` names
+when the shown second next turns over, which is what an embedder parks until.
+The login screen and the desktop's screen lock both count with it.
+
+## The authorisation sheet
+
+`AuthoriseSheet` is the system's question before a program runs with
+authority the signed-in account may not hold. It asks for exactly what the
+authority needs: the signed-in account's password when that account may allow
+the program, a choice of the accounts that may when it may not, and nothing at
+all when none may. It is a control — the embedder gives it events and its
+rectangle and performs the exchange itself — built from the shared pieces: the
+`monogram_disc`, the `SecretField`, `lib/controls` rows and buttons, and this
+crate's own wording, shake and cooldown notice. It is as tall as what it asks
+(`client_extent`), keyboard-complete (Tab and Shift-Tab, the arrows on the
+accounts, Enter, Escape stepping back before it cancels), and states every
+answer: checking, refused, cooling down, accepted but not done, unreachable.
+`nothing_waiting` is the notice the secure attention key brings up when no
+question is up. What makes the sheet the system's — the scrim, the held seat,
+the key no application receives — is the embedder's; the desktop's is
+`elevate::AuthorisePrompt` ([the session](../desktop/session.md)).
+
 ## Chrome
 
 `set_chrome` supplies the two lines of one row along the top of the screen,

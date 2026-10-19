@@ -745,6 +745,7 @@ tairix/
 │   │   ├── audiod/      # Audio mixer/router: sole holder of CAP_AUDIO_DEVICE.
 │   │   ├── soundd/      # Cue authority: plays the desktop's sounds.
 │   │   ├── confd/       # App-data service: the per-app settings store.
+│   │   ├── settingsd/   # Machine-settings service: system.conf and network.conf's one writer.
 │   │   ├── timed/       # Time service: NTP client, sole CAP_TIME_SET holder.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
 │   ├── session/         # Authentication and session bring-up.
@@ -1832,6 +1833,8 @@ Authoritative subdirectories:
 ├── Zoneinfo/    # Compiled IANA civil-time zone rules, read-only shipped data.
 ├── Logs/        # Append-only structured logs (writable; noexec).
 ├── Settings/    # Machine-wide settings (writable; noexec).
+├── Defaults/    # The image's own machine settings, read-only: what a
+│             #   Settings/ document holds until an administrator changes it.
 ├── Components/  # Parts of the OS the system starts by path: the desktop
 │             #   session and the file manager, Settings and Date & Time
 │             #   it opens. One §16.5 bundle each, never searched by a
@@ -1866,9 +1869,14 @@ beneath `/System`. They are mounted `noexec`; the rest of
 `/System` is read-only. Write access is gated first by the per-inode
 owner/mode/ACL model (§5.3) under the caller's kernel-attested identity —
 these subtrees are owned by the system user with restrictive modes, so
-ordinary principals read but do not write. A *dedicated* write capability
-(a `CAP_LOG_WRITE` for the journal, a `CAP_SETTINGS_WRITE` for the settings
-service) is introduced **with the service that holds and enforces it**, not
+ordinary principals read but do not write. A service whose state lives there
+owns its own directory. The machine's settings documents (`system.conf`,
+`network.conf`) are written only by the settings service, which admits a
+caller holding `CAP_SETTINGS_WRITE` — an administrator's elevated program —
+and makes each change to the document as it stands: the administrator's
+document under `Settings/` where one exists, else the image's default under
+`Defaults/`. A *dedicated* write capability (a `CAP_LOG_WRITE` for the
+journal) is introduced **with the service that holds and enforces it**, not
 ahead of it — per the capability-minimalism rule (§5.2), a capability with
 no live holder or enforcement point is not added in advance.
 

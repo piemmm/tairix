@@ -3,22 +3,23 @@
 # composer; the capability list is the bundle's request, intersected with
 # the launching user's grants. CAP_CONSOLE_WRITE covers the setting
 # listing (and the short help) written to the inherited standard output;
-# CAP_FS_ACCESS covers the store read/write under
-# /System/Settings/Configuration and the short-help read of the bundle's
-# own Help/ documents — both through the secured VFS, which authorises
-# every path per-inode under the caller's attested identity, so only a
-# principal the /System/Settings policy admits can change a setting.
-# CAP_NET_ADMIN lets a changed net.* key reach the *running* network stack
-# over its admin endpoint: writing the store alone would only take effect at
-# the next boot, and the stack holds no filesystem capability so it cannot
-# read the store itself. A caller whose ceiling withholds it still saves the
-# setting and is told the running stack did not take it. The tool reads no
-# input, so it requests no CAP_CONSOLE_READ and nothing else.
+# CAP_FS_ACCESS covers reading the machine configuration's two layers and
+# the short-help read of the bundle's own Help/ documents, both authorised
+# per-inode under the caller's attested identity. CAP_SETTINGS_WRITE asks the
+# settings service to change either document and to read the network one,
+# which is not open — the service is their one writer, so only an elevated
+# administrator changes a setting. CAP_NET_ADMIN lets a changed net.* key or
+# interface reach the *running* network stack over its admin endpoint: a
+# saved change alone takes effect at the next boot, and the stack holds no
+# filesystem capability so it cannot read the store itself. A caller whose
+# ceiling withholds it still saves the setting and is told the running stack
+# did not take it. The tool reads no input, so it requests no
+# CAP_CONSOLE_READ and nothing else.
 id = "os.tairix.configure"
 name = "configure"
 title = "Configure"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET_ADMIN"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SETTINGS_WRITE", "CAP_NET_ADMIN"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "configure.png"

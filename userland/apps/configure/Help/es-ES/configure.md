@@ -1,6 +1,6 @@
 ## NAME
 
-configure — leer y establecer la configuración del sistema en el arranque
+configure — leer y establecer los ajustes de la máquina
 
 ## SYNOPSIS
 
@@ -8,22 +8,30 @@ configure — leer y establecer la configuración del sistema en el arranque
 
 ## DESCRIPTION
 
-Lista, muestra y establece los ajustes del almacén de configuración en
+Lista, muestra y establece los ajustes de la máquina, guardados en
 `/System/Settings/Configuration/system.conf`. Sin operandos se lista
-cada ajuste con su valor actual; con una clave sola se muestra su
-valor; con una clave y un valor se cambia el ajuste.
+cada ajuste con su valor actual; con una clave sola se muestra su valor;
+con uno o más pares `<key> <value>` se cambian esos ajustes a la vez.
 
-El almacén reside en el volumen raíz cifrado y sus consumidores lo leen
-tras desbloquear el sistema de archivos raíz; un cambio surte efecto la
-próxima vez que arranque su consumidor (`os.loginType`: el inicio de
-sesión del próximo arranque; los conmutadores `cache.*`: el desbloqueo
-del próximo arranque).
+Varios pares son un solo cambio, no varios: cada par se comprueba antes
+de cambiar nada, y después los ajustes se guardan de una sola vez. Una
+línea de órdenes que nombre una clave desconocida, un valor fuera del
+conjunto de su clave o la misma clave dos veces no cambia nada en
+absoluto, de modo que un grupo de ajustes nunca puede quedar aplicado a
+medias.
+
+Solo un administrador puede cambiar un ajuste: una cuenta ordinaria lee
+los ajustes de la máquina pero no cambia ninguno. El sistema trae sus
+propios ajustes, que rigen hasta que un administrador cambia alguno, y
+el primer cambio conserva todos los demás ajustes que trae el sistema.
+Un cambio surte efecto la próxima vez que arranca la parte del sistema
+que lo lee (`os.loginType` en el próximo inicio de sesión, los
+conmutadores `cache.*` en el próximo arranque), salvo que su clave, más
+abajo, indique otra cosa.
 
 El conjunto de claves es cerrado: una clave desconocida, o un valor
 fuera del conjunto de una clave, se rechaza indicando las opciones
-válidas y no cambia nada. Cambiar un ajuste reescribe el almacén en su
-forma canónica y requiere acceso de escritura a `/System/Settings`: una
-cuenta ordinaria puede leer los ajustes pero no cambiarlos.
+válidas y no cambia nada.
 
 - `os.loginType` — `text` o `graphical`: qué tipo de sesión inicia el
   servicio de inicio de sesión para un usuario autenticado. `graphical`
@@ -79,20 +87,35 @@ afectado — nunca cambia un resultado.
   RAM de la máquina, para que un servidor grande no quede atado a una
   cifra elegida en uno pequeño; un tamaño lo sustituye para una carga que
   usted conoce mejor. Cada principal puede tener una dieciseisava parte
-  del presupuesto efectivo. En bytes y no en número de sockets, porque el
-  mismo número de sockets son unos kilobytes en reposo y megabytes cuando
-  están llenos: el presupuesto lleva muchas conexiones tranquilas o menos
-  conexiones activas, según sea la carga en realidad.
+  del presupuesto efectivo, así que siempre hay sitio para dieciséis. En
+  bytes y no en número de sockets, porque el mismo número de sockets son
+  unos kilobytes en reposo y megabytes cuando están llenos: el
+  presupuesto lleva muchas conexiones tranquilas o menos conexiones
+  activas, según sea la carga en realidad.
 - `time.servers` — `none` o una lista de servidores de hora de red
   separada por comas, cada uno un nombre de host o una dirección. `none`
-  (el valor por omisión) significa que el reloj nunca se ajusta desde la
-  red: TAIRiX no tiene un grupo de servidores de hora propio, así que
-  nombrar un servidor es decisión del operador.
+  (el valor por omisión) no nombra ningún servidor propio: el reloj se
+  ajusta entonces desde el servidor que indica la concesión de dirección
+  de la red, o si no desde el grupo público `pool.ntp.org`. Los servidores
+  nombrados aquí tienen prioridad sobre ambos.
 - `time.refresh` — `6h`, `12h`, `1d`, `2d` o `7d`: cuánto tiempo de
   actividad pasa entre consultas del reloj una vez conocida la hora. `1d`
   es el valor por omisión. Un reloj sin ajustar, inverosímil o muy
   desactualizado se corrige en cuanto la red lo permite, diga esto lo que
   diga.
+- `time.network` — `on` (el valor por omisión) u `off`: si el reloj se
+  ajusta desde la red. Con `off` no sale ninguna consulta de hora hacia
+  ningún servidor, y el reloj se ajusta a mano o desde el chip de reloj de
+  la placa, que se lee en cada arranque en cualquier caso. Un cambio se
+  aplica al momento; el ajuste se guarda en el disco del sistema, así que
+  al principio de un arranque rige el valor por omisión hasta que se
+  alcanza ese disco.
+- `time.zone` — `default` o el nombre de una zona horaria como
+  `Europe/London`: la zona horaria de la máquina, la que muestra la
+  pantalla de inicio de sesión y la que usa una cuenta que no ha elegido
+  ninguna. `default` es la zona que el sistema trae como propia; un
+  nombre que no figura en la lista de zonas del sistema se pasa por alto
+  como si fuera `default`. Un cambio se aplica al momento.
 - `input.mouse.debounce` — milisegundos enteros, `25` por omisión, `0` para
   desactivarlo, `100` como máximo: cuánto tiempo después de soltar un botón
   del ratón se ignora la siguiente pulsación del mismo botón como rebote del
@@ -112,8 +135,57 @@ afectado — nunca cambia un resultado.
   audio toma un valor cambiado en el siguiente arranque; `audioctl` cambia
   la máquina en marcha.
 
-La pila de red lee los ajustes `net.*`; un cambio surte efecto cuando
-la pila vuelve a aplicar su configuración.
+Una clave que no está en la lista anterior se busca en un segundo
+registro: los ajustes de red de cada interfaz, guardados en
+`/System/Settings/Network/network.conf`. Sus claves se escriben
+`<interface>.<setting>`, donde `<interface>` es el alias que un
+administrador dio a una interfaz de red (`wan`, `lan0`) y `<setting>` es
+uno de `kind`, `match.mac`, `match.node`, `ipv4.method`, `ipv4.address`,
+`ipv4.gateway`, `ipv6.method`, `ipv6.address`, `ipv6.gateway`,
+`dns.servers`, `mtu`, `bond.members`, `bond.mode`,
+`bond.monitor-interval` y `bond.primary`.
+
+El registro de la máquina de arriba se consulta siempre primero, así que
+un alias de interfaz nunca puede apropiarse del nombre de un ajuste de
+la máquina.
+
+Los ajustes de red no tienen valores por defecto, así que la lista
+muestra solo los ajustes que están establecidos, y mostrar uno que no lo
+está responde con una línea vacía en lugar de inventar un valor. Solo un
+administrador puede leerlos o cambiarlos: nombran el hardware de cada
+interfaz y las direcciones de esta máquina. La lista de cualquier otra
+cuenta muestra los ajustes de la máquina e indica que los de red no se
+muestran.
+
+Como ese registro no tiene valores por defecto, un ajuste se elimina en
+lugar de restablecerse, y un **valor vacío** es la forma de eliminarlo:
+`configure wan.ipv4.address ""`. Ningún ajuste de interfaz acepta un
+valor vacío, así que esta escritura nunca puede confundirse con
+establecer uno. Esto es lo que permite que una sola orden pase una
+interfaz de una dirección estática a DHCP —
+`configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""`
+— un cambio del que ninguna de las dos mitades describe por sí sola una
+configuración coherente. Una interfaz cuyo último ajuste se elimina deja
+de estar declarada en absoluto.
+
+Toda la configuración editada se comprueba antes de guardar nada: un
+cambio que la dejaría incoherente (un método estático sin dirección, un
+agregado de enlaces con menos de dos miembros) se rechaza y no se guarda
+nada.
+
+Cambiar un ajuste `net.*`, o uno de interfaz, lo guarda y lo entrega a
+la pila de red en marcha, así que surte efecto al momento. Solo se
+entregan las interfaces a las que el cambio afectó de verdad. Si la pila
+en marcha no acepta una entrega — no hay ninguna en marcha, o su cuenta
+no puede administrar la red —, el ajuste se guarda igualmente y
+`configure` lo indica; entonces se aplica en el próximo arranque.
+
+Dos límites se comunican en lugar de ocultarse. Una interfaz que usted
+quitó de la configuración sigue funcionando hasta el próximo arranque
+con la última configuración que recibió la pila, porque la pila no tiene
+ningún mensaje que retire una. Una interfaz guardada sin `match.mac` ni
+`match.node` nunca puede vincularse a un dispositivo, así que se guarda
+y se indica el rechazo.
 
 ## OPTIONS
 
@@ -129,15 +201,30 @@ la pila vuelve a aplicar su configuración.
   el sistema.
 - `configure cache.filesystem off` — desactivar solo la caché del
   sistema de archivos.
+- `configure net.ipv6.enabled false` — desactivar IPv6 en toda la pila.
+- `configure time.servers 0.example.test,1.example.test` — establecer
+  los servidores de hora de red con los que se sincroniza el reloj.
+- `configure time.zone Europe/London` — hacer que la máquina siga la
+  hora de Londres.
+- `configure wan.ipv4.address` — mostrar la dirección IPv4 estática
+  configurada para la interfaz llamada `wan`.
+- `configure wan.ipv4.address 10.0.0.7/24 wan.ipv4.gateway 10.0.0.1` —
+  dar a `wan` una dirección IPv4 estática y una puerta de enlace
+  predeterminada.
+- `configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""`
+  — pasar `wan` del direccionamiento estático a DHCP.
+- `configure wan.dns.servers 9.9.9.9,2001:db8::53` — establecer los
+  servidores DNS recursivos que se usarán en `wan`.
 
 ## EXIT STATUS
 
 - `0` — se completó la lista, el valor, la ayuda breve o el cambio.
-- `1` — el almacén no se pudo leer o escribir (por ejemplo, quien llama
-  no puede cambiar los ajustes del sistema), o la salida no se pudo
-  entregar.
-- `2` — la línea de órdenes no se entendió, la clave es desconocida o
-  el valor está fuera del conjunto de la clave.
+- `1` — los ajustes no se pudieron leer o cambiar (por ejemplo, quien
+  llama no puede cambiar los ajustes de la máquina, o no puede leer sus
+  ajustes de red), o la salida no se pudo entregar.
+- `2` — la línea de órdenes no se entendió, la clave es desconocida, el
+  valor está fuera del conjunto de la clave, o el cambio dejaría
+  incoherente la configuración de red.
 
 ## ENVIRONMENT
 

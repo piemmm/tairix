@@ -1123,6 +1123,15 @@ const EVERY_FAMILY: &[Family] = &[
     ("SearchField", SEAT, |sf, b, s, th| {
         SearchField::new().render(sf, b, s, th);
     }),
+    ("PlaceChooser", SEAT, |sf, b, s, th| {
+        crate::place_tests::chooser()
+            .with_highlight(5)
+            .render(sf, b, s, th);
+    }),
+    ("PlaceDialog", SEAT, |sf, b, s, th| {
+        crate::place::PlaceDialog::new("Choose a time zone", crate::place_tests::chooser())
+            .render(sf, b, s, th);
+    }),
     ("Toolbar", SEAT, |sf, b, s, th| {
         Toolbar::new().render(sf, b, s, th, &mut NoArtwork);
     }),

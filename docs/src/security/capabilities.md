@@ -202,7 +202,9 @@ transport layer to run the diagnostic `ping`, is an administrative act, the
 Unix `CAP_NET_BIND_SERVICE`/`CAP_NET_RAW` model — `CAP_NET_DISCOVER_ALL`,
 browsing any link-local service type and enumerating every type, where an
 application otherwise browses only the types its signed manifest declares
-(`docs/src/userland/discoveryd.md`), and `CAP_PROC_CONTROL`,
+(`docs/src/userland/discoveryd.md`), `CAP_SETTINGS_WRITE`, changing the
+machine's settings and reading its network addressing through the settings
+service (`docs/src/userland/settingsd.md`), and `CAP_PROC_CONTROL`,
 which `signal` consults only once its own-child and own-uid checks have
 both come up empty: controlling a process that belongs to a *different*
 principal is an administrative act, while signalling one's own children

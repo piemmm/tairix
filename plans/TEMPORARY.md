@@ -25,7 +25,7 @@
 | TMP-6 | Raspberry Pi 4 acceptance of TMP-1 to TMP-5 and TMP-7 to TMP-9 on metal | blocked: the operator's Pi 4 run |
 | TMP-7 | Dialogs, forms and progress are owned windows of their own; a modal panel drawn inside an application's window is forbidden | done |
 | TMP-7.1 | The owned dialog window: protocol, session placement, owner modality shared with alerts, earned focus | done |
-| TMP-7.2 | TextEdit's Go to line, Paint's forms and Settings' credential sheet become dialog windows; the in-window placement helpers are deleted | done |
+| TMP-7.2 | TextEdit's Go to line and Paint's forms become dialog windows; the in-window placement helpers are deleted | done |
 | TMP-7.3 | Each file operation's progress is a modeless window of its own; the file manager runs a bounded, ordered set of operations | done |
 | TMP-8 | Alerts and dialog windows size to their content; nothing is elided (`plans/OPEN-DEFECTS.md` D1129) | done |
 
@@ -443,7 +443,7 @@ own page.
   holder behind it, else the window. Focus is earned as an alert's, spending
   the activation that earned it; a dialog takes no press until `ALERT_ARM_NS`
   after the frame that first shows its content.
-- **Telling the system's prompts apart.** The session's credential and
+- **Telling the system's prompts apart.** The session's authorisation and
   confirmation prompts are undecorated, centred on the screen and hold the
   whole seat; an application's dialog is framed, names its application first,
   sits over its own window and never holds the seat.
@@ -451,14 +451,12 @@ own page.
   (owner-modal: their rows are filled from the picture they act on) are drawn
   beside the document's area and shown in a dialog through the document host
   (`DocumentView::dialog_window`, `dialog_input`), which fits and scrolls a
-  dialog the desktop shrank. Settings' credential question (owner-modal) has
-  its own window in the settings loop. Each file operation has a modeless
+  dialog the desktop shrank. Each file operation has a modeless
   progress window of its own; a folder window may run several, bounded by the
   operations desk and run in the order asked, so one touching a tree an earlier
   one works in waits behind it and says so. None of the applications filters
   its own input for modality.
-- **Deleted.** `Dialog::placed_over`, `CredentialSheet::centred_in`, the
-  TextEdit and Paint veils, the file manager's `operation_control` and
+- **Deleted.** `Dialog::placed_over`, the TextEdit and Paint veils, the file manager's `operation_control` and
   in-window progress panel, and the settings shell's modality filters.
 
 ## TMP-8 — Alerts and dialog windows size to their content; nothing is elided
@@ -495,8 +493,8 @@ The operator's run on the Pi 4, with the system log captured:
 - an ext stick made on another system presents its own ownership, and a
   refused write is stated to the user (TMP-4);
 - a drag-resize of a file window produces no stall report (TMP-5);
-- a copy's progress, Go to line, a Paint form and the Settings credential
-  sheet each open as a window of their own (TMP-7);
+- a copy's progress, Go to line and a Paint form each open as a window of
+  their own (TMP-7);
 - an alert with a long headline shows all of it, and a short one is short
   (TMP-8).
 

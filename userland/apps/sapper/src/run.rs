@@ -527,6 +527,7 @@ mod program {
             // surfaces this application never opens, so none can arrive here.
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::AlertClosed { .. }
+            | WindowEvent::Authorised { .. }
             | WindowEvent::LayerPointer { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::Key { .. }

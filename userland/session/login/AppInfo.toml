@@ -11,11 +11,12 @@
 # audit records, CAP_SYSINFO_KERNEL so the full-screen view's status bar
 # can show the memory figures (a refusal degrades that one figure to a
 # placeholder, never the login), and CAP_FS_ACCESS for read-only
-# existence probes: whether the desktop-session and greeter bundles
+# existence probes — whether the desktop-session and greeter bundles
 # exist, which decides if a graphical login is possible at all
-# (plans/DISPLAY.md D7d; plans/NEW-DESKTOP-LOGIN.md). Credentials still
-# flow only through the gated users_db_read syscall, never the
-# filesystem.
+# (plans/DISPLAY.md D7d; plans/NEW-DESKTOP-LOGIN.md) — and for reading an
+# elevated program's manifest, whose request decides which accounts may
+# allow it (plans/CAPABILITY_USE.md CU5). Credentials still flow only
+# through the gated users_db_read syscall, never the filesystem.
 id = "os.tairix.login"
 name = "login"
 title = "Login"

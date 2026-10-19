@@ -5,7 +5,7 @@
 use std::sync::OnceLock;
 
 use tairix_abi::time::{days_from_civil, CivilTime, Time64};
-use tairix_tz::{Disambiguation, LocalError, ZoneInfo};
+use tairix_tz::{Disambiguation, LocalError, Weekday, ZoneInfo};
 
 const HOUR: i32 = 3600;
 
@@ -186,6 +186,21 @@ fn the_shipped_defaults_are_london_and_the_united_kingdom() {
     );
     assert_eq!(info.regions().count(), 249);
     assert_eq!(info.places().count(), 418);
+    // CLDR 44's weekData, and the world's Monday where a region lists none.
+    for (code, day) in [
+        ("GB", Weekday::Monday),
+        ("US", Weekday::Sunday),
+        ("JP", Weekday::Sunday),
+        ("EG", Weekday::Saturday),
+        ("MV", Weekday::Friday),
+        ("AQ", Weekday::Monday),
+    ] {
+        assert_eq!(
+            info.region(code).map(|region| region.first_weekday),
+            Some(day),
+            "{code}"
+        );
+    }
     let accra = info
         .places()
         .find(|place| place.region == "GH")
@@ -200,4 +215,23 @@ fn the_shipped_defaults_are_london_and_the_united_kingdom() {
 #[test]
 fn the_store_stays_small_enough_to_keep_resident() {
     assert!(store().len() < 256 * 1024, "{} bytes", store().len());
+}
+
+#[test]
+fn the_next_change_of_the_shipped_zones_is_named() {
+    let info = ZoneInfo::parse(store()).expect("the store parses");
+    let london = info.zone("Europe/London").expect("London");
+    let summer = Time64::from_secs(utc(2026, 7, 1, 12, 0));
+    let autumn = london.next_change(summer).expect("the clocks go back");
+    assert_eq!(autumn.at, Time64::from_secs(utc(2026, 10, 25, 1, 0)));
+    assert_eq!(autumn.before.utc_offset - autumn.after.utc_offset, 3600);
+    // Read in the offset it leaves: 02:00 on a Sunday.
+    let local = CivilTime::at_offset(autumn.at.secs(), autumn.before.utc_offset);
+    assert_eq!((local.month, local.day, local.hour), (10, 25, 2));
+    assert_eq!(
+        Weekday::of_days(days_from_civil(local.year, local.month, local.day).expect("a date")),
+        Weekday::Sunday
+    );
+    let kolkata = info.zone("Asia/Kolkata").expect("Kolkata");
+    assert_eq!(kolkata.next_change(summer), None, "India keeps one offset");
 }

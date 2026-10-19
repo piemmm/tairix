@@ -151,6 +151,8 @@ pub const AUDIOD: EventRange = EventRange::new(30_000, 31_000);
 pub const SWITCHBOARD: EventRange = EventRange::new(31_000, 32_000);
 /// The network map's active reachability probing.
 pub const NETMAP: EventRange = EventRange::new(33_000, 34_000);
+/// The machine-settings service.
+pub const SETTINGSD: EventRange = EventRange::new(34_000, 35_000);
 
 /// Every range and the crates that take identifiers from it.
 pub const OWNERS: &[Owner] = &[
@@ -341,6 +343,10 @@ pub const OWNERS: &[Owner] = &[
     Owner {
         range: NETMAP,
         crates: &["userland/apps/netmap"],
+    },
+    Owner {
+        range: SETTINGSD,
+        crates: &["userland/system/settingsd"],
     },
 ];
 

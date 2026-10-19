@@ -1,9 +1,9 @@
 //! Tests for General: the machine readings, the staged-apply model, and the
-//! credential question the elevated run is offered through.
+//! system task an apply asks the desktop for.
 //!
-//! The elevation seam is injected by driving the shell's own outcome — the
-//! shell asks for a run and adopts the verdict it is told — so the whole
-//! staged model is exercised with no broker, no account database, and no
+//! The desktop is injected by driving the shell's own outcome — the shell
+//! asks for a task and adopts what it is told came of it — so the whole
+//! staged model is exercised with no desktop, no account database, and no
 //! spawn anywhere near it.
 
 use alloc::string::{String, ToString};
@@ -11,18 +11,17 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{SystemIdentity, Uptime};
 use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
-use tairix_controls::Keystroke;
 use tairix_geometry::{to_i32, Point, Scale};
 use tairix_icon::NoArtwork;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
-use tairix_sysconfig::{CacheMode, CacheSwitch, LoginType, SystemConfig};
-use tairix_vt::secret::SECRET_TICK_NS;
+use tairix_sysconfig::{CacheMode, LoginType, Switch, SystemConfig};
 use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
-use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
-use crate::test_support::{damage, opaque, question_client, question_key, stated, theme, WIDE};
+use crate::shell::{Authorised, Shell, ShellOutcome};
+use crate::test_support::{band_line, damage, opaque, stated, task_words, theme, WIDE};
+use tairix_abi::window_ipc::SystemTask;
 
 /// A shell showing `pane`, with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
@@ -85,28 +84,24 @@ fn press_action(shell: &mut Shell) -> ShellOutcome {
     press_command(shell, last)
 }
 
-/// Type `text` into whichever field of the credential question holds the
-/// keyboard, in the question's own window.
-fn type_into(shell: &mut Shell, text: &str) {
-    for ch in text.chars() {
-        question_key(shell, Key::Char(ch));
-    }
-}
-
-/// Press `key` in the credential question's own window.
-fn press(shell: &mut Shell, key: NamedKey) -> ShellOutcome {
-    question_key(shell, Key::Named(key))
+/// Press the band's acting command and hand back the task it asked the
+/// desktop for.
+fn apply(shell: &mut Shell) -> SystemTask {
+    let ShellOutcome::Authorise(task) = press_action(shell) else {
+        panic!("the band asks the desktop for a task");
+    };
+    *task
 }
 
 // --- The staged model ---------------------------------------------------
 
 #[test]
 fn a_staged_row_edits_a_working_copy_and_asks_for_nothing() {
-    // The whole point of a staged pane: a choice is not a write, so no
-    // password is asked for and no store is touched until Apply.
+    // The whole point of a staged pane: a choice is not a write, so nothing
+    // is asked of the desktop and no store is touched until Apply.
     let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    assert!(!shell.asking(), "a choice asks for no account");
+    assert!(!shell.authorising(), "a choice asks for nothing");
     let form = shell.form_for_test().expect("a composed pane");
     assert_eq!(
         form.pending(),
@@ -129,71 +124,48 @@ fn reverting_puts_the_working_copy_back() {
 }
 
 #[test]
-fn applying_asks_for_an_account_and_runs_the_tool_that_owns_the_store() {
+fn applying_asks_the_desktop_to_configure_every_staged_key_at_once() {
     let mut shell = showing_with("caching", SystemConfig::default());
-    // Two rows, so the one run carries both changes together.
+    // Two rows, so the one task carries both changes together.
     choose_next(&mut shell, 0, 0);
     choose_next(&mut shell, 1, 0);
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 2);
 
-    press_action(&mut shell);
-    assert!(shell.asking(), "applying asks for an account");
-
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "hunter2");
-    let ShellOutcome::Elevate(asked) = press(&mut shell, NamedKey::Enter) else {
-        panic!("offering an account asks for the run");
-    };
-    assert_eq!(asked.account, "root");
-    assert_eq!(asked.password, b"hunter2");
-    assert_eq!(asked.program, "/System/Commands/configure.app/Run");
-    assert_eq!(asked.mode, RunMode::Wait, "a store write is waited for");
+    let task = apply(&mut shell);
+    assert!(shell.authorising(), "the desktop is asked");
+    assert!(matches!(task, SystemTask::Configure(_)));
     // One invocation carrying every changed key, so the document is
     // rendered once and cannot be left half written.
     assert_eq!(
-        asked.argv,
-        alloc::vec![
-            "cache.all".to_string(),
-            "off".to_string(),
-            "cache.filesystem".to_string(),
-            "off".to_string(),
-        ]
+        task_words(&task),
+        ["cache.all", "off", "cache.filesystem", "off"]
     );
 }
 
 #[test]
-fn a_refused_account_keeps_the_question_and_the_working_copy() {
+fn a_task_the_desktop_would_not_ask_keeps_the_working_copy() {
     let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "wrong");
-    press(&mut shell, NamedKey::Enter);
+    let _ = apply(&mut shell);
 
-    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::Credentials));
-    assert!(
-        shell.asking(),
-        "a refusal leaves the question up to correct"
-    );
-    // And the working copy stands, so the reader corrects the password
-    // rather than retyping the change.
+    shell.adopt_authorisation(Authorised::Refused(String::from(
+        "Something else holds the screen. Try again once it has gone.",
+    )));
+    assert!(!shell.authorising());
+    assert!(band_line(&shell).contains("Something else holds the screen"));
+    // The working copy stands, so the reader applies again rather than
+    // restaging the change.
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 1);
 }
 
 #[test]
-fn an_accepted_run_takes_the_question_down_and_re_reads_the_store() {
+fn a_task_that_ran_re_reads_the_store() {
     let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "hunter2");
-    press(&mut shell, NamedKey::Enter);
+    let _ = apply(&mut shell);
 
-    shell.adopt_elevation(Elevated::Finished(0));
-    assert!(!shell.asking());
+    shell.adopt_authorisation(Authorised::Ran(0));
+    assert!(!shell.authorising());
     // Persist-then-adopt: what is durable is whatever the store now says,
     // so the window asks for it again rather than declaring its own
     // working copy the truth.
@@ -209,109 +181,46 @@ fn an_accepted_run_takes_the_question_down_and_re_reads_the_store() {
 #[test]
 fn a_run_that_did_not_take_the_change_is_not_reported_as_applied() {
     // A non-zero exit is the tool refusing, which is not a success however
-    // cleanly the account authenticated.
+    // cleanly the account was allowed.
     let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "hunter2");
-    press(&mut shell, NamedKey::Enter);
+    let _ = apply(&mut shell);
 
-    shell.adopt_elevation(Elevated::Finished(2));
-    assert!(shell.asking(), "the question stays up to try again");
+    shell.adopt_authorisation(Authorised::Ran(2));
+    assert!(!shell.authorising(), "the task is over");
+    assert!(band_line(&shell).contains("did not accept the change"));
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 1);
     assert!(!shell.config_wanted(), "nothing was written to re-read");
 }
 
 #[test]
-fn the_date_and_time_pane_launches_the_application_that_owns_the_clock() {
+fn the_date_and_time_pane_asks_the_desktop_to_open_date_and_time() {
     let mut shell = showing_with("date-time", SystemConfig::default());
-    press_action(&mut shell);
-    assert!(shell.asking());
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "hunter2");
-    let ShellOutcome::Elevate(asked) = press(&mut shell, NamedKey::Enter) else {
-        panic!("offering an account asks for the run");
-    };
-    assert_eq!(asked.program, tairix_abi::DATETIME_RUN_PATH);
-    // Started and left running: the reader then works in it, and a window
-    // that waited for its exit would stop drawing for the whole session.
-    assert_eq!(asked.mode, RunMode::Leave);
-    assert!(
-        asked.argv.is_empty(),
-        "an interactive program takes no argv"
-    );
+    assert_eq!(apply(&mut shell), SystemTask::SetClock);
+    shell.adopt_authorisation(Authorised::Launched);
+    assert!(!shell.authorising());
 }
 
 #[test]
-fn the_questions_password_steps_its_marker_on_the_clock_its_keystroke_was_taken_at() {
+fn a_declined_prompt_changes_nothing_anywhere() {
     let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    assert_eq!(
-        shell.secret_deadline_ns(),
-        None,
-        "nothing typed, nothing timed"
-    );
-
-    let theme = theme();
-    let client = question_client(&shell);
-    let at = 7 * SECRET_TICK_NS;
-    let stroke = Keystroke {
-        key: Key::Char('h'),
-        modifiers: Modifiers::default(),
-        at_ns: at,
-    };
-    shell.on_question_key(stroke, client, Scale::ONE, &theme, &mut damage());
-    let due = at + SECRET_TICK_NS;
-    assert_eq!(shell.secret_deadline_ns(), Some(due));
-
-    let mut early = damage();
-    shell.advance_question(due - 1, client, Scale::ONE, &mut early);
-    assert!(early.is_empty(), "no dot moves before its tick");
-    let mut stepped = damage();
-    shell.advance_secrets(due, WIDE, (Scale::ONE, &theme), &mut stepped);
-    assert!(
-        stepped.is_empty(),
-        "nothing of the question is in the window"
-    );
-    shell.advance_question(due, client, Scale::ONE, &mut stepped);
-    assert!(!stepped.is_empty(), "the step reports where to present");
-    assert!(
-        stepped
-            .rects()
-            .iter()
-            .all(|rect| rect.intersection(&client) == *rect),
-        "in the question's own window"
-    );
-    assert_eq!(shell.secret_deadline_ns(), Some(due + SECRET_TICK_NS));
-}
-
-#[test]
-fn cancelling_the_question_changes_nothing_anywhere() {
-    let mut shell = showing_with("login-startup", SystemConfig::default());
-    choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    assert_eq!(press(&mut shell, NamedKey::Escape), ShellOutcome::Changed);
-    assert!(!shell.asking());
+    let _ = apply(&mut shell);
+    let said = band_line(&shell);
+    shell.adopt_authorisation(Authorised::Declined);
+    assert!(!shell.authorising());
     assert!(!shell.config_wanted());
     assert_eq!(shell.form_for_test().expect("a form").pending().len(), 1);
+    assert_eq!(band_line(&shell), said, "nothing to say");
 }
 
-/// The question is held modal by the desktop, which holds the settings
-/// window while its dialog is up, so the window's own input is never
+/// The desktop's prompt holds the seat, so the window's own input is never
 /// filtered for it here: what reaches the pane is the pane's.
 #[test]
-fn the_window_keeps_its_own_input_while_the_question_is_up() {
+fn the_window_keeps_its_own_input_while_the_desktop_asks() {
     let mut shell = showing_with("caching", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    assert!(shell.asking());
+    let _ = apply(&mut shell);
     let staged = shell.form_for_test().expect("a form").pending();
     press_command(&mut shell, 0);
     assert_ne!(
@@ -319,79 +228,22 @@ fn the_window_keeps_its_own_input_while_the_question_is_up() {
         staged,
         "Revert reached the pane"
     );
-    assert!(shell.asking(), "and left the question to be answered");
+    assert!(shell.authorising(), "and left the task with the desktop");
 }
 
-/// While the broker checks an offer the question takes nothing more: a second
-/// Enter asks for no second run, and the refusal hands the keyboard back.
+/// One task is asked at a time: Apply while the desktop is asking asks
+/// nothing more, and once the task is over the next Apply asks again.
 #[test]
-fn a_question_being_checked_asks_for_no_second_run() {
+fn one_task_is_asked_at_a_time() {
     let mut shell = showing_with("login-startup", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "hunter2");
-    assert!(matches!(
-        press(&mut shell, NamedKey::Enter),
-        ShellOutcome::Elevate(_)
-    ));
-
-    type_into(&mut shell, "x");
+    let _ = apply(&mut shell);
     assert!(
-        !matches!(press(&mut shell, NamedKey::Enter), ShellOutcome::Elevate(_)),
-        "a question being checked offers nothing"
+        !matches!(press_action(&mut shell), ShellOutcome::Authorise(_)),
+        "a task outstanding asks for no second"
     );
-
-    shell.adopt_elevation(Elevated::Refused(ElevateRefusal::Credentials));
-    type_into(&mut shell, "again");
-    let ShellOutcome::Elevate(asked) = press(&mut shell, NamedKey::Enter) else {
-        panic!("a refused question asks again");
-    };
-    assert_eq!(asked.password, b"again");
-}
-
-#[test]
-fn an_offered_secret_is_never_rendered() {
-    // A derived `Debug` would print the password into whatever rendered
-    // the request — a diagnostic, a log line, a test failure.
-    let mut shell = showing_with("login-startup", SystemConfig::default());
-    choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    type_into(&mut shell, "root");
-    press(&mut shell, NamedKey::Tab);
-    type_into(&mut shell, "hunter2");
-    let ShellOutcome::Elevate(asked) = press(&mut shell, NamedKey::Enter) else {
-        panic!("offering an account asks for the run");
-    };
-    let rendered = alloc::format!("{asked:?}");
-    assert!(rendered.contains("root"), "the account is not the secret");
-    assert!(
-        !rendered.contains("hunter2"),
-        "a rendered request must not carry the offered password: {rendered}"
-    );
-}
-
-#[test]
-fn erasing_a_request_zeroes_the_offered_secret() {
-    // The one eraser `Drop` runs, checked on a live value: a holder that
-    // outlives the exchange calls it explicitly, and every other path is
-    // the drop.
-    let mut asked = Elevation {
-        account: String::from("root"),
-        password: b"hunter2".to_vec(),
-        program: "/x",
-        argv: Vec::new(),
-        mode: RunMode::Wait,
-    };
-    asked.erase();
-    assert!(
-        asked.password.iter().all(|byte| *byte == 0),
-        "the secret is zeroed in place, not merely dropped"
-    );
-    // The account is not a secret and is left as typed, so a refusal can
-    // be corrected without retyping it.
-    assert_eq!(asked.account, "root");
+    shell.adopt_authorisation(Authorised::Declined);
+    assert!(matches!(apply(&mut shell), SystemTask::Configure(_)));
 }
 
 // --- The readings -------------------------------------------------------
@@ -591,7 +443,7 @@ fn a_store_whose_master_switch_is_off_still_reports_each_class_value() {
     let shell = showing_with(
         "caching",
         SystemConfig {
-            cache_all: CacheSwitch::Off,
+            cache_all: Switch::Off,
             cache_block: CacheMode::Off,
             ..SystemConfig::default()
         },
@@ -604,10 +456,10 @@ fn a_store_whose_master_switch_is_off_still_reports_each_class_value() {
 
 /// The window's bare ground is the icon bar's glass and a strip row laid on
 /// it is solid, and nothing anywhere is more see-through than the glass. The
-/// credential question is drawn in a window of its own, solid, and never into
-/// this one.
+/// system's prompt is the desktop's, so asking for a task draws nothing into
+/// this window.
 #[test]
-fn the_window_is_glass_and_its_question_is_solid_in_its_own_window() {
+fn the_window_is_glass_and_asking_for_a_task_draws_nothing_into_it() {
     use tairix_raster::Color;
     use tairix_theme::ThemeRegistry;
 
@@ -616,9 +468,6 @@ fn the_window_is_glass_and_its_question_is_solid_in_its_own_window() {
 
     let mut shell = showing_with("caching", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
-    press_action(&mut shell);
-    assert!(shell.asking(), "applying asks for an account");
-
     let themes = ThemeRegistry::with_builtins();
     let grounds = themes.grounds(WINDOW_GROUND);
     let p = *grounds.window.palette();
@@ -647,21 +496,13 @@ fn the_window_is_glass_and_its_question_is_solid_in_its_own_window() {
         Some(p.chrome_alpha),
         "something is thinner than the glass"
     );
+    let _ = apply(&mut shell);
+    assert!(shell.authorising());
     let mut asked = Surface::new(WIDE.width, WIDE.height).expect("a surface");
     shell.render(&mut asked, WIDE, Scale::ONE, grounds, &mut NoArtwork);
     assert_eq!(
         asked.pixels(),
         surface.pixels(),
         "drawn into no part of this window"
-    );
-
-    let client = question_client(&shell);
-    let mut question = Surface::new(client.width, client.height).expect("a surface");
-    shell.render_question(&mut question, client, Scale::ONE, grounds.popups);
-    let middle = question.get(client.width / 2, client.height / 2);
-    assert_eq!(
-        middle.map(|pixel| pixel.a),
-        Some(u8::MAX),
-        "the question is solid"
     );
 }

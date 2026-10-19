@@ -385,7 +385,7 @@ fn a_fixed_point_spelling_reads_back_exactly() {
         (i32::MIN, 0, "-2147483648"),
         (i32::MAX, 4, "214748.3647"),
     ] {
-        assert_eq!(spell(value, places, &mut spelt), text);
+        assert_eq!(spell(value, places, 1, &mut spelt), text);
         assert_eq!(parse_fixed(text, places), Some(i64::from(value)), "{text}");
     }
     assert_eq!(parse_fixed(".5", 2), Some(50));
@@ -394,4 +394,63 @@ fn a_fixed_point_spelling_reads_back_exactly() {
         assert_eq!(parse_fixed(refused, 2), None, "{refused}");
     }
     assert_eq!(parse_fixed("1.0", 0), None);
+}
+
+#[test]
+fn a_padded_spelling_keeps_its_digits_and_reads_back() {
+    use crate::number::{parse_fixed, spell, MOST_DIGITS};
+    let mut spelt = [0; 16];
+    for (value, places, digits, text) in [
+        (5, 0, 2, "05"),
+        (59, 0, 2, "59"),
+        (123, 0, 2, "123"),
+        (-5, 0, 2, "-05"),
+        (7, 2, 2, "00.07"),
+        (
+            i32::MAX,
+            MOST_PLACES_FOR_TEST,
+            MOST_DIGITS,
+            "000214748.3647",
+        ),
+        (
+            i32::MIN,
+            MOST_PLACES_FOR_TEST,
+            MOST_DIGITS,
+            "-000214748.3648",
+        ),
+        (0, MOST_PLACES_FOR_TEST, MOST_DIGITS, "000000000.0000"),
+    ] {
+        assert_eq!(spell(value, places, digits, &mut spelt), text);
+        assert_eq!(parse_fixed(text, places), Some(i64::from(value)), "{text}");
+    }
+}
+
+/// The most decimal places a field takes, as the padded case uses it.
+const MOST_PLACES_FOR_TEST: u8 = crate::number::MOST_PLACES;
+
+#[test]
+fn a_padded_field_shows_its_zeros_and_a_wrapping_one_carries_round() {
+    let mut minutes = NumberField::new(58, 0, 59).with_digits(2).with_wrap();
+    minutes.set_focused(true);
+    assert_eq!(minutes.text(), "58");
+    assert_eq!(
+        key(&mut minutes, Key::Named(NamedKey::Up)),
+        Some(NumberAction::Settled { value: 59 })
+    );
+    assert_eq!(
+        key(&mut minutes, Key::Named(NamedKey::Up)),
+        Some(NumberAction::Settled { value: 0 })
+    );
+    assert_eq!(minutes.text(), "00");
+    assert_eq!(
+        key(&mut minutes, Key::Named(NamedKey::Down)),
+        Some(NumberAction::Settled { value: 59 })
+    );
+    let mut held = NumberField::new(59, 0, 59).with_digits(2);
+    held.set_focused(true);
+    assert_eq!(
+        key(&mut held, Key::Named(NamedKey::Up)),
+        None,
+        "no wrap: held at the bound"
+    );
 }

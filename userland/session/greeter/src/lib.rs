@@ -94,5 +94,5 @@ pub use cursor::{pointer_image, Cursor};
 pub use frame::{Present, Scanout};
 pub use screen::{LoginScreen, Step};
 pub use verify::{exchange, Answer, Check, Checked};
-pub use wait::{park_timeout, Cooldown};
+pub use wait::park_timeout;
 pub use zones::{zone_store_grant, ZoneStoreRefusal};

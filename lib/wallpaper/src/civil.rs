@@ -7,22 +7,32 @@
 //! every reader of these settings.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
+use tairix_abi::zone::ZoneName;
 use tairix_tz::{resolve_region, resolve_zone, CivilClock, Decided, ZoneInfo};
 
 use crate::DesktopSettings;
 
 /// The clock `settings` ask for: their zone and region where `zones` holds
-/// them, else the store's own, else UTC with ISO 8601 dates; with what
+/// them, else `fallback` for the zone — the machine's own, for a reader who
+/// chose none — else the store's own, else UTC with ISO 8601 dates; with what
 /// decided each.
 #[must_use]
 pub fn civil_clock<'a>(
     zones: Option<&'a ZoneInfo<'a>>,
     settings: &DesktopSettings,
+    fallback: Option<&str>,
 ) -> (CivilClock<'a>, (Decided, Decided)) {
-    let zone = settings.time_zone.as_ref().map(ZoneName::as_str);
+    let zone: Vec<&str> = settings
+        .time_zone
+        .as_ref()
+        .map(ZoneName::as_str)
+        .into_iter()
+        .chain(fallback)
+        .collect();
     let region = settings.region.as_ref().map(RegionCode::as_str);
-    let (zone, zone_decided) = resolve_zone(zones, zone.as_slice());
+    let (zone, zone_decided) = resolve_zone(zones, &zone);
     let (region, region_decided) = resolve_region(zones, region.as_slice());
     (
         CivilClock::new(zone, region.as_ref()),
@@ -42,24 +52,6 @@ impl RegionCode {
     }
 
     /// The code.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// The IANA name of a zone the user chose.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ZoneName(String);
-
-impl ZoneName {
-    /// `name` as a zone name, or `None` unless it has one's shape.
-    #[must_use]
-    pub fn new(name: &str) -> Option<Self> {
-        tairix_tz::is_zone_name(name).then(|| Self(String::from(name)))
-    }
-
-    /// The name.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -92,21 +84,50 @@ mod tests {
         let (clock, decided) = civil_clock(
             Some(zones()),
             &settings(Some("America/New_York"), Some("US")),
+            Some("Asia/Kolkata"),
         );
         assert_eq!(clock.zone().name(), "America/New_York");
         assert_eq!(decided, (Decided::Preference(0), Decided::Preference(0)));
-        let (clock, decided) = civil_clock(Some(zones()), &settings(None, None));
+        let (clock, decided) = civil_clock(Some(zones()), &settings(None, None), None);
         assert_eq!(clock.zone().name(), "Europe/London");
         assert_eq!(decided, (Decided::StoreDefault, Decided::StoreDefault));
     }
 
     #[test]
-    fn a_choice_the_store_lacks_reads_the_stores_default_and_no_store_reads_utc() {
+    fn a_reader_who_chose_no_zone_reads_the_fallback_before_the_stores_default() {
         let (clock, decided) =
-            civil_clock(Some(zones()), &settings(Some("Mars/Olympus"), Some("ZZ")));
+            civil_clock(Some(zones()), &settings(None, None), Some("Asia/Kolkata"));
+        assert_eq!(clock.zone().name(), "Asia/Kolkata");
+        assert_eq!(decided.0, Decided::Preference(0));
+        let (clock, decided) = civil_clock(
+            Some(zones()),
+            &settings(Some("Mars/Olympus"), None),
+            Some("Asia/Kolkata"),
+        );
+        assert_eq!(clock.zone().name(), "Asia/Kolkata");
+        assert_eq!(
+            decided.0,
+            Decided::Preference(1),
+            "past a choice the store lacks"
+        );
+        let (clock, _) = civil_clock(Some(zones()), &settings(None, None), Some("Mars/Olympus"));
+        assert_eq!(clock.zone().name(), "Europe/London");
+    }
+
+    #[test]
+    fn a_choice_the_store_lacks_reads_the_stores_default_and_no_store_reads_utc() {
+        let (clock, decided) = civil_clock(
+            Some(zones()),
+            &settings(Some("Mars/Olympus"), Some("ZZ")),
+            None,
+        );
         assert_eq!(clock.zone().name(), "Europe/London");
         assert_eq!(decided, (Decided::StoreDefault, Decided::StoreDefault));
-        let (clock, decided) = civil_clock(None, &settings(Some("America/New_York"), Some("US")));
+        let (clock, decided) = civil_clock(
+            None,
+            &settings(Some("America/New_York"), Some("US")),
+            Some("Asia/Kolkata"),
+        );
         assert_eq!(clock.zone().name(), "UTC");
         assert_eq!(decided, (Decided::NoStore, Decided::NoStore));
     }

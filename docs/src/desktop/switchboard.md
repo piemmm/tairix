@@ -554,9 +554,9 @@ describing what is on screen.
 preemptions are counters the kernel keeps since boot, and a total says nothing
 about what the scheduler is doing now, so the CPU pane states each as events a
 second — the counters' growth over the sample's own interval, each CPU deltaed
-against its own last reading and summed — and graphs the two as one duplex
-trace beneath the per-core grid, switches above the midline and preemptions
-below. A first sample measures no interval and reads unavailable; without
+against its own last reading and summed — and graphs the two as one trace
+beneath the per-core grid: the switches, and the preemptions among them drawn
+within it on the same scale, which the caption states first. A first sample measures no interval and reads unavailable; without
 `CAP_SYSINFO_KERNEL` both read not permitted and the trace states its absence.
 
 **A resource under pressure wears a banner on its own pane**, above the hero:

@@ -2,6 +2,7 @@
 //! places each zone in a region, and the regions' own conventions.
 
 use tairix_tz::write::{PlaceInput, RegionInput};
+use tairix_tz::Weekday;
 
 /// Why a table line was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,26 +51,38 @@ pub fn places(text: &str) -> Result<Vec<PlaceInput>, TableError> {
 }
 
 /// `regions.tsv`: per row a region code, its English name, its numeric date
-/// pattern and its time-of-day pattern.
+/// pattern, its time-of-day pattern, and the day its week begins on, spelled
+/// as CLDR spells it (`mon` … `sun`).
 ///
 /// # Errors
 ///
-/// The first row that is not four fields.
+/// The first row that is not five fields, or whose week begins on no day.
 pub fn regions(text: &str) -> Result<Vec<RegionInput>, TableError> {
     rows(text)
         .map(|(line, fields)| match fields[..] {
-            [code, name, date, time] => Ok(RegionInput {
+            [code, name, date, time, week] => Ok(RegionInput {
                 code: String::from(code),
                 name: String::from(name),
+                first_weekday: weekday(week).ok_or(TableError {
+                    line,
+                    reason: "a week begins on mon, tue, wed, thu, fri, sat or sun",
+                })?,
                 date: String::from(date),
                 time: String::from(time),
             }),
             _ => Err(TableError {
                 line,
-                reason: "a region row is a code, a name, a date and a time",
+                reason: "a region row is a code, a name, a date, a time and a week",
             }),
         })
         .collect()
+}
+
+/// The day CLDR spells `day`.
+fn weekday(day: &str) -> Option<Weekday> {
+    let days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let index = days.iter().position(|spelled| *spelled == day)?;
+    Weekday::ALL.get(index).copied()
 }
 
 #[cfg(test)]

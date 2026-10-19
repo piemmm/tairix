@@ -1,6 +1,6 @@
 ## NAME
 
-configure — read and set the boot-time system configuration
+configure — read and set the machine's settings
 
 ## SYNOPSIS
 
@@ -8,28 +8,28 @@ configure — read and set the boot-time system configuration
 
 ## DESCRIPTION
 
-Lists, shows, and sets the settings of the system-configuration store
-at `/System/Settings/Configuration/system.conf`. With no operand every
+Lists, shows, and sets the machine's settings, kept at
+`/System/Settings/Configuration/system.conf`. With no operand every
 setting is listed with its current value; with a key alone that
 setting's value is shown; with one or more `<key> <value>` pairs those
 settings are changed together.
 
-Several pairs are one change, not several: every pair is resolved and
-applied to a working copy before a byte is written, and the store is
-then rewritten once. A command line naming an unknown key, a value
-outside its key's set, or the same key twice changes nothing at all,
-so a group of settings can never be left half applied.
+Several pairs are one change, not several: every pair is checked before
+anything is changed, and the settings are then saved at once. A command
+line naming an unknown key, a value outside its key's set, or the same
+key twice changes nothing at all, so a group of settings can never be
+left half applied.
 
-The store lives on the encrypted root volume and is parsed by its
-consumers after the root filesystem is unlocked, so a change takes
-effect the next time its consumer starts (`os.loginType`: the next
-boot's login; the `cache.*` switches: the next boot's unlock).
+Changing a setting needs an administrator: an ordinary account reads the
+machine settings but changes none. The system ships settings of its own,
+which stand until an administrator changes one, and the first change
+keeps every other setting the system shipped. A change takes effect the
+next time the part of the system that reads it starts — `os.loginType`
+at the next login, the `cache.*` switches at the next boot — unless its
+key below says otherwise.
 
 The set of keys is closed: an unknown key, or a value outside a key's
 set, is refused with the valid choices stated and changes nothing.
-Changing a setting rewrites the store in its canonical form and
-requires write access to `/System/Settings` — an ordinary account can
-read the settings but not change them.
 
 - `os.loginType` — `text` or `graphical`: which session type the login
   service starts for an authenticated user. `graphical` (the default)
@@ -87,13 +87,24 @@ never changes a result.
   really is.
 - `time.servers` — `none` or a comma-separated list of network time
   servers, each a host name or an address literal. `none` (the default)
-  means the clock is never set from the network: TAIRiX has no time-server
-  pool of its own, so naming a server is the operator's choice rather than
-  a default aimed at somebody else's service.
+  names no server of your own: the clock is then kept from the server the
+  network's address lease names, or else from the public pool
+  `pool.ntp.org`. Servers named here outrank both.
 - `time.refresh` — `6h`, `12h`, `1d`, `2d`, or `7d`: how much uptime
   passes between clock re-queries once the time is known. `1d` is the
   default. A clock that is unset, implausible, or long stale is corrected
   as soon as the network allows, whatever this says.
+- `time.network` — `on` (the default) or `off`: whether the clock is
+  kept from the network at all. `off` sends no time query to any server,
+  and the clock is set by hand or from the board's clock chip, which is
+  read at every start either way. A change applies at once; the setting
+  lives on the system disk, so the default applies at the start of a boot
+  until that disk is reached.
+- `time.zone` — `default` or a time zone's name such as `Europe/London`:
+  the time zone the machine keeps, which the login screen shows and an
+  account that has chosen none uses. `default` is the zone the system
+  ships as its own; a name the system's list of zones does not hold is
+  passed over as if it were `default`. A change applies at once.
 - `input.mouse.debounce` — whole milliseconds, `25` by default, `0` to
   disable, at most `100`: how long after a mouse button is released the same
   button's next press is ignored as switch chatter instead of starting a new
@@ -112,7 +123,7 @@ never changes a result.
   value at the next boot; `audioctl` changes the running machine.
 
 A key that is not in the list above is read against a second registry:
-the per-interface settings of the network store at
+the network settings of each interface, kept at
 `/System/Settings/Network/network.conf`. Its keys are spelled
 `<interface>.<setting>`, where `<interface>` is the alias an
 administrator gave a network interface (`wan`, `lan0`) and `<setting>`
@@ -124,12 +135,12 @@ is one of `kind`, `match.mac`, `match.node`, `ipv4.method`,
 The machine registry above is always searched first, so an interface
 alias can never take a machine setting's name over.
 
-That document holds only what an administrator wrote — it has no
-defaults — so listing shows just the settings it carries, and showing
-one it does not carry answers with an empty line rather than inventing
-a value. Reading or changing it needs an account that may: it carries
-each interface's hardware identity and this machine's static
-addressing, which are not world-readable.
+The network settings have no defaults, so listing shows just the
+settings that are set, and showing one that is not answers with an
+empty line rather than inventing a value. Reading or changing them needs
+an administrator: they name each interface's hardware and this machine's
+addresses. Anyone else's listing shows the machine settings and says
+that the network ones are not shown.
 
 Because that registry has no defaults, a setting is removed rather than
 reset, and an **empty value** is how you remove one:
@@ -141,10 +152,10 @@ DHCP — `configure wan.ipv4.method dhcp wan.ipv4.address "" wan.ipv4.gateway ""
 together on its own. An interface whose last setting is removed is no
 longer declared at all.
 
-The whole edited document is checked before anything is written: a
+The whole edited configuration is checked before anything is saved: a
 change that would leave it inconsistent (a static method with no
 address, a bond with fewer than two members) is refused and nothing is
-written.
+saved.
 
 Changing a `net.*` setting, or a per-interface one, saves it and delivers
 it to the running network stack, so it takes effect at once. Only the
@@ -154,7 +165,7 @@ not administer the network — the setting is still saved and `configure`
 says so; it then applies at the next boot.
 
 Two limits are reported rather than hidden. An interface you removed
-from the document keeps running with the configuration the stack was
+from the configuration keeps running with the configuration the stack was
 last given until the next boot, because the stack has no message that
 retires one. An interface saved with neither `match.mac` nor
 `match.node` can never be bound to a device, so it is saved and the
@@ -174,6 +185,7 @@ refusal stated.
 - `configure net.ipv6.enabled false` — turn IPv6 off stack-wide.
 - `configure time.servers 0.example.test,1.example.test` — set the
   network time servers the clock is synchronised from.
+- `configure time.zone Europe/London` — keep the machine on London time.
 - `configure wan.ipv4.address` — show the static IPv4 address
   configured for the interface called `wan`.
 - `configure wan.ipv4.address 10.0.0.7/24 wan.ipv4.gateway 10.0.0.1` —
@@ -186,9 +198,9 @@ refusal stated.
 ## EXIT STATUS
 
 - `0` — the listing, value, short help, or change was completed.
-- `1` — a store could not be read or written (for example the caller
-  may not change system settings, or may not read the network store),
-  or the output could not be delivered.
+- `1` — the settings could not be read or changed (for example the
+  caller may not change the machine's settings, or may not read its
+  network settings), or the output could not be delivered.
 - `2` — the command line was not understood, the key is unknown, the
   value is outside the key's set, or the change would leave the network
   configuration inconsistent.

@@ -373,10 +373,20 @@ pub(crate) fn name_charset_ok(name: &str, max_len: usize) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
-/// Validate a username against the shared identifier grammar
-/// ([`name_charset_ok`]) within [`MAX_USERNAME_LEN`].
+/// Whether `name` is an account name the database could hold: 1 to
+/// [`MAX_USERNAME_LEN`] bytes, the first `[a-z_]` and the rest `[a-z0-9_-]`,
+/// the grammar group names share.
+///
+/// Public because a surface that names an account to the user, or hands one
+/// to a tool, must hold it to this same rule rather than a second copy of it.
+#[must_use]
+pub fn valid_username(name: &str) -> bool {
+    name_charset_ok(name, MAX_USERNAME_LEN)
+}
+
+/// Validate a username against [`valid_username`].
 fn check_username(name: &str) -> Result<(), ParseError> {
-    if name_charset_ok(name, MAX_USERNAME_LEN) {
+    if valid_username(name) {
         Ok(())
     } else {
         Err(ParseError::Username)
@@ -515,8 +525,8 @@ fn push_field(out: &mut String, field: &str) {
 mod tests {
     use super::FIELD_SEPARATOR;
     use super::{
-        valid_display_name, valid_path, AccountState, Gid, Identity, Uid, UserRecord,
-        MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
+        valid_display_name, valid_path, valid_username, AccountState, Gid, Identity, Uid,
+        UserRecord, MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
     };
     use crate::password::{PasswordRecord, StoredPassword, MIN_ITERATIONS};
     use crate::ParseError;
@@ -552,6 +562,28 @@ mod tests {
         StoredPassword::Password(
             PasswordRecord::new(b"byron", [0x5A; 16], MIN_ITERATIONS).expect("valid"),
         )
+    }
+
+    #[test]
+    fn a_username_is_the_identifier_the_database_holds() {
+        for name in ["ada", "_svc", "a-b_9", &"a".repeat(MAX_USERNAME_LEN)] {
+            assert!(valid_username(name), "{name}");
+        }
+        for name in [
+            "",
+            "Ada",
+            "9ada",
+            "-ada",
+            "ada lovelace",
+            "ada:x",
+            "ad\u{202e}a",
+            &"a".repeat(MAX_USERNAME_LEN + 1),
+        ] {
+            assert!(!valid_username(name), "{name}");
+        }
+        let mut bad = identity(&[]);
+        bad.username = "Ada";
+        assert!(UserRecord::new(bad, password()).is_err());
     }
 
     #[test]

@@ -676,9 +676,10 @@ fn render_draws_the_channel_and_an_idle_thumb() {
     assert!(has_pixel(&surface, premul(theme.palette().scroll_thumb)));
 }
 
-/// An awake bar's thumb, and an end button hovered or held, take the neutral
-/// active grey: the accent is the selection's, and a bar in use is handled,
-/// not selected.
+/// An awake bar's thumb, and an end control while its press is live, take the
+/// neutral active grey: the accent is the selection's, and a bar in use is
+/// handled, not selected. The end control is lit by its press alone — hover
+/// lights the thumb, never an arrow.
 #[test]
 fn an_awake_bar_takes_the_active_grey_never_the_accent() {
     let theme = theme();
@@ -695,27 +696,53 @@ fn an_awake_bar_takes_the_active_grey_never_the_accent() {
         .part_rect(ScrollPart::Decrement, vbounds(), Scale::ONE, &theme)
         .expect("a decrement button");
     let centre = button.center();
-    bar.on_pointer(
-        &moved(centre.x, centre.y),
-        vbounds(),
-        Scale::ONE,
-        &theme,
-        &mut sink(),
-    );
-    let hovered = render(&bar, vbounds(), &theme);
     let on_button = |surface: &Surface, colour| {
         (0..button.height)
             .any(|y| (0..button.width).any(|x| surface.get(x, y) == Some(premul(colour))))
     };
+    let at = |bar: &mut ScrollBar, x: i32, y: i32| {
+        bar.on_pointer(&moved(x, y), vbounds(), Scale::ONE, &theme, &mut sink());
+    };
+    at(&mut bar, centre.x, centre.y);
+    let hovered = render(&bar, vbounds(), &theme);
     assert!(
-        on_button(&hovered, palette.scroll_thumb_active),
-        "a hovered end button lights grey"
+        !on_button(&hovered, palette.scroll_thumb_active),
+        "hover alone lights no end control"
     );
+    assert!(on_button(&hovered, palette.scroll_thumb));
     assert!(
         on_button(&hovered, palette.on_surface),
-        "its chevron stays the plain foreground"
+        "its chevron is the plain foreground"
     );
-    assert!(!has_pixel(&hovered, premul(palette.rim_active)));
+
+    bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink());
+    assert!(
+        on_button(
+            &render(&bar, vbounds(), &theme),
+            palette.scroll_thumb_active
+        ),
+        "a pressed end control lights"
+    );
+    at(&mut bar, 2, 200);
+    assert!(
+        !on_button(
+            &render(&bar, vbounds(), &theme),
+            palette.scroll_thumb_active
+        ),
+        "a press the pointer has left is not live"
+    );
+    at(&mut bar, centre.x, centre.y);
+    assert!(
+        on_button(
+            &render(&bar, vbounds(), &theme),
+            palette.scroll_thumb_active
+        ),
+        "and is live again when it comes back"
+    );
+    bar.on_pointer(&RELEASE, vbounds(), Scale::ONE, &theme, &mut sink());
+    let released = render(&bar, vbounds(), &theme);
+    assert!(!on_button(&released, palette.scroll_thumb_active));
+    assert!(!has_pixel(&released, premul(palette.rim_active)));
 }
 
 /// The channel's long sides carry a one-pixel edge in the frame colour, so the
@@ -741,6 +768,22 @@ fn the_channel_is_edged_along_both_long_sides() {
         Some(frame),
         "the edge is one pixel wide"
     );
+}
+
+/// A bar embedded in a plate whose rim already bounds it draws its channel
+/// with no edge, and the difference is a drawn one.
+#[test]
+fn a_bar_without_edges_draws_none_along_its_channel() {
+    let theme = theme();
+    let frame = premul(theme.palette().frame);
+    let bare = vbar().without_edges();
+    let surface = render(&bare, vbounds(), &theme);
+    let (w, h) = (surface.width(), surface.height());
+    for y in 0..h {
+        assert_ne!(surface.get(0, y), Some(frame), "left edge at row {y}");
+        assert_ne!(surface.get(w - 1, y), Some(frame), "right edge at row {y}");
+    }
+    assert_ne!(bare, vbar(), "the edge is part of what the bar draws");
 }
 
 #[test]
@@ -928,28 +971,38 @@ fn a_move_within_one_part_leaves_a_scrollbar_equal() {
     }
 }
 
+/// Which part the pointer is over draws nothing while nothing is held, so
+/// crossing from the track onto an end control repaints nothing. The
+/// regression: hover lit an end control's plate.
 #[test]
-fn the_part_under_the_pointer_is_a_drawn_property() {
+fn the_part_under_the_pointer_draws_nothing_until_a_press_is_held() {
     let theme = theme();
-    // The end button beneath the pointer brightens, so *which* part the
-    // pointer sits over does compare — excluding it would let the gate pass a
-    // bar that paints a lit chevron off as one that does not. The increment,
-    // because at the start there is nothing above for the decrement to light.
+    // The increment, because at the start there is nothing above for the
+    // decrement to light.
     let foot = i32::try_from(VH).expect("small") - 2;
     let mut on_end = vbar();
     on_end.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut sink());
     let mut on_track = vbar();
     on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut sink());
 
-    assert_ne!(
-        on_end, on_track,
-        "a lit increment chevron is a different composition"
-    );
-    assert_ne!(
+    assert_eq!(on_end, on_track, "the same composition");
+    assert_eq!(
         render(&on_end, vbounds(), &theme).pixels(),
         render(&on_track, vbounds(), &theme).pixels(),
-        "…and the two must therefore paint differently"
     );
+    let mut damage = sink();
+    on_track.on_pointer(&moved(2, foot), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(
+        damage.is_empty(),
+        "crossing onto an end control repaints nothing"
+    );
+
+    let mut damage = sink();
+    on_track.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(!damage.is_empty(), "a press lights it");
+    let mut damage = sink();
+    on_track.on_pointer(&moved(2, 150), vbounds(), Scale::ONE, &theme, &mut damage);
+    assert!(!damage.is_empty(), "leaving it while held puts it out");
 }
 
 /// A release clears the drag latch and the pressed look the bar draws, so it

@@ -479,7 +479,8 @@ taken as a third of the hero, which truncated
 **A plated block claims one row past its content.** Its rows are inset from the
 top of its band, so a plate exactly as tall as its content ran the last row over
 its own rim and margin — which is what put the memory hero's share bar outside
-its plate.
+its plate. A trend's chart box closes the bottom edge itself, as the hero's
+does, so a trend block claims no such row.
 
 **A block carries no explanatory note.** The prose under each block ("a sum of
 tasks is not the device's total", "swap has no plaintext mode") is gone, along
@@ -536,11 +537,13 @@ again inside itself.
   - **CPU** (`02-cpu.png`) — the per-core grid: one cell per logical CPU
     carrying the core's own trace, its busy percentage, its live measured
     clock and its performance class. Then the scheduler's two rates as one
-    duplex trace across the pane — tasks dispatched a second above the
-    midline, timer preemptions a second below, against the least power of two
-    seating the window's peak and floored at `SCHEDULER_TRACE_FLOOR` — each the
-    counters' growth over the sample's own interval, summed over the CPUs both
-    samples name (`SchedulerMeters`). Then the processor fact columns, which
+    trace across the pane — every context switch a second, and the timer
+    preemptions among them drawn within it (`Trace::Within`), since a
+    preemption is a switch and the two read on one scale in one direction —
+    against the least power of two seating the window's peak and floored at
+    `SCHEDULER_TRACE_FLOOR`, the scale leading its caption; each the counters'
+    growth over the sample's own interval, summed over the CPUs both samples
+    name (`SchedulerMeters`). Then the processor fact columns, which
     state those two rates as `/s` and include the ISA extensions a program may
     rely on: the *intersection* over
     every reported core, because a heterogeneous machine schedules a task on

@@ -36,6 +36,27 @@ fn each_regions_date_reads_in_its_own_order_padding_and_separators() {
 }
 
 #[test]
+fn a_time_to_the_second_sets_its_seconds_off_as_the_minutes_are() {
+    let time = |text| {
+        let mut out = String::new();
+        Pattern::time(text)
+            .expect("a time pattern")
+            .write_with_seconds(&AFTERNOON, &mut out)
+            .expect("a String takes any write");
+        out
+    };
+    assert_eq!(time("HH:mm"), "14:05:09");
+    assert_eq!(time("H.mm"), "14.05.09", "Finland");
+    assert_eq!(time("h:mm a"), "2:05:09 PM");
+    assert_eq!(time("a h:mm"), "PM 2:05:09", "South Korea");
+    assert_eq!(
+        spelled(ISO_TIME, &AFTERNOON),
+        "14:05",
+        "plain writing keeps none"
+    );
+}
+
+#[test]
 fn each_regions_time_reads_on_its_own_clock() {
     let time =
         |text, civil: &CivilTime| spelled(Pattern::time(text).expect("a time pattern"), civil);

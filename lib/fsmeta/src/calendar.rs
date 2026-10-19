@@ -54,6 +54,20 @@ pub fn month_abbreviation(month: u32) -> &'static str {
     ordinal_name(&MONTH_ABBREVIATIONS, month)
 }
 
+/// The name of month `month`, 1 being January, or `""` for a number no month
+/// has.
+#[must_use]
+pub fn month_name(month: u32) -> &'static str {
+    ordinal_name(&MONTH_NAMES, month)
+}
+
+/// The name of the weekday ISO 8601 numbers `weekday`, 1 being Monday, or `""`
+/// for a number no weekday has.
+#[must_use]
+pub fn weekday_name(weekday: u32) -> &'static str {
+    ordinal_name(&WEEKDAY_NAMES, weekday)
+}
+
 /// The entry of `names` numbered `ordinal` from 1, or `""` past either end.
 fn ordinal_name(names: &[&'static str], ordinal: u32) -> &'static str {
     usize::try_from(ordinal)
@@ -127,8 +141,20 @@ fn spelled_date(civil: &CivilTime, weekdays: &[&'static str], months: &[&'static
 
 #[cfg(test)]
 mod tests {
-    use super::{full_date, iso_minute, long_date, month_abbreviation};
+    use super::{full_date, iso_minute, long_date, month_abbreviation, month_name, weekday_name};
     use tairix_abi::time::CivilTime;
+
+    #[test]
+    fn names_are_numbered_from_one_and_nothing_else_names_one() {
+        assert_eq!(month_name(1), "January");
+        assert_eq!(month_name(12), "December");
+        assert_eq!(weekday_name(1), "Monday");
+        assert_eq!(weekday_name(7), "Sunday");
+        for missing in [0, 13] {
+            assert_eq!(month_name(missing), "");
+        }
+        assert_eq!(weekday_name(8), "");
+    }
 
     #[test]
     fn a_month_number_outside_the_calendar_names_nothing() {

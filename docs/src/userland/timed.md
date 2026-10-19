@@ -8,12 +8,12 @@ clock from a network source runs through it. The staged design is
 `tairix_net::ntp`.
 
 The installed binary lives at `/System/Services/timed.app/Run`. It is the
-**enrolment-governed** tier rather than the bootstrap floor: automatic
-time-setting is something a user may turn off, so PID 1 starts it only if the
-enrolment record enables it, and an administrator's `servicectl disable timed`
-survives a reboot ([`servicectl`](servicectl.md)). A stock image enrols it, so
-the default is on. A Raspberry
-Pi 3/4 has no RTC at all, so without this service such a machine boots with
+**enrolment-governed** tier rather than the bootstrap floor: PID 1 starts it
+only if the enrolment record enables it, and an administrator's `servicectl
+disable timed` survives a reboot ([`servicectl`](servicectl.md)). A stock image
+enrols it. Disabling the service stops the clock chip being read as well as the
+network being asked; turning automatic time-setting off is `time.network`
+(below), which keeps the chip. A Raspberry Pi 3/4 has no RTC at all, so without this service such a machine boots with
 `WallTimeState::Unset` for ever — and the audit log's hash chains, ARXFS
 `Time64` metadata, and certificate lifetimes all rest on the clock it
 establishes.
@@ -93,26 +93,57 @@ vendor zone changes only `FALLBACK_TIME_SERVERS`.
 
 ## Configuration
 
-Two keys in `/System/Settings/Configuration/system.conf`:
+Three keys of the machine configuration, `system.conf`, read from the first
+of its layers that exists — the administrator's at
+`/System/Settings/Configuration/system.conf`, else the image's default at
+`/System/Defaults/Configuration/system.conf` (`docs/src/lib/sysconfig.md`).
+The settings service changes them for an elevated administrator
+(`docs/src/userland/settingsd.md`):
 
+* `time.network` — `on` (the default) or `off`: whether the clock is kept from
+  the network at all. Off drops the half of the service that asks the network —
+  its sockets, its resolver and its engine — and keeps the clock chip, which is
+  read at every start either way, so a machine with network time off still
+  boots with the time its chip vouches for.
 * `time.servers` — `none` (the default) or a comma-separated list of at most
   eight host names or address literals. `none` does not mean "never query": it
   means the operator expressed no preference, so a lower tier above applies.
 * `time.refresh` — `6h`, `12h`, `1d` (the default), `2d`, or `7d`: how much
   *uptime* passes between steady-state re-queries.
 
+The service follows the administrator's layer while it runs — the image's never
+changes at runtime. It watches that layer's directory, or `/System/Settings`
+until that directory exists, and on a change reads the document again and asks
+`tairix_timed::retune` what it means:
+
+| Change | What the service does |
+|---|---|
+| Network time switched off | Drops the network half; the query in flight is abandoned and its answer sets nothing. |
+| Network time switched on | Builds the network half with its first query as prompt as an unset clock's (`SwitchedOn`), whatever the reading. |
+| The operator's server list | Replaces the servers in use, from whichever tier the new list leaves in charge. |
+| The refresh cadence alone | Applies it in place (`TimeSync::set_refresh`), keeping the rotation, the backoff and every Kiss-o'-Death the servers sent. |
+| Anything else | Nothing. |
+
+A replacement never re-reads the clock chip, and its first request waits out
+`MIN_POLL` after the last request sent, so flipping the switch cannot make the
+service ask more often than the poll floor allows. A document that cannot be
+read or fully understood — over `MAX_CONFIG_LEN` included — changes nothing:
+the settings in use stand, and the refusal is recorded. An administrator's layer
+that exists but cannot be read is such a refusal; the image's is never read in
+its place.
+
 The store lives on the root volume and this service starts before that root
-is mounted, so its first read normally finds nothing. There is no userland
-event for "the root is mounted", so the tiers are re-selected on a bounded,
-doubling schedule folded into the reactor's own deadline — about seventeen
-minutes of attempts, parking between them, never a spin and never a wait on the
-start-up path, which would hold the boot up behind a service nothing else is
-waiting for. The same schedule is what picks up a DHCP lease acquired after the
-service started, so the two "it is not there yet" problems have one mechanism.
-A failed read never disarms it: before the root is mounted the path has no
-backing at all, which is indistinguishable from a volume-less boot, so the
-service would strand itself exactly when it most needs to retry. The ladder
-being finite is what bounds the volume-less case instead.
+is mounted, so its first read normally finds nothing and the defaults apply —
+network time on, whatever the document says — until the root is reached. There
+is no userland event for "the root is mounted", so the service looks for it
+again on a bounded, doubling schedule folded into the reactor's own deadline —
+about seventeen minutes of attempts, parking between them, never a spin and
+never a wait on the start-up path, which would hold the boot up behind a
+service nothing else is waiting for. The first rung that reaches the root arms
+the watch and reads the record (below). The same schedule is what picks up a
+DHCP lease acquired after the service started, so the two "it is not there
+yet" problems have one mechanism. It ends once the operator has named a server
+or switched network time off, there being nothing better to look for.
 
 Only a *strictly better* tier replaces the servers in use. An equal-tier change
 — a renewed lease naming a different server — would reset the engine's rotation
@@ -136,19 +167,32 @@ tell.
 A missing, short, long, wrongly-magicked, torn, implausible, or
 invariant-violating document resolves to "time was never seen", which makes the
 stale-boot and went-backwards rules simply not fire rather than fire on a
-fiction. The checksum guards corruption, not tampering: a principal that can
-write the file can recompute it, and only the per-inode policy on the document
-keeps a forged instant out.
+fiction. A long one is caught by reading one byte past the record's length.
+The checksum guards corruption, not tampering: a principal that can write the
+file can recompute it, and only the per-inode policy on the document keeps a
+forged instant out.
+
+The record lives on the root, which is usually mounted after the service has
+started and decided, so it is read again when the root is first reached
+(`Timed::store_reachable`). What this boot synchronised is kept beside it and
+written out, since a write before the root was there failed. If the record then
+gives a reason to distrust a clock the service believed — the chip lost its time
+to a plausible date, or the machine was off for longer than five days — a first
+query not yet sent is brought forward (`TimeSync::reconsider`), recorded as
+`CLOCK_DOUBTED`. Once a request has gone out the record no longer moves the
+schedule: the engine's own cadence decides.
 
 ## The reactor
 
 One wait-set over the delivery port the network stack posts the service's
-datagrams to, armed with the timeout the engine's single folded deadline
-implies. The loop parks; it never polls. A wake is either a datagram (evaluate
-it in the worker, apply the verdict) or the deadline lapsing (send the next
-request). With no deadline left — every server in use retired by a
-Kiss-o'-Death and the re-selection ladder spent — the service exits rather than
-holding a task and a bound delivery port doing nothing.
+datagrams to and the configuration watch, armed with the timeout the engine's
+single folded deadline implies. The loop parks; it never polls. A wake is a
+datagram (evaluate it in the worker, apply the verdict), a configuration change
+(above), or the deadline lapsing (send the next request). With no deadline
+left — network time off, or every server retired by a Kiss-o'-Death, and the
+ladder spent — the service parks on the watch alone, since the configuration
+may yet switch network time on or name a server. Only with no watch either does
+it exit, rather than hold a task and a bound delivery port doing nothing.
 
 Every nonce and jitter value comes from one generator keyed from the kernel
 CSPRNG at start-up. A service the kernel cannot key exits with its reason
@@ -170,7 +214,10 @@ without depending on the service crate. Every clock change carries the
 applied instant, whether it was a step or a refinement, the correction
 magnitude where there was a previous reading, the measured round trip, and the
 server's stratum; every refused sample, retired server, rate limit, failed
-evaluation, unsent query, and unwritten record has its own stable id. A spoofed
+evaluation, unsent query, and unwritten record has its own stable id. A change
+to what the service asks the network (`NETWORK_TIME_CHANGED`) carries the state
+it now has, as the start-up record does; a configuration it could not read
+(`CONFIG_REFUSED`) or cannot watch (`CONFIG_NOT_FOLLOWED`) is recorded too. A spoofed
 datagram is deliberately *not* audited per packet — that would make an injected
 flood a log-flood denial of service — and is instead invisible in exactly the
 way the nonce gate makes it irrelevant.

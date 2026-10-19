@@ -31,6 +31,19 @@ pub struct ZoneOffset<'a> {
     pub daylight: bool,
 }
 
+impl ZoneOffset<'_> {
+    /// Write the offset from UTC to the minute: `UTC+01:00`, `UTC-03:30`.
+    ///
+    /// # Errors
+    ///
+    /// The writer's own failure.
+    pub fn write_from_utc(&self, out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+        let sign = if self.utc_offset < 0 { '-' } else { '+' };
+        let minutes = self.utc_offset.unsigned_abs() / 60;
+        write!(out, "UTC{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+    }
+}
+
 /// An instant as it reads in a zone.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct LocalTime<'a> {
@@ -173,6 +186,29 @@ impl<'a> Zone<'a> {
         Time64::from_secs(change.map_or(minute, |change| change.min(minute)))
     }
 
+    /// The first change of this zone's offset from UTC after `time`, or
+    /// `None` where it keeps its offset for good.
+    ///
+    /// A change of abbreviation or daylight flag alone moves no clock, so it
+    /// is passed over: Europe/Dublin calls its winter time daylight saving.
+    #[must_use]
+    pub fn next_change(&self, time: Time64) -> Option<OffsetChange<'a>> {
+        let (mut before, mut next) = self.stretch(time.secs());
+        for _ in 0..MAX_UNMOVED_CHANGES {
+            let at = next?;
+            let (after, following) = self.stretch(at);
+            if after.utc_offset != before.utc_offset {
+                return Some(OffsetChange {
+                    at: Time64::from_secs(at),
+                    before,
+                    after,
+                });
+            }
+            (before, next) = (after, following);
+        }
+        None
+    }
+
     /// The offset in force at `at`, and the first instant after it at which
     /// that may change: one search for both.
     fn stretch(&self, at: i64) -> (ZoneOffset<'a>, Option<i64>) {
@@ -197,6 +233,22 @@ impl<'a> Zone<'a> {
         })
     }
 }
+
+/// A change of a zone's offset from UTC.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OffsetChange<'a> {
+    /// The instant the new offset begins.
+    pub at: Time64,
+    /// The offset in force until then.
+    pub before: ZoneOffset<'a>,
+    /// The offset in force from then.
+    pub after: ZoneOffset<'a>,
+}
+
+/// The most changes that move no clock [`Zone::next_change`] passes over
+/// before it answers that none does: a bound on the walk, far past the few
+/// renamings any zone makes between two changes of offset.
+const MAX_UNMOVED_CHANGES: usize = 64;
 
 /// An instant's place in a stored zone: the last of the zone's transitions at
 /// or before it, and the zone's last transition.
