@@ -42,7 +42,7 @@ use tairix_wintersun_net::value::Facing;
 use crate::breath::Breath;
 use crate::clip::Clip;
 use crate::error::FigureError;
-use crate::frame::Basis;
+use crate::frame::{Basis, Body, Lens};
 use crate::humanoid;
 use crate::identity::{
     Build, EarForm, EyeShape, FaceShape, Features, HairStyle, HornForm, Identity, IdentityError,
@@ -54,7 +54,7 @@ use crate::plant::{Legs, Planted};
 use crate::plausible;
 use crate::pose::Pose;
 use crate::rig::{Frames, Part, Placement, Resolved, Rig, Stance};
-use crate::shadow::{Contact, Light};
+use crate::shadow::{Contact, Footing, Light};
 use crate::species::Species;
 use crate::tint::Tints;
 
@@ -700,13 +700,16 @@ impl Staged {
         self.rig.retint(tints);
     }
 
-    /// `pose` with `breath` laid over it, solved onto the level ground with
-    /// the root at `lift`.
+    /// `pose` with `breath` laid over it and the root at `lift`, each foot
+    /// solved onto the ground `under` reports beneath the two of them — the
+    /// height of the terrain under each foot's plan position over the figure's
+    /// own ground point, in figure units.
     pub(crate) fn plant(
         &self,
         pose: &Pose,
         breath: Breath,
         lift: f64,
+        under: impl FnOnce([Body; 2]) -> [f64; 2],
     ) -> Result<Planted, FigureError> {
         let rigging = humanoid::rigging(&self.rig)?;
         let posed = breath.overlay()?.applied(pose)?;
@@ -714,20 +717,20 @@ impl Staged {
         rigging
             .posture(&posed)?
             .resolve(Resolved::REST, &mut frames);
-        self.legs.plant(&rigging, &posed, &frames, LEVEL, lift)
+        let ground = under(self.legs.standing(&frames, lift)?);
+        self.legs.plant(&rigging, &posed, &frames, ground, lift)
     }
 
-    /// Place `planted` facing `facing` under the stage's light, drawn at
-    /// `scale` with its ground contact at the surface point `at`.
+    /// Place `planted` facing `facing` under the stage's light, seen through
+    /// `lens`.
     pub(crate) fn place(
         &self,
         planted: &Planted,
         facing: Facing,
-        scale: f64,
-        at: (f64, f64),
+        lens: Lens<'_>,
         out: &mut Placement,
     ) -> Result<(), FigureError> {
-        let stance = Stance::new(facing, scale, at, Reference::light()?)?.rooted(planted.root());
+        let stance = Stance::new(facing, lens, Reference::light()?)?.rooted(planted.root());
         humanoid::rigging(&self.rig)?
             .posture(&planted.pose())?
             .place(&stance, &[], out)
@@ -791,7 +794,8 @@ impl Reference {
         out: &mut Placement,
     ) -> Result<Planted, FigureError> {
         let planted = self.posed(cell)?;
-        self.staged.place(&planted, cell.facing, scale, at, out)?;
+        self.staged
+            .place(&planted, cell.facing, Lens::Oblique { scale, at }, out)?;
         Ok(planted)
     }
 
@@ -809,6 +813,7 @@ impl Reference {
             &clip.sample(cell.phase())?,
             breath,
             clip.root_at(cell.phase()),
+            |_| LEVEL,
         )
     }
 
@@ -854,7 +859,7 @@ impl Reference {
     ///
     /// Whatever the light, the contact or the cast refuse.
     pub fn shadow(lift: f64, scale: f64, at: (f64, f64)) -> Result<Placed, FigureError> {
-        Contact::new(SHADOW.0, SHADOW.1)?.cast(Self::light()?, lift, scale, at)
+        Contact::new(SHADOW.0, SHADOW.1)?.cast(Self::light()?, lift, Footing::oblique(scale, at)?)
     }
 
     /// The light the reference grid is lit by: the sun.

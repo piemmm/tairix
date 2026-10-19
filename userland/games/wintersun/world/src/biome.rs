@@ -199,9 +199,16 @@ impl Conditions {
     /// humid.
     #[must_use]
     pub fn moisture(&self) -> f64 {
-        let threshold = 20.0 * (self.celsius + 7.0 + 7.0 * self.rain_season);
-        self.precipitation / mathf::fmax(threshold, ARIDITY_FLOOR_MILLIMETRES)
+        moisture(self.precipitation, self.celsius, self.rain_season)
     }
+}
+
+/// Effective moisture, as [`Conditions::moisture`], of `precipitation`
+/// millimetres a year at a mean of `celsius` falling in `rain_season`.
+#[must_use]
+pub fn moisture(precipitation: f64, celsius: f64, rain_season: f64) -> f64 {
+    let threshold = 20.0 * (celsius + 7.0 + 7.0 * rain_season);
+    precipitation / mathf::fmax(threshold, ARIDITY_FLOOR_MILLIMETRES)
 }
 
 /// The least the aridity threshold is ever taken to be, in millimetres, so

@@ -23,15 +23,38 @@ fn mip_sides_halve_down_the_chain() {
 }
 
 #[test]
-fn density_picks_a_finer_mip_the_closer_the_camera_is() {
+fn a_footprint_picks_a_finer_mip_the_closer_the_camera_is() {
     let shift = 5;
     let span = 1u32 << shift;
-    assert_eq!(Mip::for_density(shift, 1).level(), 0);
-    assert_eq!(Mip::for_density(shift, span).level(), 0);
-    assert_eq!(Mip::for_density(shift, span * 2).level(), 1);
-    assert_eq!(Mip::for_density(shift, span * 8).level(), 3);
+    assert_eq!(Mip::at(shift, 1, 0).level(), 0);
+    assert_eq!(Mip::at(shift, span, 0).level(), 0);
+    assert_eq!(Mip::at(shift, span * 2, 0).level(), 1);
+    assert_eq!(Mip::at(shift, span * 8, 0).level(), 3);
     // Far beyond the chain still lands inside it.
-    assert_eq!(Mip::for_density(shift, span * 4096).level(), MIP_LEVELS - 1);
+    assert_eq!(Mip::at(shift, span * 4096, 15).level(), MIP_LEVELS - 1);
+}
+
+#[test]
+fn the_dither_mixes_only_the_two_levels_a_footprint_falls_between() {
+    let shift = 4;
+    let span = 1u32 << shift;
+    // Halfway, by the linear fraction, from level 2 to level 3.
+    let footprint = span * 4 + span * 2;
+    let levels: alloc::vec::Vec<u32> = (0..16)
+        .map(|d| Mip::at(shift, footprint, d).level())
+        .collect();
+    assert!(levels.iter().all(|&l| l == 2 || l == 3));
+    assert_eq!(
+        levels.iter().filter(|&&l| l == 3).count(),
+        8,
+        "half the dither raises it"
+    );
+    // A footprint exactly on a level is that level whatever the dither.
+    for dither in 0..16 {
+        assert_eq!(Mip::at(shift, span * 4, dither).level(), 2);
+    }
+    // The dither's top bits are ignored, so no byte reaches past the next level.
+    assert_eq!(Mip::at(shift, span * 4, 0xF0).level(), 2);
 }
 
 #[test]
@@ -231,9 +254,9 @@ fn payload_bytes_are_four_per_texel() {
 
 #[test]
 fn an_absurd_grain_shift_picks_a_mip_rather_than_shifting_off() {
-    // `for_density` is public and takes a caller's shift; `1 << 32` is
-    // not a value a machine can produce.
+    // `at` is public and takes a caller's shift; `1 << 32` is not a value a
+    // machine can produce.
     for shift in [31, 32, 64, u32::MAX] {
-        assert_eq!(Mip::for_density(shift, u32::MAX).level(), 0);
+        assert_eq!(Mip::at(shift, u32::MAX, 0).level(), 0);
     }
 }

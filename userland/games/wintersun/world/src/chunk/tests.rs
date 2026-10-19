@@ -1,4 +1,7 @@
-use super::{segment_reaches, wetness, Chunk, ChunkBuild, Phase, Surface, SHORE_CELLS, WORK_CELLS};
+use super::{
+    segment_reaches, wetness, Chunk, ChunkBuild, Phase, Surface, APRON_CELLS, GROUND_APRON_CELLS,
+    SETTLEMENT_RELIEF_KEPT, SHORE_CELLS, WORK_CELLS,
+};
 use crate::biome::{self, Biome, Water, SHORE_REACH};
 use crate::blend::Blend;
 use crate::blend::WEIGHT_TOTAL;
@@ -201,6 +204,147 @@ fn a_chunk_is_the_same_alone_as_among_its_neighbours() {
         }
     }
     assert_eq!(alone, digest::chunk(&built_from(&land, coord, &mut kept)));
+}
+
+#[test]
+fn an_apron_holds_what_each_neighbour_holds() {
+    let land = land(0xA9E0);
+    let mut kept = shared();
+    let centre = ChunkCoord { x: 2, y: -3 };
+    let chunk = built_from(&land, centre, &mut kept);
+    let edge = signed(CHUNK_CELLS);
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1)] {
+        let neighbour = built_from(
+            &land,
+            ChunkCoord {
+                x: centre.x + dx,
+                y: centre.y + dy,
+            },
+            &mut kept,
+        );
+        let (offset_x, offset_y) = (dx * edge, dy * edge);
+        let reach = signed(APRON_CELLS);
+        for y in -reach..edge + reach {
+            for x in -reach..edge + reach {
+                let (nx, ny) = (x - offset_x, y - offset_y);
+                let inside = |v: i32| (0..edge).contains(&v);
+                if !inside(nx) || !inside(ny) {
+                    continue;
+                }
+                let (cx, cy) = (nx.unsigned_abs(), ny.unsigned_abs());
+                assert_eq!(
+                    chunk.elevation_beside(x, y),
+                    Some(neighbour.elevation(cx, cy))
+                );
+                assert_eq!(chunk.water_beside(x, y), Some(neighbour.water(cx, cy)));
+                let ground_reach = signed(GROUND_APRON_CELLS);
+                let in_ground_apron = |v: i32| (-ground_reach..edge + ground_reach).contains(&v);
+                if in_ground_apron(x) && in_ground_apron(y) {
+                    assert_eq!(
+                        chunk.ground_beside(x, y),
+                        Some(neighbour.ground(cx, cy)),
+                        "({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+    let past = signed(APRON_CELLS) + 1;
+    assert_eq!(chunk.elevation_beside(-past, 0), None);
+    assert_eq!(
+        chunk.ground_beside(edge + signed(GROUND_APRON_CELLS), 0),
+        None
+    );
+}
+
+/// A settlement pulls its ground toward its grade but keeps a share of the
+/// relief it was laid on: inside a quarter of its radius, where its pull is
+/// near whole, the ground stands between that share and what a quarter's
+/// falloff leaves of its departure from the grade.
+#[test]
+fn a_settlement_keeps_a_share_of_its_natural_relief() {
+    let land = land(0x5E77_1E00);
+    let field = land.field();
+    let mut checked = 0;
+    for site in field.sites().iter().filter(|site| site.radius_cells >= 12) {
+        let coord = site.at.chunk();
+        if !field.params().holds_chunk(coord.x, coord.y) {
+            continue;
+        }
+        let mut build = ChunkBuild::new(coord).expect("fits");
+        while build.phase() != Phase::Structures {
+            build.step(&land, &mut Unkept, &SERIAL).expect("steps");
+        }
+        let natural = build.work_ground.clone();
+        build.step(&land, &mut Unkept, &SERIAL).expect("levels");
+        let (gx, gy) = field.grid_position(site.at);
+        let grade = field.coarse_at(gx, gy).elevation_units();
+        let inner = f64::from(site.radius_cells) / 4.0;
+        let (mut kept, mut was) = (0.0, 0.0);
+        for wy in 0..WORK_CELLS {
+            for wx in 0..WORK_CELLS {
+                let Some((cx, cy)) = ChunkBuild::in_chunk(wx, wy) else {
+                    continue;
+                };
+                let index = ChunkBuild::work_index(wx, wy);
+                let cell = build.work_cell(wx, wy);
+                let distance = tairix_util::mathf::hypot(
+                    f64::from(cell.x - site.at.x),
+                    f64::from(cell.y - site.at.y),
+                );
+                if distance > inner
+                    || build.work_wet[index]
+                    || build.partial().surface(cx, cy).is_road()
+                {
+                    continue;
+                }
+                let (now, before) = (build.work_ground[index] - grade, natural[index] - grade);
+                kept += now * now;
+                was += before * before;
+            }
+        }
+        if was < 1.0 {
+            continue;
+        }
+        let share = tairix_util::mathf::sqrt(kept / was);
+        assert!(
+            (SETTLEMENT_RELIEF_KEPT - 0.01..0.38).contains(&share),
+            "{share} of its relief kept at {:?}",
+            site.at
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "the realm has a settlement on uneven ground");
+}
+
+/// Ground the realm holds dry stands above the sea beside it: the relief below
+/// the coarse step once sank a dry cell of this chunk almost fifty units
+/// beneath sea level, where it would have been drawn as a pit.
+#[test]
+fn no_dry_cell_lies_below_the_sea() {
+    let params = RealmParams::new(RealmSpec {
+        seed: 0xFA4_0002,
+        extent_chunks: 32,
+        coarse_samples: 64,
+        ..RealmParams::default_realm(0xFA4_0002).spec()
+    })
+    .expect("legal");
+    let land = land_of(params);
+    let mut kept = shared();
+    for coord in [ChunkCoord { x: 3, y: -2 }, ChunkCoord { x: 2, y: -2 }] {
+        let chunk = built_from(&land, coord, &mut kept);
+        for cy in 0..CHUNK_CELLS {
+            for cx in 0..CHUNK_CELLS {
+                if chunk.water(cx, cy) == chunk.elevation(cx, cy) {
+                    assert!(
+                        !chunk.elevation(cx, cy).is_submerged(),
+                        "{coord:?} ({cx}, {cy}) is dry at {:?}",
+                        chunk.elevation(cx, cy)
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

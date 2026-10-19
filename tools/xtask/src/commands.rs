@@ -2251,27 +2251,61 @@ fn build_platform_image(ctx: &Context, args: ImageArgs) -> Result<PathBuf, Strin
 /// to exercise the SMP scheduler while staying cheap under TCG.
 const DEFAULT_RUN_CPUS: u32 = 4;
 
-/// Split `run` arguments into the runner's own `--cpus <n>` and the
-/// argument tail forwarded to the `image` grammar (`--target`,
-/// `--profile`, `--firmware`, `--out`), so the image-building half of
-/// `run` and the `image` subcommand can never drift apart.
-fn parse_run_args(args: &[OsString]) -> Result<(u32, Vec<OsString>), String> {
-    let mut cpus = DEFAULT_RUN_CPUS;
+/// The machine an interactive session presents: its CPUs and, where `--ram`
+/// sized it, its RAM.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct RunMachine {
+    cpus: u32,
+    /// Guest RAM in mebibytes; `None` keeps the board's default.
+    ram_mib: Option<u32>,
+}
+
+/// Split `run` arguments into the runner's own `--cpus <n>` and
+/// `--ram <size>` and the argument tail forwarded to the `image` grammar
+/// (`--target`, `--profile`, `--firmware`, `--out`), so the image-building
+/// half of `run` and the `image` subcommand can never drift apart.
+fn parse_run_args(args: &[OsString]) -> Result<(RunMachine, Vec<OsString>), String> {
+    let mut machine = RunMachine {
+        cpus: DEFAULT_RUN_CPUS,
+        ram_mib: None,
+    };
     let mut image_args = Vec::with_capacity(args.len());
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         if flag == "--cpus" {
-            cpus = it
+            machine.cpus = it
                 .next()
                 .and_then(|v| v.to_str())
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|&n| n >= 1)
                 .ok_or("run: --cpus requires a positive integer")?;
+        } else if flag == "--ram" {
+            let size = it
+                .next()
+                .and_then(|v| v.to_str())
+                .ok_or("run: --ram requires a size such as 512M or 2G")?;
+            machine.ram_mib = Some(parse_ram(size)?);
         } else {
             image_args.push(flag.clone());
         }
     }
-    Ok((cpus, image_args))
+    Ok((machine, image_args))
+}
+
+/// `--ram`'s `size` in mebibytes: a whole number of mebibytes, bare or
+/// suffixed `M`, or of gibibytes suffixed `G`, as QEMU's `-m` spells them.
+fn parse_ram(size: &str) -> Result<u32, String> {
+    let (count, scale) = match size.as_bytes().last() {
+        Some(b'M' | b'm') => (&size[..size.len() - 1], 1),
+        Some(b'G' | b'g') => (&size[..size.len() - 1], 1024),
+        _ => (size, 1),
+    };
+    count
+        .parse::<u32>()
+        .ok()
+        .and_then(|count| count.checked_mul(scale))
+        .filter(|&mib| mib >= 1)
+        .ok_or_else(|| format!("run: --ram takes a whole size such as 512M or 2G, not `{size}`"))
 }
 
 /// Build the QEMU-`virt`-board form of the production kernel for
@@ -2341,13 +2375,17 @@ fn build_virt_run_kernel(
 ///
 /// Pure, so the shape a human's session gets is a checkable contract
 /// rather than something only a windowed run reveals.
-fn run_session_spec(kernel: &Path, disk_image: &Path, cpus: u32) -> tairix_qemu::Spec {
-    tairix_qemu::Spec::for_aarch64_kernel(kernel)
-        .with_cpus(cpus)
+fn run_session_spec(kernel: &Path, disk_image: &Path, machine: RunMachine) -> tairix_qemu::Spec {
+    let spec = tairix_qemu::Spec::for_aarch64_kernel(kernel)
+        .with_cpus(machine.cpus)
         .with_virtio_blk(disk_image)
         .with_ramfb()
         .with_virtio_net_user(image_drivers::VIRT_SESSION_NIC_MAC)
-        .windowed_interactive()
+        .windowed_interactive();
+    match machine.ram_mib {
+        Some(ram_mib) => spec.with_ram_mib(ram_mib),
+        None => spec,
+    }
 }
 
 /// Build the platform image for the requested profile, then boot it as
@@ -2374,12 +2412,12 @@ fn run_session_spec(kernel: &Path, disk_image: &Path, cpus: u32) -> tairix_qemu:
 /// with no deadline and ends when the user closes the QEMU window or
 /// the guest powers off.
 fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    let (cpus, image_args) = parse_run_args(args)?;
+    let (machine, image_args) = parse_run_args(args)?;
     let parsed = parse_image_args(&image_args)?;
     let kind = parsed.kind;
     let disk_image = build_platform_image(ctx, parsed)?;
     let virt_kernel = build_virt_run_kernel(ctx, kind.profile())?;
-    let spec = run_session_spec(&virt_kernel, &disk_image, cpus);
+    let spec = run_session_spec(&virt_kernel, &disk_image, machine);
     let unlock = match kind.root() {
         tairix_mkimage::VolumeProtection::Plaintext => {
             "the root mounts with no passphrase".to_owned()
@@ -2390,10 +2428,13 @@ fn run_run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         ),
     };
     eprintln!(
-        "xtask: [run] booting {} ({}) on qemu-system-aarch64 -M virt; this \
-         terminal is the guest serial console ({unlock})",
+        "xtask: [run] booting {} ({}) on qemu-system-aarch64 -M virt with {} \
+         CPUs and {} MiB of RAM; this terminal is the guest serial console \
+         ({unlock})",
         disk_image.display(),
         kind.profile().label(),
+        spec.cpus,
+        spec.ram_mib(),
     );
     let status = tairix_qemu::Runner::run_interactive(&spec).map_err(|e| format!("run: {e}"))?;
     if status != 0 {
@@ -2441,8 +2482,8 @@ mod tests {
         cargo_subcommand_available, dir_size, host_clippy, host_order_args, image_drivers,
         kernel_build_profile, kernel_diag_feature_args, parse_image_args, parse_run_args,
         parse_test_options, run_session_spec, Command, HostLane, PassOrder, Path, RunBudget,
-        CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, PLATFORM_IMAGE_DRIVER_STORE,
-        TEST_SOAK_SECS,
+        RunMachine, CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
+        PLATFORM_IMAGE_DRIVER_STORE, TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
@@ -2531,23 +2572,89 @@ mod tests {
         );
     }
 
-    /// `run` consumes only its own `--cpus`; every other argument is
-    /// forwarded verbatim to the shared `image` grammar so the two
-    /// entry points cannot drift apart.
+    /// The session `run` boots when it is asked for nothing but an image.
+    const DEFAULT_MACHINE: RunMachine = RunMachine {
+        cpus: DEFAULT_RUN_CPUS,
+        ram_mib: None,
+    };
+
+    /// `run` consumes only its own `--cpus` and `--ram`; every other argument
+    /// is forwarded verbatim to the shared `image` grammar so the two entry
+    /// points cannot drift apart.
     #[test]
-    fn run_args_default_the_cpu_count_and_forward_the_rest() {
+    fn run_args_default_the_machine_and_forward_the_rest() {
         let args = argv(&["--target", "aarch64-rpi", "--profile", "installer"]);
-        let (cpus, rest) = parse_run_args(&args).expect("defaults parse");
-        assert_eq!(cpus, DEFAULT_RUN_CPUS);
+        let (machine, rest) = parse_run_args(&args).expect("defaults parse");
+        assert_eq!(machine, DEFAULT_MACHINE);
         assert_eq!(rest, args);
     }
 
     #[test]
     fn run_cpus_flag_overrides_the_default() {
         let args = argv(&["--cpus", "2", "--target", "aarch64-rpi"]);
-        let (cpus, rest) = parse_run_args(&args).expect("--cpus parses");
-        assert_eq!(cpus, 2);
+        let (machine, rest) = parse_run_args(&args).expect("--cpus parses");
+        assert_eq!(machine.cpus, 2);
         assert_eq!(rest, argv(&["--target", "aarch64-rpi"]));
+    }
+
+    /// `--ram` sizes the session's guest, which the kernel then finds in the
+    /// device tree QEMU generates for it.
+    #[test]
+    fn run_ram_flag_sizes_the_guest() {
+        for (size, mib) in [
+            ("512M", 512),
+            ("512m", 512),
+            ("768", 768),
+            ("2G", 2048),
+            ("1g", 1024),
+        ] {
+            let args = argv(&["--ram", size, "--target", "aarch64-rpi"]);
+            let (machine, rest) = parse_run_args(&args).expect("--ram parses");
+            assert_eq!(machine.ram_mib, Some(mib), "--ram {size}");
+            assert_eq!(rest, argv(&["--target", "aarch64-rpi"]));
+        }
+        let sized = run_session_spec(
+            Path::new("/tmp/kernel.img"),
+            Path::new("/tmp/disk.img"),
+            RunMachine {
+                ram_mib: Some(512),
+                ..DEFAULT_MACHINE
+            },
+        );
+        assert_eq!(sized.ram_mib(), 512);
+        let unsized_spec = run_session_spec(
+            Path::new("/tmp/kernel.img"),
+            Path::new("/tmp/disk.img"),
+            DEFAULT_MACHINE,
+        );
+        assert_eq!(
+            unsized_spec.ram_mib(),
+            tairix_qemu::aarch64::DEFAULT_RAM_MIB,
+            "no --ram keeps the board's default"
+        );
+    }
+
+    /// A `--ram` that is missing, not a whole size, nothing, or more mebibytes
+    /// than the runner can name is refused rather than defaulted (fail closed).
+    #[test]
+    fn run_ram_rejects_nothing_garbage_fractions_and_overflow() {
+        for size in [
+            "0",
+            "0G",
+            "",
+            "M",
+            "512X",
+            "1.5G",
+            "-1G",
+            "4294967296",
+            "4194304G",
+        ] {
+            assert!(
+                parse_run_args(&argv(&["--ram", size])).is_err(),
+                "--ram {size} was accepted"
+            );
+        }
+        assert!(parse_run_args(&argv(&["--ram"])).is_err());
     }
 
     /// A human's session gets a NIC, and it is the one the image it boots
@@ -2565,7 +2672,7 @@ mod tests {
         let spec = run_session_spec(
             Path::new("/tmp/kernel.img"),
             Path::new("/tmp/disk.img"),
-            DEFAULT_RUN_CPUS,
+            DEFAULT_MACHINE,
         );
         assert_eq!(spec.net_devices.len(), 1, "exactly one NIC");
         assert_eq!(

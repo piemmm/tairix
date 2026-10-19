@@ -12,7 +12,7 @@ use super::{
     STANDING_HEIGHT,
 };
 use crate::error::FigureError;
-use crate::frame::{Rotation, FORESHORTEN};
+use crate::frame::{Lens, Rotation, FORESHORTEN};
 use crate::identity::{Build, Features, Identity, Palette, Setting, Spec};
 use crate::mesh;
 use crate::reference::{self, Reference};
@@ -65,9 +65,9 @@ fn overlap(out: &Placement, one: u16, other: u16) -> bool {
 /// A stance the placement cases share; what a stance refuses is `rig`'s own
 /// test, so these state only their own subject.
 #[track_caller]
-fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
-    Stance::new(facing, scale, at, Reference::light().expect("a real light"))
-        .expect("a real stance")
+fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance<'static> {
+    let light = Reference::light().expect("a real light");
+    Stance::new(facing, Lens::Oblique { scale, at }, light).expect("a real stance")
 }
 use crate::socket::{Side, Socket};
 

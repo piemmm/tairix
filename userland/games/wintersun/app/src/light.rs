@@ -1,111 +1,118 @@
-//! The low sun, and what it does to the ground.
+//! The low sun, the air, and the sky, and the pass that lights the geometry
+//! buffer with them.
 //!
-//! `WinterSun` is lit by a single directional light at a shallow angle.
-//! That is an art direction and a simplification at once: long shadows, a
-//! cold-to-warm gradient across every slope, and no light to trace — the
-//! shading is the terrain's own gradient dotted with one vector.
+//! `WinterSun` is lit by one directional light at a shallow angle: long
+//! shadows and a cold-to-warm turn across every slope. Each pixel is lit from
+//! its own surface normal, so a slope is lit as it is seen, and veiled by the
+//! air between it and the eye — the fog of distance and the mist that pools
+//! in hollows — before the sky takes whatever no surface covers.
 //!
-//! # Why a buffer rather than a term per pixel
+//! # Set up once a frame, read per pixel
 //!
-//! The result is low-frequency: it is a function of the ground's slope
-//! and height, both of which vary over cells rather than pixels. So it is
-//! accumulated into a buffer at a fraction of the render resolution and
-//! upsampled, which is what makes it affordable and what gives the
-//! degradation ladder a knob to turn that costs almost no fidelity for
-//! most of its travel. The point lights a later item adds — lanterns,
-//! fires, spell effects — accumulate into this same buffer rather than a
-//! second one.
+//! Everything the light depends on but the pixel — the sun's direction, how
+//! far the fog reaches, the sky's colour up the screen — is folded into
+//! tables when a frame begins ([`Atmosphere::new`]). A pixel's light is then
+//! a few lookups and a blend, in integers.
 //!
-//! The upsample has the same shape as the terrain pass: the two buffer
-//! rows either side of an output row are interpolated once into a
-//! scratch row, and the pixels step along it.
+//! # Silhouettes are resolved here
+//!
+//! The terrain is scan-converted a pixel at a time, so its silhouette against
+//! the sky or a farther slope is aliased. Every fragment recorded how near
+//! its triangle's edge lies; where that edge is within half a pixel and the
+//! surface beyond it is a different one — its depth jumps, or there is no
+//! surface at all — the pixel takes its neighbour's light for the share of it
+//! the neighbour covers.
 
 use alloc::vec::Vec;
 use core::f64::consts::FRAC_PI_2;
 
-use tairix_parallel::{bands, for_each_drawn, piece_len, JobRunner};
 use tairix_raster::color::{Color, Pixel};
+use tairix_raster::mesh::{Depth, EdgeNear, Toward};
+use tairix_raster::surface::RowBand;
+use tairix_raster::view::Perspective;
+use tairix_util::mathf;
 use tairix_wintersun_art::palette;
 use tairix_wintersun_figure::reference::{SUN_ELEVATION, SUN_TOWARD};
 use tairix_wintersun_figure::shadow::Light;
-use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_rules::terrain::MAX_STEP_RISE_SUB_UNITS;
-use tairix_wintersun_world::geom::ELEVATION_SUB_UNITS;
+use tairix_wintersun_world::geom::{CELL_SUB_UNITS, ELEVATION_SUB_UNITS};
 
 use crate::error::ClientError;
-use crate::quality::Relief;
-use crate::terrain::TerrainGrid;
-use crate::view::Viewport;
-
-/// The gradient at which relief shading saturates, in elevation
-/// sub-units per cell.
-///
-/// The greatest rise a body may step up, which is the line the terrain
-/// itself draws between a slope and a cliff face. Shading that saturates
-/// exactly there means the ground a player can walk over is shaded
-/// across its whole range, and everything steeper reads as the wall it
-/// is.
-const SLOPE_FULL: i32 = MAX_STEP_RISE_SUB_UNITS;
+use crate::mesh::{NORMAL_ONE, WORLD_PER_ELEVATION};
+use crate::raster::{GBuffer, Texel};
 
 /// Elevation above which no ground mist collects, in elevation sub-units.
 ///
 /// Mist pools in hollows, so the term is driven by how far *below* this a
-/// cell sits. Sixty world units is the valley floor of the realm's own
+/// surface sits. Sixty world units is the valley floor of the realm's own
 /// relief rather than a number picked to look right at one seed.
 const MIST_CEILING: i32 = 60 * ELEVATION_SUB_UNITS;
+
+/// How far the fog reaches, in world sub-units: the distance over which it
+/// closes all but a third of the view. [`crate::terrain::VIEW_RANGE`] is set
+/// where it has closed almost all of it.
+pub const FOG_DEPTH: f64 = 900.0 * CELL_SUB_UNITS as f64;
+
+/// The gain that leaves a channel exactly as the palette authored it.
+///
+/// Shading is *relative*: a slope facing neither toward nor away from the sun
+/// draws the material's own colour, and the sun brightens or cools it from
+/// there. A tint applied as a plain multiply would instead darken every
+/// surface in the world by whatever its mid-point happened to be, which is a
+/// palette change disguised as lighting.
+pub const UNSHADED: u8 = 128;
+
+/// How far a pixel's depth may differ from its neighbour's, as a fraction of
+/// the nearer, before the two are different surfaces: well past what a
+/// continuous slope changes over one pixel, short of the step a ridge makes
+/// against the ground behind it.
+const DISCONTINUITY: u32 = 8;
 
 /// A direction and two colours: everything the ground is lit by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Sun {
-    /// The in-plane direction as given, which the figures' light is built
-    /// from exactly.
+    /// The in-plane direction it travels in, east and south.
     toward: (i32, i32),
-    /// Eastward component of the in-plane direction, as a 1/256 fraction.
-    dx: i32,
-    /// Southward component, likewise.
-    dy: i32,
     /// The colour a slope facing the sun takes.
     pub warm: Color,
     /// The colour a slope facing away takes.
     pub cool: Color,
-    /// How far the slope moves the mix, out of 255.
+    /// How far a slope moves the mix either way, out of 255.
     pub relief: u8,
-    /// The tint a slope facing neither way takes, which every gain is
-    /// measured against.
+    /// The tint level ground takes, which every gain is measured against.
     neutral: Color,
 }
 
-/// The fixed-point scale the sun's direction is held at.
-const UNIT: i32 = 256;
-
 impl Sun {
-    /// A sun shining toward `(dx, dy)`, normalised.
+    /// A sun travelling toward `(dx, dy)` at the stage's elevation.
     ///
     /// A zero direction is a sun directly overhead, which shades nothing
-    /// — the honest answer rather than a refusal, since the rest of the
-    /// frame is unaffected by it.
+    /// sideways — the honest answer rather than a refusal.
     #[must_use]
     pub fn new(dx: i32, dy: i32, warm: Color, cool: Color, relief: u8) -> Self {
-        let length = i64::from(dx)
-            .saturating_mul(i64::from(dx))
-            .saturating_add(i64::from(dy).saturating_mul(i64::from(dy)))
-            .isqrt();
-        let scale = |v: i32| {
-            if length == 0 {
-                0
-            } else {
-                i32::try_from(i64::from(v) * i64::from(UNIT) / length).unwrap_or(0)
-            }
-        };
         Self {
             toward: (dx, dy),
-            dx: scale(dx),
-            dy: scale(dy),
             warm,
             cool,
             relief,
             neutral: palette::lerp(cool, warm, UNSHADED),
         }
+    }
+
+    /// Daylight from `WinterSun`'s low sun in the north-west — the sun the
+    /// art harness measures every figure under — at a neutral colour
+    /// temperature, so it lights an ice field and a savanna alike until the
+    /// sky gives it the hour and the weather.
+    #[must_use]
+    pub fn daylight() -> Self {
+        let (dx, dy) = SUN_TOWARD;
+        Self::new(
+            dx,
+            dy,
+            Color::rgb(255, 240, 216),
+            Color::rgb(140, 152, 178),
+            200,
+        )
     }
 
     /// The light the figures under this sun are shaded by: its direction, at
@@ -126,7 +133,7 @@ impl Sun {
         light.map_err(|_| ClientError::Figure)
     }
 
-    /// The gain a slope at `level` applies to each channel.
+    /// The gain a surface at `level` applies to each channel.
     #[must_use]
     pub fn gain(&self, level: u8) -> Color {
         let tint = palette::lerp(self.cool, self.warm, level);
@@ -140,32 +147,6 @@ impl Sun {
             about(tint.b, self.neutral.b),
         )
     }
-
-    /// Daylight from `WinterSun`'s low sun in the north-west — the sun the
-    /// art harness measures every figure under — at a neutral colour
-    /// temperature, so it lights an ice field and a savanna alike until the
-    /// sky gives it the hour and the weather.
-    #[must_use]
-    pub fn daylight() -> Self {
-        let (dx, dy) = SUN_TOWARD;
-        Self::new(
-            dx,
-            dy,
-            Color::rgb(255, 240, 216),
-            Color::rgb(140, 152, 178),
-            200,
-        )
-    }
-
-    /// Where a slope of `(gx, gy)` elevation sub-units per cell sits
-    /// between the cold and warm ends, out of 255.
-    #[must_use]
-    pub fn level(&self, gx: i32, gy: i32) -> u8 {
-        let dot = i64::from(gx) * i64::from(self.dx) + i64::from(gy) * i64::from(self.dy);
-        let full = i64::from(UNIT) * i64::from(SLOPE_FULL);
-        let swing = dot.clamp(-full, full) * i64::from(self.relief) / (2 * full);
-        u8::try_from((128 + swing).clamp(0, 255)).unwrap_or(128)
-    }
 }
 
 /// The sky the ground sits under.
@@ -175,360 +156,350 @@ pub struct Sky {
     pub mist: Color,
     /// How opaque the mist becomes in the deepest hollow, out of 255.
     pub mist_depth: u8,
+    /// The sky at the horizon, which the fog of distance is coloured too, so
+    /// far ground fades into the sky beyond it.
+    pub horizon: Color,
+    /// The sky straight up.
+    pub zenith: Color,
 }
 
 impl Sky {
-    /// A neutral daylight haze pooling in the valleys, until the sky gives
-    /// it the hour and the weather.
+    /// A neutral daylight haze pooling in the valleys, under a pale sky,
+    /// until the sky gives it the hour and the weather.
     #[must_use]
     pub const fn daylight() -> Self {
         Self {
             mist: Color::rgb(170, 176, 186),
             mist_depth: 88,
+            horizon: Color::rgb(188, 196, 208),
+            zenith: Color::rgb(92, 128, 176),
         }
     }
 }
 
-/// The gain that leaves a channel exactly as the palette authored it.
-///
-/// Shading is *relative*: a slope facing neither toward nor away from
-/// the sun draws the material's own colour, and the sun brightens or
-/// cools it from there. A tint applied as a plain multiply would instead
-/// darken every surface in the world by whatever its mid-point happened
-/// to be, which is a palette change disguised as lighting.
-pub const UNSHADED: u8 = 128;
+/// Steps per axis the normal table is indexed in.
+const NORMAL_STEPS: usize = 64;
 
-/// What one buffer texel says about its patch of ground.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Lit {
-    /// Per-channel gain about [`UNSHADED`].
-    pub gain: Color,
-    /// How far toward the sky's mist it is mixed, out of 255.
-    pub mist: u8,
+/// Octaves of reciprocal depth the fog table spans, and the steps of it per
+/// octave.
+const FOG_OCTAVES: usize = 32;
+const FOG_STEPS: usize = 16;
+
+/// The light and the air for one frame, folded into what each pixel reads.
+#[derive(Clone, Debug)]
+pub struct Atmosphere {
+    /// The gain a surface takes from the sun, by where its normal falls in
+    /// the normal table: unshaded throughout where the ground takes no sun.
+    tints: Vec<Color>,
+    /// How far toward the fog a surface is, by its reciprocal depth's octave
+    /// and step, out of 255.
+    fog: Vec<u8>,
+    /// The sky at each render row.
+    rows: Vec<Color>,
+    sky: Sky,
 }
 
-impl Lit {
-    /// Ground the light leaves alone, which is what an unshaded buffer
-    /// holds.
-    pub const NEUTRAL: Self = Self {
-        gain: Color::rgb(UNSHADED, UNSHADED, UNSHADED),
-        mist: 0,
-    };
-}
-
-/// The light term for a frame, at a fraction of its resolution.
-#[derive(Debug, Default)]
-pub struct LightBuffer {
-    width: u32,
-    height: u32,
-    shift: u32,
-    texels: Vec<Lit>,
-}
-
-impl LightBuffer {
-    /// An empty buffer, sized on its first shade.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The buffer's own extent, in texels.
-    #[must_use]
-    pub const fn extent(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    /// Log2 of the render pixels one texel covers.
-    #[must_use]
-    pub const fn shift(&self) -> u32 {
-        self.shift
-    }
-
-    /// Shade every texel covering `view` from the ground `grid` holds.
-    ///
-    /// Texel rows are independent, so they are handed to `runner` the
-    /// same way the frame's pixel bands are. Measured, not assumed: with
-    /// the composite distributed and this left on the calling thread the
-    /// light pass ran half again over its budget, and the whole of that
-    /// overrun was here.
+impl Atmosphere {
+    /// Fold `sun` and `sky`, seen through `camera` onto a render target
+    /// `height` rows tall, into a frame's tables; an unlit frame draws every
+    /// surface in its materials' own colours.
     ///
     /// # Errors
     ///
-    /// [`ClientError::OutOfMemory`] if the buffer does not fit. It is
-    /// reused between frames, so this is reached only when the view or
-    /// the resolution grows.
-    pub fn shade(
-        &mut self,
-        view: &Viewport,
-        grid: &TerrainGrid,
-        pass: &Shading,
-        runner: &dyn JobRunner,
-    ) -> Result<(), ClientError> {
-        self.resize(view, pass.shift)?;
-        let width = self.width as usize;
-        let rows = self.height as usize;
-        let grain = (MIN_SHADE_TEXELS / width.max(1)).max(1);
-        let per = piece_len(rows, bands(runner, rows, grain));
-        let width32 = self.width;
-        let work = self
-            .texels
-            .chunks_mut(per * width)
-            .enumerate()
-            .map(|(index, chunk)| (u32::try_from(index * per).unwrap_or(u32::MAX), chunk));
-        for_each_drawn(runner, work, &|(first, texels)| {
-            shade_band(texels, first, width32, grid, pass);
-        });
-        Ok(())
-    }
-
-    /// Size the buffer for `view` at `shift`, leaving every texel
-    /// neutral.
-    ///
-    /// # Errors
-    ///
-    /// [`ClientError::OutOfMemory`] if the buffer does not fit. It is
-    /// reused between frames, so this is reached only when the view or
-    /// the resolution grows.
-    pub fn resize(&mut self, view: &Viewport, shift: u32) -> Result<(), ClientError> {
-        let (rw, rh) = view.render();
-        // One texel past each edge, so the last output pixel has a pair
-        // to interpolate between rather than a clamped repeat.
-        self.width = (rw >> shift) + 2;
-        self.height = (rh >> shift) + 2;
-        self.shift = shift;
-        let texels = (self.width as usize)
-            .checked_mul(self.height as usize)
-            .ok_or(ClientError::OutOfMemory)?;
-        fit(&mut self.texels, texels)
-    }
-
-    /// How wide a scratch row [`Self::composite_row`] needs.
-    ///
-    /// A band composites on its own thread, so each holds its own rather
-    /// than sharing one and serialising on it.
-    #[must_use]
-    pub const fn scratch_len(&self) -> usize {
-        self.width as usize
-    }
-
-    /// Interpolate the two texel rows either side of render row `row`
-    /// into `scratch`, ready for [`Self::composite_row`].
-    fn prepare(&self, scratch: &mut [Lit], row: u32) {
-        let step = pixel_span(self.shift);
-        let near = (row / step).min(self.height.saturating_sub(2));
-        let t = fraction(row % step, self.shift);
-        let width = self.width as usize;
-        let near_base = (near as usize) * width;
-        for (x, slot) in scratch.iter_mut().enumerate().take(width) {
-            let (a, b) = (
-                self.texels[near_base + x],
-                self.texels[near_base + width + x],
-            );
-            *slot = Lit {
-                gain: palette::lerp(a.gain, b.gain, t),
-                mist: lerp_u8(a.mist, b.mist, t),
-            };
-        }
-    }
-
-    /// How far toward `sky`'s mist the ground under render pixel `(x, y)` is
-    /// mixed, out of 255: what a figure standing there is veiled by.
-    ///
-    /// Read off the texel the point falls in rather than interpolated: a
-    /// figure takes one veil over its whole body, and a texel is already the
-    /// low-frequency average the veil is.
-    #[must_use]
-    pub fn mist_at(&self, x: i32, y: i32, sky: Sky) -> u8 {
-        let texel = |at: i32, extent: u32| {
-            u32::try_from(at.max(0)).map_or(0, |at| {
-                (at >> self.shift.min(16)).min(extent.saturating_sub(1))
-            })
+    /// [`ClientError::OutOfMemory`] where the tables do not fit.
+    #[allow(
+        clippy::float_arithmetic,
+        reason = "the sun's direction, the fog's falloff and the sky's colour \
+                  up the screen are trigonometry and exponentials, folded once \
+                  a frame into the tables every pixel reads in integers"
+    )]
+    pub fn new(
+        sun: &Sun,
+        sky: Sky,
+        camera: &Perspective,
+        height: u32,
+        lit: bool,
+    ) -> Result<Self, ClientError> {
+        let (dx, dy) = sun.toward;
+        let length = mathf::hypot(f64::from(dx), f64::from(dy));
+        let (east, south) = if length > 0.0 {
+            (f64::from(dx) / length, f64::from(dy) / length)
+        } else {
+            (0.0, 0.0)
         };
-        let (tx, ty) = (texel(x, self.width), texel(y, self.height));
-        let index = (ty as usize) * (self.width as usize) + (tx as usize);
-        self.texels.get(index).map_or(0, |lit| mist_of(*lit, sky))
+        let elevation = if length > 0.0 {
+            SUN_ELEVATION
+        } else {
+            FRAC_PI_2
+        };
+        let (flat, high) = (mathf::cos(elevation), mathf::sin(elevation));
+        // Toward the sun: against the way it travels, and up.
+        let toward = [-east * flat, -south * flat, high];
+        // The slope at which the shading saturates is the steepest a body may
+        // step up, the line the terrain itself draws between slope and cliff.
+        let steepest = mathf::atan(
+            f64::from(MAX_STEP_RISE_SUB_UNITS * WORLD_PER_ELEVATION) / f64::from(CELL_SUB_UNITS),
+        );
+        let full = mathf::sin(elevation + steepest) - high;
+        let swing = f64::from(sun.relief) * 0.5;
+
+        let mut tints = Vec::new();
+        tints
+            .try_reserve(NORMAL_STEPS * NORMAL_STEPS)
+            .map_err(|_| ClientError::OutOfMemory)?;
+        for iy in 0..NORMAL_STEPS {
+            for ix in 0..NORMAL_STEPS {
+                let centre =
+                    |step: usize| (mathf::real(step * 4) + 2.0 - 128.0) / f64::from(NORMAL_ONE);
+                let (mut nx, mut ny) = (centre(ix), centre(iy));
+                let rim = nx * nx + ny * ny;
+                if rim > 1.0 {
+                    let shrink = 1.0 / mathf::sqrt(rim);
+                    (nx, ny) = (nx * shrink, ny * shrink);
+                }
+                let nz = mathf::sqrt(mathf::fmax(0.0, 1.0 - nx * nx - ny * ny));
+                let facing = mathf::fmax(0.0, nx * toward[0] + ny * toward[1] + nz * toward[2]);
+                let lean = if full > 0.0 {
+                    mathf::clamp((facing - high) / full, -1.0, 1.0)
+                } else {
+                    0.0
+                };
+                let level = mathf::byte((f64::from(UNSHADED) + lean * swing) / 255.0);
+                tints.push(if lit {
+                    sun.gain(level)
+                } else {
+                    Color::rgb(UNSHADED, UNSHADED, UNSHADED)
+                });
+            }
+        }
+
+        let mut fog = Vec::new();
+        fog.try_reserve(FOG_OCTAVES * FOG_STEPS + 1)
+            .map_err(|_| ClientError::OutOfMemory)?;
+        for slot in 0..=FOG_OCTAVES * FOG_STEPS {
+            let octave = mathf::real(slot / FOG_STEPS);
+            let step = mathf::real(slot % FOG_STEPS) / mathf::real(FOG_STEPS);
+            let reciprocal = mathf::power(2.0, octave) * (1.0 + step);
+            // A reciprocal depth's own reciprocal is the distance it stands at.
+            let distance = camera.depth(reciprocal);
+            fog.push(mathf::byte(1.0 - mathf::exp(-distance / FOG_DEPTH)));
+        }
+
+        let mut rows = Vec::new();
+        rows.try_reserve(height as usize)
+            .map_err(|_| ClientError::OutOfMemory)?;
+        let (middle, _) = camera.centre();
+        for row in 0..height {
+            let ray = camera.ray(middle, f64::from(row) + 0.5);
+            let up = mathf::sqrt(mathf::fmax(0.0, ray[2]));
+            rows.push(palette::lerp(sky.horizon, sky.zenith, mathf::byte(up)));
+        }
+
+        Ok(Self {
+            tints,
+            fog,
+            rows,
+            sky,
+        })
     }
 
-    /// Apply the light to one row of already-painted ground.
-    pub fn composite_row(&self, dst: &mut [Pixel], scratch: &mut [Lit], sky: Sky, row: u32) {
-        if self.texels.is_empty() || scratch.len() < self.scratch_len() {
-            return;
-        }
-        self.prepare(scratch, row);
-        let step = pixel_span(self.shift) as usize;
-        let last = self.scratch_len() - 1;
-        // Walked in texel-wide runs rather than by pixel index: a run
-        // boundary is exactly where the index division and modulo used to
-        // fall, so neither survives into a loop the whole frame goes
-        // through, and the two texels a run interpolates are read once.
-        for (near, run) in dst.chunks_mut(step).enumerate() {
-            let near = near.min(last);
-            let far = (near + 1).min(last);
-            let (near, far) = (scratch[near], scratch[far]);
-            for (within, pixel) in run.iter_mut().enumerate() {
-                let t = fraction(u32::try_from(within).unwrap_or(u32::MAX), self.shift);
-                let lit = Lit {
-                    gain: palette::lerp(near.gain, far.gain, t),
-                    mist: lerp_u8(near.mist, far.mist, t),
+    /// Light `band`'s rows of the frame from `buffer`.
+    pub fn composite(&self, buffer: &GBuffer, band: &mut RowBand<'_>) {
+        let width = buffer.width();
+        for row in band.rows() {
+            let (Some((_, pixels)), Some(here)) =
+                (band.row_span_mut(row, 0, width), buffer.row(row))
+            else {
+                continue;
+            };
+            let sky = self.sky_at(row);
+            let columns = pixels
+                .iter_mut()
+                .zip(here.depth)
+                .zip(here.albedo.iter().zip(here.texels))
+                .zip(here.edges);
+            for (x, (((pixel, &depth), (&albedo, &texel)), edge)) in (0u32..).zip(columns) {
+                let own = if depth == Depth::CLEAR {
+                    sky
+                } else {
+                    self.surface(depth, albedo, texel)
                 };
-                *pixel = apply(*pixel, lit, sky);
+                *pixel = match edge.get() {
+                    Some(near) if near.0 < EdgeNear::STEPS / 2 => {
+                        self.resolve(buffer, (x, row), depth, own, near)
+                    }
+                    _ => own,
+                };
             }
         }
     }
-}
 
-/// The fewest texels worth handing to another core.
-///
-/// A work grain, not a capacity: below roughly this much the dispatch
-/// costs more than the shading it is splitting.
-const MIN_SHADE_TEXELS: usize = 1 << 12;
-
-/// Shade one run of whole texel rows, starting at row `first`.
-fn shade_band(texels: &mut [Lit], first: u32, width: u32, grid: &TerrainGrid, pass: &Shading) {
-    let texel_span = pass.step.saturating_mul(axis(pixel_span(pass.shift)));
-    let stride = width as usize;
-    for (index, texel) in texels.iter_mut().enumerate() {
-        let tx = u32::try_from(index % stride.max(1)).unwrap_or(0);
-        let ty = first.saturating_add(u32::try_from(index / stride.max(1)).unwrap_or(0));
-        let at = WorldPoint {
-            x: pass
-                .origin
-                .x
-                .saturating_add(texel_span.saturating_mul(axis(tx))),
-            y: pass
-                .origin
-                .y
-                .saturating_add(texel_span.saturating_mul(axis(ty))),
+    /// The light at pixel `(x, y)`, `depth` deep and lit `own`, whose
+    /// triangle's edge lies `distance` toward `toward`: its silhouette
+    /// resolved against the surface beyond the edge.
+    fn resolve(
+        &self,
+        buffer: &GBuffer,
+        (x, y): (u32, u32),
+        depth: Depth,
+        own: Pixel,
+        (distance, toward): (u8, Toward),
+    ) -> Pixel {
+        let half = EdgeNear::STEPS / 2;
+        let (nx, ny) = match toward {
+            Toward::Left => (x.checked_sub(1), Some(y)),
+            Toward::Right => (Some(x + 1), Some(y)),
+            Toward::Up => (Some(x), y.checked_sub(1)),
+            Toward::Down => (Some(x), Some(y + 1)),
         };
-        *texel = shade_at(grid, pass, at);
+        let Some((beyond, far_albedo, far_texel, _)) =
+            nx.zip(ny).and_then(|(nx, ny)| buffer.at(nx, ny))
+        else {
+            return own;
+        };
+        if !apart(depth, beyond) {
+            return own;
+        }
+        let other = self.shade(beyond, far_albedo, far_texel, ny.unwrap_or(y));
+        // The neighbour covers what lies past the edge: half a pixel less the
+        // edge's distance from this one's centre.
+        let share = u32::from(half - distance) * 255 / u32::from(EdgeNear::STEPS);
+        mix(own, other, u8::try_from(share).unwrap_or(0))
+    }
+
+    /// A surface's light: its albedo under the sun, veiled by mist and fog;
+    /// or the sky at row `y` where no surface was drawn.
+    fn shade(&self, depth: Depth, albedo: Pixel, texel: Texel, y: u32) -> Pixel {
+        if depth == Depth::CLEAR {
+            self.sky_at(y)
+        } else {
+            self.surface(depth, albedo, texel)
+        }
+    }
+
+    /// The sky at render row `y`.
+    fn sky_at(&self, y: u32) -> Pixel {
+        opaque(
+            self.rows
+                .get(y as usize)
+                .copied()
+                .unwrap_or(self.sky.horizon),
+        )
+    }
+
+    /// A drawn surface's light: its albedo under the sun, veiled by mist and
+    /// fog.
+    fn surface(&self, depth: Depth, albedo: Pixel, texel: Texel) -> Pixel {
+        let gain = self
+            .tints
+            .get(normal_index(texel.normal))
+            .copied()
+            .unwrap_or(Color::rgb(UNSHADED, UNSHADED, UNSHADED));
+        let modulate = |channel: u8, gain: u8| {
+            let scaled = u32::from(channel) * u32::from(gain) / u32::from(UNSHADED);
+            u8::try_from(scaled.min(u32::from(u8::MAX))).unwrap_or(u8::MAX)
+        };
+        let lit = Color::rgb(
+            modulate(albedo.r, gain.r),
+            modulate(albedo.g, gain.g),
+            modulate(albedo.b, gain.b),
+        );
+        let misted = palette::lerp(lit, self.sky.mist, self.mist(texel.elevation));
+        opaque(palette::lerp(misted, self.sky.horizon, self.fog(depth)))
+    }
+
+    /// How far toward the mist a surface at `elevation` is mixed, out of
+    /// 255.
+    #[must_use]
+    pub fn mist(&self, elevation: i16) -> u8 {
+        let below = (MIST_CEILING - i32::from(elevation)).clamp(0, MIST_CEILING);
+        let pooled = i64::from(below) * i64::from(self.sky.mist_depth) / i64::from(MIST_CEILING);
+        u8::try_from(pooled).unwrap_or(u8::MAX)
+    }
+
+    /// How far toward the fog a surface at `depth` is mixed, out of 255.
+    #[must_use]
+    pub fn fog(&self, depth: Depth) -> u8 {
+        let q = depth.0;
+        if q == 0 {
+            return u8::MAX;
+        }
+        // The octave and a fraction of it in eight bits, read between the
+        // table's two nearest steps.
+        let octave = q.ilog2();
+        let fraction = if octave >= 12 {
+            (q >> (octave - 12)) & 0xFFF
+        } else {
+            (q << (12 - octave)) & 0xFFF
+        };
+        let slot = (octave as usize) * FOG_STEPS + (fraction >> 8) as usize;
+        let (near, far) = (
+            self.fog.get(slot).copied().unwrap_or(0),
+            self.fog.get(slot + 1).copied().unwrap_or(0),
+        );
+        let between = i32::from(far) - i32::from(near);
+        let value = i32::from(near) + between * i32::try_from(fraction & 0xFF).unwrap_or(0) / 256;
+        u8::try_from(value.clamp(0, 255)).unwrap_or(0)
+    }
+
+    /// What a figure standing on ground at `elevation`, `depth` from the eye,
+    /// is veiled by: the mist and the fog it stands in, composed.
+    #[must_use]
+    pub fn veil(&self, depth: Depth, elevation: i16) -> u8 {
+        let (mist, fog) = (u32::from(self.mist(elevation)), u32::from(self.fog(depth)));
+        let clear = (255 - mist) * (255 - fog) / 255;
+        u8::try_from(255 - clear).unwrap_or(u8::MAX)
+    }
+
+    /// The tone a veil mixes toward.
+    #[must_use]
+    pub const fn veil_tone(&self) -> Color {
+        self.sky.horizon
     }
 }
 
-/// What a shading pass needs to know about the frame it is shading.
-#[derive(Copy, Clone, Debug)]
-pub struct Shading {
-    /// The light.
-    pub sun: Sun,
-    /// Log2 of the render pixels one buffer texel covers.
-    pub shift: u32,
-    /// How the relief term is measured.
-    pub relief: Relief,
-    /// World sub-units per render pixel.
-    pub step: i32,
-    /// The world position of the render target's top-left pixel.
-    pub origin: WorldPoint,
-}
-
-/// The light at one world position.
-fn shade_at(grid: &TerrainGrid, pass: &Shading, at: WorldPoint) -> Lit {
-    let Some((gx, gy, ground)) = gradient(grid, pass.relief, at) else {
-        return Lit::NEUTRAL;
-    };
-    let level = pass.sun.level(gx, gy);
-    let below = (MIST_CEILING - i32::from(ground)).clamp(0, MIST_CEILING);
-    let mist = u8::try_from(i64::from(below) * 255 / i64::from(MIST_CEILING)).unwrap_or(255);
-    Lit {
-        gain: pass.sun.gain(level),
-        mist,
+/// Whether two depths belong to different surfaces: one is the sky, or they
+/// differ by more than [`DISCONTINUITY`]'s share of the nearer.
+fn apart(a: Depth, b: Depth) -> bool {
+    if a == Depth::CLEAR || b == Depth::CLEAR {
+        return a != b;
     }
+    let (near, far) = (a.0.max(b.0), a.0.min(b.0));
+    near - far > near / DISCONTINUITY
 }
 
-/// The ground gradient around `at`, in elevation sub-units per cell, and
-/// the height there.
-///
-/// `None` where the ground is not resident: unmapped ground is drawn as
-/// what it is and must not be lit as though it were a plain.
-fn gradient(grid: &TerrainGrid, relief: Relief, at: WorldPoint) -> Option<(i32, i32, i16)> {
-    let (col, row) = grid.lattice_at(at)?;
-    let here = grid.ground(col, row)?;
-    // The wider stencil is the penumbra, and it is also the more expensive,
-    // which is why the ladder narrows it before it gives up the term.
-    let reach = match relief {
-        Relief::Flat => return Some((0, 0, here)),
-        Relief::Wide => 2,
-        Relief::Narrow => 1,
+/// Where `normal` falls in the normal table.
+fn normal_index(normal: [i8; 2]) -> usize {
+    let step = |component: i8| {
+        usize::try_from((i32::from(component) + 128) >> 2)
+            .unwrap_or(0)
+            .min(NORMAL_STEPS - 1)
     };
-    let east = grid.ground(col + reach, row).unwrap_or(here);
-    let south = grid.ground(col, row + reach).unwrap_or(here);
-    let scale = i32::from(here);
-    Some((
-        (i32::from(east) - scale) / reach_divisor(reach),
-        (i32::from(south) - scale) / reach_divisor(reach),
-        here,
-    ))
+    step(normal[1]) * NORMAL_STEPS + step(normal[0])
 }
 
-/// Cells the stencil spans, so a wider one is not read as a steeper
-/// slope.
-fn reach_divisor(reach: usize) -> i32 {
-    i32::try_from(reach).unwrap_or(1).max(1)
-}
-
-/// Apply the ground's gain, then mix it toward the mist.
-///
-/// Terrain pixels are opaque, so the premultiplied channels are the
-/// straight ones and neither step needs to divide by alpha.
-fn apply(pixel: Pixel, lit: Lit, sky: Sky) -> Pixel {
-    let modulate = |channel: u8, gain: u8| {
-        let scaled = u32::from(channel) * u32::from(gain) / u32::from(UNSHADED);
-        u8::try_from(scaled.min(u32::from(u8::MAX))).unwrap_or(u8::MAX)
-    };
-    let lit_color = Color::rgb(
-        modulate(pixel.r, lit.gain.r),
-        modulate(pixel.g, lit.gain.g),
-        modulate(pixel.b, lit.gain.b),
-    );
-    let misted = palette::lerp(lit_color, sky.mist, mist_of(lit, sky));
+/// `color` as an opaque pixel.
+fn opaque(color: Color) -> Pixel {
     Pixel {
-        r: misted.r,
-        g: misted.g,
-        b: misted.b,
-        a: pixel.a,
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: u8::MAX,
     }
 }
 
-/// How far toward the mist a texel's ground is mixed.
-fn mist_of(lit: Lit, sky: Sky) -> u8 {
-    u8::try_from(u32::from(lit.mist) * u32::from(sky.mist_depth) / 255).unwrap_or(0)
-}
-
-/// The render pixels one buffer texel covers.
-fn pixel_span(shift: u32) -> u32 {
-    1u32 << shift.min(16)
-}
-
-/// Where within a texel a pixel sits, out of 255, for a texel span of
-/// `1 << shift` ([`pixel_span`]).
-///
-/// Scaled by a shift rather than a division because the span is a power
-/// of two by construction and this runs once per pixel of the frame — a
-/// divisor the compiler cannot see is constant costs more here than the
-/// interpolation it feeds.
-fn fraction(within: u32, shift: u32) -> u8 {
-    u8::try_from(within.saturating_mul(255) >> shift.min(16)).unwrap_or(u8::MAX)
-}
-
-/// A texel or pixel index as the signed offset the projection multiplies.
-fn axis(index: u32) -> i32 {
-    i32::try_from(index).unwrap_or(i32::MAX)
-}
-
-/// Interpolate two bytes.
-fn lerp_u8(a: u8, b: u8, t: u8) -> u8 {
-    let span = i32::from(b) - i32::from(a);
-    let moved = i32::from(a) + span * i32::from(t) / 255;
-    u8::try_from(moved.clamp(0, 255)).unwrap_or(a)
-}
-
-/// Grow `buffer` to `len` neutral texels, refusing rather than panicking
-/// when the allocation does not fit.
-fn fit(buffer: &mut Vec<Lit>, len: usize) -> Result<(), ClientError> {
-    buffer.clear();
-    buffer
-        .try_reserve(len)
-        .map_err(|_| ClientError::OutOfMemory)?;
-    buffer.resize(len, Lit::NEUTRAL);
-    Ok(())
+/// `a` moved `t` out of 255 of the way to `b`, both opaque.
+fn mix(a: Pixel, b: Pixel, t: u8) -> Pixel {
+    let channel = |from: u8, to: u8| {
+        let moved = i32::from(from) + (i32::from(to) - i32::from(from)) * i32::from(t) / 255;
+        u8::try_from(moved.clamp(0, 255)).unwrap_or(from)
+    };
+    Pixel {
+        r: channel(a.r, b.r),
+        g: channel(a.g, b.g),
+        b: channel(a.b, b.b),
+        a: u8::MAX,
+    }
 }
 
 #[cfg(test)]

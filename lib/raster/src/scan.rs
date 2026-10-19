@@ -40,7 +40,7 @@ use crate::surface::SUBPIXEL;
 /// The grid every vertex is snapped to, so it is also the finest edge
 /// placement the coverage can distinguish: a 256th of a pixel, far below the
 /// 255 alpha levels the result is quoted in.
-const UNIT: i64 = 256;
+pub(crate) const UNIT: i64 = 256;
 
 /// What a wholly covered pixel accumulates: twice its area, in sub-units
 /// squared.
@@ -69,7 +69,7 @@ pub const MAX_DRAWING_EXTENT: u32 = 1 << 20;
 /// Clamping to it bounds every product an intersection computes to roughly
 /// `2^58`, so the arithmetic stays exact in `i64` for any `i32` input a
 /// caller (or an attacker) supplies rather than overflowing.
-const COORD_LIMIT: i64 = MAX_DRAWING_EXTENT as i64 * UNIT;
+pub(crate) const COORD_LIMIT: i64 = MAX_DRAWING_EXTENT as i64 * UNIT;
 
 /// Which points enclosed by a set of contours count as inside.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -244,16 +244,16 @@ impl SampleSpace {
 ///
 /// A horizontal edge encloses no area and crosses no row, so it is never
 /// built.
-#[derive(Debug)]
-struct Edge {
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Edge {
     /// The y of the edge's upper endpoint.
-    top: i64,
+    pub(crate) top: i64,
     /// The y of its lower endpoint.
-    bottom: i64,
+    pub(crate) bottom: i64,
     /// The x at `top`.
-    x_top: i64,
+    pub(crate) x_top: i64,
     /// The x at `bottom`.
-    x_bottom: i64,
+    pub(crate) x_bottom: i64,
     /// `1` when the contour ran downward through this edge and `-1` when it
     /// ran upward: the winding the coverage accumulates.
     direction: i32,
@@ -262,7 +262,7 @@ struct Edge {
 impl Edge {
     /// Where this edge sits at `y`, which the caller keeps inside
     /// `top..=bottom`.
-    fn x_at(&self, y: i64) -> i64 {
+    pub(crate) fn x_at(&self, y: i64) -> i64 {
         let rise = self.bottom - self.top;
         let run = self.x_bottom - self.x_top;
         if run == 0 || rise <= 0 {
@@ -644,16 +644,10 @@ impl<'s> ScanFill<'s> {
             }
         }
         self.crossings.sort_unstable_by_key(|&(x, _)| x);
-        let origin = i64::from(first_pixel) * UNIT;
         let len = i64::try_from(out.len()).unwrap_or(i64::MAX);
-        // The first pixel whose centre lies at or right of `x`.
         let column = |x: i64| {
-            usize::try_from(
-                (x - origin - UNIT / 2 + UNIT - 1)
-                    .div_euclid(UNIT)
-                    .clamp(0, len),
-            )
-            .unwrap_or(0)
+            usize::try_from((first_centre_from(x) - i64::from(first_pixel)).clamp(0, len))
+                .unwrap_or(0)
         };
         let mut written: Option<Range<usize>> = None;
         let mut winding = 0i64;
@@ -839,6 +833,13 @@ fn fit<T: Copy + Default>(buffer: &mut Vec<T>, len: usize) -> bool {
     true
 }
 
+/// The first pixel, along either axis, whose centre lies at or past sub-unit
+/// `at`: what decides which pixels a centre-sampled run between two crossings
+/// owns, so a centre exactly on an edge belongs to the run beyond it.
+pub(crate) const fn first_centre_from(at: i64) -> i64 {
+    (at + UNIT / 2 - 1).div_euclid(UNIT)
+}
+
 /// The left edge of `cell`, in window-relative sub-units.
 fn cell_base(cell: usize) -> i64 {
     i64::try_from(cell).unwrap_or(i64::MAX / UNIT) * UNIT
@@ -893,7 +894,7 @@ fn rounded_div(numerator: i64, denominator: i64) -> i64 {
 
 /// The edge from `from` to `to`, oriented downward, or `None` when it is
 /// horizontal and encloses no area.
-fn edge_between(from: (i64, i64), to: (i64, i64)) -> Option<Edge> {
+pub(crate) fn edge_between(from: (i64, i64), to: (i64, i64)) -> Option<Edge> {
     let (top, bottom, x_top, x_bottom, direction) = match from.1.cmp(&to.1) {
         Ordering::Less => (from.1, to.1, from.0, to.0, 1),
         Ordering::Greater => (to.1, from.1, to.0, from.0, -1),

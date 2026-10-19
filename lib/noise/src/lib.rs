@@ -232,10 +232,18 @@ const FOLDED: (f64, f64) = (0.5, 2.03);
 /// do: `0.0..=1.0` for a finite place.
 #[must_use]
 pub fn ridged2(x: f64, z: f64, seed: u32, octaves: u32) -> f64 {
+    ridged2_fading(x, z, seed, (octaves, FOLDED.0))
+}
+
+/// [`ridged2`] with each octave `gain` times fainter than the last rather
+/// than half: a gain above a half leaves more of the finest crests, below it
+/// less.
+#[must_use]
+pub fn ridged2_fading(x: f64, z: f64, seed: u32, (octaves, gain): (u32, f64)) -> f64 {
     let mut previous = 1.0;
     plane_octaves(
         (x, z),
-        (octaves, FOLDED.0, FOLDED.1),
+        (octaves, gain, FOLDED.1),
         |octave, (_, weight), (rx, rz)| {
             let crest = 1.0 - noise2(rx, rz, seed.wrapping_add(octave)).abs();
             let crest = crest * crest * previous;
@@ -251,9 +259,16 @@ pub fn ridged2(x: f64, z: f64, seed: u32, octaves: u32) -> f64 {
 /// finite place, about a quarter on average.
 #[must_use]
 pub fn billow2(x: f64, z: f64, seed: u32, octaves: u32) -> f64 {
+    billow2_fading(x, z, seed, (octaves, FOLDED.0))
+}
+
+/// [`billow2`] with each octave `gain` times fainter than the last rather
+/// than half.
+#[must_use]
+pub fn billow2_fading(x: f64, z: f64, seed: u32, (octaves, gain): (u32, f64)) -> f64 {
     plane_octaves(
         (x, z),
-        (octaves, FOLDED.0, FOLDED.1),
+        (octaves, gain, FOLDED.1),
         |octave, (_, weight), (rx, rz)| weight * noise2(rx, rz, seed.wrapping_add(octave)).abs(),
     )
     .clamp(0.0, 1.0)

@@ -1,11 +1,19 @@
 //! What the painter puts down, in what order, and what it costs.
 
+use tairix_raster::mesh::{
+    Depth, DepthBuffer, DepthPlane, DepthTest, EdgeRecord, MeshVertex, Triangle,
+};
 use tairix_raster::shape::{Placed, Shape};
 use tairix_raster::surface::Surface;
+use tairix_raster::view::Perspective;
 use tairix_raster::Color;
+use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{cost, draw, Brush, Veil, MAX_FIGURE_POINTS};
+use super::{
+    cost, draw, figure, figure_occluded, ground, ground_occluded, Brush, Veil, MAX_FIGURE_POINTS,
+};
+use crate::frame::Lens;
 use crate::humanoid;
 use crate::mesh::{self, LEVELS};
 use crate::pose::Pose;
@@ -21,7 +29,11 @@ fn placed(scale: f64) -> Placement {
     let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
     let posture = rigging.posture(&Pose::REST).expect("a rest posture");
     let light = Reference::light().expect("a real light");
-    let stance = Stance::new(Facing(0x2000), scale, (48.0, 92.0), light).expect("a real stance");
+    let lens = Lens::Oblique {
+        scale,
+        at: (48.0, 92.0),
+    };
+    let stance = Stance::new(Facing(0x2000), lens, light).expect("a real stance");
     let mut placement = Placement::new();
     posture
         .place(&stance, &[], &mut placement)
@@ -194,4 +206,150 @@ fn a_veil_mixes_every_stroke_toward_its_tone() {
         toward(&veiled) > toward(&clear),
         "the veil did not reach the figure"
     );
+}
+
+/// The reference human at rest on level ground, seen through a perspective
+/// camera that frames it in a [`SIDE`]-pixel square.
+fn seen(camera: &Perspective) -> Placement {
+    let rig = human();
+    let rigging = humanoid::rigging(&rig).expect("the humanoid rigging");
+    let posture = rigging.posture(&Pose::REST).expect("a rest posture");
+    let light = Reference::light().expect("a real light");
+    let lens = Lens::Perspective {
+        camera,
+        ground: [0.0, 0.0, 0.0],
+        units: 24.0,
+    };
+    let stance = Stance::new(Facing(0x2000), lens, light).expect("a real stance");
+    let mut placement = Placement::new();
+    posture
+        .place(&stance, &[], &mut placement)
+        .expect("it places");
+    placement
+}
+
+/// A camera six metres south of the origin and above it, looking at it.
+fn framing() -> Perspective {
+    let (sin, cos) = (mathf::sin(0.5), mathf::cos(0.5));
+    let distance = 6144.0;
+    Perspective::new(
+        [0.0, distance * cos, distance * sin],
+        [0.0, -cos, -sin],
+        [1.0, 0.0, 0.0],
+        [0.0, sin, -cos],
+        150.0,
+        (96, 140),
+        256.0,
+    )
+    .expect("a camera")
+}
+
+/// Make every pixel of `rows` hold the nearest depth there is.
+fn nearest_over(depth: &mut DepthBuffer, rows: u32) {
+    let corner = |x: u32, y: u32| MeshVertex {
+        x: i32::try_from(x * 256).expect("small"),
+        y: i32::try_from(y * 256).expect("small"),
+        depth: Depth::NEAREST,
+    };
+    let height = depth.height();
+    for mut band in depth.bands_mut(height) {
+        for corners in [
+            [corner(0, 0), corner(SIDE, 0), corner(0, rows)],
+            [corner(SIDE, 0), corner(SIDE, rows), corner(0, rows)],
+        ] {
+            Triangle::new(corners).expect("a triangle").fill(
+                &mut band,
+                DepthTest::OPAQUE,
+                EdgeRecord::Skip,
+                |_| true,
+            );
+        }
+    }
+}
+
+/// In a scene a figure is drawn exactly where nothing nearer stands, and
+/// not at all where something does.
+#[test]
+fn a_figure_in_a_scene_hides_behind_what_is_nearer() {
+    let camera = framing();
+    let placement = seen(&camera);
+    assert!(!placement.is_empty());
+    let mut brush = Brush::new();
+    let mut alone = Surface::new(SIDE, SIDE).expect("a surface");
+    figure(&mut alone, &placement, &mut brush, Veil::NONE);
+
+    let mut scene = DepthBuffer::new();
+    assert!(scene.reset(SIDE, SIDE));
+    let mut open = Surface::new(SIDE, SIDE).expect("a surface");
+    figure_occluded(&mut open, &placement, &scene, &mut brush, Veil::NONE);
+    assert_eq!(
+        open.pixels(),
+        alone.pixels(),
+        "an empty scene hid something"
+    );
+
+    let half = SIDE / 2;
+    nearest_over(&mut scene, half);
+    let mut hidden = Surface::new(SIDE, SIDE).expect("a surface");
+    figure_occluded(&mut hidden, &placement, &scene, &mut brush, Veil::NONE);
+    let (mut shown, mut covered) = (0, 0);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let got = hidden.get(x, y).expect("a pixel");
+            if y < half {
+                assert_eq!(got.a, 0, "drawn behind something nearer at {x},{y}");
+                covered += usize::from(alone.get(x, y).expect("a pixel").a > 0);
+            } else {
+                assert_eq!(got, alone.get(x, y).expect("a pixel"), "at {x},{y}");
+                shown += usize::from(got.a > 0);
+            }
+        }
+    }
+    assert!(
+        shown > 0 && covered > 0,
+        "the figure must straddle the split"
+    );
+}
+
+/// A shadow in a scene lies on its ground and is hidden by anything nearer.
+#[test]
+fn a_shadow_in_a_scene_hides_behind_what_is_nearer() {
+    let shadow = Placed {
+        x: 48.0,
+        y: 48.0,
+        turn: 0.0,
+        shape: Shape::Superellipse {
+            rx: 30.0,
+            ry: 30.0,
+            square: 0.0,
+        },
+        color: Color::rgb(0x10, 0x10, 0x10),
+        seed: 0,
+    };
+    let mut brush = Brush::new();
+    let mut scene = DepthBuffer::new();
+    assert!(scene.reset(SIDE, SIDE));
+    let plane = DepthPlane::flat(Depth(1000));
+    let mut alone = Surface::new(SIDE, SIDE).expect("a surface");
+    ground(&mut alone, &[shadow], &mut brush, Veil::NONE);
+    nearest_over(&mut scene, SIDE / 2);
+    let mut hidden = Surface::new(SIDE, SIDE).expect("a surface");
+    ground_occluded(
+        &mut hidden,
+        &[shadow],
+        plane,
+        &scene,
+        &mut brush,
+        Veil::NONE,
+    );
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let got = hidden.get(x, y).expect("a pixel");
+            if y < SIDE / 2 {
+                assert_eq!(got.a, 0, "a shadow showed through at {x},{y}");
+            } else {
+                assert_eq!(got, alone.get(x, y).expect("a pixel"), "at {x},{y}");
+            }
+        }
+    }
 }

@@ -113,6 +113,7 @@ pub mod chunk;
 pub mod climate;
 pub mod digest;
 pub mod error;
+pub mod far;
 pub mod geology;
 pub mod geom;
 pub mod ground;

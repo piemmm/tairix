@@ -1,13 +1,15 @@
 //! What a rig refuses, and what placing one guarantees.
 
+use tairix_raster::mesh::{Depth, DepthPlane};
 use tairix_raster::surface::SUBPIXEL;
+use tairix_raster::view::Perspective;
 use tairix_raster::Color;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{Fitted, Part, Placement, Posture, Resolved, Rig, Stance, MAX_FITTED};
+use super::{fit, Fitted, Part, Placement, Posture, Resolved, Rig, Stance, MAX_FITTED};
 use crate::error::FigureError;
-use crate::frame::{Body, Rotation};
+use crate::frame::{Body, Lens, Rotation};
 use crate::joint::{Joint, JointId, Limit, Limits};
 use crate::mesh::{Ring, Stretch};
 use crate::shadow::Light;
@@ -21,8 +23,8 @@ const ABSENT: JointId = JointId::new(9);
 /// A stance the placement cases share. What a stance refuses is its own
 /// test below, so every other case states only its own subject.
 #[track_caller]
-fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance {
-    Stance::new(facing, scale, at, light()).expect("a real stance")
+fn stance(facing: Facing, scale: f64, at: (f64, f64)) -> Stance<'static> {
+    Stance::new(facing, Lens::Oblique { scale, at }, light()).expect("a real stance")
 }
 
 /// A light every placement case shares; what it does to a tone is the mesh
@@ -580,14 +582,22 @@ fn more_equipment_than_a_figure_carries_is_refused() {
 fn an_unreal_scale_or_anchor_is_refused() {
     for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert_eq!(
-            Stance::new(EAST, scale, (0.0, 0.0), light()).map(|_| ()),
+            Stance::new(
+                EAST,
+                Lens::Oblique {
+                    scale,
+                    at: (0.0, 0.0),
+                },
+                light()
+            )
+            .map(|_| ()),
             Err(FigureError::ScaleUnreal),
             "scale {scale} must be refused"
         );
     }
     for at in [(f64::NAN, 0.0), (0.0, f64::INFINITY)] {
         assert_eq!(
-            Stance::new(EAST, 1.0, at, light()).map(|_| ()),
+            Stance::new(EAST, Lens::Oblique { scale: 1.0, at }, light()).map(|_| ()),
             Err(FigureError::GeometryUnreal)
         );
     }
@@ -1123,6 +1133,94 @@ fn a_mount_scale_that_is_not_finite_and_positive_is_refused() {
 /// this is a decision to make in the linker scripts, not an accident.
 #[test]
 fn a_figures_buffers_stay_inside_their_stated_size() {
-    assert!(core::mem::size_of::<Placement>() <= 16 * 1024);
+    assert!(core::mem::size_of::<Placement>() <= 18 * 1024);
     assert!(core::mem::size_of::<Rig>() <= 8 * 1024);
+}
+
+/// A camera south of the origin and above it, looking at it.
+fn camera() -> Perspective {
+    let (sin, cos) = (mathf::sin(0.6), mathf::cos(0.6));
+    let distance = 4000.0;
+    Perspective::new(
+        [0.0, distance * cos, distance * sin],
+        [0.0, -cos, -sin],
+        [1.0, 0.0, 0.0],
+        [0.0, sin, -cos],
+        300.0,
+        (640, 480),
+        256.0,
+    )
+    .expect("a camera")
+}
+
+#[test]
+fn a_plane_fitted_to_points_on_one_reproduces_them() {
+    let on = |x: f64, y: f64| (x, y, 5000.0 + 37.0 * x - 12.5 * y);
+    let points = [on(10.0, 4.0), on(30.5, 9.0), on(12.0, 41.0), on(55.0, 60.0)];
+    let plane = fit(points.iter());
+    for (x, y) in [(0u32, 0u32), (20, 30), (70, 5)] {
+        let (_, _, expected) = on(f64::from(x) + 0.5, f64::from(y) + 0.5);
+        assert!(
+            (f64::from(plane.at(x, y).0) - expected).abs() <= 1.0,
+            "at {x},{y}"
+        );
+    }
+    // On a line, the slope along it and none across it.
+    let line = [(0.0, 0.0, 100.0), (10.0, 10.0, 300.0), (20.0, 20.0, 500.0)];
+    let along = fit(line.iter());
+    assert_eq!(along.at(4, 4).0, 190);
+    assert_eq!(along.at(7, 1).0, 190);
+    // One point: flat at it.
+    let once = fit([(3.0, 3.0, 777.0)].iter());
+    assert_eq!(once.at(90, 2).0, 777);
+}
+
+/// Seen in perspective, every strip's plane answers its own points with a
+/// depth inside the figure's own reach of its ground point; seen obliquely,
+/// none is depth-tested at all.
+#[test]
+fn a_strip_seen_in_perspective_carries_its_depth() {
+    let rig = crate::testing::human();
+    let rigging = crate::humanoid::rigging(&rig).expect("it binds");
+    let posture = rigging
+        .posture(&crate::pose::Pose::REST)
+        .expect("rest is posturable");
+    let camera = camera();
+    let units = 24.0;
+    let lens = Lens::Perspective {
+        camera: &camera,
+        ground: [0.0, 0.0, 0.0],
+        units,
+    };
+    let mut out = Placement::new();
+    posture
+        .place(
+            &Stance::new(SOUTH, lens, light()).expect("a stance"),
+            &[],
+            &mut out,
+        )
+        .expect("it places");
+    assert!(!out.is_empty());
+    let distance = camera.view([0.0, 0.0, 0.0])[2];
+    let reach = rig.reach() * units;
+    let (far, near) = (
+        camera.depth(distance + reach),
+        camera.depth(distance - reach),
+    );
+    let pixel = |sub: i32| u32::try_from(sub.div_euclid(SUBPIXEL)).expect("on screen");
+    for strip in out.strips() {
+        for &(x, y) in strip.near.iter().chain(strip.far) {
+            let depth = f64::from(strip.plane.at(pixel(x), pixel(y)).0);
+            assert!(
+                (far..=near).contains(&depth),
+                "{depth} outside {far}..{near}"
+            );
+        }
+    }
+
+    let oblique = stance(SOUTH, 1.0, (100.0, 200.0));
+    posture.place(&oblique, &[], &mut out).expect("it places");
+    for strip in out.strips() {
+        assert_eq!(strip.plane, DepthPlane::flat(Depth::NEAREST));
+    }
 }

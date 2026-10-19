@@ -79,10 +79,10 @@ separate rotation to seam at a lattice boundary and no separate scale to
 fight it. The field is continuous, therefore the distortion is, therefore
 there is no edge anywhere for the eye to find.
 
-It is evaluated at the two ends of a span and interpolated across it rather
-than sampled per pixel: it varies over thousands of world sub-units and a
-span is a few hundred, so the line is within a sub-unit of the curve and
-costs two evaluations instead of one per pixel.
+A caller reads it where its geometry's vertices lie and interpolates it
+across each triangle, as any vertex attribute, rather than sampling it per
+pixel: the field varies over sixteen metres, so between vertices a metre apart
+the line is within a sub-unit of the curve.
 
 ## Roads, rivers and scars are weight, not geometry
 
@@ -129,8 +129,9 @@ oldest particle is nearest its own death anyway.
 
 ## Everything degrades, nothing fails
 
-Material resolution is total: a tile the cache will not admit degrades to a
-coarser mip, and then to the material's flat mid tone at its standing height.
+Material resolution is total: a level the cache does not hold reads the
+nearest coarser tile held, then the nearest finer one, and only a ground with
+no tile at all draws its flat mid tone at its standing height.
 The splat therefore always draws, and a frame is never dropped over a
 texture. Tiles live in a `lib/reclaim` cache budgeted from the memory the
 machine reported, generationed on the quality they were synthesised at — shed
@@ -171,15 +172,13 @@ picture rather than over one crate.
   and fuzzes. The adversarial coverage it does need — that no sequence of
   legal operations leaves a weight field unnormalised or a particle field
   over its budget — is a `proptest` model.
-- **No SIMD kernel selection.** The frame budget assumes `lib/cpuops` will
-  pick one, but a family with a single portable candidate selects nothing,
-  and reaching for per-architecture intrinsics before a measurement says the
-  portable kernel misses its budget is speculative optimisation. The
-  measurement is the M1 exit criterion; the kernel is already shaped as the
-  contiguous span function such a candidate would replace.
-- **No camera, no tiling, no lighting.** A caller supplies the two ends of
-  each horizontal run and distributes runs over `lib/parallel`; the low sun,
-  the shadows and the light buffer are the client shell's.
+- **No SIMD kernel selection yet.** The per-fragment read and blend are a
+  portable kernel; the hand-written candidates `lib/cpuops` will select are
+  `plans/WINTERSUN.md` WS37, measured against the baseline WS32 recorded.
+- **No camera, no meshes, no lighting.** A caller plans each quad of its
+  geometry once and hands this crate one fragment at a time, distributing the
+  work over `lib/parallel`; the low sun, the shadows and the light composite
+  are the client shell's.
 - **No figures.** The parametric outline primitives are `lib/raster::shape`
   and the rig above them is `wintersun/figure`. Nothing here draws anything
   but ground and particles.

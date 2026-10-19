@@ -2330,8 +2330,9 @@ static TESTS: &[QemuTest] = &[
     // pixel folded, with the ground art's own digest folded in after them,
     // into one number that must equal the constant every other Tier-1 target
     // asserts. It is the cross-target *rendering* claim — the generator's
-    // f64 terrain, the art's integer splat and the client's integer shading,
-    // composed — and the only thing that builds the ground art for this
+    // f64 terrain, the client's f64 perspective, the art's integer splat and
+    // the client's integer light, composed — and the only thing that builds
+    // the ground art for this
     // target at all. A realm and a handful of chunks are solved before the
     // first frame, which is why the budget is larger than its determinism
     // siblings'.
@@ -2362,8 +2363,9 @@ static TESTS: &[QemuTest] = &[
     // pixel folded, with the ground art's own digest folded in after them,
     // into one number that must equal the constant every other Tier-1 target
     // asserts. It is the cross-target *rendering* claim — the generator's
-    // f64 terrain, the art's integer splat and the client's integer shading,
-    // composed — and the only thing that builds the ground art for this
+    // f64 terrain, the client's f64 perspective, the art's integer splat and
+    // the client's integer light, composed — and the only thing that builds
+    // the ground art for this
     // target at all. A realm and a handful of chunks are solved before the
     // first frame, which is why the budget is larger than its determinism
     // siblings'.
@@ -2394,8 +2396,9 @@ static TESTS: &[QemuTest] = &[
     // pixel folded, with the ground art's own digest folded in after them,
     // into one number that must equal the constant every other Tier-1 target
     // asserts. It is the cross-target *rendering* claim — the generator's
-    // f64 terrain, the art's integer splat and the client's integer shading,
-    // composed — and the only thing that builds the ground art for this
+    // f64 terrain, the client's f64 perspective, the art's integer splat and
+    // the client's integer light, composed — and the only thing that builds
+    // the ground art for this
     // target at all. A realm and a handful of chunks are solved before the
     // first frame, which is why the budget is larger than its determinism
     // siblings'.

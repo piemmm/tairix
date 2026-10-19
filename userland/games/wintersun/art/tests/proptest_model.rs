@@ -6,14 +6,14 @@
 //! sum it was not given, or reads a texture for a material contributing
 //! nothing, or draws the same material twice. So a randomised program of
 //! legal operations — covering, interpolating, stamping decals,
-//! re-budgeting and advancing a particle field, and drawing spans — is
+//! re-budgeting and advancing a particle field, and drawing fragments — is
 //! replayed, and the invariant is checked after **every** command.
 //!
 //! Two things make it sharp. The workspace builds with overflow checks on
 //! in every profile, so arithmetic that wrapped aborts the case rather
 //! than quietly producing a wrong number — and this crate's arithmetic is
-//! full of products of weights, coverages and distances. And the spans are
-//! actually drawn, so a field that passed the invariant but that the
+//! full of products of weights, coverages and distances. And the fragments
+//! are actually drawn, so a field that passed the invariant but that the
 //! kernel could not consume would still be caught.
 //!
 //! Unlike a fuzz harness, which hammers bytes looking for crashes, this
@@ -24,12 +24,11 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use tairix_raster::color::Pixel;
 use tairix_reclaim::PressureBand;
 use tairix_wintersun_art::decal::{Decal, Fray};
 use tairix_wintersun_art::material::{MaterialTile, Mip, Quality};
 use tairix_wintersun_art::particle::{budget, ParticleField, ParticleKind, Spawn, MAX_PARTICLES};
-use tairix_wintersun_art::splat::{splat, Geometry, SpanPlan, SpanTiles, Warp};
+use tairix_wintersun_art::splat::{fragment, Fragment, Materials, QuadPlan, Warp, QUAD_ONE};
 use tairix_wintersun_art::weight::{WeightField, TOTAL};
 use tairix_wintersun_net::value::{WorldPoint, WorldVector};
 use tairix_wintersun_world::blend::Kind;
@@ -48,8 +47,8 @@ const PROGRAM_LEN: usize = 40;
 /// The realm every case draws for.
 const SEED: u64 = 0x4152_5457_4F52_4B53;
 
-/// Pixels in a drawn span.
-const SPAN_PIXELS: usize = 24;
+/// Fragments drawn across a quad.
+const QUAD_FRAGMENTS: u16 = 24;
 
 /// One legal thing a caller may do to the art pipeline.
 #[derive(Copy, Clone, Debug)]
@@ -198,25 +197,33 @@ impl Session {
                 decal.stamp(&mut self.field, &self.fray, WorldPoint { x, y });
             }
             Cmd::Draw { material, x, step } => {
-                let right = WeightField::solid(ground_of(material));
-                let plan = SpanPlan::new(&self.field, &right);
-                let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
-                for (slot, planned) in tiles.iter_mut().zip(plan.grounds()) {
-                    if planned == self.tile.ground() {
-                        *slot = Some(&self.tile);
-                    }
+                let other = WeightField::solid(ground_of(material));
+                let plan = QuadPlan::new([&self.field, &other, &other, &self.field]);
+                let mut materials = Materials::flat();
+                materials.hold(&self.tile);
+                for index in 0..QUAD_FRAGMENTS {
+                    let world = WorldPoint {
+                        x: x.saturating_add(step.saturating_mul(i32::from(index))),
+                        y: x ^ 0x5A5A,
+                    };
+                    let (dx, dy) = self.warp.at(world);
+                    let shade = fragment(
+                        &plan,
+                        &materials,
+                        Fragment {
+                            sample: WorldPoint {
+                                x: world.x.wrapping_add(dx),
+                                y: world.y.wrapping_add(dy),
+                            },
+                            across: index * QUAD_ONE / QUAD_FRAGMENTS,
+                            down: QUAD_ONE - index * QUAD_ONE / QUAD_FRAGMENTS,
+                            footprint: step.unsigned_abs(),
+                            dither: u8::try_from(index % 16).unwrap_or(0),
+                        },
+                    );
+                    // Ground is opaque whatever it was drawn from.
+                    assert_eq!(shade.a, u8::MAX);
                 }
-                let origin = WorldPoint { x, y: x ^ 0x5A5A };
-                let geometry = Geometry::new(
-                    &self.warp,
-                    origin,
-                    step,
-                    u32::try_from(SPAN_PIXELS).unwrap_or(1),
-                );
-                let mut row = [Pixel::TRANSPARENT; SPAN_PIXELS];
-                splat(&mut row, &plan, &tiles, &geometry);
-                // Ground is opaque whatever it was drawn from.
-                assert!(row.iter().all(|p| p.a == u8::MAX));
             }
             Cmd::Rebudget { area, band } => {
                 self.particles.rebudget(budget(area, band_of(band)));

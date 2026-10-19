@@ -8,9 +8,10 @@ wintersun — percorrer um mundo gerado proceduralmente
 
 ## DESCRIPTION
 
-Abre uma janela do ambiente de trabalho sobre um mundo gerado: uma vista de
-cima de um terreno que a máquina sintetiza em vez de distribuir, iluminado por
-um sol baixo que lança sombras compridas por cada encosta.
+Abre uma janela do ambiente de trabalho sobre um mundo gerado, visto de trás e
+de cima de si enquanto o percorre: um terreno que a máquina sintetiza em vez de
+distribuir, cujas colinas escondem o que fica para lá delas, iluminado por um
+sol baixo que lança sombras compridas por cada encosta.
 
 O mundo vai de uma calota de gelo no extremo norte até à floresta tropical para
 lá do equador. O seu clima segue a latitude, os ventos dominantes e as montanhas
@@ -33,26 +34,27 @@ percorrem a diagonal entre elas à mesma velocidade, e teclas opostas anulam-
 se. A vista segue-o e pára na extremidade do mundo em vez de sair dele.
 Encostas demasiado íngremes e água demasiado funda desviam-no.
 
-`+` e `-` aproximam e afastam a vista, em cinco passos, de uma célula do mundo
-com oito pixéis de largura até uma com cento e vinte e oito.
+`+` e `-` aproximam e afastam a vista, em cinco passos, cada um ao dobro da
+distância do anterior, desde seis células do mundo de distância até noventa e
+seis.
 
 `F11` põe a janela em ecrã inteiro e devolve-a depois ao que era: uma janela
 maximizada volta maximizada. `Esc` restaura-a. `Q` sai.
 
 Cada detalhe é desenhado no nível mais fino até escolher outra coisa. A linha
-*Settings…* do menu do jogo na barra de ícones abre a janela de definições,
-onde a qualidade é *Ultra*, cada detalhe no nível mais fino; *Basic*, cada
-detalhe no nível mais simples, no tamanho completo da janela; *Custom*, a sua
-própria escolha da iluminação, das sombras, da textura do terreno e da escala
-de renderização, cada uma no seu cursor; ou *Auto*. Mover um cursor torna a
-escolha *Custom*. A sua escolha é guardada para a próxima vez que jogar.
+*Settings…* do menu do jogo na barra de ícones abre a janela de definições, onde
+a qualidade é *Ultra*, cada detalhe no nível mais fino; *Basic*, cada detalhe no
+nível mais simples, no tamanho completo da janela; *Custom*, a sua própria
+escolha das sombras, da textura do terreno e da escala de renderização, cada uma
+no seu cursor; ou *Auto*. Mover um cursor torna a escolha *Custom*. A sua
+escolha é guardada para a próxima vez que jogar.
 
 Em *Auto*, o cliente reduz o detalhe quando os fotogramas se atrasam durante
-algum tempo — primeiro a iluminação, depois as sombras, depois a escala de
-renderização — e devolve-o, passo a passo, à medida que recuperam. Avalia ao
-longo de segundos e não de fotogramas isolados, pelo que um momento de outro
-trabalho na máquina não custa nada e uma janela maior não o leva ao nível mais
-simples, e nunca desenha as figuras demasiado pequenas para se lerem.
+algum tempo — primeiro as sombras, depois a escala de renderização — e
+devolve-o, passo a passo, à medida que recuperam. Avalia ao longo de segundos e
+não de fotogramas isolados, pelo que um momento de outro trabalho na máquina não
+custa nada e uma janela maior não o leva ao nível mais simples, e nunca desenha
+as figuras demasiado pequenas para se lerem.
 
 Uma janela maior do que o renderizador por software consegue preencher é
 desenhada no máximo a 2560×1440 e ampliada até ao tamanho da janela.

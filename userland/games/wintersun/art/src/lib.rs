@@ -67,42 +67,50 @@
 //!
 //! # Example
 //!
-//! Drawing a run of terrain pixels from a generated cell's blend:
+//! Shading fragments of one quad of the weight field:
 //!
 //! ```
-//! use tairix_raster::color::Pixel;
 //! use tairix_wintersun_art::material::{MaterialTile, Mip, Quality};
-//! use tairix_wintersun_art::splat::{splat, Geometry, SpanPlan, SpanTiles, Warp};
+//! use tairix_wintersun_art::splat::{fragment, Fragment, Materials, QuadPlan, Warp, QUAD_ONE};
 //! use tairix_wintersun_art::weight::WeightField;
 //! use tairix_wintersun_net::value::WorldPoint;
-//! use tairix_wintersun_world::blend::{Blend, BLEND_SLOTS};
+//! use tairix_wintersun_world::blend::Blend;
 //! use tairix_wintersun_world::ground::Ground;
 //!
 //! # fn main() -> Result<(), tairix_wintersun_art::error::ArtError> {
 //! let realm_seed = 0x5749_4E54_4552;
 //!
-//! // The two ends of one horizontal run, from the cells it crosses.
-//! let left = WeightField::from_blend(&Blend::solid(Ground::Snow));
-//! let mut right = WeightField::from_blend(&Blend::solid(Ground::Granite));
-//! right.cover(Ground::Gravel, 90);
-//! let plan = SpanPlan::new(&left, &right);
+//! // The quad's corners, from the cells it lies between.
+//! let snow = WeightField::from_blend(&Blend::solid(Ground::Snow));
+//! let mut rock = WeightField::from_blend(&Blend::solid(Ground::Granite));
+//! rock.cover(Ground::Gravel, 90);
+//! let plan = QuadPlan::new([&snow, &rock, &snow, &rock]);
 //!
-//! // Resolve a tile per ground the plan needs, then draw from them.
+//! // A tile per ground the plan needs, bound for the frame.
 //! let held: Vec<MaterialTile> = plan
 //!     .grounds()
 //!     .map(|ground| MaterialTile::synthesise(ground, Mip::BASE, Quality::FULL))
 //!     .collect::<Result<_, _>>()?;
-//! let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
-//! for (slot, tile) in tiles.iter_mut().zip(held.iter()) {
-//!     *slot = Some(tile);
+//! let mut materials = Materials::flat();
+//! for tile in &held {
+//!     materials.hold(tile);
 //! }
 //!
 //! let warp = Warp::new(realm_seed);
-//! let geometry = Geometry::new(&warp, WorldPoint { x: 0, y: 0 }, 32, 64);
-//! let mut row = [Pixel::TRANSPARENT; 64];
-//! splat(&mut row, &plan, &tiles, &geometry);
-//!
-//! assert!(row.iter().all(|p| p.a == 255));
+//! let world = WorldPoint { x: 512, y: 256 };
+//! let (dx, dy) = warp.at(world);
+//! let pixel = fragment(
+//!     &plan,
+//!     &materials,
+//!     Fragment {
+//!         sample: WorldPoint { x: world.x + dx, y: world.y + dy },
+//!         across: QUAD_ONE / 2,
+//!         down: QUAD_ONE / 4,
+//!         footprint: 32,
+//!         dither: 0,
+//!     },
+//! );
+//! assert_eq!(pixel.a, 255);
 //! # Ok(())
 //! # }
 //! ```

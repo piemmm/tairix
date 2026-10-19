@@ -20,6 +20,8 @@
 //! what the realm has generated, and a window that is missing a chunk fails
 //! closed rather than treating absence as open field.
 
+use core::borrow::Borrow;
+
 use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_world::chunk::{Chunk, ChunkWindow};
 use tairix_wintersun_world::geom::{CellCoord, Elevation, CELL_SUB_UNITS, ELEVATION_SUB_UNITS};
@@ -117,27 +119,36 @@ pub fn rise_legal(from: Option<TerrainCell>, to: Option<TerrainCell>) -> bool {
 ///
 /// Holds a borrowed window and nothing else: no cache, no budget, no
 /// generation. The caller decides which chunks are resident and when they
-/// are released, and hands a slice of them here for the duration of a step.
-#[derive(Copy, Clone, Debug)]
-pub struct ChunkTerrain<'a> {
-    window: ChunkWindow<'a>,
+/// are released, and hands a slice of them here — borrowed or its own — for
+/// the duration of a step.
+#[derive(Debug)]
+pub struct ChunkTerrain<'a, C = &'a Chunk> {
+    window: ChunkWindow<'a, C>,
 }
 
-impl<'a> ChunkTerrain<'a> {
+impl<C> Clone for ChunkTerrain<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for ChunkTerrain<'_, C> {}
+
+impl<'a, C: Borrow<Chunk>> ChunkTerrain<'a, C> {
     /// Read a window of chunks, sorted by coordinate, as collision ground.
     ///
     /// # Errors
     ///
     /// [`RuleError::TerrainWindow`] when the slice is not sorted, since an
     /// unsorted window would silently answer `None` for chunks it holds.
-    pub fn new(window: &'a [&'a Chunk]) -> Result<Self, RuleError> {
+    pub fn new(window: &'a [C]) -> Result<Self, RuleError> {
         ChunkWindow::new(window)
             .map(|window| Self { window })
             .map_err(|_| RuleError::TerrainWindow)
     }
 }
 
-impl Terrain for ChunkTerrain<'_> {
+impl<C: Borrow<Chunk>> Terrain for ChunkTerrain<'_, C> {
     fn cell(&self, cell: CellCoord) -> Option<TerrainCell> {
         let chunk = self.window.chunk(cell)?;
         let (cx, cy) = cell.within_chunk();

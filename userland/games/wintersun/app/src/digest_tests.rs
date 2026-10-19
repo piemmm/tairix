@@ -34,11 +34,11 @@ fn the_frames_the_digest_folds_are_real_terrain_with_the_whole_cast() {
             pixels.iter().all(|p| p.a == 255),
             "frame {drawn} left transparent pixels"
         );
-        assert_eq!(
-            renderer.grid().unmapped(),
-            0,
-            "frame {drawn} drew ground it did not hold"
+        assert!(
+            renderer.complete(),
+            "frame {drawn} drew ground short of its detail"
         );
+        assert!(renderer.drawn() > 0, "frame {drawn} drew no ground");
         assert_eq!(
             renderer.figures(),
             reference::CAST_LEN,
@@ -71,8 +71,9 @@ fn the_digest_folds_in_the_art_constant() {
 
 #[test]
 fn the_reference_frames_cover_both_ends_of_every_knob() {
-    let details: alloc::vec::Vec<Detail> = FRAMES.iter().map(|(detail, _)| *detail).collect();
-    let zooms: alloc::vec::Vec<Zoom> = FRAMES.iter().map(|(_, zoom)| *zoom).collect();
+    let details: alloc::vec::Vec<Detail> = FRAMES.iter().map(|(detail, _, _)| *detail).collect();
+    let zooms: alloc::vec::Vec<Zoom> = FRAMES.iter().map(|(_, zoom, _)| *zoom).collect();
+    let tilts: alloc::vec::Vec<Tilt> = FRAMES.iter().map(|(_, _, tilt)| *tilt).collect();
     assert!(
         details.contains(&Detail::FINEST) && details.contains(&Detail::PLAINEST),
         "a digest at one detail proves nothing about the knobs"
@@ -80,5 +81,9 @@ fn the_reference_frames_cover_both_ends_of_every_knob() {
     assert!(
         zooms.contains(&Zoom::DEFAULT) && zooms.contains(&Zoom::FURTHEST),
         "a digest at one zoom exercises one mip band"
+    );
+    assert!(
+        tilts.contains(&Tilt::LOWEST) && tilts.contains(&Tilt::DEFAULT),
+        "a digest at one tilt never sees the horizon or never sees the ground close"
     );
 }

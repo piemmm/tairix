@@ -3,12 +3,12 @@
 //!
 //! ## What this proves that a host test cannot
 //!
-//! Four crates meet in a frame. The world generator and the figure engine
-//! work in `f64`; the ground art is integer throughout and carries no
-//! vertical of its own because bit-identity follows from the language
-//! there; this client's projection, lattice sampling, shading and figure
-//! pass are integer too. Each part agreeing separately does not say the
-//! composition does.
+//! Four crates meet in a frame. The world generator, the figure engine
+//! and this client's perspective and scan conversion work in `f64` basic
+//! operations and `mathf`, never fused; the ground art's splat and the
+//! client's light are integer, and the art carries no vertical of its own
+//! because bit-identity follows from the language there. Each part agreeing
+//! separately does not say the composition does.
 //!
 //! So two whole frames are drawn here, with figures standing in them —
 //! one wide at full quality, one close with every degradation rung shed —

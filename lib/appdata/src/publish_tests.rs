@@ -168,6 +168,74 @@ fn a_save_mends_a_stored_value_the_registry_refused_and_spares_another_apps_keys
     assert_eq!(host.committed().get("layout.other"), Some("kept"));
 }
 
+/// A registry with a setting another makes meaningless: the level counts
+/// only while the gate is on, and is read and ignored while it is off.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct Gated {
+    on: bool,
+    level: u32,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum GatedKey {
+    On,
+    Level,
+}
+
+impl Registry for Gated {
+    type Key = GatedKey;
+    const KEYS: &'static [GatedKey] = &[GatedKey::On, GatedKey::Level];
+
+    fn name(key: GatedKey) -> &'static str {
+        match key {
+            GatedKey::On => "gate.on",
+            GatedKey::Level => "gate.level",
+        }
+    }
+
+    fn read(&mut self, key: GatedKey, text: &str) -> bool {
+        match key {
+            GatedKey::On => match text {
+                "yes" => self.on = true,
+                "no" => self.on = false,
+                _ => return false,
+            },
+            GatedKey::Level if self.on => match as_u32(text) {
+                Ok(level) => self.level = level,
+                Err(_) => return false,
+            },
+            GatedKey::Level => {}
+        }
+        true
+    }
+
+    fn spell(&self, key: GatedKey, out: &mut String) -> bool {
+        match key {
+            GatedKey::On => {
+                out.push_str(if self.on { "yes" } else { "no" });
+                true
+            }
+            GatedKey::Level => self.on && write!(out, "{}", self.level).is_ok(),
+        }
+    }
+}
+
+#[test]
+fn a_setting_another_makes_meaningless_is_removed_by_the_next_save() {
+    let mut host = service().with_store("gate.on = no\ngate.level = 7\n");
+    let mut store = Settings::open(&mut host, OWN_WORD);
+    let (record, refusals) = loaded::<Gated>(&store);
+    assert_eq!((record, refusals), (Gated::default(), alloc::vec![]));
+    save(&record, &mut store).expect("written");
+    drop(store);
+    assert_eq!(
+        host.committed().get("gate.level"),
+        None,
+        "a setting nothing uses outlived the one that made it mean something"
+    );
+    assert_eq!(host.committed().get("gate.on"), Some("no"));
+}
+
 #[test]
 fn a_setting_said_by_its_absence_is_removed_and_a_restore_removes_every_key() {
     let mut host = service().with_store("badge = 3\nscheme = amber\nlayout.other = kept\n");

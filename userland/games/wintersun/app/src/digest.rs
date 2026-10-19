@@ -9,10 +9,10 @@
 //! run.
 //!
 //! This is where those three meet. A frame is the generator's `f64`
-//! terrain, read through the art's integer splat, lit by this crate's
-//! integer shading, on four different compiler backends. That the parts
-//! agree separately does not say the composition does, and the digest
-//! below is the claim that it does.
+//! terrain, seen through this crate's `f64` perspective, read through the
+//! art's integer splat and lit by this crate's integer light, on four
+//! different compiler backends. That the parts agree separately does not say
+//! the composition does, and the digest below is the claim that it does.
 //!
 //! [`tairix_wintersun_art::digest::REFERENCE_DIGEST`] is folded in, so
 //! this vertical is also the one that fails when the art moves — which
@@ -20,8 +20,8 @@
 //!
 //! The frames are drawn with figures standing in them, because the figure
 //! crate's own vertical proves a pose and its placement but not the client
-//! drawing it: the band-by-band fill, the depth order, the veil and the
-//! waterline are this crate's arithmetic.
+//! drawing it: the band-by-band fill, the depth test against the ground and
+//! the veil are this crate's arithmetic.
 
 use core::hash::Hasher;
 
@@ -31,7 +31,7 @@ use tairix_raster::surface::Surface;
 use tairix_wintersun_art::digest as art;
 use tairix_wintersun_figure::motion::Set;
 
-use crate::camera::Zoom;
+use crate::camera::{Tilt, Zoom};
 use crate::error::ClientError;
 use crate::frame::Renderer;
 use crate::quality::Detail;
@@ -40,12 +40,12 @@ use crate::view::Viewport;
 
 /// The digest of the reference frames, on every target.
 ///
-/// Changing the projection, the lattice sampling, the light model, the
-/// detail knobs, the figure pass, or anything in the art, the figure
+/// Changing the camera, the meshes, the scan conversion, the light model,
+/// the detail knobs, the figure pass, or anything in the art, the figure
 /// engine or the world generator beneath them changes this. It is the
 /// record of what the game looks like, not a number to be re-derived when a
 /// test fails.
-pub const REFERENCE_DIGEST: u64 = 0x0DA7_63C6_E985_3298;
+pub const REFERENCE_DIGEST: u64 = 0xBBC9_032F_812C_2E12;
 
 /// The window the reference frames are drawn at.
 ///
@@ -60,17 +60,18 @@ pub const FRAME_WIDTH: u32 = 160;
 /// The height of the reference frames.
 pub const FRAME_HEIGHT: u32 = 120;
 
-/// The frames the digest is folded over: a detail and the zoom to draw it
-/// at.
+/// The frames the digest is folded over: a detail, and the zoom and tilt to
+/// draw it at.
 ///
-/// Two, and deliberately at opposite corners of both. The wide one in the
-/// finest detail covers many cells through the coarse mips and every soft
-/// shadow; the close one in the plainest covers the fine mips and the flat,
-/// hard-shadowed, half-scale, untextured end of every knob. Between them
-/// every knob moves the digest.
-const FRAMES: [(Detail, Zoom); 2] = [
-    (Detail::FINEST, Zoom::FURTHEST),
-    (Detail::PLAINEST, Zoom::DEFAULT),
+/// Two, and deliberately at opposite corners of all three. The far, low one
+/// in the finest detail looks across the land to the horizon: far patches,
+/// the coarse mips, the fog, the sky, the silhouettes the composite resolves
+/// and every soft shadow. The close, steep one in the plainest covers solved
+/// ground, the fine mips and the flat, hard-shadowed, half-scale, untextured
+/// end of every knob. Between them every knob moves the digest.
+const FRAMES: [(Detail, Zoom, Tilt); 2] = [
+    (Detail::FINEST, Zoom::FURTHEST, Tilt::LOWEST),
+    (Detail::PLAINEST, Zoom::DEFAULT, Tilt::DEFAULT),
 ];
 
 /// Draw the reference frames and return their digest.
@@ -84,7 +85,7 @@ const FRAMES: [(Detail, Zoom); 2] = [
 pub fn reference() -> Result<u64, ClientError> {
     let mut hasher = FastHash::with_seed(reference::SEED);
     draw_frames(|target, renderer| {
-        fold_frame(&mut hasher, target.pixels(), renderer.grid().unmapped());
+        fold_frame(&mut hasher, target.pixels(), renderer.drawn());
         hasher.write_u64(u64::try_from(renderer.figures()).unwrap_or(u64::MAX));
     })?;
     // The ground the frames are drawn from, so a change to the art moves
@@ -101,13 +102,14 @@ fn draw_frames(mut each: impl FnMut(&Surface, &Renderer)) -> Result<(), ClientEr
     let clips = set.clips().map_err(|_| ClientError::Figure)?;
     let mut cache = reference::cache(&tairix_reclaim::Unpressured);
     let mut renderer = Renderer::new();
-    for (detail, zoom) in FRAMES {
+    for (detail, zoom, tilt) in FRAMES {
         let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, detail.resolution.scale())?;
         let (width, height) = view.render();
         let mut target = Surface::new(width, height).ok_or(ClientError::OutOfMemory)?;
         let shot = Shot {
             view: &view,
             zoom,
+            tilt,
             detail,
         };
         world.draw(
@@ -123,14 +125,13 @@ fn draw_frames(mut each: impl FnMut(&Surface, &Renderer)) -> Result<(), ClientEr
     Ok(())
 }
 
-/// Fold a whole frame's pixels, and how much of it was ground the client
-/// did not hold.
-fn fold_frame(hasher: &mut FastHash, pixels: &[Pixel], unmapped: usize) {
+/// Fold a whole frame's pixels, and how many meshes drew it.
+fn fold_frame(hasher: &mut FastHash, pixels: &[Pixel], meshes: usize) {
     // A fixed width, because `usize` is four bytes on wasm32 and eight
     // everywhere else and a length folded raw would differ by target for
     // that reason alone.
     hasher.write_u64(u64::try_from(pixels.len()).unwrap_or(u64::MAX));
-    hasher.write_u64(u64::try_from(unmapped).unwrap_or(u64::MAX));
+    hasher.write_u64(u64::try_from(meshes).unwrap_or(u64::MAX));
     for pixel in pixels {
         hasher.write(&[pixel.r, pixel.g, pixel.b, pixel.a]);
     }

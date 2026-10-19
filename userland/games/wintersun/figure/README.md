@@ -35,11 +35,12 @@ No front/back/side artwork, no per-direction branch, no second path to keep in
 step. The depth key is deliberately *not* the screen row: a raised hand draws
 higher without becoming further away.
 
-The foreshortening is the figure's own drawing elevation, not the world
-camera's. WinterSun's ground is drawn top-down and unforeshortened
-(`wintersun/app`'s `Camera`); a figure standing in it is a billboard seen from
-about 35°, which is why this constant lives here rather than beside the
-camera.
+That foreshortening is the oblique `frame::Lens` the art harness and the
+designer draw through: one size at every depth, seen from about 35°. A scene
+draws through the perspective lens instead — its own camera
+(`lib/raster::view::Perspective`), so a figure grows as it nears the eye, paints
+in order of its distance, and carries a depth plane per strip that the scene's
+depth buffer hides it behind.
 
 **A joint that bears a limb carries its mass.** A part names a `JointId`, so
 the shoulder cap the trunk shows and the arm that swings from it are the same

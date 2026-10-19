@@ -54,19 +54,22 @@ The sort key is deliberately not the screen row. A raised hand draws higher
 without becoming further away, so sorting on the row would put it behind the
 body it belongs to.
 
-### The elevation is the figure's, not the camera's
+### Two lenses
 
-WinterSun's world projection is orthographic, axis-aligned and top-down: one
-pixel spans a power-of-two number of world sub-units on both axes, and the
-ground is drawn unforeshortened. A figure standing in that world is a
-billboard seen from a *shallower* angle — about 35°, carried by the single
-`FORESHORTEN` ratio — because a part offset along the heading would otherwise
-read as a figure lying on the floor.
+The offsets reach the screen through a `frame::Lens`. The **oblique** lens is
+the drawing above: one size at every depth, the depth axis foreshortened by
+the single `FORESHORTEN` ratio, the elevation about 35° — what the art harness
+and the designer's preview draw, so a figure is measured the same however a
+scene would place it. The **perspective** lens is the scene's own camera
+(`lib/raster::view::Perspective`): every vertex is carried into the world at
+the figure's ground point and projected as the terrain is, so a figure grows
+as it nears the eye, and its paint order is its distance from the eye.
 
-That is why the constant lives with the figure rather than beside the camera,
-and it is also why a figure does not change size with depth: the world
-projection is orthographic, so a figure whose size tracked its ground row
-would grow and shrink as the camera scrolled.
+A strip drawn through the perspective lens also carries its depth: the plane,
+fitted by least squares over the strip's projected vertices, that a scene's
+depth buffer is tested against, so the ground nearer the eye than a strip
+hides it. A figure any of which is nearer than the near plane is placed as
+nothing rather than clipped.
 
 ### Why nothing needs a screen angle
 
@@ -375,13 +378,12 @@ identity and a figure on the level is drawn exactly as its clip authored it.
 That property is a test, and it is the one that stops the planter quietly
 redrawing every figure in the game.
 
-The ground a foot is raised by is the ground the view *draws*. WinterSun draws
-its world from directly above, with height shown by shading alone, so the plane
-a figure's feet meet on screen is level everywhere and the game's actor plants
-on the level; a view that draws relief as geometry — an elevated camera —
-plants each foot on the heights it draws. Standing water is the exception that
-shows from above: a figure wading stands on the bed, sunk by the depth, and
-nothing of it is drawn below the surface.
+The ground a foot is raised by is the ground the view *draws*. The actor asks
+a `Relief` — the surface the scene draws — for the height under each foot, so a
+figure on a slope stands with one foot higher than the other on the triangles
+drawn there, and the ground it was asked to stand on is taken where the relief
+holds none. A figure wading stands on the bed, sunk by the depth, and the
+water's surface, nearer the eye than its legs, hides them.
 
 ### The height the body is at is the clip's, not a reading of the fold
 
@@ -506,12 +508,17 @@ itself by playing an animation, and the animation and the movement cannot
 disagree about how the move was paced.
 
 The contact shadow is a circle on the ground raked away from the light and
-then foreshortened on the way to the screen. Those are two different
-stretches, so the result is an ellipse whose axes are neither — taking the
-light's stretch as the screen's puts the long axis visibly wrong at every
-bearing but four. `shadow::Contact` composes the two maps and recovers the
-axes of what comes out, which is exact at every bearing for a handful of
-arithmetic. A rising figure's shadow stays on the ground and slides away from
+then carried to the screen by the ground's own map there (`shadow::Footing`):
+the oblique drawing's foreshortening, or, through the scene's camera, the
+first-order map of the ground under the figure, its slope included, which over
+a footprint is as affine as the oblique drawing is everywhere. Those are two
+different stretches, so the result is an ellipse whose axes are neither —
+taking the light's stretch as the screen's puts the long axis visibly wrong at
+every bearing but four. `shadow::Contact` composes the two maps and recovers
+the axes of what comes out, which is exact at every bearing for a handful of
+arithmetic. In a scene the shadow is depth-tested against the ground it lies
+on, its plane brought the footprint's radius toward the eye so the ground
+within that takes it and anything nearer hides it. A rising figure's shadow stays on the ground and slides away from
 the light as it thins, which is the cue that reads as height rather than as
 the figure growing. Drawn soft, it is three nested rings, the light's raked
 footprint the innermost, each light enough that where all three overlap they

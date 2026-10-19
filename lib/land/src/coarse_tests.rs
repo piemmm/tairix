@@ -265,11 +265,7 @@ fn a_field_holds_a_lake_where_its_drainage_fills_it_deep() {
         heights: alloc::vec![5.0; 81],
         filled: alloc::vec![5.0; 81],
         wetness: alloc::vec![0.0; 81],
-        grains: Grains::Even(Grain {
-            roughness: 0.0,
-            ridges: 0.0,
-            dunes: 0.0,
-        }),
+        grains: Grains::Even(Grain::hummocks(0.0)),
         character: Character {
             longest: 30.0,
             growth: 1.0,
@@ -367,9 +363,9 @@ fn a_field_that_does_not_fit_is_refused() {
     assert_eq!(
         refused(&|field| {
             field.grains = Grains::Even(Grain {
-                roughness: 1.0,
                 ridges: 0.7,
                 dunes: 0.4,
+                ..Grain::hummocks(1.0)
             });
         }),
         Some(Error::Shape),

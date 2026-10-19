@@ -8,9 +8,10 @@ wintersun — walk a procedurally generated world
 
 ## DESCRIPTION
 
-Opens a desktop window onto a generated world: a top-down view of ground the
-machine synthesises rather than ships, lit by a low sun that throws long
-shadows down every slope.
+Opens a desktop window onto a generated world, seen from behind and above you as
+you walk across it: ground the machine synthesises rather than ships, its hills
+hiding what lies beyond them, lit by a low sun that throws long shadows down
+every slope.
 
 The world runs from an ice sheet in the far north to rainforest past the
 equator. Its climate follows the latitude, the prevailing winds and the
@@ -33,26 +34,25 @@ between them at the same speed, and opposing keys cancel. The view follows you
 and stops at the edge of the world rather than sliding off it. Hills too steep
 to climb and water too deep to wade turn you aside.
 
-`+` and `-` move the view closer and further, through five steps between one
-world cell across eight pixels and one across a hundred and twenty-eight.
+`+` and `-` move the view closer and further, through five steps, each twice as
+far back as the last, from six world cells away to ninety-six.
 
 `F11` takes the window fullscreen and returns it to whatever it was before, so
 a maximised window comes back maximised. `Escape` restores it. `Q` leaves.
 
-Every detail is drawn at its finest until you choose otherwise. The
-*Settings…* row of the game's icon-bar menu opens its settings window, where
-the quality is *Ultra*, every detail at its finest; *Basic*, every detail at
-its plainest at the window's full size; *Custom*, your own choice of the
-lighting, the shadows, the ground's texture and the scale the game renders at,
-each on its own slider; or *Auto*. Moving a slider makes the choice *Custom*.
-Your choice is kept for the next time you play.
+Every detail is drawn at its finest until you choose otherwise. The *Settings…*
+row of the game's icon-bar menu opens its settings window, where the quality is
+*Ultra*, every detail at its finest; *Basic*, every detail at its plainest at
+the window's full size; *Custom*, your own choice of the shadows, the ground's
+texture and the scale the game renders at, each on its own slider; or *Auto*.
+Moving a slider makes the choice *Custom*. Your choice is kept for the next time
+you play.
 
 On *Auto* the client eases detail off when frames have run late for a while —
-the lighting first, then the shadows, then the scale it renders at — and gives
-it back, a step at a time, as they recover. It judges over seconds rather than
-single frames, so a moment of other work on the machine costs nothing and a
-larger window does not send it to its plainest, and it never draws figures too
-small to read.
+the shadows first, then the scale it renders at — and gives it back, a step at a
+time, as they recover. It judges over seconds rather than single frames, so a
+moment of other work on the machine costs nothing and a larger window does not
+send it to its plainest, and it never draws figures too small to read.
 
 A window larger than the software renderer can fill is drawn at up to
 2560×1440 and scaled up to the window.

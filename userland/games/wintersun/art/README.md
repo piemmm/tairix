@@ -29,7 +29,7 @@ all** — `deny(clippy::float_arithmetic)` makes that a compile error.
 | `cache` | The `lib/reclaim`-governed tile cache, keyed on `(ground, mip)` and generationed on `Quality`. |
 | `weight` | The splat field's weight vector and `cover`, the single mutation decals, snow accumulation and scorch marks all go through. |
 | `decal` | Polyline stamps into that field: exact integer distance-to-segment, a smoothstep falloff, and a noise-frayed edge. |
-| `splat` | The span kernel — plan a run once, step it per pixel — the height-offset blend, and the anti-repetition warp. |
+| `splat` | The quad plan — a quad's grounds and their weights at its corners, made once — the per-fragment read of each ground at its mip, the height-offset blend, and the anti-repetition warp. |
 | `particle` | Ten kinds, their parameter rows, and a bounded field whose budget is derived from the area on screen and the memory-pressure band. |
 | `digest` | The scripted scene and its reference constant. |
 
@@ -73,16 +73,13 @@ Allocation is fallible throughout: a machine too short for a tile gets a typed
   and fuzzes. The adversarial coverage it does need — that no sequence of
   legal operations leaves a weight field unnormalised or a particle field over
   budget — is `tests/proptest_model.rs`.
-- **No SIMD kernel selection.** The plan's frame budget assumes `lib/cpuops`
-  will pick one, but a family with a single portable candidate selects
-  nothing, and reaching for per-architecture intrinsics before a measurement
-  says the portable kernel misses its budget is the speculative optimisation
-  the charter forbids. The measurement is the M1 exit criterion (WS5); the
-  kernel is already shaped as the contiguous span function such a candidate
-  would replace.
-- **No camera, no tiling, no lighting.** A caller supplies the two ends of
-  each horizontal run and distributes runs over `lib/parallel`; the low sun,
-  the shadows and the light buffer are the client shell's (WS5).
+- **No SIMD kernel selection yet.** The per-fragment read and blend are a
+  portable kernel; the hand-written candidates `lib/cpuops` will select are
+  `plans/WINTERSUN.md` WS37, measured against the baseline WS32 recorded.
+- **No camera, no meshes, no lighting.** A caller plans each quad of its
+  geometry once and hands this crate one fragment at a time, distributing the
+  work over `lib/parallel`; the low sun, the shadows and the light composite
+  are the client shell's (WS5, WS32).
 - **No figures.** Parametric outline primitives are `lib/raster::shape`
   (`plans/FIGURE.md` FG1) and the rig above them is `wintersun/figure` (WS6).
   Nothing here draws anything but ground and particles.

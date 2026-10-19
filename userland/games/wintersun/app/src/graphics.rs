@@ -2,12 +2,12 @@
 //! sessions.
 //!
 //! One setting, because "let the machine decide", "every detail at its
-//! finest" and "exactly these four knobs" are answers to one question. A new
+//! finest" and "exactly these three knobs" are answers to one question. A new
 //! install draws everything at its finest; `auto` is the player's to choose.
 //!
 //! # What the store holds
 //!
-//! Only what is in force: the mode always, and the four knobs only while the
+//! Only what is in force: the mode always, and the three knobs only while the
 //! choice is custom, so the document never keeps a detail nobody is using and
 //! two players' files mean the same thing when they say the same thing. The
 //! store is the application's own per-app data, reached only through the
@@ -24,16 +24,13 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use tairix_appconf::{as_u32, overwrite, Live, Registry};
+use tairix_appconf::{as_u32, overwrite, Keys, Live, Registry};
 use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
 
-use crate::quality::{Detail, Lighting, Resolution, Shadows};
+use crate::quality::{Detail, Resolution, Shadows};
 
 /// The key the mode is stored under.
 pub const MODE_KEY: &str = "graphics.mode";
-
-/// The key a custom choice's lighting is stored under.
-pub const LIGHTING_KEY: &str = "graphics.lighting";
 
 /// The key a custom choice's shadows are stored under.
 pub const SHADOWS_KEY: &str = "graphics.shadows";
@@ -161,14 +158,12 @@ impl Default for Graphics {
     }
 }
 
-/// One key the choice is kept under: the mode, then the four knobs, which
+/// One key the choice is kept under: the mode, then the three knobs, which
 /// count only while the choice is custom.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum GraphicsKey {
     /// [`MODE_KEY`].
     Mode,
-    /// [`LIGHTING_KEY`].
-    Lighting,
     /// [`SHADOWS_KEY`].
     Shadows,
     /// [`GROUND_KEY`].
@@ -183,7 +178,6 @@ impl Registry for Graphics {
     type Key = GraphicsKey;
     const KEYS: &'static [GraphicsKey] = &[
         GraphicsKey::Mode,
-        GraphicsKey::Lighting,
         GraphicsKey::Shadows,
         GraphicsKey::Ground,
         GraphicsKey::Resolution,
@@ -192,7 +186,6 @@ impl Registry for Graphics {
     fn name(key: GraphicsKey) -> &'static str {
         match key {
             GraphicsKey::Mode => MODE_KEY,
-            GraphicsKey::Lighting => LIGHTING_KEY,
             GraphicsKey::Shadows => SHADOWS_KEY,
             GraphicsKey::Ground => GROUND_KEY,
             GraphicsKey::Resolution => RESOLUTION_KEY,
@@ -211,8 +204,6 @@ impl Registry for Graphics {
             return true;
         };
         match key {
-            GraphicsKey::Lighting => spelled(Lighting::ALL, lighting_token, text)
-                .map(|lighting| detail.lighting = lighting),
             GraphicsKey::Shadows => {
                 spelled(Shadows::ALL, shadows_token, text).map(|shadows| detail.shadows = shadows)
             }
@@ -228,7 +219,6 @@ impl Registry for Graphics {
         let token = match (key, *self) {
             (GraphicsKey::Mode, graphics) => graphics.mode().token(),
             (_, Self::Auto | Self::Ultra | Self::Basic) => return false,
-            (GraphicsKey::Lighting, Self::Custom(detail)) => lighting_token(detail.lighting),
             (GraphicsKey::Shadows, Self::Custom(detail)) => shadows_token(detail.shadows),
             (GraphicsKey::Ground, Self::Custom(detail)) => {
                 return write!(out, "{}", detail.ground.octaves()).is_ok();
@@ -251,12 +241,22 @@ impl Live for Graphics {
             return false;
         };
         match key {
-            GraphicsKey::Lighting => overwrite(&mut mine.lighting, theirs.lighting),
             GraphicsKey::Shadows => overwrite(&mut mine.shadows, theirs.shadows),
             GraphicsKey::Ground => overwrite(&mut mine.ground, theirs.ground),
             GraphicsKey::Resolution => overwrite(&mut mine.resolution, theirs.resolution),
             GraphicsKey::Mode => false,
         }
+    }
+
+    /// A new mode brings its knobs with it, so a choice of another mode
+    /// differs in every key: otherwise an answer to an older custom write
+    /// would put its knobs back over the ones a newer custom choice brought.
+    fn differing(&self, other: &Self) -> Keys<Self> {
+        if self.mode() != other.mode() {
+            return Keys::ALL;
+        }
+        let mut copy = *self;
+        copy.set_from(other, Keys::ALL)
     }
 }
 
@@ -267,14 +267,6 @@ fn spelled<T: Copy, const N: usize>(
     text: &str,
 ) -> Option<T> {
     all.into_iter().find(|value| token(*value) == text)
-}
-
-const fn lighting_token(lighting: Lighting) -> &'static str {
-    match lighting {
-        Lighting::Fine => "fine",
-        Lighting::Medium => "medium",
-        Lighting::Coarse => "coarse",
-    }
 }
 
 const fn shadows_token(shadows: Shadows) -> &'static str {

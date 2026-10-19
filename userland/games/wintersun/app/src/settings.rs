@@ -31,7 +31,7 @@ use tairix_theme::Theme;
 use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
 
 use crate::graphics::{Graphics, Mode};
-use crate::quality::{Detail, Lighting, Resolution, Shadows};
+use crate::quality::{Detail, Resolution, Shadows};
 
 /// The window's title.
 pub const TITLE: &str = "WinterSun Settings";
@@ -87,11 +87,10 @@ pub struct Shown {
     pub readable: Resolution,
 }
 
-/// One of the four knobs, as a slider sets it: plainest at the left, finest
-/// at the right.
+/// One of the three knobs, as a slider sets it: plainest at the left,
+/// finest at the right.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Knob {
-    Lighting,
     Shadows,
     Ground,
     Resolution,
@@ -99,16 +98,10 @@ enum Knob {
 
 impl Knob {
     /// The knobs, in the order the pane lists them.
-    const ALL: [Self; 4] = [
-        Self::Lighting,
-        Self::Shadows,
-        Self::Ground,
-        Self::Resolution,
-    ];
+    const ALL: [Self; 3] = [Self::Shadows, Self::Ground, Self::Resolution];
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Lighting => "Lighting",
             Self::Shadows => "Shadows",
             Self::Ground => "Ground texture",
             Self::Resolution => "Render scale",
@@ -118,7 +111,6 @@ impl Knob {
     /// How many settings the knob has.
     const fn settings(self) -> usize {
         match self {
-            Self::Lighting => Lighting::ALL.len(),
             Self::Shadows => Shadows::ALL.len(),
             Self::Ground => MAX_OCTAVES as usize + 1,
             Self::Resolution => Resolution::ALL.len(),
@@ -129,9 +121,6 @@ impl Knob {
     fn position(self, detail: Detail) -> usize {
         let finest_first = |found: Option<usize>| self.settings() - 1 - found.unwrap_or(0);
         match self {
-            Self::Lighting => {
-                finest_first(Lighting::ALL.iter().position(|l| *l == detail.lighting))
-            }
             Self::Shadows => finest_first(Shadows::ALL.iter().position(|s| *s == detail.shadows)),
             Self::Ground => usize::try_from(detail.ground.octaves()).unwrap_or(0),
             Self::Resolution => {
@@ -145,10 +134,6 @@ impl Knob {
         let last = self.settings() - 1;
         let finest_first = last - position.min(last);
         match self {
-            Self::Lighting => Detail {
-                lighting: Lighting::ALL[finest_first],
-                ..detail
-            },
             Self::Shadows => Detail {
                 shadows: Shadows::ALL[finest_first],
                 ..detail
@@ -167,11 +152,6 @@ impl Knob {
     /// What the knob is set to in `detail`, in a line.
     fn describe(self, detail: Detail, readable: Resolution) -> String {
         match self {
-            Self::Lighting => String::from(match detail.lighting {
-                Lighting::Fine => "Fine",
-                Lighting::Medium => "Medium",
-                Lighting::Coarse => "Coarse",
-            }),
             Self::Shadows => String::from(match detail.shadows {
                 Shadows::Soft => "Soft",
                 Shadows::Hard => "Hard",
@@ -194,6 +174,14 @@ impl Knob {
         }
     }
 
+    /// A slider with a stop for each of the knob's settings, plainest at the
+    /// left, at `position`.
+    fn slider(self, position: usize) -> Slider {
+        let mut slider = Slider::new(0).with_stops(u16::try_from(self.settings()).unwrap_or(0));
+        slider.set_value(stop_value(&slider, position));
+        slider
+    }
+
     /// Every way [`Self::describe`] can put it, for sizing a window that
     /// must seat the longest.
     fn every_description(self) -> Vec<String> {
@@ -204,22 +192,12 @@ impl Knob {
     }
 }
 
-/// A slider position, counted from the plainest, as a slider's permille.
-fn permille_of(position: usize, settings: usize) -> u16 {
-    let last = settings.saturating_sub(1).max(1);
-    u16::try_from(position.min(last) * 1000 / last).unwrap_or(1000)
-}
-
-/// The position nearest a slider's `permille`.
-fn position_of(permille: u16, settings: usize) -> usize {
-    let last = settings.saturating_sub(1).max(1);
-    (usize::from(permille) * last + 500) / 1000
-}
-
-/// A detented slider over `settings` positions at `position`.
-fn detented(position: usize, settings: usize) -> Slider {
-    let step = permille_of(1, settings);
-    Slider::new(permille_of(position, settings)).with_steps(step, step)
+/// The value of `slider`'s stop at `position`, counted from its plainest.
+fn stop_value(slider: &Slider, position: usize) -> u16 {
+    u16::try_from(position)
+        .ok()
+        .and_then(|stop| slider.stop_value(stop))
+        .unwrap_or(0)
 }
 
 /// Which region of the window holds the keyboard.
@@ -234,7 +212,7 @@ enum Focus {
 /// The group holding the mode.
 const QUALITY: usize = 0;
 
-/// The group holding the four knobs.
+/// The group holding the three knobs.
 const KNOBS: usize = 1;
 
 /// Where every part of the window is drawn, resolved once per pass so a
@@ -353,12 +331,11 @@ impl SettingsWindow {
         let mut knobs_moved = [false; Knob::ALL.len()];
         for (index, knob) in Knob::ALL.into_iter().enumerate() {
             let position = knob.position(shown.detail);
-            let settings = knob.settings();
             knobs_moved[index] = restate_row(
                 &mut self.groups[KNOBS].rows_mut()[index],
                 |control| match control {
                     FieldControl::Slider(slider) => {
-                        let value = permille_of(position, settings);
+                        let value = stop_value(slider, position);
                         let moved = slider.value() != value;
                         slider.set_value(value);
                         moved
@@ -462,7 +439,7 @@ impl SettingsWindow {
                 } else {
                     order[(at + 1) % order.len()]
                 };
-                self.move_focus(next, &placed, scale, theme, damage);
+                self.move_focus(next, 0, &placed, scale, theme, damage);
                 return None;
             }
             _ => {}
@@ -528,8 +505,8 @@ impl SettingsWindow {
         }
     }
 
-    /// The knob on `row` was moved to `permille`: seat its slider on the
-    /// nearest setting and answer the custom choice it makes.
+    /// The knob on `row` was moved to the stop at `permille`: answer the
+    /// custom choice it makes.
     fn turn(
         &mut self,
         row: usize,
@@ -540,17 +517,11 @@ impl SettingsWindow {
         damage: &mut Region,
     ) -> Option<Graphics> {
         let knob = *Knob::ALL.get(row)?;
-        let settings = knob.settings();
-        let position = position_of(permille, settings);
+        let FieldControl::Slider(slider) = self.groups[KNOBS].rows().get(row)?.control() else {
+            return None;
+        };
+        let position = usize::from(slider.stop_of(permille)?);
         let detail = knob.set(self.shown.detail, position);
-        let seated = permille_of(position, settings);
-        if let Some(FieldControl::Slider(slider)) = self.groups[KNOBS]
-            .rows_mut()
-            .get_mut(row)
-            .map(FieldRow::control_mut)
-        {
-            slider.set_value(seated);
-        }
         report_row(
             &self.groups[KNOBS],
             row,
@@ -577,26 +548,25 @@ impl SettingsWindow {
             return;
         };
         if placed.strip.contains(pointer) {
-            self.move_focus(Focus::Strip, placed, scale, theme, damage);
+            self.move_focus(Focus::Strip, 0, placed, scale, theme, damage);
             return;
         }
         // The group the press reaches gives the keyboard to the row itself.
         for group in 0..self.groups.len() {
             let layout = placed.groups[group];
-            if self.groups[group]
-                .row_at(layout, scale, theme, pointer)
-                .is_some()
-            {
-                self.move_focus(Focus::Group(group), placed, scale, theme, damage);
+            if let Some(row) = self.groups[group].row_at(layout, scale, theme, pointer) {
+                self.move_focus(Focus::Group(group), row, placed, scale, theme, damage);
                 return;
             }
         }
     }
 
-    /// Move the keyboard to `next`, reporting the marks it moves between.
+    /// Move the keyboard to `next` — onto `row` where it is a group —
+    /// reporting the marks it moves between.
     fn move_focus(
         &mut self,
         next: Focus,
+        row: usize,
         placed: &Placed,
         scale: Scale,
         theme: &Theme,
@@ -620,7 +590,7 @@ impl SettingsWindow {
                     .set_current(current, placed.strip, scale, theme, damage);
             }
             Focus::Group(group) => {
-                self.groups[group].set_focus(Some(0), placed.groups[group], scale, theme, damage);
+                self.groups[group].set_focus(Some(row), placed.groups[group], scale, theme, damage);
             }
         }
         self.focus = next;
@@ -687,7 +657,7 @@ fn knob_group(detail: Detail, readable: Resolution) -> FieldGroup {
         .map(|knob| {
             FieldRow::new(
                 knob.label(),
-                FieldControl::Slider(detented(knob.position(detail), knob.settings())),
+                FieldControl::Slider(knob.slider(knob.position(detail))),
             )
             .with_description(knob.describe(detail, readable))
         })

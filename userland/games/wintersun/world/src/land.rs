@@ -25,9 +25,12 @@ use tairix_util::{fallible, mathf};
 
 pub use tairix_terrain::droplet::{Block, Kept, Placed, Store, Unkept};
 
+use crate::biome::{self, SNOWLINE_CELSIUS, TREELINE_CELSIUS};
 use crate::chunk::SHORE_CELLS;
 use crate::error::WorldError;
-use crate::geom::{lerp, rise, signed, Elevation};
+use crate::geom::{lerp, rise, signed, CellCoord, Elevation};
+use crate::hydrology::FlowDir;
+use crate::realm::CoarseSample;
 use crate::realm::RealmField;
 use crate::seed::Stage;
 
@@ -62,6 +65,56 @@ const DUNE_SHARE: f64 = 7.0 / DETAIL_AMPLITUDE;
 /// fades in: a sea floor the player never sees takes none, so none pokes
 /// above the water to move the coastline the realm asked for.
 const SHORE_FADE_UNITS: f64 = 12.0;
+
+/// The coarse grade, per cell, from which ground counts as steep: a face that
+/// sheds rubble and, where it is cold, breaks.
+const STEEP_GRADE: f64 = 0.08;
+
+/// The coarse grade below which ground counts as level: where water stands
+/// in a wet climate and salt dries out in a dry one.
+const LEVEL_GRADE: f64 = 0.012;
+
+/// The share of the roughness that flat ground — a drained bottom, a fen, a
+/// salt pan — loses.
+const FLAT_SMOOTHING: f64 = 0.9;
+
+/// How much rougher ground breaks above the treeline, where nothing grows to
+/// hold it and frost splits the rock.
+const BROKEN_ROCK: f64 = 0.35;
+
+/// How much of a flat's smoothing an ice sheet takes: ice flows over the land
+/// it buries and lies smooth across it.
+const ICE_SMOOTHING_SHARE: f64 = 0.6;
+
+/// How far an ice sheet's surface leans to its longest waves.
+const SWELL_ICE: f64 = 0.9;
+
+/// The share of the roughness badlands run in gullies.
+const GULLY_SHARE: f64 = 0.8;
+
+/// How much deeper badlands are rilled than the ground about them.
+const BADLAND_DEPTH: f64 = 0.8;
+
+/// How far grassland's relief leans to its longest waves.
+const SWELL_GRASSLAND: f64 = 0.85;
+
+/// How far frost-split rock above the treeline, and badlands' rills, lean to
+/// their shortest waves.
+const BREAK_ALPINE: f64 = 0.5;
+const RILL_BADLANDS: f64 = 0.9;
+
+/// How high, in metres, frost heaves tundra's hummocks, a bog's tussocks
+/// stand, and the rubble lies below a face or above the treeline.
+const FROST_KNOBS: f64 = 0.45;
+const TUSSOCK_KNOBS: f64 = 0.35;
+const RUBBLE_KNOBS: f64 = 0.4;
+
+/// How deep, in metres, badlands' rills are cut.
+const RILL_KNOBS: f64 = 2.0;
+
+// What the ridges leave is divided between dunes and gullies, each a share
+// of it.
+const _: () = assert!(DUNE_SHARE <= 1.0 && GULLY_SHARE <= 1.0);
 
 /// The realm field, and its land as the levels refine it.
 #[derive(Debug)]
@@ -127,6 +180,53 @@ impl RealmLand {
         while !refining.step(&self.coarse, Some(parent), store, runner)? {}
         Ok(refining.finish()?.heights)
     }
+}
+
+impl RealmLand {
+    /// Cells between level 0's vertices.
+    pub(crate) fn level_zero_step(&self) -> u32 {
+        self.coarse.lattices().ratio(CELLS).unwrap_or(0)
+    }
+
+    /// Level 0's height at `cell`, read between its vertices and held to its
+    /// square at the realm's edge.
+    pub(crate) fn level_zero_height(&self, cell: CellCoord) -> f64 {
+        let (square, heights) = (&self.far.0, &self.far.1);
+        let step = f64::from(self.level_zero_step().max(1));
+        let across = |at: i32, origin: i64, size: u32| {
+            let place = f64::from(at) / step - real_place(origin);
+            mathf::clamp(place, 0.0, f64::from(size.saturating_sub(1)))
+        };
+        let (x, y) = (
+            across(cell.x, square.origin.0, square.size.0),
+            across(cell.y, square.origin.1, square.size.1),
+        );
+        let (x0, y0) = (mathf::floor(x), mathf::floor(y));
+        let width = square.size.0 as usize;
+        let read = |column: f64, row: f64| {
+            let to_index = |v: f64, size: u32| {
+                usize::try_from(mathf::round_i32(v))
+                    .unwrap_or(0)
+                    .min(size.saturating_sub(1) as usize)
+            };
+            let index = to_index(row, square.size.1) * width + to_index(column, square.size.0);
+            heights.get(index).copied().map_or(0.0, f64::from)
+        };
+        mathf::bilinear(
+            [
+                read(x0, y0),
+                read(x0 + 1.0, y0),
+                read(x0, y0 + 1.0),
+                read(x0 + 1.0, y0 + 1.0),
+            ],
+            (x - x0, y - y0),
+        )
+    }
+}
+
+/// A lattice place as a real number: exact, since a place fits an `i32`.
+fn real_place(place: i64) -> f64 {
+    i32::try_from(place).map_or(0.0, f64::from)
 }
 
 /// The level whose vertices are the cells.
@@ -231,15 +331,10 @@ fn survey(field: &RealmField) -> Result<Field, WorldError> {
             let elevation = sample.elevation.units();
             heights.push(elevation);
             filled.push(sample.water.units());
-            wet.push(wetness(f64::from(sample.discharge) * cell_area));
-            let ridge = mathf::smoothstep(f64::from(sample.belt) / f64::from(u8::MAX));
-            let arid = 1.0 - rise(sample.precipitation.millimetres(), 250.0, 300.0);
-            let fade = mathf::clamp(elevation / SHORE_FADE_UNITS, 0.0, 1.0);
-            grains.push(Grain {
-                roughness: lerp(DETAIL_AMPLITUDE, BELT_AMPLITUDE, ridge) * fade,
-                ridges: ridge,
-                dunes: DUNE_SHARE * arid * (1.0 - ridge),
-            });
+            let drained = wetness(f64::from(sample.discharge) * cell_area);
+            wet.push(drained);
+            let at = (signed(column) - signed(pad), signed(row) - signed(pad));
+            grains.push(character(field, at, &sample, drained));
         }
     }
     Ok(Field {
@@ -257,6 +352,89 @@ fn survey(field: &RealmField) -> Result<Field, WorldError> {
             seed: seed_of(field),
         },
     })
+}
+
+/// The grain of the fine relief about coarse sample `at`, `sample`, which
+/// drains `drained` of the realm's wetness: chosen from what the classifier
+/// reads before any fine relief exists — the belt, the climate, the rock and
+/// the drainage — never from the biome, which reads the fine relief's slope.
+///
+/// Mountain belts ridge; ground too cold in summer for trees heaves into frost
+/// hummocks, or breaks into rubble where it is steep or belted; drained
+/// bottoms, wet flats and salt pans lie near level; soft rock in a dry climate
+/// rills into badlands; dry sand dunes; temperate and tropical grassland rolls
+/// in long swells while an ice sheet lies smooth; and a steep face of hard rock
+/// sheds rubble below it.
+fn character(field: &RealmField, at: (i32, i32), sample: &CoarseSample, drained: f64) -> Grain {
+    let elevation = sample.elevation.units();
+    let spacing = f64::from(field.params().cells_per_coarse());
+    let height = |dx: i32, dy: i32| field.sample(at.0 + dx, at.1 + dy).elevation.units();
+    let slope = mathf::fmax(
+        mathf::fabs(height(1, 0) - height(-1, 0)),
+        mathf::fabs(height(0, 1) - height(0, -1)),
+    ) / (2.0 * spacing);
+    let celsius = sample.temperature.celsius();
+    let warm = celsius + sample.range.celsius() / 2.0;
+    let precipitation = sample.precipitation.millimetres();
+    let rock = field.lithology_at(f64::from(at.0), f64::from(at.1)).rock;
+
+    let ridge = mathf::smoothstep(f64::from(sample.belt) / f64::from(u8::MAX));
+    let fade = mathf::clamp(elevation / SHORE_FADE_UNITS, 0.0, 1.0);
+    let arid = 1.0 - rise(precipitation, 250.0, 300.0);
+    let steep = rise(slope, STEEP_GRADE, STEEP_GRADE * 0.75);
+    let level = 1.0 - rise(slope, LEVEL_GRADE, LEVEL_GRADE * 0.75);
+    let thawed = rise(warm, SNOWLINE_CELSIUS, 3.0);
+    let cold = (1.0 - rise(warm, TREELINE_CELSIUS, 3.0)) * thawed;
+    let alpine = cold * mathf::fmax(ridge, steep);
+    let tundra = cold * (1.0 - alpine);
+    let ice = 1.0 - thawed;
+
+    let bottom = rise(drained, 0.55, 0.15) * (1.0 - steep);
+    let fen = rise(precipitation, 700.0, 200.0) * level * (1.0 - steep);
+    let pan = if sample.flow == FlowDir::Sink {
+        (1.0 - rise(precipitation, 150.0, 100.0)) * level
+    } else {
+        0.0
+    };
+    let flat = mathf::fmax(mathf::fmax(bottom, fen), pan);
+
+    let moisture = biome::moisture(precipitation, celsius, sample.rain_season.fraction());
+    let badlands = (1.0 - rise(moisture, 0.7, 0.3)) * rock.softness() * thawed * (1.0 - flat);
+    let grass = rise(celsius, 4.0, 3.0)
+        * rise(precipitation, 300.0, 150.0)
+        * (1.0 - rise(precipitation, 1100.0, 300.0))
+        * (1.0 - ridge)
+        * (1.0 - flat);
+    let rubble = if rock.is_hard() {
+        steep * (1.0 - flat)
+    } else {
+        0.0
+    };
+
+    // The ridges take their share first, and the dunes and gullies divide what
+    // is left, so the three never claim more than the whole.
+    Grain {
+        roughness: lerp(DETAIL_AMPLITUDE, BELT_AMPLITUDE, ridge)
+            * fade
+            * (1.0 - FLAT_SMOOTHING * mathf::fmax(flat, ICE_SMOOTHING_SHARE * ice))
+            * (1.0 + BROKEN_ROCK * alpine)
+            * (1.0 + BADLAND_DEPTH * badlands),
+        ridges: ridge,
+        dunes: DUNE_SHARE * arid * (1.0 - badlands) * (1.0 - ridge),
+        gullies: GULLY_SHARE * badlands * (1.0 - ridge),
+        lean: mathf::clamp(
+            SWELL_GRASSLAND * grass + SWELL_ICE * ice
+                - BREAK_ALPINE * alpine
+                - RILL_BADLANDS * badlands,
+            -1.0,
+            1.0,
+        ),
+        knobs: fade
+            * (FROST_KNOBS * tundra * (1.0 - flat)
+                + TUSSOCK_KNOBS * mathf::fmax(fen, bottom) * (1.0 - pan)
+                + RUBBLE_KNOBS * mathf::fmax(rubble, alpine)
+                + RILL_KNOBS * badlands),
+    }
 }
 
 /// The levels a realm of `side` samples `step` cells apart is refined

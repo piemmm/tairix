@@ -159,12 +159,12 @@ Two rules carry most of the visual quality:
   own drawing elevation, and they paint far-first by projected depth — so
   eight or sixteen headings need no new artwork and no `cfg`. This is
   `cinder`'s insight and it is the single largest saving in the whole design.
-  A figure's **size does not vary with depth**: the world projection is
-  orthographic (`wintersun/app`'s `Camera`), so a figure whose scale tracked
-  its ground row would grow and shrink as the camera scrolled. The
-  foreshortening applies to the figure's own frame, not to its size.
-  `plans/WINTERSUN.md` WS32 turns the world to a perspective view, and this
-  rule changes with it.
+  In a scene a figure **grows as it nears the eye**: it is projected through
+  the scene's own perspective camera (`frame::Lens::Perspective`,
+  `plans/WINTERSUN.md` WS32) and depth-tested against the ground. The art
+  harness and the designer draw through the oblique lens instead, one size at
+  every depth with the depth axis foreshortened, so the art is measured the
+  same wherever a scene would place it.
 
 Equipment is parts on sockets with their own palette, so gear is visible,
 mixable, and costs no new art path. A helm is a `Plate` and a `Wedge`, not a
@@ -350,11 +350,9 @@ keyframed:
   whole figure rather than tearing the rig. **This is a correctness
   requirement, not polish**: a camera looks straight at the ground-contact
   line, which is exactly where the error is most visible. The ground a foot
-  is planted on is the ground the view *draws*: WinterSun draws its world
-  from directly above with height shown by shading alone, so its feet meet a
-  level plane everywhere and its actor plants on the level, wading figures
-  standing on the bed below the drawn water; the per-foot solve is for a view
-  that draws relief as geometry.
+  is planted on is the ground the view *draws*: a scene hands the actor its
+  drawn surface as a `Relief`, each foot is planted on it, and a wading figure
+  stands on the bed with the drawn water hiding its legs.
 - **Root motion where a clip needs it.** A dodge, a lunge and a stagger
   displace the figure by an amount the *clip* owns, so the animation and the
   movement cannot disagree. The authoritative displacement stays the
@@ -526,9 +524,12 @@ The readability check has a second consumer: `plans/WINTERSUN.md` §3 fixes the
 renderer's degradation floor as the last detail level whose frames still clear
 these bounds. The bounds are proven at the smallest drawn side,
 `reference::SIDES[0]`, so the floor is the scale that still draws the smallest
-figure a record describes (`humanoid::LEAST_REACH`) at that side:
-`actor::readable` answers it for a view's scale and `app::quality::Ladder`
-stops the render scale there. No frame measures readability. So a change that
+figure a record describes (`humanoid::LEAST_REACH`) at that side, taken at the
+distance each zoom stop puts the character at (`app::camera::focus_step`):
+`actor::readable` answers it for that scale and `app::quality::Ladder` stops
+the render scale there. A figure farther than the character is drawn smaller,
+as the land about it is; the floor is the character's. No frame measures
+readability. So a change that
 loosens these numbers does not merely admit a worse contact sheet; it lets the
 running game shed detail past the point a player can read it.
 

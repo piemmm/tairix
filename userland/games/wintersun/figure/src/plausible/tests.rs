@@ -13,6 +13,7 @@ use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
 use super::{figure, HAIRED};
+use crate::frame::Lens;
 use crate::humanoid;
 use crate::identity::{EyeShape, FaceShape, HairStyle, Identity, Spec};
 use crate::pose::Pose;
@@ -81,7 +82,11 @@ fn every_draw_is_a_record_that_builds_and_places() {
             assert_eq!(identity.species(), species);
             assert_eq!(Identity::decode(&identity.encode()), Ok(identity));
             let rig = humanoid::rig(&identity).expect("every record builds");
-            let stance = Stance::new(Facing(0x2000), 1.0, (40.0, 90.0), light).expect("a stance");
+            let lens = Lens::Oblique {
+                scale: 1.0,
+                at: (40.0, 90.0),
+            };
+            let stance = Stance::new(Facing(0x2000), lens, light).expect("a stance");
             humanoid::rigging(&rig)
                 .expect("it binds")
                 .posture(&Pose::REST)

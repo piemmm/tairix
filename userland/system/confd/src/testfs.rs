@@ -35,6 +35,8 @@ pub struct TestFs {
     /// Every descriptor delegation minted, in mint order — what a test
     /// inspects instead of a kernel handle table.
     grants: Vec<Grant>,
+    /// Files written whole.
+    replaced: usize,
 }
 
 /// One minted descriptor delegation, as the fake records it.
@@ -61,6 +63,7 @@ impl TestFs {
             offline: None,
             hidden: Vec::new(),
             grants: Vec::new(),
+            replaced: 0,
         };
         fs.add_dir("/Users", 0);
         fs.add_dir("/System", 0);
@@ -148,6 +151,11 @@ impl TestFs {
         self.offline = Some(err);
     }
 
+    /// How many files have been written whole.
+    pub fn replaced(&self) -> usize {
+        self.replaced
+    }
+
     /// Every delegation minted so far, in mint order.
     pub fn grants(&self) -> &[Grant] {
         &self.grants
@@ -179,6 +187,7 @@ impl Storage for TestFs {
         }
         self.files.insert(path.to_string(), bytes.to_vec());
         self.owners.insert(path.to_string(), CONFD_UID.0);
+        self.replaced += 1;
         Ok(())
     }
 

@@ -346,23 +346,50 @@ impl Character {
 }
 
 /// The grain of a land's relief below its coarse step at a place: how rough
-/// it is, and how much of that roughness runs in sharp-crested ridges or in
-/// billowed dunes rather than rounded hummocks.
+/// it is, how much of that roughness runs in sharp-crested ridges, billowed
+/// dunes or creased gullies rather than rounded hummocks, which of its waves
+/// it leans to, and the knobs it is studded with at the scale of a stride.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Grain {
     /// How rough, in metres.
     pub roughness: f64,
-    /// The share of the roughness in ridges, as bare rock and gullied ground
-    /// break.
+    /// The share of the roughness in ridges, as bare rock breaks.
     pub ridges: f64,
-    /// The share in dunes, as wind-blown sand lies; with the ridges', at most
-    /// one.
+    /// The share in dunes, as wind-blown sand lies.
     pub dunes: f64,
+    /// The share in gullies, as soft rock is rilled where little grows to
+    /// hold it; with the ridges' and the dunes', at most one.
+    pub gullies: f64,
+    /// How the relief leans across its waves, `-1.0..=1.0`: toward its
+    /// longest, rolling in smooth swells as grassland does, toward its
+    /// shortest, breaking as frost-split rock and rilled clay do, or neither,
+    /// as natural ground is at nought.
+    pub lean: f64,
+    /// How high, in metres, the knobs stand that frost heaves up in tundra,
+    /// tussocks raise in a bog and rubble lies in, waves of a few metres a
+    /// level fine enough to hold them adds.
+    pub knobs: f64,
 }
 
 impl Grain {
+    /// Rounded hummocks `roughness` metres rough, leaning to none of its waves
+    /// and studded with nothing.
+    #[must_use]
+    pub const fn hummocks(roughness: f64) -> Self {
+        Self {
+            roughness,
+            ridges: 0.0,
+            dunes: 0.0,
+            gullies: 0.0,
+            lean: 0.0,
+            knobs: 0.0,
+        }
+    }
+
     /// Whether it is a grain at all: finite, no rougher than nought below, its
-    /// shares each within `0.0..=1.0` and together at most one.
+    /// shares each within `0.0..=1.0` and together at most one, its lean
+    /// within `-1.0..=1.0`, and its knobs a finite height no lower than
+    /// nought.
     #[must_use]
     pub fn fits(&self) -> bool {
         let share = 0.0..=1.0;
@@ -370,7 +397,11 @@ impl Grain {
             && self.roughness >= 0.0
             && share.contains(&self.ridges)
             && share.contains(&self.dunes)
-            && self.ridges + self.dunes <= 1.0
+            && share.contains(&self.gullies)
+            && (-1.0..=1.0).contains(&self.lean)
+            && self.ridges + self.dunes + self.gullies <= 1.0
+            && self.knobs.is_finite()
+            && self.knobs >= 0.0
     }
 }
 

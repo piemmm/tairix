@@ -27,7 +27,6 @@
 use core::hash::Hasher;
 
 use tairix_hash::FastHash;
-use tairix_raster::color::Pixel;
 use tairix_reclaim::PressureBand;
 use tairix_wintersun_net::value::{WorldPoint, WorldVector};
 use tairix_wintersun_world::blend::{Kind, BLEND_SLOTS};
@@ -37,7 +36,7 @@ use crate::decal::{Decal, Fray};
 use crate::error::ArtError;
 use crate::material::{MaterialTile, Mip, Quality};
 use crate::particle::{budget, ParticleField, ParticleKind, Spawn};
-use crate::splat::{self, Geometry, SpanPlan, SpanTiles, Warp};
+use crate::splat::{self, Fragment, Materials, QuadPlan, Warp, QUAD_ONE};
 use crate::weight::WeightField;
 
 /// The digest of the scripted scene, on every target.
@@ -48,7 +47,7 @@ use crate::weight::WeightField;
 /// change that moves it changes every frame anybody will ever see, and
 /// the new value is written down deliberately rather than pasted out of
 /// a failure.
-pub const REFERENCE_DIGEST: u64 = 0xC464_940F_D96B_CD7E;
+pub const REFERENCE_DIGEST: u64 = 0x19E4_DA06_7573_21F0;
 
 /// The realm the scripted scene is drawn for.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_5355;
@@ -62,7 +61,7 @@ const SWEEP_MIP: u32 = 3;
 /// Mip the one full-detail tile is synthesised at.
 const DETAIL_MIP: u32 = 1;
 
-/// Pixels in each splat span of the fold.
+/// Fragments read along each quad of the fold.
 const SPAN_PIXELS: usize = 48;
 
 /// Ticks the particle run is advanced for.
@@ -82,7 +81,7 @@ pub fn reference() -> Result<u64, ArtError> {
     materials(&mut hasher)?;
     weights(&mut hasher);
     decals(&mut hasher);
-    spans(&mut hasher)?;
+    fragments(&mut hasher)?;
     particles(&mut hasher);
     Ok(hasher.finish())
 }
@@ -170,50 +169,66 @@ fn decals(hasher: &mut FastHash) {
     }
 }
 
-/// The splat kernel over a run of spans walking one ground into another,
-/// with the warp live.
-fn spans(hasher: &mut FastHash) -> Result<(), ArtError> {
+/// The splat kernel over quads walking one ground into another, with the
+/// warp live, read at footprints that fall on the mip the tiles hold, finer
+/// than it and coarser than any held.
+fn fragments(hasher: &mut FastHash) -> Result<(), ArtError> {
     let mip = Mip::new(SWEEP_MIP).ok_or(ArtError::NoSuchMip)?;
     let warp = Warp::new(REFERENCE_SEED);
-    let mut row = [Pixel::TRANSPARENT; SPAN_PIXELS];
 
     for (step, pair) in Ground::ALL.windows(2).enumerate() {
         let mut left = WeightField::solid(pair[0]);
         left.cover(Ground::Granite, 60);
         let right = WeightField::solid(pair[1]);
-        let plan = SpanPlan::new(&left, &right);
+        let plan = QuadPlan::new([&left, &right, &right, &left]);
 
         let mut held = [const { None }; BLEND_SLOTS];
         for (slot, ground) in held.iter_mut().zip(plan.grounds()) {
             *slot = Some(MaterialTile::synthesise(ground, mip, Quality::FULL)?);
         }
-        let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
-        for (slot, tile) in tiles.iter_mut().zip(held.iter()) {
-            *slot = tile.as_ref();
+        let mut materials = Materials::flat();
+        for tile in held.iter().flatten() {
+            materials.hold(tile);
         }
 
         let ordinal = i32::try_from(step).unwrap_or(0);
-        let origin = WorldPoint {
-            x: ordinal * 3301 - 20_000,
-            y: ordinal * 1777 + 5_000,
-        };
-        let pixels = u32::try_from(SPAN_PIXELS).unwrap_or(1);
-        let geometry = Geometry::new(&warp, origin, 96, pixels);
-        hasher.write_i32(geometry.warp_near.0);
-        hasher.write_i32(geometry.warp_near.1);
-        hasher.write_i32(geometry.warp_far.0);
-        hasher.write_i32(geometry.warp_far.1);
-
-        splat::splat(&mut row, &plan, &tiles, &geometry);
-        for pixel in &row {
-            hasher.write_u8(pixel.r);
-            hasher.write_u8(pixel.g);
-            hasher.write_u8(pixel.b);
-            hasher.write_u8(pixel.a);
+        for pixel in 0..SPAN_PIXELS {
+            let along = i32::try_from(pixel).unwrap_or(0);
+            let world = WorldPoint {
+                x: ordinal * 3301 - 20_000 + along * 96,
+                y: ordinal * 1777 + 5_000,
+            };
+            let (dx, dy) = warp.at(world);
+            hasher.write_i32(dx);
+            hasher.write_i32(dy);
+            let across = u16::try_from(pixel * usize::from(QUAD_ONE) / SPAN_PIXELS).unwrap_or(0);
+            let shade = splat::fragment(
+                &plan,
+                &materials,
+                Fragment {
+                    sample: WorldPoint {
+                        x: world.x + dx,
+                        y: world.y + dy,
+                    },
+                    across,
+                    down: QUAD_ONE - across / 2,
+                    footprint: FOOTPRINTS[pixel % FOOTPRINTS.len()],
+                    dither: u8::try_from(pixel % 16).unwrap_or(0),
+                },
+            );
+            hasher.write_u8(shade.r);
+            hasher.write_u8(shade.g);
+            hasher.write_u8(shade.b);
+            hasher.write_u8(shade.a);
         }
     }
     Ok(())
 }
+
+/// The ground one pixel spans in the fragment fold, in world sub-units:
+/// magnified, on the swept mip for a fine and a coarse grain, and past the
+/// coarsest held.
+const FOOTPRINTS: [u32; 4] = [8, 1 << 9, 1 << 11, 1 << 16];
 
 /// A storm: every kind emitted, advanced under a turning wind.
 fn particles(hasher: &mut FastHash) {

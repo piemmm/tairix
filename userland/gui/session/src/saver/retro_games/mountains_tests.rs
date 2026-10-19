@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_raster::{Canvas, ScanScratch};
+use tairix_raster::{Canvas, Occlusion, ScanScratch};
 use tairix_util::mathf;
 use tairix_wm::{Color, Rect, Scale, Surface};
 
@@ -119,6 +119,16 @@ impl Canvas for Recorder {
         _: &mut ScanScratch,
     ) {
         unreachable!("the ranges wash nothing");
+    }
+
+    fn fill_polygon_subpixel_occluded(
+        &mut self,
+        _: &[(i32, i32)],
+        _: Color,
+        _: &Occlusion<'_>,
+        _: &mut ScanScratch,
+    ) {
+        unreachable!("nothing stands in front of the ranges");
     }
 }
 

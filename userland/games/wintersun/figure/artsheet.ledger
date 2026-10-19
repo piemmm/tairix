@@ -24,7 +24,7 @@
 # as-of-last-regeneration.
 #
 artsheet 2
-figure-digest 0x695d313a73ed2e37
+figure-digest 0x547808c75ccae48f
 sides [32, 64, 128]
 
 figure human record 01008080808080000100000002800407010000 parts 27 tones 6 reach 103.394645

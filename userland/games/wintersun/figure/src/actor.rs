@@ -25,15 +25,16 @@
 //!
 //! # The ground a figure stands on is the ground drawn
 //!
-//! The world is drawn from directly above, with height shown by shading
-//! alone, so the plane a figure's feet meet on screen is level everywhere.
-//! A figure is therefore planted on the level whatever the terrain's height
-//! beneath it. Standing water is the exception that shows: a figure wading
-//! stands on the bed, below the surface drawn over it, so it is sunk by the
-//! depth and nothing of it is drawn beneath the waterline.
+//! A figure is placed on the surface the scene draws, through the scene's
+//! camera, and each foot is planted on the relief beneath it, so a figure
+//! standing across a slope has one foot higher than the other. Standing water
+//! needs nothing of its own: a figure wading stands on the bed, and the water
+//! drawn over it hides whatever of the figure is below it.
 
 use tairix_inline::ArrayVec;
+use tairix_raster::mesh::{Depth, DepthPlane};
 use tairix_raster::shape::{Placed, Shape};
+use tairix_raster::view::Perspective;
 use tairix_raster::Color;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::{Facing, WorldPoint};
@@ -42,15 +43,16 @@ use crate::blend::Blend;
 use crate::breath::Breath;
 use crate::clip::Clip;
 use crate::error::FigureError;
+use crate::frame::{plan, Body, Heading, Lens};
 use crate::gait::Gait;
 use crate::humanoid::{self, UPPER_BODY};
 use crate::identity::Identity;
 use crate::motion::{Clips, Kind, Layer};
 use crate::plant::Planted;
 use crate::pose::{Mask, Pose};
-use crate::reference::{self, Staged, BREATH, SHADOW};
+use crate::reference::{self, Staged, BREATH, LEVEL, SHADOW};
 use crate::rig::Placement;
-use crate::shadow::{Contact, Light, PENUMBRA};
+use crate::shadow::{Contact, Footing, Light, PENUMBRA};
 use crate::socket::Side;
 use crate::transition::{Animator, ClipId, Edge, StateId, Transitions};
 
@@ -225,18 +227,35 @@ pub enum Shade {
     Hard,
 }
 
+/// The ground a figure stands on: the height of the surface a scene draws.
+pub trait Relief {
+    /// The surface's height under `at`, in world sub-units, or `None` where
+    /// the scene does not hold it.
+    fn height(&self, at: WorldPoint) -> Option<i32>;
+}
+
 /// Where a placed figure lands, beyond its strips.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawn {
     /// The rings of its contact shadow, outermost first: none, one, or
     /// [`PENUMBRA`] of them.
     pub shadow: ArrayVec<Placed, PENUMBRA>,
-    /// The first surface row under water, where a figure wades: nothing of
-    /// it is drawn there or below.
-    pub waterline: Option<i32>,
+    /// The shadow's reciprocal depth across the screen: the ground it lies
+    /// on, brought toward the eye by the shadow's own radius, so ground within
+    /// that of it takes the shadow and anything nearer hides it.
+    pub depth: DepthPlane,
     /// The surface rows figure and shadow can reach, half-open, so a scene
     /// sorts it into the pieces of a frame it can touch and no others.
     pub rows: (i32, i32),
+}
+
+impl Drawn {
+    /// Nothing: a figure the camera cannot see.
+    const NOTHING: Self = Self {
+        shadow: ArrayVec::new(),
+        depth: DepthPlane::flat(Depth::NEAREST),
+        rows: (0, 0),
+    };
 }
 
 /// One action layer: an animator over its own machine, and how much of the
@@ -634,74 +653,133 @@ impl<'a> Actor<'a> {
         Ok(())
     }
 
-    /// Place the figure for its current moment, standing at `ground` in a
-    /// view whose top-left pixel samples `origin` at `step` world sub-units a
-    /// pixel, under `light`, with its contact shadow drawn as `shade` says.
+    /// Place the figure for its current moment, standing at `ground` on
+    /// `relief`, seen through `camera` under `light`, with its contact shadow
+    /// drawn as `shade` says.
+    ///
+    /// A figure the camera cannot see whole — any of it nearer than the near
+    /// plane — is placed as nothing, with no shadow.
     ///
     /// # Errors
     ///
-    /// [`FigureError::ScaleUnreal`] for a step that is not a positive whole
-    /// number of sub-units; otherwise whatever the pose, the planting solve
-    /// or the placement refuse, which for a checked identity is nothing.
-    pub fn place(
+    /// [`FigureError::GroundUnreal`] where `relief` does not hold the ground
+    /// point; otherwise whatever the pose, the planting solve or the
+    /// placement refuse, which for a checked identity is nothing.
+    pub fn place<R: Relief + ?Sized>(
         &self,
         ground: WorldPoint,
-        origin: WorldPoint,
-        step: i32,
+        relief: &R,
+        camera: &Perspective,
         light: Light,
         shade: Shade,
         out: &mut Placement,
     ) -> Result<Drawn, FigureError> {
-        if step <= 0 {
-            return Err(FigureError::ScaleUnreal);
+        let floor = relief.height(ground).ok_or(FigureError::GroundUnreal)?;
+        let heading = Heading::of(self.heading);
+        let below = |at: Body| {
+            let (east, south) = plan(heading, at);
+            let under = WorldPoint {
+                x: ground
+                    .x
+                    .saturating_add(mathf::round_i32(east * WORLD_SCALE)),
+                y: ground
+                    .y
+                    .saturating_add(mathf::round_i32(south * WORLD_SCALE)),
+            };
+            // Ground the scene does not hold is taken level with the figure's
+            // own, which is the ground it was asked to stand on.
+            relief
+                .height(under)
+                .map_or(0.0, |height| f64::from(height - floor) / WORLD_SCALE)
+        };
+        let planted = self.planted(|feet| feet.map(below))?;
+        let at = [f64::from(ground.x), f64::from(ground.y), f64::from(floor)];
+        let lens = Lens::Perspective {
+            camera,
+            ground: at,
+            units: WORLD_SCALE,
+        };
+        self.staged.place(&planted, self.heading, lens, out)?;
+        if out.is_empty() {
+            return Ok(Drawn::NOTHING);
         }
-        let planted = self.planted()?;
-        let pixel = f64::from(step);
-        let scale = WORLD_SCALE / pixel;
-        let surface = (
-            (f64::from(ground.x) - f64::from(origin.x)) / pixel,
-            (f64::from(ground.y) - f64::from(origin.y)) / pixel,
+
+        // The ground's slope across the shadow's own footprint, so the shadow
+        // lies on the ground it darkens rather than on a level beneath it.
+        let (radius, tone) = SHADOW;
+        let reach = radius * WORLD_SCALE;
+        let height_at = |east: f64, south: f64| {
+            let at = WorldPoint {
+                x: ground.x.saturating_add(mathf::round_i32(east)),
+                y: ground.y.saturating_add(mathf::round_i32(south)),
+            };
+            relief.height(at).map_or(f64::from(floor), f64::from)
+        };
+        let slope = (
+            (height_at(reach, 0.0) - height_at(-reach, 0.0)) / (2.0 * reach),
+            (height_at(0.0, reach) - height_at(0.0, -reach)) / (2.0 * reach),
         );
-        // A wading figure stands on the bed, below the surface drawn over it.
-        let sunk = self.wading * scale;
-        let feet = (surface.0, surface.1 + sunk);
-        self.staged
-            .place(&planted, self.heading, scale, feet, out)?;
+        let Some(footing) = Footing::seen(camera, at, slope, WORLD_SCALE)? else {
+            return Ok(Drawn::NOTHING);
+        };
 
         let mut shadow = ArrayVec::new();
         let drowned = mathf::clamp(self.wading / SHADOW_DROWN, 0.0, 1.0);
         if drowned < 1.0 {
-            let (radius, tone) = SHADOW;
             let faded = Color::rgba(tone.r, tone.g, tone.b, fade(tone.a, 1.0 - drowned));
             let contact = Contact::new(radius, faded)?;
             match shade {
                 Shade::Soft => {
-                    for ring in contact.penumbra(light, 0.0, scale, surface)? {
+                    for ring in contact.penumbra(light, 0.0, footing)? {
                         let _ = shadow.try_push(ring);
                     }
                 }
                 Shade::Hard => {
-                    let _ = shadow.try_push(contact.cast(light, 0.0, scale, surface)?);
+                    let _ = shadow.try_push(contact.cast(light, 0.0, footing)?);
                 }
             }
         }
-
-        let waterline = (self.wading > 0.0).then(|| row(surface.1));
         Ok(Drawn {
-            rows: reach(out, &shadow),
+            rows: reach_rows(out, &shadow),
+            depth: shadow_depth(camera, at, slope, reach),
             shadow,
-            waterline,
         })
     }
 
-    /// The pose the current moment stands in, planted on the level.
-    fn planted(&self) -> Result<Planted, FigureError> {
+    /// The pose the current moment stands in, each foot planted on the ground
+    /// `under` reports beneath the two of them.
+    fn planted(&self, under: impl FnOnce([Body; 2]) -> [f64; 2]) -> Result<Planted, FigureError> {
         let (locomotion, lift) = self.moving.pose()?;
         let body = self.body.over(&locomotion)?;
         let lift = self.body.lift(lift)?;
         let pose = self.upper.over(&body)?;
-        self.staged.plant(&pose, self.breath, lift)
+        self.staged.plant(&pose, self.breath, lift, under)
     }
+}
+
+/// The plane a contact shadow is depth-tested by: the ground about `ground`,
+/// sloping by `slope`, brought `reach` world units toward the eye.
+fn shadow_depth(
+    camera: &Perspective,
+    ground: [f64; 3],
+    slope: (f64, f64),
+    reach: f64,
+) -> DepthPlane {
+    let landed = |east: f64, south: f64| {
+        let point = camera.view([
+            ground[0] + east,
+            ground[1] + south,
+            ground[2] + east * slope.0 + south * slope.1,
+        ]);
+        let at = camera.project(point)?;
+        let nearer = mathf::fmax(point[2] - reach, camera.near());
+        Some((at.x, at.y, camera.depth(nearer)))
+    };
+    let corners = (landed(0.0, 0.0), landed(reach, 0.0), landed(0.0, reach));
+    let (Some(centre), Some(east), Some(south)) = corners else {
+        return DepthPlane::flat(Depth::NEAREST);
+    };
+    DepthPlane::through([centre, east, south]).unwrap_or(DepthPlane::flat(Depth::NEAREST))
 }
 
 /// Whether every figure a record describes is still drawn at a size the art
@@ -768,7 +846,7 @@ fn row(y: f64) -> i32 {
 }
 
 /// The surface rows a placed figure and its shadow can reach, half-open.
-fn reach(placement: &Placement, shadow: &[Placed]) -> (i32, i32) {
+fn reach_rows(placement: &Placement, shadow: &[Placed]) -> (i32, i32) {
     let unit = tairix_raster::surface::SUBPIXEL;
     let (mut top, mut bottom) = match placement.extent() {
         Some((_, top, _, bottom)) => (top.div_euclid(unit), bottom.div_euclid(unit) + 1),
@@ -796,9 +874,15 @@ fn footprint(staged: &Staged) -> Result<u16, FigureError> {
     /// finer than a world sub-unit.
     const SCALE: f64 = 64.0;
     let mut placement = Placement::new();
-    let rest = staged.plant(&Pose::REST, Breath::new(BREATH.0, BREATH.1)?, 0.0)?;
+    let rest = staged.plant(&Pose::REST, Breath::new(BREATH.0, BREATH.1)?, 0.0, |_| {
+        LEVEL
+    })?;
     // Facing the viewer, the width across the body is the screen's.
-    staged.place(&rest, Facing(0x4000), SCALE, (0.0, 0.0), &mut placement)?;
+    let lens = Lens::Oblique {
+        scale: SCALE,
+        at: (0.0, 0.0),
+    };
+    staged.place(&rest, Facing(0x4000), lens, &mut placement)?;
     let (left, _, right, _) = placement.extent().ok_or(FigureError::NoSuchJoint)?;
     let width = f64::from(right - left) / f64::from(tairix_raster::surface::SUBPIXEL) / SCALE;
     let radius = mathf::ceil(width * 0.5 * WORLD_SCALE);

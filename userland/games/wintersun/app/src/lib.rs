@@ -21,12 +21,16 @@ pub mod graphics;
 pub mod input;
 pub mod landfall;
 pub mod light;
+pub mod mesh;
 pub mod pacing;
 pub mod presets;
 pub mod quality;
+pub mod raster;
 pub mod reference;
 #[cfg(feature = "settings")]
 pub mod settings;
 pub mod shell;
 pub mod terrain;
+#[cfg(test)]
+mod testing;
 pub mod view;

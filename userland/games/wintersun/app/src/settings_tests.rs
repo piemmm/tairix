@@ -29,11 +29,18 @@ fn open(shown: Shown) -> SettingsWindow {
 
 /// A custom detail with every knob somewhere between its ends.
 const MIDDLING: Detail = Detail {
-    lighting: Lighting::Medium,
     shadows: Shadows::Hard,
     ground: MaterialQuality::new(3),
     resolution: Resolution::TwoThirds,
 };
+
+/// The row `knob` is listed on.
+fn row_of(knob: Knob) -> usize {
+    Knob::ALL
+        .iter()
+        .position(|listed| *listed == knob)
+        .expect("every knob is listed")
+}
 
 /// The rectangle the slider on knob row `row` is drawn and hit-tested in.
 fn slider_rect(window: &SettingsWindow, row: usize) -> Rect {
@@ -122,8 +129,11 @@ fn every_knob_setting_round_trips_through_its_slider() {
         for position in 0..knob.settings() {
             let detail = knob.set(Detail::FINEST, position);
             assert_eq!(knob.position(detail), position, "{knob:?} at {position}");
-            let permille = permille_of(position, knob.settings());
-            assert_eq!(position_of(permille, knob.settings()), position);
+            let slider = knob.slider(position);
+            assert_eq!(
+                slider.stop_of(slider.value()).map(usize::from),
+                Some(position)
+            );
         }
         assert_eq!(
             knob.position(Detail::FINEST),
@@ -141,7 +151,7 @@ fn every_knob_setting_round_trips_through_its_slider() {
 #[test]
 fn dragging_a_slider_previews_as_it_goes_and_settles_once() {
     let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
-    let slider = slider_rect(&window, 0);
+    let slider = slider_rect(&window, row_of(Knob::Shadows));
     let y = slider.top() + to_i32(slider.height / 2);
     let from = Point::new(slider.right() - 1, y);
     let through: Vec<Point> = (0..24)
@@ -170,17 +180,74 @@ fn dragging_a_slider_previews_as_it_goes_and_settles_once() {
     assert_eq!(
         asked.last(),
         Some(&Request::Settle(Graphics::Custom(Detail {
-            lighting: Lighting::Coarse,
+            shadows: Shadows::Flat,
             ..Detail::FINEST
         }))),
-        "dragged to the left end, the light is at its coarsest and nothing else moved"
+        "dragged to the left end, the shadows are at their plainest and nothing else moved"
+    );
+}
+
+/// Every pointer sample of a drag lands on some setting, but only a sample
+/// that crosses into a new one changes what the frame draws.
+#[test]
+fn a_drag_previews_once_for_each_setting_it_crosses() {
+    let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
+    let slider = slider_rect(&window, row_of(Knob::Shadows));
+    let y = slider.top() + to_i32(slider.height / 2);
+    let through: Vec<Point> = (0..48)
+        .map(|i| Point::new(slider.right() - 1 - i * to_i32(slider.width) / 48, y))
+        .collect();
+    let asked = drag(&mut window, Point::new(slider.right() - 1, y), &through);
+    let previews = asked
+        .iter()
+        .filter(|r| matches!(r, Request::Preview(_)))
+        .count();
+    assert_eq!(
+        previews,
+        Shadows::ALL.len() - 1,
+        "a drag across the shadows previewed {previews} times: {asked:?}"
+    );
+}
+
+/// A press entering a group gives the keyboard to the row pressed, and
+/// reports nothing of a row it never moved to.
+#[test]
+fn a_press_entering_a_group_reports_only_the_row_it_presses() {
+    let theme = theme();
+    let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
+    assert_ne!(
+        window.focus,
+        Focus::Group(KNOBS),
+        "the press must enter the group"
+    );
+    let pressed = row_of(Knob::Resolution);
+    let slider = slider_rect(&window, pressed);
+    let at = Point::new(slider.left() + 1, slider.top() + to_i32(slider.height / 2));
+    let mut sink = damage::sink();
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+    ] {
+        let _ = window.on_pointer(&event, SCALE, &theme, &mut sink);
+    }
+    assert_eq!(window.focus, Focus::Group(KNOBS));
+    assert_eq!(window.groups[KNOBS].focus(), Some(pressed));
+    let placed = window.place(SCALE, &theme);
+    let first = window.groups[KNOBS]
+        .row_rect(0, placed.groups[KNOBS], SCALE, &theme)
+        .expect("the first knob row is laid out");
+    assert!(
+        !sink.intersects(first),
+        "the press reported the first row's focus ring, which never moved there"
     );
 }
 
 #[test]
 fn a_slider_sits_on_the_setting_nearest_where_it_was_left() {
     let mut window = open(shown(Graphics::Ultra, Detail::FINEST));
-    let slider = slider_rect(&window, 0);
+    let slider = slider_rect(&window, row_of(Knob::Shadows));
     let y = slider.top() + to_i32(slider.height / 2);
     // Two fifths of the way along three settings is nearer the middle one.
     let at = Point::new(slider.left() + to_i32(slider.width * 2 / 5), y);
@@ -188,12 +255,12 @@ fn a_slider_sits_on_the_setting_nearest_where_it_was_left() {
     assert_eq!(
         asked.last(),
         Some(&Request::Settle(Graphics::Custom(Detail {
-            lighting: Lighting::Medium,
+            shadows: Shadows::Hard,
             ..Detail::FINEST
         })))
     );
     assert_eq!(
-        slider_value(&window, 0),
+        slider_value(&window, row_of(Knob::Shadows)),
         500,
         "the thumb was left between two settings"
     );
@@ -208,7 +275,7 @@ fn a_key_on_a_slider_steps_one_setting_and_settles() {
     assert_eq!(
         asked,
         Some(Request::Settle(Graphics::Custom(Detail {
-            lighting: Lighting::Medium,
+            shadows: Shadows::Hard,
             ..Detail::FINEST
         })))
     );
@@ -281,7 +348,7 @@ fn showing_what_is_shown_reports_nothing_and_one_knob_reports_its_row() {
     );
     let placed = window.place(SCALE, &theme);
     let row = window.groups[KNOBS]
-        .row_rect(1, placed.groups[KNOBS], SCALE, &theme)
+        .row_rect(row_of(Knob::Shadows), placed.groups[KNOBS], SCALE, &theme)
         .expect("the shadows row is laid out");
     assert_eq!(
         sink.bounds(),
@@ -347,7 +414,7 @@ fn a_render_below_the_readable_floor_says_so() {
         detail: plain,
         readable: Resolution::FourFifths,
     });
-    let row = &window.groups[KNOBS].rows()[3];
+    let row = &window.groups[KNOBS].rows()[row_of(Knob::Resolution)];
     assert!(
         row.description()
             .is_some_and(|d| d.contains("may not read clearly")),

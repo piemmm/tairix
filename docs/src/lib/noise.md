@@ -21,7 +21,10 @@ is `no_std`, allocation-free and forbids `unsafe`.
   folds each octave at nought and weights it by the crest beneath, so ridges
   branch as eroded mountains do; `billow2` folds each octave at nought
   without the weighting, so its crests round and its troughs crease, as sand
-  lies in dunes. `turbulence3` folds three-dimensional octaves into veins.
+  lies in dunes. Their `_fading` forms take each octave's gain from the
+  caller, so a relief leans to its longest waves below a half and to its
+  shortest above it. `turbulence3` folds three-dimensional octaves into
+  veins.
 - **Cellular noise.** `cells2` and `cells3` are Worley's: one jittered
   feature to a unit cell, the nearest two among the cells about a place and
   the way to the nearest, each feature's place drawn apart from the id it

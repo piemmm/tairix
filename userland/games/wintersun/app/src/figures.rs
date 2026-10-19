@@ -4,35 +4,38 @@
 //! # Placed on every core, painted on every band
 //!
 //! A figure's pose and placement are its own business, so every figure the
-//! view can see is posed and placed at once, one to a core. Painting is the
-//! frame's: each band draws every figure that reaches it, far to near,
+//! camera can see is posed and placed at once, one to a core. Painting is
+//! the frame's: each band draws every figure that reaches it, far to near,
 //! confined to its own rows, so a figure straddling two bands is two halves
 //! that meet exactly and no band waits on another.
 //!
-//! # Drawn over the light, veiled by the air
+//! # Drawn over the light, behind the land, veiled by the air
 //!
-//! The light buffer holds the ground's own relief shading, which is not a
-//! figure's light: a figure is shaded from its own surfaces by the same sun.
-//! So figures are drawn after the light composite, and each takes the mist
-//! at its feet as a veil, so a figure standing in a hollow is as misted as
-//! the ground around it.
+//! The composite lights the ground, which is not a figure's light: a figure
+//! is shaded from its own surfaces by the same sun. So figures are drawn
+//! after the composite, each strip hidden wherever the ground is nearer the
+//! eye than it — a hill hides the figure behind it, and water hides the legs
+//! of a figure wading — and each takes the fog and mist at its feet as a
+//! veil, so a figure far off or in a hollow is as veiled as the ground about
+//! it.
 
 use alloc::vec::Vec;
 
 use tairix_parallel::{for_each, JobRunner};
+use tairix_raster::mesh::{Depth, DepthBuffer};
 use tairix_raster::surface::RowBand;
-use tairix_wintersun_art::decal::Bounds;
-use tairix_wintersun_figure::actor::{Actor, Drawn, Shade, REACH};
+use tairix_raster::view::Perspective;
+use tairix_wintersun_figure::actor::{Actor, Drawn, Relief, Shade, REACH};
 use tairix_wintersun_figure::paint::{self, Brush, Veil};
 use tairix_wintersun_figure::rig::Placement;
 use tairix_wintersun_figure::shadow::Light;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
 use tairix_wintersun_rules::terrain::{cell_at, Terrain, TerrainCell};
-use tairix_wintersun_world::geom::{CELL_SUB_UNITS, ELEVATION_SUB_UNITS};
 
-use crate::camera;
 use crate::error::ClientError;
-use crate::light::{LightBuffer, Sky};
+use crate::light::Atmosphere;
+use crate::mesh::WORLD_PER_ELEVATION;
+use crate::terrain::VIEW_RANGE;
 
 /// One figure of the scene: whose it is, the actor playing it, and where it
 /// stands.
@@ -99,16 +102,6 @@ impl<'a> Figure<'a> {
         self.ground = to;
     }
 }
-
-/// World sub-units per elevation sub-unit: a height carried into the units
-/// the world's positions are stated in.
-const WORLD_PER_ELEVATION: i32 = {
-    assert!(
-        CELL_SUB_UNITS % ELEVATION_SUB_UNITS == 0,
-        "a whole number of world sub-units to an elevation one"
-    );
-    CELL_SUB_UNITS / ELEVATION_SUB_UNITS
-};
 
 /// How deep the water a body standing at `at` is in, in world sub-units: the
 /// rules' own depth at its cell, and none where the ground is not held.
@@ -189,15 +182,11 @@ impl<'a> Cast<'a> {
     }
 }
 
-/// How the view a frame's figures are placed into sits over the world.
+/// How a frame's figures are seen and lit.
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct Framing {
-    /// The world point the render target's top-left pixel samples.
-    pub origin: WorldPoint,
-    /// World sub-units a render pixel.
-    pub step: i32,
-    /// The world extent the view covers.
-    pub visible: Bounds,
+pub(crate) struct Framing<'a> {
+    /// The view.
+    pub camera: &'a Perspective,
     /// The sun the figures are shaded by.
     pub light: Light,
     /// How their contact shadows are drawn.
@@ -210,7 +199,8 @@ struct Standing {
     placement: usize,
     drawn: Drawn,
     veil: Veil,
-    depth: (i32, i32, u64),
+    /// Its ground point's reciprocal depth and its id: nearest last.
+    order: (Depth, u64),
 }
 
 /// The buffers a frame's figures are placed and painted through, held
@@ -220,6 +210,8 @@ struct Standing {
 pub(crate) struct Stage {
     placements: Vec<Placement>,
     standing: Vec<Standing>,
+    /// Which of the cast the camera can see, by their place in it.
+    seen: Vec<usize>,
 }
 
 /// One figure's share of the placing, handed to a core.
@@ -230,35 +222,59 @@ struct Work<'s, 'a> {
 }
 
 impl Stage {
-    /// Pose and place every figure of `cast` that can reach the view, one to
-    /// a core, veil each by the mist at its feet, and order them far to near.
+    /// Pose and place every figure of `cast` the camera can see, one to a
+    /// core, each on the ground `relief` reports, veil each by the air at its
+    /// feet, and order them far to near.
     ///
-    /// A figure the actor cannot place is left out of the frame rather than
-    /// failing it: one figure is not worth a blank window.
+    /// A figure the actor cannot place — or one standing on ground the scene
+    /// does not hold — is left out of the frame rather than failing it: one
+    /// figure is not worth a blank window.
     ///
     /// # Errors
     ///
     /// [`ClientError::OutOfMemory`] where a placement buffer for another
     /// figure does not fit.
-    pub(crate) fn place(
+    pub(crate) fn place<R: Relief + Sync>(
         &mut self,
         cast: &Cast<'_>,
-        framing: &Framing,
-        light: &LightBuffer,
-        sky: Sky,
+        framing: &Framing<'_>,
+        relief: &R,
+        atmosphere: &Atmosphere,
         runner: &dyn JobRunner,
     ) -> Result<(), ClientError> {
+        let camera = framing.camera;
         let near = |figure: &Figure<'_>| {
             let at = figure.ground;
-            let reach = i64::from(REACH);
-            let inside = |value: i32, low: i32, high: i32| {
-                i64::from(value) >= i64::from(low) - reach
-                    && i64::from(value) <= i64::from(high) + reach
+            let Some(floor) = relief.height(at) else {
+                return false;
             };
-            inside(at.x, framing.visible.min_x, framing.visible.max_x)
-                && inside(at.y, framing.visible.min_y, framing.visible.max_y)
+            let corner = |at: i32, by: i32| f64::from(at.saturating_add(by));
+            camera.sees(
+                [
+                    corner(at.x, -REACH),
+                    corner(at.y, -REACH),
+                    corner(floor, -REACH),
+                ],
+                [
+                    corner(at.x, REACH),
+                    corner(at.y, REACH),
+                    corner(floor, REACH),
+                ],
+                f64::from(VIEW_RANGE),
+            )
         };
-        let wanted = cast.figures.iter().filter(|figure| near(figure)).count();
+        self.seen.clear();
+        self.seen
+            .try_reserve(cast.figures.len())
+            .map_err(|_| ClientError::OutOfMemory)?;
+        self.seen.extend(
+            cast.figures
+                .iter()
+                .enumerate()
+                .filter(|(_, figure)| near(figure))
+                .map(|(index, _)| index),
+        );
+        let wanted = self.seen.len();
         if self.placements.len() < wanted {
             self.placements
                 .try_reserve(wanted - self.placements.len())
@@ -269,11 +285,12 @@ impl Stage {
         let mut work: Vec<Work<'_, '_>> = Vec::new();
         work.try_reserve(wanted)
             .map_err(|_| ClientError::OutOfMemory)?;
-        let mut placements = self.placements.iter_mut();
-        for figure in cast.figures.iter().filter(|figure| near(figure)) {
-            let Some(placement) = placements.next() else {
-                break;
-            };
+        for (figure, placement) in self
+            .seen
+            .iter()
+            .filter_map(|&index| cast.figures.get(index))
+            .zip(self.placements.iter_mut())
+        {
             work.push(Work {
                 figure,
                 placement,
@@ -286,13 +303,14 @@ impl Stage {
                 .actor
                 .place(
                     item.figure.ground,
-                    framing.origin,
-                    framing.step,
+                    relief,
+                    camera,
                     framing.light,
                     framing.shade,
                     item.placement,
                 )
-                .ok();
+                .ok()
+                .filter(|_| !item.placement.is_empty());
         });
 
         self.standing.clear();
@@ -304,26 +322,32 @@ impl Stage {
                 continue;
             };
             let at = item.figure.ground;
-            let (x, y) = camera::pixel_of(framing.origin, framing.step, at);
+            let Some(floor) = relief.height(at) else {
+                continue;
+            };
+            let view = camera.view([f64::from(at.x), f64::from(at.y), f64::from(floor)]);
+            let depth = camera.vertex(view).map_or(Depth::CLEAR, |seen| seen.depth);
+            let elevation = i16::try_from(floor / WORLD_PER_ELEVATION).unwrap_or(i16::MAX);
             self.standing.push(Standing {
                 placement: index,
                 drawn,
                 veil: Veil {
-                    tone: sky.mist,
-                    amount: light.mist_at(x, y, sky),
+                    tone: atmosphere.veil_tone(),
+                    amount: atmosphere.veil(depth, elevation),
                 },
-                depth: (at.y, at.x, item.figure.id.0),
+                order: (depth, item.figure.id.0),
             });
         }
-        // Further up the screen is further from the viewer, and a tie is
-        // broken the same way every frame.
+        // Farther is a smaller reciprocal depth, and a tie is broken the same
+        // way every frame.
         self.standing
-            .sort_unstable_by_key(|standing| standing.depth);
+            .sort_unstable_by_key(|standing| standing.order);
         Ok(())
     }
 
-    /// Paint every placed figure that reaches `band` onto it, far to near.
-    pub(crate) fn paint(&self, band: &mut RowBand<'_>, brush: &mut Brush) {
+    /// Paint every placed figure that reaches `band` onto it, far to near,
+    /// hidden wherever `scene` holds ground nearer than it.
+    pub(crate) fn paint(&self, band: &mut RowBand<'_>, scene: &DepthBuffer, brush: &mut Brush) {
         let rows = band.rows();
         let (top, bottom) = (i64::from(rows.start), i64::from(rows.end));
         for standing in &self.standing {
@@ -334,15 +358,16 @@ impl Stage {
             let Some(placement) = self.placements.get(standing.placement) else {
                 continue;
             };
-            paint::ground(band, &standing.drawn.shadow, brush, standing.veil);
-            match standing.drawn.waterline {
-                Some(waterline) => {
-                    let above = u32::try_from(waterline.max(0)).unwrap_or(0);
-                    let mut dry = band.narrowed(rows.start..above);
-                    paint::figure(&mut dry, placement, brush, standing.veil);
-                }
-                None => paint::figure(band, placement, brush, standing.veil),
-            }
+            let drawn = &standing.drawn;
+            paint::ground_occluded(
+                band,
+                &drawn.shadow,
+                drawn.depth,
+                scene,
+                brush,
+                standing.veil,
+            );
+            paint::figure_occluded(band, placement, scene, brush, standing.veil);
         }
     }
 

@@ -1,146 +1,401 @@
-//! The lattice covers the view, unmapped ground is drawn as unmapped,
-//! and a road reaches the weight field.
+//! Which ground a view wants and in what order, what the held ground says
+//! the surface is, and that a road reaches the ground drawn.
+#![allow(
+    clippy::float_arithmetic,
+    reason = "a camera is placed through the perspective, which takes reals"
+)]
+
+use tairix_inline::ArrayVec;
+use tairix_raster::view::Perspective;
+use tairix_wintersun_art::decal::Fray;
+use tairix_wintersun_art::splat::Warp;
+use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
+use tairix_wintersun_world::chunk::Chunk;
+use tairix_wintersun_world::geom::{CELL_SUB_UNITS, CHUNK_CELLS};
+use tairix_wintersun_world::ground::Ground;
 
 use super::*;
-use tairix_parallel::SERIAL;
-use tairix_wintersun_world::chunk::ChunkBuild;
-use tairix_wintersun_world::land::{Keeping, RealmLand};
-use tairix_wintersun_world::params::{RealmParams, RealmSpec};
-use tairix_wintersun_world::realm::RealmField;
+use crate::mesh::{TerrainMesh, WORLD_PER_ELEVATION};
+use crate::testing::{chunk, land_of, realm, worn};
 
-fn realm() -> RealmParams {
-    RealmParams::new(RealmSpec {
-        extent_chunks: 8,
-        coarse_samples: 32,
-        plates: 8,
-        ..RealmParams::default_realm(0x7E57_5EED).spec()
-    })
-    .expect("the spec is in range")
+/// The middle of chunk `coord`.
+fn middle(coord: ChunkCoord) -> WorldPoint {
+    WorldPoint {
+        x: coord.x * CHUNK_SUB_UNITS + CHUNK_SUB_UNITS / 2,
+        y: coord.y * CHUNK_SUB_UNITS + CHUNK_SUB_UNITS / 2,
+    }
 }
 
-fn land_of(params: RealmParams) -> RealmLand {
-    RealmField::generate(params)
-        .and_then(|field| RealmLand::new(field, &SERIAL))
-        .expect("the realm generates")
+/// A camera above `at`, looking north and down.
+fn looking_north(at: WorldPoint) -> Perspective {
+    Perspective::new(
+        [f64::from(at.x), f64::from(at.y) + 30_000.0, 40_000.0],
+        [0.0, -0.6, -0.8],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.8, -0.6],
+        200.0,
+        (320, 180),
+        256.0,
+    )
+    .expect("a camera")
 }
 
-/// The ground a test's chunks are worn from: every block they share kept.
-fn worn() -> Keeping {
-    Keeping::within(usize::MAX)
+#[test]
+fn a_point_lies_in_the_chunk_whose_square_holds_it() {
+    assert_eq!(
+        chunk_at(WorldPoint { x: 0, y: 0 }),
+        ChunkCoord { x: 0, y: 0 }
+    );
+    assert_eq!(
+        chunk_at(WorldPoint { x: -1, y: -1 }),
+        ChunkCoord { x: -1, y: -1 }
+    );
+    assert_eq!(
+        chunk_at(WorldPoint {
+            x: CHUNK_SUB_UNITS,
+            y: CHUNK_SUB_UNITS - 1
+        }),
+        ChunkCoord { x: 1, y: 0 }
+    );
+    let coord = ChunkCoord { x: 2, y: -3 };
+    assert_eq!(distance_squared(coord, middle(coord)), 0);
+    let beside = WorldPoint {
+        x: 3 * CHUNK_SUB_UNITS + 10,
+        y: middle(coord).y,
+    };
+    assert_eq!(distance_squared(coord, beside), 100);
 }
 
-/// The chunk at `coord`, worn from what `worn` keeps.
-fn chunk(land: &RealmLand, worn: &mut Keeping, coord: ChunkCoord) -> Chunk {
-    ChunkBuild::new(coord)
-        .expect("a chunk fits")
-        .finish(land, worn, &SERIAL)
-        .expect("a chunk generates")
+#[test]
+fn held_ground_is_ordered_once_and_given_back_beyond_its_reach() {
+    let land = land_of(realm());
+    let mut kept = worn();
+    let coords = [
+        ChunkCoord { x: 1, y: 0 },
+        ChunkCoord { x: -1, y: 0 },
+        ChunkCoord { x: 0, y: 0 },
+    ];
+    let mut ground = HeldGround::new();
+    for coord in coords {
+        ground.adopt(chunk(&land, &mut kept, coord)).expect("room");
+        ground
+            .adopt_far(land.far(coord).expect("a patch"))
+            .expect("room");
+    }
+    ground
+        .adopt(chunk(&land, &mut kept, coords[0]))
+        .expect("room");
+    let held: alloc::vec::Vec<ChunkCoord> = ground.solved().iter().map(Chunk::coord).collect();
+    let mut sorted = coords.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(held, sorted, "held in coordinate order, each once");
+    assert_eq!(ground.far().len(), 3);
+
+    // Focused on the west chunk with a radius of nought, the east one is two
+    // chunks away and given back; the patches are all in view range.
+    let west = middle(coords[1]);
+    assert!(
+        ground.release_distant(west, 0, west),
+        "the east chunk was given back"
+    );
+    assert!(!ground.holds(coords[0]));
+    assert!(ground.holds(coords[1]) && ground.holds(coords[2]));
+    assert!(coords.iter().all(|coord| ground.holds_far(*coord)));
+    // An eye far beyond the view range gives every patch back.
+    let away = WorldPoint {
+        x: west.x + 20 * CHUNK_SUB_UNITS * 4,
+        y: west.y,
+    };
+    assert!(ground.release_distant(away, 0, away));
+    assert!(ground.far().is_empty());
+    assert!(
+        !ground.release_distant(away, 0, away),
+        "nothing left to give back"
+    );
 }
 
-fn chunks(land: &RealmLand, worn: &mut Keeping, visible: Bounds) -> alloc::vec::Vec<Chunk> {
-    visible_chunks(visible)
-        .filter(|c| land.field().params().holds_chunk(c.x, c.y))
-        .map(|coord| chunk(land, worn, coord))
-        .collect()
+#[test]
+fn the_nearest_unsolved_chunk_about_the_focus_is_asked_for_first() {
+    let params = realm();
+    let land = land_of(params);
+    let focus = middle(ChunkCoord { x: 0, y: 0 });
+    let mut ground = HeldGround::new();
+    assert_eq!(
+        ground.next_solve(params, focus, 1, &[]),
+        Some(ChunkCoord { x: 0, y: 0 }),
+        "the focus's own chunk first"
+    );
+    ground
+        .adopt(chunk(&land, &mut worn(), ChunkCoord { x: 0, y: 0 }))
+        .expect("room");
+    let next = ground
+        .next_solve(params, focus, 1, &[])
+        .expect("more to solve");
+    assert_eq!(
+        (next.x.abs() + next.y.abs()),
+        1,
+        "an edge neighbour before a corner"
+    );
+    let refused = [next];
+    assert_ne!(ground.next_solve(params, focus, 1, &refused), Some(next));
+    assert_eq!(
+        ground.next_solve(params, focus, 0, &[]),
+        None,
+        "nothing left at radius nought"
+    );
 }
 
-fn bounds(min_x: i32, min_y: i32, max_x: i32, max_y: i32) -> Bounds {
-    Bounds {
-        min_x,
-        min_y,
-        max_x,
-        max_y,
+#[test]
+fn far_ground_is_asked_for_only_where_the_camera_sees_and_nothing_covers_it() {
+    let params = realm();
+    let land = land_of(params);
+    let at = middle(ChunkCoord { x: 0, y: 1 });
+    let camera = looking_north(at);
+    let mut ground = HeldGround::new();
+    let first = ground.next_far(params, &camera, &[]);
+    assert!(!first.is_empty() && first.len() <= FAR_BATCH);
+    let eye = WorldPoint {
+        x: at.x,
+        y: at.y + 30_000,
+    };
+    let distances: alloc::vec::Vec<i64> = first
+        .iter()
+        .map(|coord| distance_squared(*coord, eye))
+        .collect();
+    assert!(
+        distances.windows(2).all(|pair| pair[0] <= pair[1]),
+        "nearest first"
+    );
+    for coord in &first {
+        assert!(params.holds_chunk(coord.x, coord.y));
+        assert!(
+            coord.y <= at.y.div_euclid(CHUNK_SUB_UNITS) + 1,
+            "behind the eye"
+        );
+    }
+    // Far ground held is not asked for again; solved ground still is, so its
+    // far reading is held when it is given back.
+    ground
+        .adopt(chunk(&land, &mut worn(), first[0]))
+        .expect("room");
+    ground
+        .adopt_far(land.far(first[1]).expect("a patch"))
+        .expect("room");
+    let refused: ArrayVec<ChunkCoord, 1> = {
+        let mut list = ArrayVec::new();
+        let _ = list.try_push(first[2]);
+        list
+    };
+    let second = ground.next_far(params, &camera, refused.as_slice());
+    assert!(
+        second.contains(&first[0]),
+        "solved ground's far reading was not asked for"
+    );
+    assert!(!second.contains(&first[1]));
+    assert!(
+        !second.contains(&first[2]),
+        "a refused chunk was asked for again"
+    );
+}
+
+#[test]
+fn a_chunks_box_holds_every_vertex_its_meshes_draw() {
+    let land = land_of(realm());
+    let coord = ChunkCoord { x: 1, y: -1 };
+    let solved = crate::testing::mesh(coord, 4, Ground::Meadow, |_, _| 0);
+    let patch = land.far(coord).expect("a patch");
+    let far = TerrainMesh::far(&patch, patch.step(), &[], &Fray::new(1), &Warp::new(1))
+        .expect("a far mesh");
+    let (low, high) = chunk_box(coord);
+    for mesh in [&solved, &far] {
+        for j in 0..mesh.side() {
+            for i in 0..mesh.side() {
+                let at = mesh.place(i, j);
+                let (x, y) = (f64::from(at.x), f64::from(at.y));
+                assert!(
+                    (low[0]..=high[0]).contains(&x) && (low[1]..=high[1]).contains(&y),
+                    "{at:?} lies outside its chunk's box"
+                );
+            }
+        }
+    }
+}
+
+/// Above `at`, looking straight up: a view that sees no ground at all.
+fn skyward(at: WorldPoint) -> Perspective {
+    Perspective::new(
+        [f64::from(at.x), f64::from(at.y), 1_000_000.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        500.0,
+        (640, 360),
+        1.0,
+    )
+    .expect("a view")
+}
+
+#[test]
+fn ground_with_no_room_is_asked_for_again_once_relieved_and_never_refused() {
+    let params = realm();
+    let at = middle(ChunkCoord { x: 0, y: 1 });
+    let camera = looking_north(at);
+    let mut holding = Holding::new();
+    let Some(Ask::Far(first)) = holding.next_ask(params, &camera, at) else {
+        panic!("far ground is asked for first");
+    };
+    let short_far = Made::Far {
+        patches: Vec::new(),
+        refused: Vec::new(),
+        short: true,
+    };
+    assert!(holding.take(short_far).is_some(), "the shortfall is said");
+    assert!(
+        matches!(holding.next_ask(params, &camera, at), Some(Ask::Solve(_))),
+        "chunks are still solved while far ground has no room"
+    );
+    assert!(holding.take(Made::Short).is_some());
+    assert_eq!(
+        holding.next_ask(params, &camera, at),
+        None,
+        "nothing is asked with no room"
+    );
+    assert!(holding.take(Made::Short).is_none(), "said once");
+    holding.relieve();
+    assert_eq!(
+        holding.next_ask(params, &camera, at),
+        Some(Ask::Far(first)),
+        "a shortfall refused nothing"
+    );
+}
+
+#[test]
+fn a_chunk_the_generator_refused_is_never_asked_for_again() {
+    let params = realm();
+    let at = middle(ChunkCoord { x: 0, y: 1 });
+    let camera = looking_north(at);
+    let short_far = || Made::Far {
+        patches: Vec::new(),
+        refused: Vec::new(),
+        short: true,
+    };
+    let mut holding = Holding::new();
+    let _ = holding.take(short_far());
+    let Some(Ask::Solve(first)) = holding.next_ask(params, &camera, at) else {
+        panic!("a chunk is asked for");
+    };
+    assert!(holding.take(Made::Refused(first)).is_some());
+    assert!(holding.take(Made::Refused(first)).is_none(), "said once");
+    holding.relieve();
+    let _ = holding.take(short_far());
+    assert_ne!(
+        holding.next_ask(params, &camera, at),
+        Some(Ask::Solve(first))
+    );
+}
+
+#[test]
+fn ground_off_the_realm_is_refused_rather_than_short() {
+    let land = land_of(realm());
+    let off = ChunkCoord {
+        x: i32::MAX / 4,
+        y: 0,
+    };
+    assert!(matches!(
+        Made::solved(off, &land, &mut worn()),
+        Made::Refused(coord) if coord == off
+    ));
+    let Made::Far {
+        patches,
+        refused,
+        short,
+    } = Made::far(&[off], &land)
+    else {
+        panic!("far ground answers as far ground");
+    };
+    assert!(patches.is_empty() && refused == [off] && !short);
+}
+
+#[test]
+fn a_scan_that_found_nothing_is_made_again_once_the_view_moves() {
+    let params = realm();
+    let away = WorldPoint {
+        x: i32::MAX / 2,
+        y: i32::MAX / 2,
+    };
+    let mut holding = Holding::new();
+    assert_eq!(holding.next_ask(params, &skyward(away), away), None);
+    let at = middle(ChunkCoord { x: 0, y: 1 });
+    assert!(matches!(
+        holding.next_ask(params, &looking_north(at), away),
+        Some(Ask::Far(_))
+    ));
+}
+
+#[test]
+fn held_ground_says_the_surface_is_where_its_cells_put_it() {
+    let land = land_of(realm());
+    let coord = ChunkCoord { x: 0, y: 0 };
+    let solved = chunk(&land, &mut worn(), coord);
+    let mut ground = HeldGround::new();
+    assert_eq!(ground.height_at(middle(coord)), None, "nothing held");
+    ground
+        .adopt_far(land.far(coord).expect("a patch"))
+        .expect("room");
+    let far = ground
+        .height_at(middle(coord))
+        .expect("the patch covers it");
+    let mesh = TerrainMesh::far(
+        &ground.far()[0],
+        ground.far()[0].step(),
+        &[],
+        &Fray::new(1),
+        &Warp::new(1),
+    )
+    .expect("it builds");
+    assert_eq!(
+        Some(far),
+        mesh.height_at(middle(coord)),
+        "the patch and its mesh agree"
+    );
+
+    ground.adopt(solved).expect("room");
+    let half = CELL_SUB_UNITS / 2;
+    let last = i32::try_from(CHUNK_CELLS).expect("a chunk's width") - 1;
+    for (dx, dy) in [(0, 0), (5, 9), (last, 3)] {
+        let at = WorldPoint {
+            x: dx * CELL_SUB_UNITS + half,
+            y: dy * CELL_SUB_UNITS + half,
+        };
+        let water = ground.solved()[0]
+            .water_beside(dx, dy)
+            .expect("in the chunk");
+        assert_eq!(
+            ground.height_at(at),
+            Some(i32::from(water.0) * WORLD_PER_ELEVATION)
+        );
     }
 }
 
 #[test]
-fn visible_chunks_are_produced_in_window_order() {
-    let coords: alloc::vec::Vec<_> = visible_chunks(bounds(-5_000, -5_000, 5_000, 5_000)).collect();
-    assert!(!coords.is_empty());
-    assert!(
-        coords.is_sorted(),
-        "the window is binary-searched, so its order is the coordinate's"
-    );
-    let unique: alloc::collections::BTreeSet<_> = coords.iter().collect();
-    assert_eq!(unique.len(), coords.len(), "a chunk was listed twice");
+fn a_distant_mesh_is_drawn_coarser_and_never_coarser_than_a_chunk() {
+    let focal = 770;
+    assert_eq!(stride_for(0, focal), 1);
+    assert_eq!(stride_for(i64::from(24 * CELL_SUB_UNITS), focal), 1);
+    let mut last = 1;
+    for metres in [100, 300, 1_000, 3_000, 100_000] {
+        let stride = stride_for(i64::from(metres) * i64::from(CELL_SUB_UNITS), focal);
+        assert!(stride >= last && stride.is_power_of_two() && stride <= CHUNK_CELLS);
+        last = stride;
+    }
+    assert_eq!(last, CHUNK_CELLS);
+    // A wider screen sees finer detail at the same distance.
+    let far = i64::from(1_000 * CELL_SUB_UNITS);
+    assert!(stride_for(far, focal * 4) < stride_for(far, focal));
 }
 
 #[test]
-fn the_visible_chunks_cover_every_lattice_sample_the_pass_reads() {
-    let land = land_of(realm());
-    let mut worn = worn();
-    let visible = bounds(-3_000, -3_000, 3_000, 3_000);
-    let held = chunks(&land, &mut worn, visible);
-    let borrowed: alloc::vec::Vec<_> = held.iter().collect();
-    let window = ChunkWindow::new(&borrowed).expect("generated in order");
-    let mut grid = TerrainGrid::new();
-    grid.rebuild(&window, visible, &[], &Fray::new(1))
-        .expect("the grid fits");
-    assert_eq!(
-        grid.unmapped(),
-        0,
-        "the chunk enumeration missed ground the lattice reads"
-    );
-}
-
-#[test]
-fn a_lattice_covers_one_sample_past_each_edge() {
-    let land = land_of(realm());
-    let mut worn = worn();
-    let visible = bounds(0, 0, 0, 0);
-    let held = chunks(&land, &mut worn, visible);
-    let borrowed: alloc::vec::Vec<_> = held.iter().collect();
-    let window = ChunkWindow::new(&borrowed).expect("generated in order");
-    let mut grid = TerrainGrid::new();
-    grid.rebuild(&window, visible, &[], &Fray::new(1))
-        .expect("the grid fits");
-    let (cols, rows) = grid.extent();
-    assert!(
-        cols >= 2 && rows >= 2,
-        "a single-pixel view still needs a pair to interpolate between"
-    );
-}
-
-#[test]
-fn ground_with_no_resident_chunk_is_drawn_as_unmapped() {
-    let empty: [&tairix_wintersun_world::chunk::Chunk; 0] = [];
-    let window = ChunkWindow::new(&empty).expect("an empty window is sorted");
-    let visible = bounds(0, 0, 4_000, 4_000);
-    let mut grid = TerrainGrid::new();
-    grid.rebuild(&window, visible, &[], &Fray::new(1))
-        .expect("the grid fits");
-    let (cols, rows) = grid.extent();
-    assert_eq!(
-        grid.unmapped(),
-        cols * rows,
-        "every sample should be missing"
-    );
-    assert_eq!(grid.ground(0, 0), None);
-    assert_eq!(grid.grounds().count(), 0);
-
-    // And the pass draws it rather than failing or guessing.
-    let warp = Warp::new(1);
-    let params = realm();
-    let quality = Quality::FULL;
-    let cache = MaterialCache::new("terrain-unmapped-test", 1 << 20, &PRESSURE, &SINK);
-    let _ = params;
-    let pass = Pass {
-        warp: &warp,
-        cache: &cache,
-        quality,
-        step: 32,
-        origin: WorldPoint { x: 0, y: 0 },
-    };
-    let mut row = [Pixel::TRANSPARENT; 64];
-    paint_row(&mut row, &grid, &pass, 0);
-    assert!(
-        row.iter().all(|p| *p == UNMAPPED.premultiply()),
-        "unmapped ground was drawn as something else"
-    );
-}
-
-#[test]
-fn a_road_reaches_the_weight_field() {
+fn a_road_reaches_the_ground_drawn() {
     // The reference realm, because a realm as small as the others here places
     // no settlements to route a road between.
     let params = crate::reference::params().expect("the reference realm is in range");
@@ -156,147 +411,42 @@ fn a_road_reaches_the_weight_field() {
         .and_then(|road| road.path.first())
         .and_then(|cell| cell.centre())
         .expect("a road has a first cell");
-    let visible = bounds(
-        on_road.x - 2_000,
-        on_road.y - 2_000,
-        on_road.x + 2_000,
-        on_road.y + 2_000,
-    );
-    let held = chunks(&land, &mut worn(), visible);
-    let borrowed: alloc::vec::Vec<_> = held.iter().collect();
-    let window = ChunkWindow::new(&borrowed).expect("generated in order");
-
-    let mut bare = TerrainGrid::new();
-    bare.rebuild(&window, visible, &[], &fray)
-        .expect("the grid fits");
-    let mut paved = TerrainGrid::new();
-    paved
-        .rebuild(&window, visible, &decals, &fray)
-        .expect("the grid fits");
-
-    let (col, row) = paved.lattice_at(on_road).expect("the road is in view");
-    let index = paved.index(col, row).expect("inside the lattice");
-    let gravel = |grid: &TerrainGrid| grid.weights[index].weight_of(Ground::Gravel);
+    let solved = chunk(&land, &mut worn(), chunk_at(on_road));
+    let bare = TerrainMesh::solved(&solved, 1, &[], &fray, &Warp::new(1)).expect("it builds");
+    let paved = TerrainMesh::solved(&solved, 1, &decals, &fray, &Warp::new(1)).expect("it builds");
+    let quad = |mesh: &TerrainMesh| {
+        let origin = mesh.origin();
+        let (i, j) = (
+            u32::try_from((on_road.x - origin.x).div_euclid(mesh.spacing())).expect("inside"),
+            u32::try_from((on_road.y - origin.y).div_euclid(mesh.spacing())).expect("inside"),
+        );
+        mesh.plan(i.min(mesh.side() - 2), j.min(mesh.side() - 2))
+            .expect("a quad")
+            .grounds()
+            .any(|ground| ground == Ground::Gravel)
+    };
     assert!(
-        gravel(&bare) < ROAD_COVERAGE,
+        !quad(&bare),
         "the road starts on gravel already, so it would prove nothing"
     );
-    assert!(
-        gravel(&paved) >= ROAD_COVERAGE,
-        "the road's centreline carries {} gravel of the road's {ROAD_COVERAGE}",
-        gravel(&paved)
-    );
-    assert!(paved.grounds().any(|ground| ground == Ground::Gravel));
+    assert!(quad(&paved), "the road did not reach its quad");
 }
 
 #[test]
-fn the_mip_coarsens_as_the_camera_pulls_back() {
-    let mut last = None;
-    for step in [8, 16, 32, 64, 128] {
-        let mip = mip_for(Ground::Granite, step);
-        if let Some(previous) = last {
-            assert!(
-                mip.level() >= previous,
-                "pulling back to {step} sub-units a pixel chose a finer mip"
-            );
-        }
-        last = Some(mip.level());
-    }
-}
-
-/// A sink the terrain tests do not read.
-struct Quiet;
-
-impl tairix_log::Sink for Quiet {
-    fn write_event(&self, _: &tairix_log::Event<'_>) {}
-}
-
-static SINK: Quiet = Quiet;
-static PRESSURE: tairix_reclaim::ReportedPressure = tairix_reclaim::ReportedPressure::unknown();
-
-#[test]
-fn the_ground_worth_holding_is_the_view_and_a_chunk_around_it() {
-    let visible = bounds(-5_000, -5_000, 5_000, 5_000);
-    let needed: alloc::vec::Vec<_> = visible_chunks(visible).collect();
-    assert!(
-        needed.iter().all(|coord| worth_holding(*coord, visible)),
-        "the view gave away ground it draws"
-    );
-    let (min_x, max_x) = (
-        needed.iter().map(|c| c.x).min().expect("a chunk"),
-        needed.iter().map(|c| c.x).max().expect("a chunk"),
-    );
-    let y = needed[0].y;
-    assert!(worth_holding(ChunkCoord { x: max_x + 1, y }, visible));
-    assert!(worth_holding(ChunkCoord { x: min_x - 1, y }, visible));
-    assert!(!worth_holding(ChunkCoord { x: max_x + 2, y }, visible));
-    assert!(!worth_holding(ChunkCoord { x: min_x, y: y - 2 }, visible));
-    // At the coordinate extremes the margin saturates rather than wrapping.
-    let edge = bounds(i32::MIN, i32::MIN, i32::MIN + 1, i32::MIN + 1);
-    assert!(!worth_holding(
-        ChunkCoord {
-            x: i32::MAX,
-            y: i32::MAX
-        },
-        edge
-    ));
-}
-
-/// Held ground is kept in coordinate order however it arrives, a chunk
-/// adopted twice is held once, and a view that moves away gives back what it
-/// no longer needs while keeping what it still draws.
-#[test]
-fn held_ground_is_ordered_deduplicated_and_trimmed_to_the_view() {
-    let land = land_of(realm());
-    let mut worn = worn();
-    let near = bounds(-2_000, -2_000, 2_000, 2_000);
-    let mut arrived = chunks(&land, &mut worn, near);
-    assert!(arrived.len() > 2, "the view spans several chunks");
-    let coords: alloc::vec::Vec<_> = arrived.iter().map(Chunk::coord).collect();
-    arrived.reverse();
-
-    let mut ground = HeldGround::new();
-    for chunk in arrived {
-        ground.adopt(chunk).expect("room to hold it");
-    }
-    let again = chunk(&land, &mut worn, coords[0]);
-    ground.adopt(again).expect("room to hold it");
-    let held: alloc::vec::Vec<_> = ground
-        .borrow()
-        .expect("room to borrow")
-        .iter()
-        .map(|chunk| chunk.coord())
-        .collect();
-    assert_eq!(held, coords, "held in coordinate order, each once");
-    assert!(ChunkWindow::new(&ground.borrow().expect("room")).is_ok());
-
-    let far = bounds(900_000, 900_000, 902_000, 902_000);
-    ground.release_distant(far);
-    assert!(coords.iter().all(|coord| !ground.holds(*coord)));
-    for chunk in chunks(&land, &mut worn, near) {
-        ground.adopt(chunk).expect("room to hold it");
-    }
-    ground.release_distant(near);
-    assert!(coords.iter().all(|coord| ground.holds(*coord)));
-}
-
-#[test]
-fn a_solve_in_flight_reaches_the_loop_however_often_it_asks() {
+fn an_ask_in_flight_reaches_the_loop_however_often_the_loop_asks() {
     let mut desk = ChunkDesk::new();
-    let wanted = ChunkCoord { x: 3, y: -2 };
-    assert!(desk.ask(wanted), "an idle worker is woken");
-    assert_eq!(desk.next_job(), Some(wanted));
-
-    // Frames pass while the worker solves, and each asks again for the
-    // ground it still has not got — or, once the view has moved, for other
-    // ground.
+    let wanted = Ask::Solve(ChunkCoord { x: 3, y: -2 });
+    assert!(desk.ask(wanted.clone()), "an idle worker is woken");
+    assert_eq!(desk.next_job(), Some(wanted.clone()));
     for _ in 0..3 {
-        assert!(!desk.ask(wanted), "no ask is taken during a solve");
+        assert!(
+            !desk.ask(wanted.clone()),
+            "no ask is taken while one is made"
+        );
     }
-    assert!(!desk.ask(ChunkCoord { x: 4, y: -2 }));
-
-    assert!(desk.deliver(wanted), "the solve is kept");
-    assert_eq!(desk.collect(), Some(wanted));
+    assert!(!desk.ask(Ask::Far(ArrayVec::new())));
+    assert!(desk.deliver(1u8), "the answer is kept");
+    assert_eq!(desk.collect(), Some(1));
     assert_eq!(
         desk.next_job(),
         None,
@@ -305,35 +455,47 @@ fn a_solve_in_flight_reaches_the_loop_however_often_it_asks() {
 }
 
 #[test]
+fn an_answer_waiting_is_collected_before_another_ask_is_taken() {
+    let mut desk = ChunkDesk::<u8>::new();
+    let (first, second) = (
+        Ask::Solve(ChunkCoord { x: 0, y: 0 }),
+        Ask::Solve(ChunkCoord { x: 1, y: 0 }),
+    );
+    assert!(desk.ask(first.clone()));
+    assert_eq!(desk.next_job(), Some(first));
+    assert!(desk.deliver(1));
+    assert!(
+        !desk.ask(second.clone()),
+        "a second answer would replace the first before it is collected"
+    );
+    assert_eq!(desk.next_job(), None);
+    assert_eq!(desk.collect(), Some(1));
+    assert!(desk.ask(second.clone()));
+    assert_eq!(desk.next_job(), Some(second));
+}
+
+#[test]
 fn an_ask_not_yet_taken_gives_way_to_the_next() {
-    let mut desk = ChunkDesk::<ChunkCoord>::new();
-    let far = ChunkCoord { x: 9, y: 9 };
-    let near = ChunkCoord { x: 0, y: 1 };
+    let mut desk = ChunkDesk::<u8>::new();
+    let far = Ask::Solve(ChunkCoord { x: 9, y: 9 });
+    let near = Ask::Solve(ChunkCoord { x: 0, y: 1 });
     assert!(desk.ask(far));
-    assert!(desk.ask(near));
+    assert!(desk.ask(near.clone()));
     assert_eq!(desk.next_job(), Some(near));
     assert_eq!(desk.next_job(), None);
 }
 
 #[test]
-fn the_next_ask_is_taken_once_a_solve_has_landed() {
-    let mut desk = ChunkDesk::new();
-    let first = ChunkCoord { x: 0, y: 0 };
-    let second = ChunkCoord { x: 1, y: 0 };
-    assert!(desk.ask(first));
-    assert_eq!(desk.next_job(), Some(first));
-    assert!(!desk.ask(second));
-    assert!(desk.deliver(first));
-    assert!(desk.ask(second));
-    assert_eq!(desk.next_job(), Some(second));
-    assert_eq!(desk.collect(), Some(first));
+fn a_stopped_desk_hands_out_nothing() {
+    let mut desk = ChunkDesk::<u8>::new();
+    desk.stop();
+    assert!(desk.stopping());
+    assert!(!desk.ask(Ask::Solve(ChunkCoord { x: 0, y: 0 })));
+    assert_eq!(desk.next_job(), None);
 }
 
 #[test]
-fn a_stopped_desk_hands_out_nothing() {
-    let mut desk = ChunkDesk::<ChunkCoord>::new();
-    desk.stop();
-    assert!(desk.stopping());
-    assert!(!desk.ask(ChunkCoord { x: 0, y: 0 }));
-    assert_eq!(desk.next_job(), None);
+fn ground_past_any_distance_is_drawn_at_the_coarsest_stride() {
+    assert_eq!(stride_for(i64::MAX, 1 << 20), CHUNK_CELLS);
+    assert_eq!(stride_for(0, 1), 1, "underfoot is the finest");
 }

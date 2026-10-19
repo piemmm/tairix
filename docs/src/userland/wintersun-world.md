@@ -104,17 +104,28 @@ else below the coarse step it adds from a fixed ring of cells:
    tracer's land generator at its *Maximum*, through a level across the whole
    realm and a level at the cells (`docs/src/lib/land.md`). Its detail is in
    *absolute* world units (texture does not scale with the realm the way
-   structure does), ridged inside belts, billowed into dunes where it is dry
-   and fading into the sea floor, and it is worn by droplets from blocks of
-   ground a store keeps, the piece exactly as the realm worn whole. A chunk off
-   the realm's land is refused.
+   structure does), and its character is chosen from what the classifier reads
+   before any fine relief exists — the belt, the climate, the rock and the
+   drainage — never from the biome, which reads the fine relief's slope.
+   Mountain belts ridge; ground too cold in summer for trees heaves into frost
+   hummocks, or breaks into rubble where it is steep or belted; drained
+   bottoms, wet flats and salt pans lie near level, a bog studded with
+   tussocks; soft rock in a dry climate rills into badlands; dry sand dunes;
+   grassland rolls in long swells while an ice sheet lies smooth; and a steep
+   face of hard rock sheds rubble below it. Ground the realm holds dry is never
+   sunk below the sea beside it. It fades into the sea floor and is worn by
+   droplets from blocks of ground a store keeps, the piece exactly as the realm
+   worn whole. A chunk off the realm's land is refused.
 2. **Water** — channels carved along the coarse drainage, widening with
    discharge; standing water only where the coarse field holds it — a hollow
    in the fine relief on dry ground is texture, not a basin. The sea stands
    at sea level and a lake at the coarse surface, and a cell is the sea's
    where the coarse water about it mostly is. Then the shore distance is
    measured.
-3. **Structures** — settlements levelled and roads laid.
+3. **Structures** — settlements levelled and roads laid. A settlement pulls
+   its ground toward its grade but keeps a quarter of the natural relief where
+   it levels hardest (`chunk::SETTLEMENT_RELIEF_KEPT`), so worked ground still
+   reads as ground.
 4. **Climate** — the coarse values corrected for the fine relief's departure
    from the coarse one.
 5. **Biome** — the biome blend and the ground blend it grows.
@@ -125,7 +136,23 @@ Scatter is last because it reads the structure stamp: nothing grows on a road.
 The build is a resumable phase machine, its relief one phase that refines the
 chunk's ground whole, and the partially-built chunk is readable throughout. A
 client solves chunks on a worker of its own, so no frame waits on generation,
-and draws the coarse ground it already has meanwhile.
+and draws the coarse ground it already has meanwhile. A chunk keeps its heights
+`chunk::APRON_CELLS` and its blends `chunk::GROUND_APRON_CELLS` past each edge
+(`elevation_beside`, `water_beside`, `ground_beside`), so a mesh of it is drawn
+and lit across a seam without its neighbour.
+
+## Far patches
+
+A view across a valley reaches far more chunks than a client can solve, so
+`far::FarPatch` is a chunk's ground at level 0's own step (`RealmLand::far_step`,
+eight cells where it divides a chunk): each vertex's surface — water where
+water stands — and the grounds it shows, classified by the chunk's own
+classifier and coloured by its palette from every condition but the fine
+relief's. It costs a fraction of a millisecond. It is coarser than a chunk, not
+a different world, and a solved chunk replaces it where it lies. Every vertex is
+a pure function of its cell and its four neighbours, and a patch keeps a
+one-vertex halo of them (`surface_beside`), so two patches agree along their
+seam and a slope read at an edge is the one read from either side.
 
 ## The halo, and why it is exactly as wide as it is
 

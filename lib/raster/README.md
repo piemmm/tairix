@@ -104,6 +104,36 @@ This crate owns:
   producing no anti-aliased fringe at all, while a diagonal keeps sub-pixel
   placement and stays smooth. The shape is *placed*, not stretched, so a glyph
   needs no square scratch surface and blit to position it.
+- `Canvas::fill_polygon_subpixel_occluded` / `shape::fill_occluded` /
+  `mesh::Occlusion` / `mesh::DepthPlane` — the same fill hidden wherever a depth buffer holds
+  something nearer than the polygon's own plane of reciprocal depth: how a
+  figure is drawn behind the ground a scene drew first. The buffer is read and
+  never written.
+- `mesh` — depth-tested triangle meshes, as a GPU draws one without
+  multisampling: a pixel belongs to a triangle when its centre does, by the
+  converter's own crossings and tie rule, so triangles sharing an edge own
+  every centre along it exactly once. `Depth` is a reversed reciprocal —
+  larger nearer, `Depth::CLEAR` beyond anything drawn — which is affine across
+  the screen, so it interpolates exactly and is the perspective weight a
+  fragment's `Weights` are taken from. A `Triangle` is set up once and filled
+  into any band of a `DepthBuffer` cut as a surface's rows are, under a
+  `DepthTest`, handing each fragment that passes to the caller's shader and
+  recording, if asked (`EdgeRecord`), how near its triangle's edge lies — what
+  a silhouette pass resolves against. Coverage is integer; the depth and
+  weight planes are `f64` set up once per triangle and evaluated in a fixed
+  order, so a mesh draws the same pixels on every target.
+- `view::Perspective` — the view a mesh is seen through: world points into
+  view space from an eye and an orthonormalised basis, projected onto the
+  converter's sub-unit grid with their reciprocal depth (`vertex`, which
+  refuses exactly the corners the clip would cut, so a triangle is drawn whole
+  only where the clip would leave it whole); a triangle clipped (`clip`) to the
+  near plane and a guard band its corners may project into, each cut from its
+  edge's inside end so two triangles sharing the edge cut it at the same point
+  and stay watertight, every remaining corner projected and carrying its share
+  of the triangle's own; a box tested against the view to a reach (`sees`),
+  culling a tall box standing behind the eye too; and the ray through a pixel.
+  Set up and evaluated in `f64` with nothing fused, so a point projects to the
+  same bits on every target.
 - `Surface::row_bands_mut` / `RowBand` / `Canvas` — a surface split into bands
   of whole rows, each borrowed exclusively, so a per-row pass runs on several
   cores at once; every band carries the surface's width and clip window, so it

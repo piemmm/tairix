@@ -15,7 +15,7 @@ use crate::humanoid;
 use crate::identity::{Identity, Setting};
 use crate::motion::{self, Kind};
 use crate::pose::Param;
-use crate::reference::{self, Cell, Reference, Staged, BREATH, FACINGS, SIDES};
+use crate::reference::{self, Cell, Reference, Staged, BREATH, FACINGS, LEVEL, SIDES};
 use crate::rig::{Placement, Strip};
 use crate::socket::Side;
 use crate::species::Species;
@@ -292,6 +292,7 @@ fn choosing_a_clip_fades_into_it_and_then_plays_it_alone() {
             &run.sample(phase).expect("in the clip"),
             breath,
             run.root_at(phase),
+            |_| LEVEL,
         )
         .expect("it plants");
     assert_eq!(preview.planted().expect("it poses"), alone);

@@ -50,9 +50,9 @@ impl Machine {
         Self { busy, ..self }
     }
 
-    /// What a frame at `ladder` in `window` costs it: each lighting and
-    /// shadow notch a twenty-fifth cheaper a pixel, and the render scale
-    /// cheaper by the pixels it drops.
+    /// What a frame at `ladder` in `window` costs it: each shadow notch a
+    /// twenty-fifth cheaper a pixel, and the render scale cheaper by the
+    /// pixels it drops.
     fn frame(self, ladder: Ladder, window: (u32, u32)) -> FrameTimes {
         let pixels = render_pixels(window, ladder).expect("a window with pixels");
         let shed = u64::from(ladder.step().min(4));
@@ -205,7 +205,7 @@ fn a_busy_machine_that_has_drawn_this_well_holds_on_for_seconds() {
     sim.run(machine.busy(180), 3 * NS_PER_SEC);
     let moves = sim.moves_since(busy_from);
     assert_eq!(moves.len(), 1, "one notch, and only one: {moves:?}");
-    assert_eq!(moves[0].1.rung(), Rung::LightResolution);
+    assert_eq!(moves[0].1.rung(), Rung::ShadowSoftness);
 }
 
 #[test]

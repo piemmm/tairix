@@ -20,6 +20,7 @@
 //! wall-clock budget.
 
 use tairix_fuzzseed::Prng;
+use tairix_wintersun_figure::frame::Lens;
 use tairix_wintersun_figure::humanoid::{self, BODY_PARTS, MOST_PARTS};
 use tairix_wintersun_figure::identity::{Identity, RECORD_LEN, RECORD_VERSION};
 use tairix_wintersun_figure::pose::Pose;
@@ -61,7 +62,11 @@ fn exercise(bytes: &[u8], placement: &mut Placement) {
     assert!((BODY_PARTS..=MOST_PARTS).contains(&rig.parts().len()));
     let rigging = humanoid::rigging(&rig).expect("it binds");
     let light = Reference::light().expect("a real light");
-    let stance = Stance::new(Facing(0x6000), 1.0, (40.0, 90.0), light).expect("a real stance");
+    let lens = Lens::Oblique {
+        scale: 1.0,
+        at: (40.0, 90.0),
+    };
+    let stance = Stance::new(Facing(0x6000), lens, light).expect("a real stance");
     rigging
         .posture(&Pose::REST)
         .expect("rest is posturable")

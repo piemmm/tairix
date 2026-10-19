@@ -10,7 +10,7 @@ use tairix_wintersun_net::value::Facing;
 
 use super::{
     allowance, fit, framing, grid, side_at, spec, Cell, Figure, Reference, Sampling, BREATH,
-    FACINGS, FIGURES, MARGIN, PHASES, SAMPLES, SIDES, STANDING,
+    FACINGS, FIGURES, LEVEL, MARGIN, PHASES, SAMPLES, SIDES, STANDING,
 };
 use crate::breath::Breath;
 use crate::frame::{project, Heading};
@@ -372,6 +372,7 @@ fn every_build_stays_within_the_allowances() {
                         &clip.sample(phase).expect("in the clip"),
                         breath,
                         clip.root_at(phase),
+                        |_| LEVEL,
                     )
                     .expect("it plants");
                 rigging

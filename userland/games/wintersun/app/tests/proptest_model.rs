@@ -3,8 +3,9 @@
 //! The shell's invariants are the ones a unit test states one case of and
 //! a randomised program states over every ordering:
 //!
-//! * the camera never shows ground outside the realm, whatever sequence
-//!   of follows and zooms put it where it is;
+//! * the camera's focus never leaves the realm, and whatever sequence of
+//!   follows, zooms and tilts put it where it is, it projects, its eye above
+//!   the ground it looks over;
 //! * the degradation ladder never leaves its range, turns more than one
 //!   knob at a time, moves more than one notch for a frame, or goes past
 //!   the floor the window and the zoom set;
@@ -30,7 +31,7 @@ use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::window_ipc::WindowSizeState;
 use tairix_parallel::Reversed;
 use tairix_wintersun_app::budget::{FrameTimes, Governor, Pass, FRAME_NS};
-use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
+use tairix_wintersun_app::camera::{realm_bounds, Camera, Tilt, Zoom};
 use tairix_wintersun_app::input::Controls;
 use tairix_wintersun_app::pacing::{Pacer, MAX_CATCHUP_NS};
 use tairix_wintersun_app::quality::Ladder;
@@ -39,6 +40,7 @@ use tairix_wintersun_app::view::{Viewport, MAX_RENDER_HEIGHT, MAX_RENDER_WIDTH};
 use tairix_wintersun_net::bounds::MAX_DIRECTION_MAGNITUDE_SQ;
 use tairix_wintersun_net::value::{Direction, WorldPoint};
 use tairix_wintersun_rules::clock::TickRate;
+use tairix_wintersun_world::geom::CELL_SUB_UNITS;
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 
 /// Sequences run once by a plain `cargo test` (no budget set).
@@ -60,6 +62,8 @@ enum Cmd {
     Follow { x: i32, y: i32 },
     /// Move the zoom in or out a stop.
     Zoom { nearer: bool },
+    /// Look down at an angle.
+    Tilt { units: u16 },
     /// The compositor answered with an extent and a state.
     Resized { width: u32, height: u32, state: u8 },
     /// A key went down or came up.
@@ -160,6 +164,7 @@ impl Session {
                     self.camera.set_zoom(zoom);
                 }
             }
+            Cmd::Tilt { units } => self.camera.set_tilt(Tilt::new(units)),
             Cmd::Resized {
                 width,
                 height,
@@ -258,14 +263,28 @@ fn check(session: &Session) -> Result<(), TestCaseError> {
         .expect("a window with pixels");
 
     let bounds = realm_bounds(session.params);
-    let visible = session.camera.visible(&view);
+    let focus = session.camera.focus();
     prop_assert!(
-        visible.min_x >= bounds.min_x
-            && visible.max_x <= bounds.max_x
-            && visible.min_y >= bounds.min_y
-            && visible.max_y <= bounds.max_y,
-        "the camera shows {visible:?}, outside the realm's {bounds:?}"
+        (bounds.min_x..bounds.max_x).contains(&focus.x)
+            && (bounds.min_y..bounds.max_y).contains(&focus.y),
+        "the camera looks at {focus:?}, outside the realm's {bounds:?}"
     );
+    // Ground under the eye higher than the focus's, as a hill behind the
+    // character stands.
+    let (floor, behind) = (0, 30 * CELL_SUB_UNITS);
+    let seen = session.camera.perspective(&view, floor, |_| Some(behind));
+    prop_assert!(
+        seen.is_ok(),
+        "the camera did not project through {:?}",
+        view.render()
+    );
+    if let Ok(seen) = seen {
+        prop_assert!(
+            seen.eye()[2] > f64::from(behind),
+            "the eye stands at {:?}, in the ground",
+            seen.eye()
+        );
+    }
 
     let (rw, rh) = view.render();
     prop_assert!(
@@ -321,6 +340,7 @@ fn command() -> impl Strategy<Value = Cmd> {
     prop_oneof![
         (any::<i32>(), any::<i32>()).prop_map(|(x, y)| Cmd::Follow { x, y }),
         any::<bool>().prop_map(|nearer| Cmd::Zoom { nearer }),
+        any::<u16>().prop_map(|units| Cmd::Tilt { units }),
         (1u32..4000, 1u32..3000, any::<u8>()).prop_map(|(width, height, state)| Cmd::Resized {
             width,
             height,
@@ -373,8 +393,7 @@ fn the_ladder_turns_one_knob_per_step_from_every_starting_point() {
             let here = Ladder::new(step);
             let next = here.shed().expect("below the bottom rung");
             let (a, b) = (here.detail(), next.detail());
-            let moved = usize::from(a.lighting != b.lighting)
-                + usize::from(a.shadows != b.shadows)
+            let moved = usize::from(a.shadows != b.shadows)
                 + usize::from(a.ground != b.ground)
                 + usize::from(a.resolution != b.resolution);
             prop_assert_eq!(moved, 1, "step {} turned {} knobs", step, moved);

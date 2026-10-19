@@ -39,8 +39,12 @@ use core::hash::Hasher;
 
 use tairix_hash::FastHash;
 use tairix_raster::shape::{Placed, Shape};
-use tairix_wintersun_net::value::Facing;
+use tairix_raster::surface::SUBPIXEL;
+use tairix_raster::view::Perspective;
+use tairix_util::mathf;
+use tairix_wintersun_net::value::{Facing, WorldPoint};
 
+use crate::actor::{Actor, Relief, Shade};
 use crate::clip::Clip;
 use crate::error::FigureError;
 use crate::frame::{project, Heading};
@@ -55,7 +59,7 @@ use crate::quality::Measured;
 use crate::reference::{self, Reference, SIDES};
 use crate::rig::{Frames, Placement, Resolved, Strip};
 use crate::rigging::Rigging;
-use crate::shadow::Contact;
+use crate::shadow::{Contact, Footing};
 use crate::socket::Side;
 use crate::species::Species;
 
@@ -69,7 +73,7 @@ use crate::species::Species;
 /// change that moves it changes every figure anybody will ever see, and the
 /// new value is written down deliberately rather than pasted out of a
 /// failure.
-pub const REFERENCE_DIGEST: u64 = 0x695D_313A_73ED_2E37;
+pub const REFERENCE_DIGEST: u64 = 0x5478_08C7_5CCA_E48F;
 
 /// The stream the reference grid is folded into.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_4647;
@@ -194,6 +198,7 @@ pub fn reference() -> Result<u64, FigureError> {
     }
     fold_shadow(&mut hasher)?;
     fold_preview(&mut hasher, &mut placement)?;
+    fold_scene(&mut hasher, &mut placement)?;
     Ok(hasher.finish())
 }
 
@@ -325,11 +330,127 @@ fn fold_shadow(hasher: &mut FastHash) -> Result<(), FigureError> {
     let contact = Contact::new(radius, tone)?;
     for lift in LIFTS {
         fold_placed(hasher, Reference::shadow(lift, SCALE, AT)?);
-        for ring in contact.penumbra(Reference::light()?, lift, SCALE, AT)? {
+        for ring in contact.penumbra(Reference::light()?, lift, Footing::oblique(SCALE, AT)?)? {
             fold_placed(hasher, ring);
         }
     }
     Ok(())
+}
+
+/// The scene probe's hillside: rising to the east and falling to the south,
+/// steeply enough that a figure standing across it plants its feet apart.
+struct Hillside;
+
+impl Relief for Hillside {
+    fn height(&self, at: WorldPoint) -> Option<i32> {
+        Some(at.x / 6 - at.y / 9)
+    }
+}
+
+/// Where the scene probe's figure stands.
+const SCENE_GROUND: WorldPoint = WorldPoint {
+    x: 4_100,
+    y: -2_750,
+};
+
+/// The scene probe's views: how far the eye stands from the figure's ground
+/// point and how far it looks down, in radians. Close and steep, far and low,
+/// and so close the eye is inside the figure, which then draws nothing.
+const SCENE_VIEWS: [(f64, f64); 3] = [(6_144.0, 0.75), (24_576.0, 0.21), (40.0, 0.75)];
+
+/// The headings the scene probe's figure faces.
+const SCENE_FACINGS: [Facing; 2] = [Facing(0x1300), Facing(0x9A00)];
+
+/// The scene probe's screen: its focal length, its extent, odd so its centre
+/// falls mid-pixel, and its near plane, in world sub-units.
+const SCENE_SCREEN: (f64, (u32, u32), f64) = (640.0, (801, 481), 256.0);
+
+/// A walking figure on [`Hillside`] seen through the scene's perspective
+/// camera: the per-foot planting on real relief, every strip and the plane it
+/// is depth-tested by, and the contact shadow laid on the slope.
+fn fold_scene(hasher: &mut FastHash, placement: &mut Placement) -> Result<(), FigureError> {
+    let motions = motion::Set::new()?;
+    let clips = motions.clips()?;
+    let identity = reference::identity(Species::Human)?;
+    let light = Reference::light()?;
+    let floor = Hillside
+        .height(SCENE_GROUND)
+        .ok_or(FigureError::GroundUnreal)?;
+    let target = [
+        f64::from(SCENE_GROUND.x),
+        f64::from(SCENE_GROUND.y),
+        f64::from(floor),
+    ];
+    for facing in SCENE_FACINGS {
+        let mut actor = Actor::new(&identity, &clips, facing)?;
+        // Moving, so one foot is lifted off the slope and the other planted.
+        actor.advance(130_000_000, (37, -22), facing, 0)?;
+        for (distance, tilt) in SCENE_VIEWS {
+            let camera = scene_camera(target, distance, tilt)?;
+            let drawn = actor.place(
+                SCENE_GROUND,
+                &Hillside,
+                &camera,
+                light,
+                Shade::Soft,
+                placement,
+            )?;
+            fold_usize(hasher, placement.len());
+            for strip in placement.strips() {
+                fold_strip(hasher, &strip);
+                let first = strip.near.first().copied().unwrap_or_default();
+                let last = strip.far.last().copied().unwrap_or_default();
+                for (x, y) in [first, last] {
+                    hasher.write_u32(strip.plane.at(pixel(x), pixel(y)).0);
+                }
+            }
+            fold_usize(hasher, drawn.shadow.len());
+            for ring in &drawn.shadow {
+                fold_placed(hasher, *ring);
+                hasher.write_u32(drawn.depth.at(pixel_of(ring.x), pixel_of(ring.y)).0);
+            }
+            hasher.write(&drawn.rows.0.to_le_bytes());
+            hasher.write(&drawn.rows.1.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// The scene probe's camera: `distance` from `target` to its south, looking
+/// north and down by `tilt`.
+pub(crate) fn scene_camera(
+    target: [f64; 3],
+    distance: f64,
+    tilt: f64,
+) -> Result<Perspective, FigureError> {
+    let (sin, cos) = (mathf::sin(tilt), mathf::cos(tilt));
+    let (focal, screen, near) = SCENE_SCREEN;
+    Perspective::new(
+        [
+            target[0],
+            target[1] + distance * cos,
+            target[2] + distance * sin,
+        ],
+        [0.0, -cos, -sin],
+        [1.0, 0.0, 0.0],
+        [0.0, sin, -cos],
+        focal,
+        screen,
+        near,
+    )
+    .ok_or(FigureError::GeometryUnreal)
+}
+
+/// The pixel a sub-pixel coordinate falls in, clamped onto the surface's
+/// side of the origin.
+fn pixel(sub: i32) -> u32 {
+    u32::try_from(sub.div_euclid(SUBPIXEL)).unwrap_or(0)
+}
+
+/// The pixel a real coordinate falls in, clamped onto the surface's side of
+/// the origin.
+fn pixel_of(value: f64) -> u32 {
+    u32::try_from(mathf::round_i32(mathf::floor(value))).unwrap_or(0)
 }
 
 fn fold_planted(hasher: &mut FastHash, planted: &Planted) {

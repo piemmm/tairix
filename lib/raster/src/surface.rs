@@ -35,6 +35,7 @@ use tairix_util::{fallible, mathf};
 use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
+use crate::mesh::Occlusion;
 use crate::paint::{Paint, Pattern};
 use crate::resample::{
     resample_pixels, resample_pixels_window, Region, ResampleError, ResampleScratch,
@@ -1986,6 +1987,17 @@ pub trait Canvas {
         scratch: &mut ScanScratch,
     ) where
         Self: Sized;
+
+    /// Fill a polygon as [`Self::fill_polygon_subpixel`] does, but only at
+    /// the pixels whose centres `occlusion` lets it show at: what draws a
+    /// standing thing among a scene's depth without writing any.
+    fn fill_polygon_subpixel_occluded(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        occlusion: &Occlusion<'_>,
+        scratch: &mut ScanScratch,
+    );
 }
 
 impl Canvas for Surface {
@@ -2006,6 +2018,16 @@ impl Canvas for Surface {
         scratch: &mut ScanScratch,
     ) {
         wash_placed(self, polygon, color, mask, scratch);
+    }
+
+    fn fill_polygon_subpixel_occluded(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        occlusion: &Occlusion<'_>,
+        scratch: &mut ScanScratch,
+    ) {
+        fill_occluded(self, polygon, color, occlusion, scratch);
     }
 }
 
@@ -2028,6 +2050,16 @@ impl Canvas for RowBand<'_> {
     ) {
         wash_placed(self, polygon, color, mask, scratch);
     }
+
+    fn fill_polygon_subpixel_occluded(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        occlusion: &Occlusion<'_>,
+        scratch: &mut ScanScratch,
+    ) {
+        fill_occluded(self, polygon, color, occlusion, scratch);
+    }
 }
 
 /// The one body of [`Canvas::fill_polygon_subpixel`], whole surface or band.
@@ -2045,6 +2077,32 @@ fn fill_placed<R: Rows + ?Sized>(
     ) {
         let source = color.premultiply();
         fill_coverage(target, fill, |_, _| source);
+    }
+}
+
+/// The one body of [`Canvas::fill_polygon_subpixel_occluded`], whole surface
+/// or band.
+fn fill_occluded<R: Rows + ?Sized>(
+    target: &mut R,
+    polygon: &[(i32, i32)],
+    color: Color,
+    occlusion: &Occlusion<'_>,
+    scratch: &mut ScanScratch,
+) {
+    if let Some(fill) = ScanFill::new(
+        slice::from_ref(&polygon),
+        SampleSpace::device(),
+        FillRule::EvenOdd,
+        scratch,
+    ) {
+        let source = color.premultiply();
+        fill_coverage(target, fill, |x, y| {
+            if occlusion.shows(x, y) {
+                source
+            } else {
+                Pixel::TRANSPARENT
+            }
+        });
     }
 }
 

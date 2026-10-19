@@ -33,6 +33,7 @@ the seam between two windows.
 |---|---|---|
 | `realm` | The whole world, solved once, coarsely: plates, relief, depression-filled drainage, stream-power erosion, lakes, climate, rock provinces, settlements, roads, landmarks. **Global and exact**, so everything derived from it is seam-free by construction. | A fixed sample count, never a step in world units — so a realm four chunks across and one four thousand chunks across pay the same. |
 | `chunk` | Fine detail on demand: the land's ground, channel carve, structure stamp, climate correction, the biome and ground blends, scatter. The ground is the realm field refined and worn by `lib/land`, the desktop ray tracer's land generator; the rest reads a fixed ring of cells. | Per chunk, cached and reclaimed, its worn ground shared with its neighbours'. |
+| `far` | A chunk's ground at level 0's own step — its surface and the grounds it shows, classified by the chunk's classifier from every condition but the fine relief's — for a view reaching past the chunks it has solved. Coarser than a chunk, not a different world. | A fraction of a millisecond a chunk, against a large part of a second solved. |
 
 ## Modules
 
@@ -53,7 +54,8 @@ the seam between two windows.
 | `ground` | The ground vocabulary and the palettes a biome blend grows into a ground blend. |
 | `scatter` | Vegetation, rock and resource nodes by biome, on a jittered grid with a priority rule rather than dart-throwing. |
 | `land` | The realm field as `lib/land`'s coarse land, refined through a level across the whole realm and a level at the cells, each piece exactly as the realm worn whole; and a bounded store of worn ground. |
-| `chunk` | The chunk value and the resumable phase machine that builds it. |
+| `chunk` | The chunk value and the resumable phase machine that builds it, its heights and blends kept a few cells past each edge so it is drawn and lit across a seam without its neighbours. |
+| `far` | The far patch: a chunk read at level 0's step, with a one-vertex halo so two patches agree along their seam. |
 | `cache` | The `lib/reclaim`-governed chunk cache, and the cache of worn ground a chunk beside one already solved reads. |
 | `digest` | The cross-architecture determinism digest and its reference constant. |
 

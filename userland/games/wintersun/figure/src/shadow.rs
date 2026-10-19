@@ -9,19 +9,112 @@
 //! # Why the ellipse is solved rather than guessed
 //!
 //! The shadow is a circle on the ground stretched away from the light, and
-//! the ground itself is foreshortened on the way to the screen. Stretching an
-//! already-turned ellipse along a second, different axis does not give an
-//! ellipse whose axes are either of those two — so taking the light's stretch
-//! as the screen's would put the long axis visibly wrong at every bearing but
-//! four. Composing the two maps and recovering the axes of what comes out is
-//! a handful of arithmetic and is exactly right at every bearing.
+//! the ground itself is turned and foreshortened on the way to the screen
+//! ([`Footing`]). Stretching an already-turned ellipse along a second,
+//! different axis does not give an ellipse whose axes are either of those
+//! two — so taking the light's stretch as the screen's would put the long
+//! axis visibly wrong at every bearing but four. Composing the two maps and
+//! recovering the axes of what comes out is a handful of arithmetic and is
+//! exactly right at every bearing.
 
+use tairix_raster::view::Perspective;
 use tairix_util::mathf;
 
 use crate::error::FigureError;
 use crate::frame::{Body, Heading, FORESHORTEN};
 use tairix_raster::shape::{Placed, Shape};
 use tairix_raster::Color;
+
+/// How the ground about a figure's ground point reaches the screen, to first
+/// order: where the point lands, and how far the screen moves per figure unit
+/// east and per figure unit south along the ground.
+///
+/// To first order because a contact shadow is a footprint wide: over that
+/// little ground a perspective view is as affine as the oblique drawing is
+/// everywhere.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Footing {
+    at: (f64, f64),
+    scale: f64,
+    /// Screen columns then rows, per figure unit east then south.
+    map: [[f64; 2]; 2],
+}
+
+impl Footing {
+    /// The oblique drawing's ground: `scale` surface pixels a figure unit
+    /// about the surface point `at`, its depth axis foreshortened.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::ScaleUnreal`] for a scale that is not finite and
+    /// positive, and [`FigureError::GeometryUnreal`] for a point that is not
+    /// finite.
+    pub fn oblique(scale: f64, at: (f64, f64)) -> Result<Self, FigureError> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(FigureError::ScaleUnreal);
+        }
+        Self::checked(at, scale, [[1.0, 0.0], [0.0, FORESHORTEN]])
+    }
+
+    /// The ground seen through `camera` about the world point `ground` — east,
+    /// south and up — sloping up by `slope.0` per unit east and `slope.1` per
+    /// unit south, with `units` world units a figure unit; or `None` where the
+    /// point is nearer than the camera sees.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::GeometryUnreal`] for a ground point, a slope or a unit
+    /// that is not finite.
+    pub fn seen(
+        camera: &Perspective,
+        ground: [f64; 3],
+        slope: (f64, f64),
+        units: f64,
+    ) -> Result<Option<Self>, FigureError> {
+        if !slope.0.is_finite() || !slope.1.is_finite() || !units.is_finite() {
+            return Err(FigureError::GeometryUnreal);
+        }
+        let point = camera.view(ground);
+        let Some(at) = camera.project(point) else {
+            return Ok(None);
+        };
+        // A unit step along the ground moves the projection by the derivative
+        // of `focal·(x, y)/z` along the step's direction in view space.
+        let moved = |step: [f64; 3]| {
+            let [dx, dy, dz] = camera.direction(step);
+            let (z, focal) = (point[2], camera.focal());
+            (
+                focal * (dx * z - point[0] * dz) / (z * z),
+                focal * (dy * z - point[1] * dz) / (z * z),
+            )
+        };
+        let east = moved([units, 0.0, units * slope.0]);
+        let south = moved([0.0, units, units * slope.1]);
+        Self::checked((at.x, at.y), 1.0, [[east.0, south.0], [east.1, south.1]]).map(Some)
+    }
+
+    /// Where the ground point lands.
+    #[must_use]
+    pub const fn at(&self) -> (f64, f64) {
+        self.at
+    }
+
+    fn checked(at: (f64, f64), scale: f64, map: [[f64; 2]; 2]) -> Result<Self, FigureError> {
+        let finite = at.0.is_finite()
+            && at.1.is_finite()
+            && map.iter().flatten().all(|value| value.is_finite());
+        if !finite {
+            return Err(FigureError::GeometryUnreal);
+        }
+        Ok(Self { at, scale, map })
+    }
+
+    /// The screen offset of a ground offset `(east, south)`, before the scale.
+    fn apply(&self, (east, south): (f64, f64)) -> (f64, f64) {
+        let [[a, b], [c, d]] = self.map;
+        (a * east + b * south, c * east + d * south)
+    }
+}
 
 /// How far a light may rake the shadow out before the stretch is capped.
 ///
@@ -118,8 +211,8 @@ impl Contact {
         Ok(Self { radius, tone })
     }
 
-    /// The shadow a figure `lift` above its ground point throws, drawn at
-    /// `scale` around the surface point `at`.
+    /// The shadow a figure `lift` above its ground point throws on the ground
+    /// `footing` describes.
     ///
     /// Painted before the figure: it is on the ground, and everything the
     /// figure is made of stands on it.
@@ -131,43 +224,32 @@ impl Contact {
     ///
     /// # Errors
     ///
-    /// [`FigureError::GeometryUnreal`] for a lift or an anchor that is not
-    /// finite, and [`FigureError::ScaleUnreal`] for a scale that is not
-    /// finite and positive.
-    pub fn cast(
-        self,
-        light: Light,
-        lift: f64,
-        scale: f64,
-        at: (f64, f64),
-    ) -> Result<Placed, FigureError> {
-        if !lift.is_finite() || !at.0.is_finite() || !at.1.is_finite() {
+    /// [`FigureError::GeometryUnreal`] for a lift that is not finite.
+    pub fn cast(self, light: Light, lift: f64, footing: Footing) -> Result<Placed, FigureError> {
+        if !lift.is_finite() {
             return Err(FigureError::GeometryUnreal);
-        }
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(FigureError::ScaleUnreal);
         }
         let height = mathf::fmax(lift, 0.0);
         // One ratio for both cues: the darkening a figure leaves behind
         // spreads as it thins.
         let soften = self.radius / (self.radius + height);
 
-        // The ground ellipse: a circle raked out along the light's bearing.
+        // The ground ellipse: a circle raked out along the light's bearing,
+        // turned to that bearing, then carried to the screen.
         let (long, short) = (self.radius * light.rake() / soften, self.radius / soften);
         let bearing = mathf::atan2(light.into, light.across);
         let (sin, cos) = (mathf::sin(bearing), mathf::cos(bearing));
-        // Turn the raked circle to the light's bearing, then foreshorten the
-        // depth axis on the way to the screen.
-        let ellipse = [
-            [long * cos, -short * sin],
-            [long * sin * FORESHORTEN, short * cos * FORESHORTEN],
-        ];
-        let (rx, ry, turn) = axes(ellipse);
+        let (first, second) = (
+            footing.apply((long * cos, long * sin)),
+            footing.apply((-short * sin, short * cos)),
+        );
+        let (rx, ry, turn) = axes([[first.0, second.0], [first.1, second.1]]);
 
         // A raised figure's shadow stays on the ground and slides away from
         // the light, which is what reads as height rather than as growth.
         let thrown = height / mathf::tan(light.elevation);
-        let (dx, dy) = (light.across * thrown, light.into * thrown * FORESHORTEN);
+        let (dx, dy) = footing.apply((light.across * thrown, light.into * thrown));
+        let (scale, at) = (footing.scale, footing.at);
 
         Ok(Placed {
             x: at.0 + dx * scale,
@@ -212,10 +294,9 @@ impl Contact {
         self,
         light: Light,
         lift: f64,
-        scale: f64,
-        at: (f64, f64),
+        footing: Footing,
     ) -> Result<[Placed; PENUMBRA], FigureError> {
-        let hard = self.cast(light, lift, scale, at)?;
+        let hard = self.cast(light, lift, footing)?;
         let Shape::Superellipse { rx, ry, square } = hard.shape else {
             return Err(FigureError::GeometryUnreal);
         };

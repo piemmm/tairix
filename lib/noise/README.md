@@ -17,6 +17,9 @@ so it is the same on every target.
   footprint can hold settles to its mean rather than aliasing.
 - `ridged2`: ridged octaves branching as eroded crests do.
 - `billow2`: billowed octaves, rounded crests and creased troughs, as dunes.
+- `ridged2_fading`, `billow2_fading`: either with each octave fainter than the
+  last by a gain of the caller's rather than a half, so a relief can lean to
+  its longest waves or its shortest.
 - `turbulence3`: folded three-dimensional octaves, read as veins.
 - `cells2`, `cells3`, `cells3_among`: Worley's cellular noise, the nearest
   two features and the way to the nearest.

@@ -15,26 +15,25 @@ use tairix_parallel::JobRunner;
 use tairix_raster::surface::Surface;
 use tairix_reclaim::PressureGauge;
 use tairix_wintersun_art::cache::MaterialCache;
-use tairix_wintersun_art::decal::{Bounds, Fray};
+use tairix_wintersun_art::decal::Fray;
 use tairix_wintersun_art::splat::Warp;
 use tairix_wintersun_figure::actor::Actor;
 use tairix_wintersun_figure::motion::{Clips, Kind};
 use tairix_wintersun_figure::reference as figures;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
-use tairix_wintersun_world::chunk::{ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
 use crate::budget::FRAME_NS;
-use crate::camera::{realm_bounds, Camera, Zoom};
+use crate::camera::{realm_bounds, Camera, Tilt, Zoom};
 use crate::error::ClientError;
 use crate::figures::Cast;
 use crate::frame::{Renderer, Scene, Stopped};
 use crate::light::{Sky, Sun};
 use crate::quality::{Detail, RenderScale};
-use crate::terrain::{self, HeldGround, RoadDecals};
+use crate::terrain::{HeldGround, RoadDecals, CHUNK_SUB_UNITS};
 use crate::view::{Reduced, Viewport};
 
 /// The seed the reference realm is generated from.
@@ -44,34 +43,49 @@ pub const SEED: u64 = 0x5749_4E54_4552_4652;
 /// chunks its views need, which lie side by side and share most of it.
 const WORN_BYTES: usize = 24 * 1024 * 1024;
 
+/// How many chunks either side of the focus's own the scene solves: one, so
+/// the ground about the cast is solved, the rest of the view is drawn from
+/// far patches, and a guest solves the lot in a moment.
+const SOLVE_RADIUS: i32 = 1;
+
+/// Where the scene's camera looks: the middle of the chunk at the realm's
+/// middle, so the cast stands on solved ground with solved ground about it.
+const FOCUS: WorldPoint = WorldPoint {
+    x: CHUNK_SUB_UNITS / 2,
+    y: CHUNK_SUB_UNITS / 2,
+};
+
 /// Memory the reference scene's material cache is sized from.
 ///
 /// Stated rather than discovered: a cache that refused a tile would draw that
-/// material flat and move the picture, so its size cannot be the machine's.
-/// It admits every tile a full-screen view of the scene needs several times
-/// over, and is a budget rather than an allocation.
-pub const CACHE_BACKING_BYTES: usize = 64 * 1024 * 1024;
+/// material coarser and move the picture, so its size cannot be the
+/// machine's. It admits every level of every ground at once, and is a budget
+/// rather than an allocation.
+pub const CACHE_BACKING_BYTES: usize = 256 * 1024 * 1024;
 
-/// How the reference scene is looked at: through which view, at what zoom,
-/// in what detail.
+/// How the reference scene is looked at: through which view, from how far
+/// back and how high, in what detail.
 #[derive(Copy, Clone, Debug)]
 pub struct Shot<'v> {
     /// The window, and the render scale the detail chose for it.
     pub view: &'v Viewport,
-    /// How much of the world the view covers.
+    /// How far back the camera stands.
     pub zoom: Zoom,
+    /// How far down it looks.
+    pub tilt: Tilt,
     /// The detail the frame is drawn at.
     pub detail: Detail,
 }
 
 impl<'v> Shot<'v> {
-    /// How a window holding the scene frames it: at the default zoom in the
-    /// finest detail, so its pixels depend on its size alone.
+    /// How a window holding the scene frames it: at the default zoom and
+    /// tilt in the finest detail, so its pixels depend on its size alone.
     #[must_use]
     pub const fn window(view: &'v Viewport) -> Self {
         Self {
             view,
             zoom: Zoom::DEFAULT,
+            tilt: Tilt::DEFAULT,
             detail: Detail::FINEST,
         }
     }
@@ -118,16 +132,16 @@ impl World {
     }
 
     /// Draw the scene as `shot` sees it into `target`, which must be the
-    /// shot's render extent, with every chunk the view needs generated first
-    /// so no ground is drawn as missing.
+    /// shot's render extent, with all the ground the view needs made first so
+    /// none is missing from it.
     ///
     /// # Errors
     ///
-    /// [`ClientError::World`] for a chunk that does not generate,
+    /// [`ClientError::World`] for ground that does not generate,
     /// [`ClientError::Figure`] for a figure that cannot be built,
     /// [`ClientError::OutOfMemory`] where the cache refused a tile, whose
-    /// material was then drawn in its flat tone, and whatever the renderer
-    /// refuses. `target` holds a partial picture after any of them.
+    /// material was then drawn coarser or in its flat tone, and whatever the
+    /// renderer refuses. `target` holds a partial picture after any of them.
     pub fn draw(
         &mut self,
         clips: &Clips<'_>,
@@ -138,18 +152,24 @@ impl World {
         runner: &dyn JobRunner,
     ) -> Result<(), ClientError> {
         let params = self.params();
-        let camera = Camera::new(WorldPoint { x: 0, y: 0 }, shot.zoom, realm_bounds(params));
-        self.hold_ground(camera.visible(shot.view), runner)?;
-        let borrowed = self.ground.borrow()?;
-        let chunks = ChunkWindow::new(&borrowed).map_err(|_| ClientError::World)?;
+        let mut camera = Camera::new(FOCUS, shot.zoom, realm_bounds(params));
+        camera.set_tilt(shot.tilt);
+        self.ground.hold(
+            &self.land,
+            &mut self.worn,
+            &camera,
+            shot.view,
+            SOLVE_RADIUS,
+            runner,
+        )?;
         let decals = self.roads.decals()?;
-        let cast = cast(clips, camera.centre(shot.view))?;
-        renderer.render(
+        let cast = cast(clips, camera.focus())?;
+        renderer.render_whole(
             target,
             shot.view,
             &Scene {
                 camera,
-                chunks,
+                ground: &self.ground,
                 decals: &decals,
                 fray: &self.fray,
                 warp: &self.warp,
@@ -191,23 +211,74 @@ impl World {
             self.draw(clips, Shot::window(&view), target, renderer, cache, runner)
         })
     }
+}
 
-    /// Hold every chunk `visible` needs, solving only those not already held
-    /// across `runner` and giving back the ones it no longer needs, so no
-    /// ground is drawn as missing and none is solved twice.
-    fn hold_ground(&mut self, visible: Bounds, runner: &dyn JobRunner) -> Result<(), ClientError> {
-        self.ground.release_distant(visible);
-        for coord in terrain::visible_chunks(visible) {
-            if !self.params().holds_chunk(coord.x, coord.y) || self.ground.holds(coord) {
-                continue;
-            }
-            let build = ChunkBuild::new(coord).map_err(|_| ClientError::World)?;
-            let chunk = build
-                .finish(&self.land, &mut self.worn, runner)
-                .map_err(|_| ClientError::World)?;
-            self.ground.adopt(chunk)?;
+/// One ask of the worker a window holding the scene is drawn by.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct SceneAsk {
+    /// The extent of the frame owed, where one is.
+    pub extent: Option<(u32, u32)>,
+    /// Whether the pressure band moved since the last ask.
+    pub give_back: bool,
+}
+
+/// What a window holding the scene still wants of the worker that draws it.
+///
+/// The worker's desk keeps only the newest ask and drops the answer to one a
+/// newer ask finds in flight, so a frame outstanding is never asked again: a
+/// give-back waits for it to land, and a frame's own tile lookups apply the
+/// band it is drawn under.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Owed {
+    asked: Option<(u32, u32)>,
+    give_back: bool,
+}
+
+impl Owed {
+    /// Nothing asked for.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            asked: None,
+            give_back: false,
         }
-        Ok(())
+    }
+
+    /// The pressure band moved: a give-back is owed.
+    pub fn pressure_moved(&mut self) {
+        self.give_back = true;
+    }
+
+    /// What to ask with the window `extent` big and a frame `shown` big on
+    /// screen: the frame of an extent neither shown nor asked for, carrying
+    /// any give-back owed, or the give-back alone once no frame is
+    /// outstanding.
+    pub fn ask(
+        &mut self,
+        extent: Option<(u32, u32)>,
+        shown: Option<(u32, u32)>,
+    ) -> Option<SceneAsk> {
+        if extent.is_some() && extent != shown && extent != self.asked {
+            self.asked = extent;
+            return Some(SceneAsk {
+                extent,
+                give_back: core::mem::take(&mut self.give_back),
+            });
+        }
+        (self.asked.is_none() && core::mem::take(&mut self.give_back)).then_some(SceneAsk {
+            extent: None,
+            give_back: true,
+        })
+    }
+
+    /// A frame `at` big landed with the window `now` big: whether it is the
+    /// window's to show. A frame for an extent the window has left is shown
+    /// nowhere.
+    pub fn landed(&mut self, at: (u32, u32), now: Option<(u32, u32)>) -> bool {
+        if self.asked == Some(at) {
+            self.asked = None;
+        }
+        now == Some(at)
     }
 }
 
@@ -241,17 +312,20 @@ impl Sink for Discard {
 /// Small and coarse: the scene is about the rendering, and a realm large
 /// enough to be played in would spend a guest's whole budget being generated.
 pub(crate) fn params() -> Result<RealmParams, ClientError> {
+    let default = RealmParams::default_realm(SEED).spec();
     RealmParams::new(RealmSpec {
         // Thirty-two chunks rather than the default realm's two hundred and
         // fifty-six: large enough that the ground around the origin has the
         // slopes and the several grounds a real one does — measured, not
-        // assumed — and small enough that a guest solves it in a moment.
-        // Everything else is the default realm's, so the origin stands in its
-        // middle latitudes.
+        // assumed — and small enough that a guest solves it in a moment. Its
+        // relief shrinks with it, so its hills stand as the default realm's
+        // do seen from the same height. Everything else is the default
+        // realm's, so the origin stands in its middle latitudes.
         extent_chunks: 32,
         coarse_samples: 32,
         plates: 8,
-        ..RealmParams::default_realm(SEED).spec()
+        relief_units: default.relief_units * 32 / 256,
+        ..default
     })
     .map_err(|_| ClientError::World)
 }

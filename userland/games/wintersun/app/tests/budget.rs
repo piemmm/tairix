@@ -1,37 +1,20 @@
-//! The frame budget, measured rather than asserted about.
+//! The software path's frame cost, measured rather than asserted about.
 //!
-//! `plans/WINTERSUN.md` states a per-pass allocation at 1280×720 on a
-//! four-core reference machine and says plainly that it "is the single
-//! most likely number in this plan to be wrong". This is where it stops
-//! being a guess: the passes are timed at the baseline resolution over
-//! generated terrain with the plan's sixty-four rigged figures standing on
-//! it, along with what placing one of them costs a single core, and the
-//! numbers are printed so a run says what the renderer actually costs.
+//! The passes are timed at the baseline resolution on a long view across
+//! broken ground at the lowest tilt the camera allows, with the plan's
+//! sixty-four rigged figures standing in it, along with what placing one of
+//! them costs a single core. The numbers are printed: `plans/WINTERSUN.md`
+//! records them as the baseline a regression is judged against.
 //!
 //! # Why no elapsed time is asserted here
 //!
-//! A wall-clock threshold in a test is a claim about the machine, not
-//! about the renderer. The same unchanged code passes on a fast host and
-//! fails on a slower one, so the failure says only that the host was
-//! slow — a flake with the machine as its seed, and one that cannot be
-//! fixed by retrying. The budget is therefore *evidence*: the milestone's
-//! exit criterion is read from this output and recorded in the plan, and
-//! nothing here fails because a host took longer. `cargo xtask bench`
-//! states the same rule for the raster and compositor families, and
-//! `kernel/mem`'s ramzip tiers and `kernel/core`'s reclaim integration
-//! print their costs the same way.
-//!
-//! # What is gated, and where
-//!
-//! The deterministic claims about this code live where they can be made
-//! without a clock: pass attribution against a controlled clock in the
-//! crate's own `frame` tests, and the band decomposition in
-//! `tests/bands.rs`. That file cuts a frame into bands on a *serial*
-//! runner, so it tests the decomposition and says nothing about
-//! threading. This is the only place a genuinely concurrent runner draws,
-//! so the claim it can make — and does, below — is that handing the bands
-//! to real threads yields the identical picture. A torn hand-off or an
-//! overlapping slice changes a pixel on any machine, fast or slow.
+//! A wall-clock threshold is a claim about the machine, not the renderer: the
+//! same code passes on a fast host and fails on a slow one, a flake no retry
+//! can fix. The deterministic claims live where no clock is needed — pass
+//! attribution against a controlled clock in the crate's `frame` tests, the
+//! band decomposition on a serial runner in `tests/bands.rs` — and the one
+//! this file makes is that handing the bands to real threads draws the
+//! identical picture, which a torn hand-off breaks on any machine.
 //!
 //! Read the numbers with:
 //! `cargo test -p tairix-wintersun-app --release --test budget -- --nocapture`
@@ -42,32 +25,32 @@ use std::time::Instant;
 use tairix_parallel::{JobRunner, Threaded};
 use tairix_raster::color::Pixel;
 use tairix_raster::surface::Surface;
+use tairix_raster::view::Perspective;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_wintersun_app::budget::{FrameTimes, Pass, BASELINE_HEIGHT, BASELINE_WIDTH, FRAME_NS};
-use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
+use tairix_wintersun_app::camera::{realm_bounds, Camera, Tilt, Zoom};
 use tairix_wintersun_app::figures::Cast;
-use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
+use tairix_wintersun_app::frame::{Clock, Renderer, Scene, Stopped};
 use tairix_wintersun_app::light::{Sky, Sun};
 use tairix_wintersun_app::quality::{Detail, RenderScale};
-use tairix_wintersun_app::terrain::{visible_chunks, RoadDecals};
+use tairix_wintersun_app::terrain::{HeldGround, RoadDecals, CHUNK_SUB_UNITS, SOLVE_RADIUS};
 use tairix_wintersun_app::view::Viewport;
 use tairix_wintersun_art::cache::MaterialCache;
-use tairix_wintersun_art::decal::{Bounds, Fray};
+use tairix_wintersun_art::decal::Fray;
 use tairix_wintersun_art::splat::Warp;
-use tairix_wintersun_figure::actor::Actor;
+use tairix_wintersun_figure::actor::{Actor, Relief};
 use tairix_wintersun_figure::motion::{Clips, Kind, Set};
 use tairix_wintersun_figure::reference;
 use tairix_wintersun_figure::rig::Placement;
 use tairix_wintersun_figure::species::Species;
-use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
-use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
+use tairix_wintersun_net::value::{ChunkCoord, EntityId, Facing, WorldPoint};
 use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
 
-/// Frames timed, so a single scheduling hiccup does not decide the
-/// answer. The best is reported, because the question is what the
-/// renderer costs, not what the machine was doing at the time.
+/// Frames timed, so a single scheduling hiccup does not decide the answer.
+/// The best is reported: the question is what the renderer costs, not what
+/// the machine was doing at the time.
 const RUNS: usize = 5;
 
 /// How many cores the budget is stated for, and so how many threads the
@@ -107,9 +90,74 @@ impl tairix_log::Sink for Quiet {
 static SINK: Quiet = Quiet;
 static PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
-/// The rigs, spread evenly across `visible` on an eight-by-eight grid, and
+/// The held ground, as a figure stands on it.
+struct Held<'a>(&'a HeldGround);
+
+impl Relief for Held<'_> {
+    fn height(&self, at: WorldPoint) -> Option<i32> {
+        self.0.height_at(at)
+    }
+}
+
+/// The chunk of the realm's southern half whose far reading spans the most
+/// height, read every fourth chunk: the most broken ground with most of the
+/// realm north of it for the view to cross.
+fn broken(land: &RealmLand) -> ChunkCoord {
+    let params = land.field().params();
+    let (low, past) = (params.min_chunk(), params.max_chunk());
+    let mut best = (0, ChunkCoord { x: 0, y: 0 });
+    for y in (0..past).step_by(4) {
+        for x in (low..past).step_by(4) {
+            let coord = ChunkCoord { x, y };
+            let patch = land.far(coord).expect("the realm holds it");
+            let heights = (0..patch.side())
+                .flat_map(|j| (0..patch.side()).map(move |i| (i, j)))
+                .filter_map(|(i, j)| patch.surface(i, j))
+                .map(|height| i32::from(height.0));
+            let (lowest, highest) = heights.fold((i32::MAX, i32::MIN), |(lo, hi), height| {
+                (lo.min(height), hi.max(height))
+            });
+            if highest - lowest > best.0 {
+                best = (highest - lowest, coord);
+            }
+        }
+    }
+    best.1
+}
+
+/// Where the screen point `(x, y)` meets level ground at `floor` through
+/// `camera`.
+fn on_ground(camera: &Perspective, x: f64, y: f64, floor: i32) -> WorldPoint {
+    let (eye, ray) = (camera.eye(), camera.ray(x, y));
+    assert!(ray[2] < 0.0, "a rig was set on a row above the horizon");
+    let reach = (f64::from(floor) - eye[2]) / ray[2];
+    let round = |value: f64| {
+        let rounded = value.round();
+        assert!(
+            rounded.abs() < f64::from(i32::MAX),
+            "off the coordinate space"
+        );
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "checked in range just above"
+        )]
+        let rounded = rounded as i32;
+        rounded
+    };
+    WorldPoint {
+        x: round(eye[0] + ray[0] * reach),
+        y: round(eye[1] + ray[1] * reach),
+    }
+}
+
+/// The rigs, set on an eight-by-eight grid over the screen's lower half, and
 /// how far each moves east a frame and how deep the water it stands in is.
-fn rigs<'a>(clips: &'a Clips<'a>, visible: Bounds) -> (Cast<'a>, Vec<(EntityId, i32, i32)>) {
+fn rigs<'a>(
+    clips: &'a Clips<'a>,
+    camera: &Perspective,
+    floor: i32,
+) -> (Cast<'a>, Vec<(EntityId, i32, i32)>) {
+    let (width, height) = (f64::from(BASELINE_WIDTH), f64::from(BASELINE_HEIGHT));
     let mut cast = Cast::new();
     let mut walks = Vec::new();
     for id in 0..RIGS {
@@ -121,14 +169,14 @@ fn rigs<'a>(clips: &'a Clips<'a>, visible: Bounds) -> (Cast<'a>, Vec<(EntityId, 
         if let Some(kind) = performs {
             actor.perform(kind).expect("it plays");
         }
-        let (column, row) = (
-            i32::try_from(id % 8).expect("a column"),
-            i32::try_from(id / 8).expect("a row"),
+        #[allow(clippy::cast_precision_loss, reason = "a grid of eight")]
+        let (column, row) = ((id % 8) as f64, (id / 8) as f64);
+        let at = on_ground(
+            camera,
+            width * (2.0 * column + 1.0) / 16.0,
+            height * (0.5 + (2.0 * row + 1.0) / 32.0),
+            floor,
         );
-        let at = WorldPoint {
-            x: visible.min_x + (visible.max_x - visible.min_x) * (2 * column + 1) / 16,
-            y: visible.min_y + (visible.max_y - visible.min_y) * (2 * row + 1) / 16,
-        };
         cast.join(EntityId(id), actor, at).expect("it joins");
         walks.push((EntityId(id), dx, depth));
     }
@@ -136,25 +184,27 @@ fn rigs<'a>(clips: &'a Clips<'a>, visible: Bounds) -> (Cast<'a>, Vec<(EntityId, 
 }
 
 /// What one frame of the baseline costs: the cheapest run's per-pass times,
-/// what placing one figure costs a single core, and the picture drawn.
+/// what placing one figure costs a single core, how many meshes it drew, and
+/// the picture drawn.
 struct Measured {
     times: FrameTimes,
     placement_ns: u64,
+    meshes: usize,
     pixels: Vec<Pixel>,
 }
 
 /// The cheapest of [`RUNS`] serial placements of every rig, per figure: the
 /// pose, planting and placement each figure costs whichever core it lands on,
-/// framed exactly as the renderer frames it.
-fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
+/// seen through the frame's own camera.
+fn placement_ns(cast: &Cast<'_>, camera: &Perspective, held: &HeldGround) -> u64 {
     let light = Sun::daylight()
         .light()
         .expect("the daylight sun lights figures");
     let shade = Detail::FINEST.shadows.shade();
-    let (origin, step) = (camera.origin(view), camera.step(view));
     let figures: Vec<_> = (0..RIGS)
         .map(|id| cast.get(EntityId(id)).expect("it is there"))
         .collect();
+    let relief = Held(held);
     let mut placement = Placement::new();
     let mut best = u64::MAX;
     for _ in 0..RUNS {
@@ -162,7 +212,14 @@ fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
         for figure in &figures {
             let drawn = figure
                 .actor()
-                .place(figure.ground(), origin, step, light, shade, &mut placement)
+                .place(
+                    figure.ground(),
+                    &relief,
+                    camera,
+                    light,
+                    shade,
+                    &mut placement,
+                )
                 .expect("it places");
             black_box((&drawn, &placement));
         }
@@ -172,17 +229,17 @@ fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
     best / RIGS
 }
 
-/// The baseline realm's land, and every chunk the baseline view needs, solved
-/// once across `runner` for every frame drawn from them.
+/// The baseline realm's land, the camera's view across it, and the ground
+/// that view draws, held once across `runner` for every frame drawn from it.
 struct Baseline {
     land: RealmLand,
-    held: Vec<Chunk>,
+    held: HeldGround,
     camera: Camera,
     view: Viewport,
 }
 
 impl Baseline {
-    fn solve(runner: &dyn JobRunner) -> Self {
+    fn hold(runner: &dyn JobRunner) -> Self {
         let params = RealmParams::new(RealmSpec {
             extent_chunks: 64,
             coarse_samples: 64,
@@ -193,23 +250,26 @@ impl Baseline {
         let land = RealmField::generate(params)
             .and_then(|field| RealmLand::new(field, runner))
             .expect("the realm generates");
-        let camera = Camera::new(
-            WorldPoint { x: 0, y: 0 },
-            Zoom::DEFAULT,
-            realm_bounds(params),
-        );
+        // Its south edge, so the view north crosses the whole of it.
+        let rough = broken(&land);
+        let focus = WorldPoint {
+            x: rough.x * CHUNK_SUB_UNITS + CHUNK_SUB_UNITS / 2,
+            y: (rough.y + 1) * CHUNK_SUB_UNITS - 1,
+        };
+        let mut camera = Camera::new(focus, Zoom::DEFAULT, realm_bounds(params));
+        camera.set_tilt(Tilt::LOWEST);
         let view = Viewport::new(BASELINE_WIDTH, BASELINE_HEIGHT, RenderScale::ONE)
             .expect("the baseline is a real window");
-        let mut worn = Keeping::within(usize::MAX);
-        let held = visible_chunks(camera.visible(&view))
-            .filter(|c| params.holds_chunk(c.x, c.y))
-            .map(|coord| {
-                ChunkBuild::new(coord)
-                    .expect("a chunk fits")
-                    .finish(&land, &mut worn, runner)
-                    .expect("a chunk generates")
-            })
-            .collect();
+        let mut held = HeldGround::new();
+        held.hold(
+            &land,
+            &mut Keeping::within(usize::MAX),
+            &camera,
+            &view,
+            SOLVE_RADIUS,
+            runner,
+        )
+        .expect("the ground generates");
         Self {
             land,
             held,
@@ -219,9 +279,9 @@ impl Baseline {
     }
 }
 
-/// Draw the baseline frame [`RUNS`] times across `runner`, returning the
-/// cheapest run's per-pass costs, the per-figure placement cost and the
-/// picture every run drew.
+/// Draw the baseline frame [`RUNS`] times across `runner`, once every mesh is
+/// built and every tile made, returning the cheapest run's per-pass costs, the
+/// per-figure placement cost and the picture every run drew.
 fn measure(runner: &dyn JobRunner, baseline: &Baseline) -> Measured {
     let Baseline {
         land,
@@ -232,55 +292,62 @@ fn measure(runner: &dyn JobRunner, baseline: &Baseline) -> Measured {
     let (camera, view) = (*camera, *view);
     let params = land.field().params();
     let (w, h) = view.render();
-    let borrowed: Vec<&Chunk> = held.iter().collect();
-    let chunks = ChunkWindow::new(&borrowed).expect("generated in coordinate order");
     let roads = RoadDecals::from_realm(land.field()).expect("the roads fit");
     let decals = roads.decals().expect("the decals fit");
     let warp = Warp::new(params.seed());
     let fray = Fray::new(params.seed());
 
+    let floor = held.height_at(camera.focus()).expect("the focus is held");
+    let seen = camera
+        .perspective(&view, floor, |at| held.height_at(at))
+        .expect("the baseline projects");
     let set = Set::new().expect("the shipped set");
     let clips = set.clips().expect("the shipped clips");
-    let (mut cast, walks) = rigs(&clips, camera.visible(&view));
+    let (mut cast, walks) = rigs(&clips, &seen, floor);
 
     PRESSURE.report(PressureBand::Normal);
-    let mut cache = MaterialCache::new("wintersun-budget", 64 * 1024 * 1024, &PRESSURE, &SINK);
+    let mut cache = MaterialCache::new("wintersun-budget", 256 * 1024 * 1024, &PRESSURE, &SINK);
     let mut renderer = Renderer::new();
     let mut target = Surface::new(w, h).expect("the baseline frame fits");
     let clock = Host(Instant::now());
 
+    // The first frame builds every mesh and tile untimed, so the frames timed
+    // build none.
     let mut best = FrameTimes::new();
-    for run in 0..RUNS {
-        for &(id, dx, depth) in &walks {
-            let figure = cast.get_mut(id).expect("it is there");
-            let to = WorldPoint {
-                x: figure.ground().x + dx,
-                y: figure.ground().y,
-            };
-            figure
-                .step(FRAME_NS, to, Facing(0), depth)
-                .expect("a frame");
+    for run in 0..=RUNS {
+        if run > 0 {
+            for &(id, dx, depth) in &walks {
+                let figure = cast.get_mut(id).expect("it is there");
+                let to = WorldPoint {
+                    x: figure.ground().x + dx,
+                    y: figure.ground().y,
+                };
+                figure
+                    .step(FRAME_NS, to, Facing(0), depth)
+                    .expect("a frame");
+            }
+        }
+        let scene = Scene {
+            camera,
+            ground: held,
+            decals: &decals,
+            fray: &fray,
+            warp: &warp,
+            sun: Sun::daylight(),
+            sky: Sky::daylight(),
+            detail: Detail::FINEST,
+            cast: &cast,
+        };
+        if run == 0 {
+            renderer
+                .render_whole(&mut target, &view, &scene, &mut cache, runner, &Stopped)
+                .expect("the frame draws");
+            continue;
         }
         let times = renderer
-            .render(
-                &mut target,
-                &view,
-                &Scene {
-                    camera,
-                    chunks,
-                    decals: &decals,
-                    fray: &fray,
-                    warp: &warp,
-                    sun: Sun::daylight(),
-                    sky: Sky::daylight(),
-                    detail: Detail::FINEST,
-                    cast: &cast,
-                },
-                &mut cache,
-                runner,
-                &clock,
-            )
+            .render(&mut target, &view, &scene, &mut cache, runner, &clock)
             .expect("the frame draws");
+        assert!(renderer.complete(), "a timed frame built a mesh");
         assert_eq!(
             renderer.figures() as u64,
             RIGS,
@@ -289,21 +356,26 @@ fn measure(runner: &dyn JobRunner, baseline: &Baseline) -> Measured {
         // The frame is timed and then not read until the last run, so the
         // measurement is only honest if the optimiser cannot see that.
         black_box(&target);
-        if run == 0 || times.total() < best.total() {
+        if run == 1 || times.total() < best.total() {
             best = times;
         }
     }
     Measured {
         times: best,
-        placement_ns: placement_ns(&cast, camera, &view),
+        placement_ns: placement_ns(&cast, &seen, held),
+        meshes: renderer.drawn(),
         pixels: target.pixels().to_vec(),
     }
 }
 
 /// Print one measurement's per-pass costs against their budgets.
-fn report(label: &str, times: &FrameTimes) {
+fn report(label: &str, measured: &Measured) {
+    let times = &measured.times;
     let micros = |ns: u64| ns / 1_000;
-    println!("WinterSun frame at {BASELINE_WIDTH}x{BASELINE_HEIGHT}, {label}:");
+    println!(
+        "WinterSun frame at {BASELINE_WIDTH}x{BASELINE_HEIGHT}, {label}, {} meshes:",
+        measured.meshes
+    );
     for pass in Pass::ALL {
         let spent = times.spent(pass);
         // A derived `Debug` ignores the width, so the name is rendered
@@ -323,7 +395,7 @@ fn report(label: &str, times: &FrameTimes) {
         micros(FRAME_NS),
         times.total().saturating_mul(100) / FRAME_NS.max(1),
     );
-    // Paid once for tiles the cache did not hold, and outside every pass.
+    // Building meshes and tiles the frame did not hold, outside every pass.
     println!(
         "  {:<10} {:>7} us  (not a cost of drawing)",
         "warm",
@@ -334,35 +406,27 @@ fn report(label: &str, times: &FrameTimes) {
 #[test]
 fn the_baseline_frame_is_measured_and_threading_does_not_change_it() {
     let threads = Threaded::new(REFERENCE_CORES);
-    let baseline = Baseline::solve(&threads);
-    let Measured {
-        times,
-        placement_ns,
-        pixels: serial,
-    } = measure(&tairix_parallel::SERIAL, &baseline);
-    report("one thread", &times);
+    let baseline = Baseline::hold(&threads);
+    let serial = measure(&tairix_parallel::SERIAL, &baseline);
+    report("one thread", &serial);
     println!(
         "  placing one figure: {}.{:01} us on one core",
-        placement_ns / 1_000,
-        placement_ns % 1_000 / 100,
+        serial.placement_ns / 1_000,
+        serial.placement_ns % 1_000 / 100,
     );
 
-    let Measured {
-        times: threaded,
-        pixels: concurrent,
-        ..
-    } = measure(&threads, &baseline);
+    let threaded = measure(&threads, &baseline);
     report(&format!("{REFERENCE_CORES} threads"), &threaded);
+    let (one, many) = (serial.times.total(), threaded.times.total().max(1));
     println!(
         "  speedup {}.{:02}x on {REFERENCE_CORES} threads (bench estimate, not a guarantee)",
-        times.total() / threaded.total().max(1),
-        (times.total() * 100 / threaded.total().max(1)) % 100,
+        one / many,
+        (one * 100 / many) % 100,
     );
 
-    // The claim that does not depend on the machine: the bands are
-    // disjoint, so running them at once draws what running them in turn
-    // drew. `tests/bands.rs` cuts the frame on a serial runner and so
-    // cannot see a torn hand-off; this runner genuinely races.
+    // The claim that does not depend on the machine: the bands are disjoint,
+    // so running them at once draws what running them in turn drew.
+    let (serial, concurrent) = (serial.pixels, threaded.pixels);
     assert_eq!(
         serial.len(),
         concurrent.len(),

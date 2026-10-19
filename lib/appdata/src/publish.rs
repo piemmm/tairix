@@ -25,8 +25,11 @@ use crate::Settings;
 
 /// Write `record` into `store` and commit, touching only what the store's
 /// layers do not already imply: a value a machine policy or the bundle's
-/// defaults supply is never copied up into the user's own document, and a
-/// stored value the registry refuses is replaced.
+/// defaults supply is never copied up into the user's own document, a stored
+/// value the registry refuses is replaced, and a key the record says by its
+/// absence is removed wherever the store still holds it — even one the
+/// registry read and ignored, as a setting another setting makes meaningless
+/// is.
 ///
 /// # Errors
 ///
@@ -40,15 +43,13 @@ pub fn save<R: Registry>(record: &R, store: &mut Settings<'_>) -> Result<(), Err
         wanted.clear();
         let had = stored.spell(key, &mut held);
         let has = record.spell(key, &mut wanted);
-        if had == has && held == wanted && !refused.contains(&key) {
-            continue;
-        }
-        if has {
+        if !has {
+            // A no-op unless a store layer still holds the key.
+            store.unset(R::name(key));
+        } else if !had || held != wanted || refused.contains(&key) {
             store
                 .set(R::name(key), &wanted)
                 .map_err(|_| Errno::OutOfRange)?;
-        } else {
-            store.unset(R::name(key));
         }
     }
     store.commit()

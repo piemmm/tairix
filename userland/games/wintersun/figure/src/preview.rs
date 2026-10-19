@@ -26,11 +26,12 @@ use tairix_wintersun_net::value::Facing;
 use crate::breath::Breath;
 use crate::design::Change;
 use crate::error::FigureError;
+use crate::frame::Lens;
 use crate::humanoid;
 use crate::identity::Identity;
 use crate::motion::{Clips, Kind};
 use crate::plant::Planted;
-use crate::reference::{self, Reference, Staged, BREATH};
+use crate::reference::{self, Reference, Staged, BREATH, LEVEL};
 use crate::rig::Placement;
 use crate::transition::{Advanced, Animator, ClipId, Edge, StateId, Transitions};
 
@@ -210,7 +211,8 @@ impl<'a> Preview<'a> {
             Frame::Measured => (self.playing(), self.staged.rig().reach()),
         };
         let (scale, at) = reference::fit(kind, reach, side)?;
-        self.staged.place(&planted, self.facing, scale, at, out)?;
+        self.staged
+            .place(&planted, self.facing, Lens::Oblique { scale, at }, out)?;
         Reference::shadow(0.0, scale, at)
     }
 
@@ -230,7 +232,7 @@ impl<'a> Preview<'a> {
         let pose = self.animator.blend()?.resolve()?;
         let planted = self
             .staged
-            .plant(&pose, self.breath, self.animator.root()?)?;
+            .plant(&pose, self.breath, self.animator.root()?, |_| LEVEL)?;
         self.planted = Some(planted);
         Ok(planted)
     }

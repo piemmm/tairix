@@ -249,9 +249,8 @@ impl Build {
             seed: plan.seed,
         };
         let grain = Grain {
-            roughness: plan.roughness,
             ridges: plan.ridges,
-            dunes: 0.0,
+            ..Grain::hummocks(plan.roughness)
         };
         if !(plan.fits() && character.fits() && grain.fits()) {
             return Err(Error::Shape);
@@ -1427,6 +1426,9 @@ impl Coarse {
                     roughness: read(|grain| grain.roughness),
                     ridges: read(|grain| grain.ridges),
                     dunes: read(|grain| grain.dunes),
+                    gullies: read(|grain| grain.gullies),
+                    lean: read(|grain| grain.lean),
+                    knobs: read(|grain| grain.knobs),
                 }
             }
         }

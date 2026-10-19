@@ -12,8 +12,11 @@ fn permille(scale: RenderScale) -> u64 {
 
 #[test]
 fn every_knob_lists_its_settings_finest_first() {
-    let shifts: alloc::vec::Vec<u32> = Lighting::ALL.iter().map(|l| l.shift()).collect();
-    assert_eq!(shifts, alloc::vec![1, 2, 3], "the light buffer coarsens");
+    let shadows: alloc::vec::Vec<Shadows> = Shadows::ALL.to_vec();
+    assert_eq!(
+        shadows,
+        alloc::vec![Shadows::Soft, Shadows::Hard, Shadows::Flat]
+    );
     let scales: alloc::vec::Vec<u64> = Resolution::ALL
         .iter()
         .map(|r| permille(r.scale()))
@@ -80,8 +83,7 @@ fn each_step_turns_exactly_one_knob() {
     let mut ladder = Ladder::FULL;
     while let Some(next) = ladder.shed() {
         let (a, b) = (ladder.detail(), next.detail());
-        let differing = usize::from(a.lighting != b.lighting)
-            + usize::from(a.shadows != b.shadows)
+        let differing = usize::from(a.shadows != b.shadows)
             + usize::from(a.ground != b.ground)
             + usize::from(a.resolution != b.resolution);
         assert_eq!(
@@ -108,19 +110,15 @@ fn the_rungs_give_way_in_the_stated_order() {
     }
     assert_eq!(
         seen,
-        alloc::vec![
-            Rung::LightResolution,
-            Rung::ShadowSoftness,
-            Rung::RenderScale
-        ],
-        "light buffer, shadow softness, render scale"
+        alloc::vec![Rung::ShadowSoftness, Rung::RenderScale],
+        "shadow softness, then render scale"
     );
 }
 
 #[test]
 fn a_rung_is_fully_shed_before_the_next_is_touched() {
-    // The first render-scale notch may only appear once the light is at its
-    // coarsest and the ground's relief flat.
+    // The first render-scale notch may only appear once the shadows are hard
+    // and the ground unlit.
     let mut ladder = Ladder::FULL;
     while ladder.detail().resolution == Resolution::Full {
         match ladder.shed() {
@@ -128,7 +126,6 @@ fn a_rung_is_fully_shed_before_the_next_is_touched() {
             None => unreachable!("the render-scale rung is reachable"),
         }
     }
-    assert_eq!(ladder.detail().lighting, Lighting::Coarse);
     assert_eq!(ladder.detail().shadows, Shadows::Flat);
 }
 
@@ -147,10 +144,6 @@ fn every_knob_is_monotone_down_the_ladder() {
     let mut ladder = Ladder::FULL;
     while let Some(next) = ladder.shed() {
         let (a, b) = (ladder.detail(), next.detail());
-        assert!(
-            b.lighting >= a.lighting,
-            "the light got finer while shedding"
-        );
         assert!(
             b.shadows >= a.shadows,
             "the shadows softened while shedding"
@@ -194,49 +187,9 @@ fn a_contact_shadow_hardens_and_never_goes() {
 }
 
 #[test]
-fn the_relief_narrows_then_flattens() {
-    let reliefs: alloc::vec::Vec<Relief> = Shadows::ALL.iter().map(|s| s.relief()).collect();
-    assert_eq!(
-        reliefs,
-        alloc::vec![Relief::Wide, Relief::Narrow, Relief::Flat]
-    );
-}
-
-#[test]
-fn every_render_scale_keeps_every_zoom_whole() {
-    let mut zooms = alloc::vec![Zoom::NEAREST];
-    while let Some(next) = zooms.last().and_then(|zoom| zoom.further()) {
-        zooms.push(next);
-    }
-    for cap in CAPS {
-        for resolution in Resolution::ALL {
-            let scale = cap.of(resolution.scale());
-            for zoom in &zooms {
-                let base = zoom.sub_units_per_pixel();
-                let whole = scale.step(base).expect("a whole step");
-                assert_eq!(
-                    i64::from(whole) * i64::from(scale.numerator()),
-                    i64::from(base) * i64::from(scale.denominator()),
-                    "{scale:?} at {zoom:?} is not the zoom's own step widened"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn a_fraction_that_splits_a_sub_unit_is_refused() {
-    let three_quarters = RenderScale {
-        numerator: 3,
-        denominator: 4,
-    };
-    assert_eq!(
-        three_quarters.step(8),
-        None,
-        "eight sub-units widened by a third split one"
-    );
-    assert_eq!(three_quarters.step(12), Some(16));
-    assert_eq!(RenderScale::ONE.step(8), Some(8));
+fn the_ground_gives_up_its_light_only_after_the_shadows_harden() {
+    let lit: alloc::vec::Vec<bool> = Shadows::ALL.iter().map(|s| s.lit()).collect();
+    assert_eq!(lit, alloc::vec![true, true, false]);
 }
 
 /// The floor falls where the smallest figure a record describes is drawn at
@@ -254,7 +207,7 @@ fn the_floor_holds_the_smallest_figure_at_the_readable_size() {
             assert_eq!(floor, native_floor, "{zoom:?} shed past the native scale");
         } else {
             assert!(
-                readable(view.step(zoom)),
+                readable(focus_step(zoom, &view)),
                 "{zoom:?}'s floor draws figures unreadably"
             );
         }
@@ -262,7 +215,7 @@ fn the_floor_holds_the_smallest_figure_at_the_readable_size() {
             let past = Viewport::new(1280, 720, deeper.detail().resolution.scale())
                 .expect("a real window");
             assert!(
-                !readable(past.step(zoom)),
+                !readable(focus_step(zoom, &past)),
                 "{zoom:?} stopped short of a readable notch"
             );
         }

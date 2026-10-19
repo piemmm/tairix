@@ -110,6 +110,7 @@
   - [`tairix-player`](./lib/player.md)
   - [`tairix-proglib`](./lib/proglib.md)
   - [`tairix-raid`](./lib/raid.md)
+  - [`tairix-raster`](./lib/raster.md)
   - [`tairix-raytrace`](./lib/raytrace.md)
   - [`tairix-resolver`](./lib/resolver.md)
   - [`tairix-resref`](./lib/resref.md)

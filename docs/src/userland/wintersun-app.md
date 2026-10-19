@@ -1,14 +1,14 @@
 # The WinterSun client shell
 
 `userland/games/wintersun/app` (`tairix-wintersun-app`) is the window a player
-looks through and the frame they see in it: the camera, the tiled software
-renderer, the terrain splat and its light composite, the figures standing on
-the ground, the fixed-tick pacing the render interpolates over, the input
+looks through and the frame they see in it: the perspective camera, the
+software renderer that draws the land in depth, the light composite over it,
+the figures standing on the ground, the fixed-tick pacing the render interpolates over, the input
 drain, the three window size states, the player's graphics choice and the
 settings window it is made in, the degradation ladder `auto` turns when frames
 run late, where a session's first body stands, and the one reference scene
 every check of the picture draws. It is `plans/WINTERSUN.md` WS5, WS6, WS18's
-detail control, WS23 and WS25's client half, and a crate of the
+detail control, WS23, WS25's client half and WS32, and a crate of the
 `userland/games/` leaf subtree. Stability tier: **experimental**.
 
 Everything with behaviour is the crate's `[lib]`; the `[[bin]]` is the on-disk
@@ -25,142 +25,126 @@ panic handler. The store's wipe links `alloc`, and each target's verticals are
 built in one invocation whose features unify, so it would impose an allocator
 on every allocator-free guest beside them.
 
-## No floating point here
+## Where floating point is
 
-The library denies `clippy::float_arithmetic`. Rust's integer arithmetic is
-exactly specified on every target and nothing here folds a `usize` into a
-result, so the ground a frame draws is bit-identical on `x86_64`, `aarch64`,
-`riscv64` and `wasm32` by the language's own rules rather than by luck.
+The library denies `clippy::float_arithmetic` but in four places a
+perspective needs reals: the camera's basis (`Camera::perspective`), the
+light's per-frame tables (`Atmosphere::new`), and two per-triangle setups in
+the terrain pass. Those, `lib/raster`'s perspective and scan converter, and
+the figure engine take `f64` basic operations in a fixed order and
+`tairix_util::mathf`, never a fused multiply-add, so a frame is the same bits
+on every target. The splat and the per-pixel light are integer.
 
-That matters because the frame is where four crates meet. The world generator
-and the figure engine work in `f64` and each carries its own cross-target
-vertical; the ground art is integer throughout and deliberately carries none.
-That the parts agree separately does not say the composition does, so
-`digest::REFERENCE_DIGEST` is folded over two whole composited frames with
-figures standing in them, and asserted by a vertical on each Tier-1 target.
-The art crate's own digest is folded in after the pixels, so a change to the
-ground moves this number too — the coverage the art crate does not carry
-itself.
+The frame is where four crates meet, and each part agreeing separately does
+not say the composition does. `digest::REFERENCE_DIGEST` is folded over two
+whole frames with figures standing in them, the art crate's own digest after
+the pixels, and asserted by a vertical on each Tier-1 target.
 
 ## The camera
 
-An orthographic, axis-aligned projection: a scale and a translate, both
-integer. A pixel spans a power-of-two number of world sub-units at the
-window's own resolution, and a render target drawn smaller spans exactly the
-inverse of its fraction more. Every render scale a detail can take and the
-window's cap use keeps that a whole number of sub-units at every zoom, so the terrain pass
-still steps a span by adding the step, and a smaller target covers the same
-piece of the world rather than a different one at a coarser resolution. There
-are five zoom stops, each a doubling, from one world cell across 128 pixels to
-one across 8.
+A perspective onto the land from a distance and a tilt. The eye looks at a
+point a cell above the focus's ground, `Zoom::distance` away: five stops, each
+a doubling, from six cells to ninety-six. `Tilt` runs from twelve degrees
+below level to straight down, authored at fifty; the heading is north until
+WS33 lets the player turn it. The focal length is the render height times
+1.072, a fifty-degree field up the screen, so a figure at the focus is drawn
+at the zoom's distance over the focal length (`focus_step`) whatever the
+window's width.
 
-The camera carries the realm's extent and clamps **where the view is
-projected**, not where it is aimed. A camera that clamped on being aimed is
-correct until the window grows: the wider view it then projects reaches past an
-edge it had already settled against, and the frame draws ground the realm does
-not have. Clamping at projection makes "the view is inside the realm" true of
-every extent rather than of the last one the camera was told about. The
-property model found that hole; the fix removed the class of it.
-
-A realm narrower than the view is centred rather than pinned to a corner.
+The focus is clamped into the realm, and the view past its edge is sky. The
+eye stands at least two cells above the ground beneath it and, raised, looks
+back down at the focus, so the character stays where it was on the screen.
+Ground rising *between* eye and character can still hide it until WS33's
+camera draws in.
 
 ## The frame
 
-A tiled, threaded software renderer over `lib/parallel`, drawing into a
-`lib/raster` surface cut into row bands. A band is a full-width run of rows,
-because every pass steps *horizontally* — the splat walks a span of pixels
-inside one cell row, the composite walks a row of the buffer — so a vertical
-cut would divide the unit each is built around. Bands are cut finer than the
-runner is wide, so a core taken by another tenant holds up one small piece
-rather than a whole share of the frame. A target a clip window cuts is refused
-rather than drawn from the wrong column.
+Described once, then drawn. `Renderer::describe` resolves everything a frame
+draws into a `Frame` — the camera, the meshes nearest first with the skirts
+each hangs, the material tiles, the light's tables, every figure posed and
+placed — and `execute` draws it reading nothing else, so one description drawn
+twice is one picture. The stages are a GPU's: the vertex stage carries each
+mesh into view space across `lib/parallel`; each band of rows sets up the
+triangles reaching it and scan-converts them depth-tested into the geometry
+buffer; the light composite lights each pixel once; the figures are drawn last,
+hidden wherever the ground is nearer.
 
-The passes run in a fixed order: the terrain splat, the light and fog
-composite over it, then the figures. Everything a band needs is resolved
-before any band starts: the chunks are already resident, the lattice is
-sampled, the material tiles are made resident by the one mutable pass over the
-cache, and every figure is posed and placed. The bands then only read. That is
-what lets them run on other cores at all, and it is the same discipline that
-keeps a frame off the filesystem.
+A band is a full-width run of rows, cut finer than the runner is wide. A target
+a clip window cuts is refused rather than drawn from the wrong column. Mesh
+builds and tile synthesis are timed apart from the passes
+(`FrameTimes::warm`).
 
 ### The ground
 
-The world generator answers per *cell*; a frame is per *pixel*, and at the
-authored zoom a cell is thirty-two of them. So the pass works on a lattice of
-the visible cells' weight fields, interpolates it vertically once per raster
-row, and hands each horizontal run between two lattice columns to the art
-crate's splat, which steps the rest. Four hash evaluations per span rather
-than four per pixel.
+The client holds two kinds of ground (`terrain::HeldGround`): chunks solved in
+full within two of the focus's, and far patches — level 0's reading of a chunk
+— over every chunk the camera sees within `VIEW_RANGE`, where the fog has all
+but closed, solved chunks included, so one given back leaves its far reading
+in place. Both are asked of one worker through the shared deferral desk,
+nearest first, far patches sixteen to an ask; an ask made while one is in
+flight or its answer waits is declined rather than allowed to discard it
+(`terrain::ChunkDesk`). What to ask for is `terrain::Holding`'s: a chunk the
+generator refuses is never asked for again, ground the heap has no room for is
+held back, each kind on its own, until some is given back or the pressure band
+moves, and a scan that found nothing is not made again until the view or the
+ground held moves. A frame draws only what is held, and the sky shows where
+ground has not arrived. Ground beyond reach is given back, and the worn ground
+chunks are solved from is one `lib/reclaim` cache the landing search and the
+worker share.
 
-Roads are stamped into that lattice as decals, converted from the generator's
-cell paths once per realm rather than once per frame. The grounds a frame
-needs are gathered into a fixed 256-member set, which a compile-time assertion
-holds wide enough for the ground vocabulary.
+Each drawn chunk is a `mesh::TerrainMesh`: vertices at cell centres a stride
+apart, the stride chosen so a quad spans at most sixteen pixels at its
+distance; each quad cut north-west to south-east, as the relief is read
+(`terrain::triangle_height`), and carrying the plan its fragments splat from.
+A vertex's normal is the fine surface's at every stride, and the material warp
+is a vertex attribute. A frame builds at most `frame::MESH_BUILDS` meshes and
+draws one of each other chunk's built meshes meanwhile, from its own source
+first and the fewest halvings from the stride wanted. Skirts hang only where a
+neighbour drawn from another source or at another stride meets an edge, or
+none does, as deep as the mesh's spacing and facing out from the edge; a seam
+on ground steeper than one in one can still show a crack until WS38.
 
-A lattice point whose chunk is not resident is *marked*, not fetched and not
-waited for, and the pass draws it as ground the client cannot vouch for —
-deliberately not a terrain colour, because a plausible placeholder would have
-the client asserting a world it has not been told about.
+Work is culled before it is set up: chunks against the view, vertex rows
+wholly behind the eye, and per band every quad beside the band or wholly
+behind ground already drawn there, against a coarse depth of each 8-pixel row
+segment — whether it is drawn whole, and the farthest depth drawn in it.
+Meshes are drawn nearest first and each one's quads outward from the eye, so
+the nearest surface takes a pixel before what it hides is shaded. Roads are
+decals stamped into the weight field, once per realm.
 
-The client holds only the ground its view needs and a chunk around it
-(`terrain::worth_holding`), giving back the rest as the view moves on, so
-however far the player walks what it holds is the view's working set; the
-margin keeps a view panning over an edge from giving away ground it is about
-to ask for again.
-
-Chunks are solved off the frame loop by one worker, nearest missing ground
-first, through the shared deferral desk (`terrain::ChunkDesk`). One chunk's
-answer never supersedes another's, so an ask made while a solve is in flight
-is declined rather than allowed to discard that solve; an ask the worker has
-not yet taken is replaced by the next one, so it always starts on the nearest
-ground still missing. Before the window opens the realm's land is refined
-across every core, and the worn ground its chunks are solved from is kept in
-one `lib/reclaim` cache the landing search and the worker share, so a chunk
-beside one already solved wears only the ground no earlier chunk reached; a
-change of memory-pressure band gives it back with the material tiles.
+A fragment interpolates, perspective-correct, its place in the quad, its
+height, normal and warp; the splat reads each ground at the mip its footprint
+asks for. A steep face reads its materials in the vertical plane it most
+nearly faces, the planes dithered into one another about forty-five degrees,
+so a cliff's texture keeps its scale rather than streaking down it. What a
+fragment leaves in the geometry buffer is its depth (a reversed reciprocal),
+albedo, normal, height, and how near its triangle's edge lies.
 
 ### The light
 
-A single directional light at a shallow angle: long shadows, a cold-to-warm
-gradient across every slope, and no light to trace. The sun and the mist are
-a neutral daylight pair, the same over ice and rainforest, until the sky
-carries live values. The shading is the
-terrain's own gradient dotted with one vector, and it saturates at the
-greatest rise a body may step up — the line the terrain itself draws between a
-slope and a cliff face, so ground a player can walk over is shaded across its
-whole range. The figures are lit by the same sun, built from the same
-direction as the one the art harness measures them under.
+One low directional sun, folded each frame into tables (`light::Atmosphere`):
+the tint of each normal, the fog of each octave of reciprocal depth, the sky
+up each row. A pixel takes its albedo under its normal's tint — relative to
+the palette, so a slope facing neither way draws the material's own colour —
+then the mist pooling below `MIST_CEILING` and the fog of its distance, which
+closes all but a third of the view over 900 cells; the sky shows where nothing
+was drawn. The shading saturates at the steepest rise a body may step up.
 
-Shading is **relative**: a slope facing neither way draws the material's own
-colour and the sun brightens or cools it from there. A plain multiply would
-darken every surface in the world by whatever the tint's mid-point happened to
-be, which is a palette change wearing lighting's clothes.
-
-The result is low-frequency — a function of slope and height, both of which
-vary over cells rather than pixels — so it is accumulated into a buffer at a
-fraction of the render resolution and upsampled, which is what makes it
-affordable and what makes its resolution a knob that costs almost no fidelity
-for most of its travel.
+Silhouettes are resolved here. A pixel whose triangle's edge lies within half a
+pixel of a different surface — a depth an eighth apart, or the sky — takes the
+neighbour's light for the share of it the neighbour covers.
 
 ### The figures
 
-`figures::Cast` is everyone in the scene, each an actor from the figure engine
-standing at a world point. A frame poses and places every figure that can
-reach the view — culled by the furthest any figure draws from its ground point
-— one to a core, then orders them far to near by ground position, with the
-entity id breaking a tie the same way every frame. Each band then draws, in
-that order, the figures whose rows reach it, confined to its own rows, so a
-figure straddling two bands is two halves that meet exactly.
-
-Figures are drawn **after** the light composite, because the light buffer is
-the ground's own relief shading: a figure standing on a slope is not tilted
-with it, and it is already shaded from its own surfaces by the same sun. What
-a figure does take from the ground is the air: the mist at its feet veils its
-every stroke, so a figure in a hollow is as misted as the ground around it.
-
-A figure standing in water is sunk by the depth the rules report at its cell
-and nothing of it is drawn below the surface; its contact shadow thins as the
-water deepens.
+`figures::Cast` is everyone in the scene. A frame poses and places every
+figure the camera can see, one to a core, through the scene's own camera, so a
+figure grows as it nears; each foot is planted on the surface the frame draws
+(`mesh::Surfaces`). Figures are drawn far to near, the entity id breaking a tie,
+each strip hidden wherever the ground's depth is nearer than its own plane, so
+a hill hides the figure behind it and water the legs of a figure wading. The
+contact shadow lies on the slope it darkens, depth-tested by it, and thins as
+the water deepens; the mist and fog at a figure's feet veil its every stroke.
+A band draws only the figures whose rows reach it.
 
 ## The command line
 
@@ -192,8 +176,9 @@ whose cache refused a tile is drawn with that material flat and is not the
 reference, so the renderer counts refusals, the digest fails rather than fold
 one, and a live window says so on standard error.
 
-The window holding it draws again only when its extent changes or the session
-gave its copy of the pixels back, so a still scene costs no frames.
+The window holding it draws only when its extent changes, on a worker so a
+resize never holds its events, and presents its last frame again when the
+session asks for the window's picture, so a still scene costs no frames.
 
 ## The player
 
@@ -254,10 +239,9 @@ notice reaches a window application yet (`plans/WINTERSUN.md` WS6).
 
 ## Detail
 
-Four knobs decide how a frame looks and what it costs: the light buffer's
-resolution, the shadows, the ground's texture, and the render scale. A
-`Detail` is one setting of all four. The player's choice (`graphics`) is one
-of four modes:
+Three knobs decide how a frame looks and what it costs: the shadows, the
+ground's texture, and the render scale. A `Detail` is one setting of all
+three. The player's choice (`graphics`) is one of four modes:
 
 - **Ultra**, the default on a new install: every knob at its finest, whatever
   the frame rate.
@@ -271,7 +255,7 @@ cannot be read leaves every detail at its finest and says why. It is written
 through a worker, never on the frame loop, and only where an interaction
 settles; what the store then holds is adopted unless the player has moved on
 since, and a refused write is reported and puts the stored choice back. The
-store keeps what is in force and nothing else: the mode always, and the four
+store keeps what is in force and nothing else: the mode always, and the three
 knobs only while the choice is custom.
 
 ## The settings window
@@ -299,12 +283,11 @@ and the window is reached through the slot's picker.
 `auto` walks a ladder with a fixed and total order, one notch at a time, of
 the knobs that cost frame time:
 
-1. light-buffer resolution
-2. shadow softness: every shadow edge hardens — each figure's contact shadow
-   becomes one ellipse and the relief term measures across one cell rather
-   than two — then the relief is dropped. A contact shadow never goes: it is
-   what says where a figure stands and whether it has left the ground.
-3. render scale, upscaled to the window
+1. shadow softness: each figure's contact shadow hardens to one ellipse, then
+   the ground is drawn in its materials' own colours, unlit. A contact shadow
+   never goes: it is what says where a figure stands and whether it has left
+   the ground.
+2. render scale, upscaled to the window
 
 Each rung sheds through its own notches before the next is touched, so two
 machines at the same step are drawing the same picture and the step is the one
@@ -347,8 +330,8 @@ The governor reads the machine over seconds, not frames:
   the evidence against it has aged.
 - **Frames after a move or a resize are not counted** for half a second and
   four frames: they pay for buffers and textures once. Nor is the time a frame
-  spent synthesising tiles, which `FrameTimes::warm` records apart from the
-  passes. Every dwell is counted in time frames were drawn in, not time that
+  spent building meshes and synthesising tiles, which `FrameTimes::warm`
+  records apart from the passes. Every dwell is counted in time frames were drawn in, not time that
   passed, so a paused window was neither overrunning nor comfortable.
 
 ## The window
@@ -371,13 +354,16 @@ run of refusals is reported once.
 
 ## The frame budget
 
-The baseline is 1280×720 at 60 Hz — a 16.6 ms frame — on a four-core machine,
-with the per-pass allocation `plans/WINTERSUN.md` states. `tests/budget.rs`
-measures it rather than asserting about it, on one thread and on four, with the
-plan's sixty-four rigged figures standing on the ground, and prints what each
-pass cost against its budget and what placing one figure costs a single core.
-No elapsed time is asserted: a wall-clock bound is a claim about the machine,
-so what the test gates is that real threads draw the picture one thread does.
+The baseline is 1280×720 on a four-core machine, with the per-pass allocation
+`plans/WINTERSUN.md` states — which, from the 3D view on, the GPU path holds;
+the software path is held to being as fast as the CPU allows. `tests/budget.rs`
+measures it rather than asserting about it: a long view at the lowest tilt
+across the most broken ground of a 64-chunk realm, the plan's sixty-four rigged
+figures standing in it, on one thread and on four, printing what each pass cost
+and what placing one figure costs a single core. The plan records those numbers
+as the baseline a regression is judged against. No elapsed time is asserted: a
+wall-clock bound is a claim about the machine, so what the test gates is that
+real threads draw the picture one thread does.
 
 The material cache is a share of the machine's memory, asked of the System
 Information API once before the window opens, and obeys the band the kernel
@@ -390,25 +376,26 @@ subtraction.
 
 ## Tests
 
-The host suite covers the projection, the detail knobs, the ladder and its
-floor, the governor against simulated machines — a moment of other work, a
-busy machine that has shown it can keep up, detail too dear for the machine, a
+The host suite covers the camera, the detail knobs, the ladder and its floor,
+the governor against simulated machines — a moment of other work, a busy
+machine that has shown it can keep up, detail too dear for the machine, a
 larger window, a pause, and a restore that does not hold — the stored choice
 over the shared fake app-data service, the settings window's drag, detents,
 chooser, layout and scoped repaint, the icon-bar declaration, the start search
 over synthetic hollows and river beds, the render target and its bands, the
-terrain lattice, the light model, the cast and the figure pass — culling,
-depth order, the waterline, and bands drawing exactly what one band draws —
-the pacing, the input mapping and the size-state model. The start search over
-the realms the client itself opens runs with the scene tests
-(`--features scene-tests`), as each generates a realm.
-`tests/bands.rs` asserts that cutting a peopled frame for any number of
-threads produces the identical picture. `tests/proptest_model.rs` is the
-invariant model over generated window, input and frame-cost programs — it is
-what found the camera's resize hole and the governor counting a pause as
-overrun time, and it holds the ladder above its floor and to one notch a
-frame.
-`tests/budget.rs` is the measurement.
+held ground and what a view asks for, the meshes and their seams, the terrain
+pass — a ridge hiding the ground behind it, the eye's own ground clipped
+rather than dropped, the same picture however the rows are cut — the light
+model and its silhouettes, the cast and the figure pass, a frame drawn twice
+from one description, the pacing, the input mapping and the size-state model.
+The start search over the realms the client itself opens runs with the scene
+tests (`--features scene-tests`), as each generates a realm. `tests/bands.rs`
+asserts that cutting a peopled frame for any number of threads produces the
+identical picture. `tests/proptest_model.rs` is the invariant model over
+generated window, input, camera and frame-cost programs — it is what found the
+camera's resize hole and the governor counting a pause as overrun time, and it
+holds the ladder above its floor and to one notch a frame. `tests/budget.rs` is
+the measurement.
 
 The cross-target rendering claim is four verticals —
 `client_frame_qemu_{aarch64,riscv64,x86_64}` and `client_frame_wasm32` — each

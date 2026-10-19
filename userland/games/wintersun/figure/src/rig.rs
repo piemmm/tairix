@@ -2,13 +2,14 @@
 //! the pass that turns a posture into painted strips.
 
 use tairix_inline::ArrayVec;
+use tairix_raster::mesh::{Depth, DepthPlane};
 use tairix_raster::surface::SUBPIXEL;
 use tairix_raster::Color;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
 use crate::error::FigureError;
-use crate::frame::{project, toward_camera, Basis, Body, Heading, Rotation};
+use crate::frame::{Basis, Body, Heading, Lens, Rotation};
 use crate::joint::{Joint, JointId, MAX_JOINTS};
 use crate::mesh::{self, Ring, Stretch, BANDS, EDGES, MAX_RINGS, STRIP};
 use crate::shadow::Light;
@@ -608,15 +609,18 @@ impl<'a> Posture<'a> {
 
     /// Place the figure for a stance.
     ///
-    /// `stance` carries the heading, the figure-local-to-surface scale, the
-    /// surface point the figure's ground contact sits on, and the root
-    /// transform a lift, a crouch or a slope tilt is expressed as. `fitted`
-    /// is the equipment hung on its sockets.
+    /// `stance` carries the heading, the lens the figure is seen through, and
+    /// the root transform a lift, a crouch or a slope tilt is expressed as.
+    /// `fitted` is the equipment hung on its sockets.
     ///
     /// The result is sorted far-first, so painting it in order composites the
     /// figure correctly: a depth tie breaks on the rig's own part order, and
     /// equipment follows the body, so a piece of piping stays behind the flap
     /// it edges and a pauldron stays in front of the shoulder it covers.
+    ///
+    /// A figure reaching nearer than the camera can see is left with nothing
+    /// placed: the eye is inside it, and a body cut open by the near plane is
+    /// no view of it.
     ///
     /// # Errors
     ///
@@ -627,7 +631,7 @@ impl<'a> Posture<'a> {
     /// where it was built.
     pub fn place(
         &self,
-        stance: &Stance,
+        stance: &Stance<'_>,
         fitted: &[Fitted],
         out: &mut Placement,
     ) -> Result<(), FigureError> {
@@ -641,10 +645,7 @@ impl<'a> Posture<'a> {
 
         self.rig
             .resolve(&self.rotations, stance.root, &mut out.frames);
-        let seen = Seen {
-            view: toward_camera(stance.heading),
-            light: stance.light.toward(stance.heading),
-        };
+        let light = stance.light.toward(stance.heading);
 
         for part in &self.rig.parts {
             let own = out.frames.frames[part.joint.index()];
@@ -660,7 +661,10 @@ impl<'a> Posture<'a> {
                 sort: part.sort,
                 color: self.rig.tints.get(part.tint),
             };
-            out.push(stance, seen, surface, own, end, rest)?;
+            if !out.push(stance, light, surface, own, end, rest)? {
+                out.len = 0;
+                return Ok(());
+            }
         }
         for piece in fitted {
             let mount = self
@@ -689,7 +693,10 @@ impl<'a> Posture<'a> {
                 sort: None,
                 color: piece.color,
             };
-            out.push(stance, seen, surface, frame, None, None)?;
+            if !out.push(stance, light, surface, frame, None, None)? {
+                out.len = 0;
+                return Ok(());
+            }
         }
 
         out.sort();
@@ -700,23 +707,14 @@ impl<'a> Posture<'a> {
 /// Where a figure stands, and how its whole body is displaced there.
 ///
 /// Gathers what turning a rig into surface pixels needs: the heading, the
-/// scale, the surface ground point, and the root transform. Validated once
-/// here, so placing has nothing left to check about it.
+/// lens, and the root transform. Validated once here, so placing has nothing
+/// left to check about it.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub struct Stance {
+pub struct Stance<'a> {
     heading: Heading,
-    scale: f64,
-    at: (f64, f64),
+    lens: Lens<'a>,
     root: Resolved,
     light: Light,
-}
-
-/// How a figure is seen: the direction toward the camera and the direction
-/// the light travels, both in the figure's own frame.
-#[derive(Copy, Clone, Debug, PartialEq)]
-struct Seen {
-    view: Body,
-    light: Body,
 }
 
 /// One surface about to be placed: its authored rings, how the figure's
@@ -731,39 +729,22 @@ struct Surface {
     color: Color,
 }
 
-impl Stance {
-    /// A figure facing `facing`, drawn at `scale`, standing at `at`, under
-    /// `light`.
+impl<'a> Stance<'a> {
+    /// A figure facing `facing`, seen through `lens`, under `light`.
     ///
-    /// `scale` converts the figure-local pixels the rig is authored in to
-    /// surface pixels — the figure's drawn height over [`Rig::reach`]'s own
-    /// units — and `at` is the surface column and row its feet rest on. The
-    /// light is the scene's, and is here because a surface cannot be shaded
-    /// without it and a figure turning under a fixed light is what makes it
-    /// read as solid. The root starts at rest; [`Self::rooted`] displaces
-    /// it.
+    /// The light is the scene's, and is here because a surface cannot be
+    /// shaded without it and a figure turning under a fixed light is what
+    /// makes it read as solid. The root starts at rest; [`Self::rooted`]
+    /// displaces it.
     ///
     /// # Errors
     ///
-    /// [`FigureError::ScaleUnreal`] for a scale that is not finite and
-    /// positive, and [`FigureError::GeometryUnreal`] for a ground point that
-    /// is not finite.
-    pub fn new(
-        facing: Facing,
-        scale: f64,
-        at: (f64, f64),
-        light: Light,
-    ) -> Result<Self, FigureError> {
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(FigureError::ScaleUnreal);
-        }
-        if !at.0.is_finite() || !at.1.is_finite() {
-            return Err(FigureError::GeometryUnreal);
-        }
+    /// As [`Lens::check`].
+    pub fn new(facing: Facing, lens: Lens<'a>, light: Light) -> Result<Self, FigureError> {
+        lens.check()?;
         Ok(Self {
             heading: Heading::of(facing),
-            scale,
-            at,
+            lens,
             root: Resolved::REST,
             light,
         })
@@ -813,6 +794,8 @@ struct Entry {
     edge: [[(i32, i32); MAX_RINGS]; EDGES],
     /// What each strip is filled with, light already applied.
     tone: [Color; BANDS],
+    /// Each strip's reciprocal depth across the screen.
+    plane: [DepthPlane; BANDS],
 }
 
 impl Entry {
@@ -823,6 +806,7 @@ impl Entry {
         rings: 0,
         edge: [[(0, 0); MAX_RINGS]; EDGES],
         tone: [Color::rgb(0, 0, 0); BANDS],
+        plane: [DepthPlane::flat(Depth::NEAREST); BANDS],
     };
 }
 
@@ -841,6 +825,9 @@ pub struct Strip<'a> {
     pub near: &'a [(i32, i32)],
     /// The points down the other, which the fill walks back along.
     pub far: &'a [(i32, i32)],
+    /// Its reciprocal depth across the screen, fitted to its own points: what
+    /// a scene's depth buffer hides it behind.
+    pub plane: DepthPlane,
 }
 
 /// The buffers a figure is placed and sorted through.
@@ -864,7 +851,7 @@ impl Placement {
         clippy::large_stack_arrays,
         reason = "the buffer is the caller's, held across frames, and this \
                   crate links no allocator to put it anywhere else. At about \
-                  fourteen kibibytes it sits inside the boot stack of every \
+                  eighteen kibibytes it sits inside the boot stack of every \
                   target this runs on, and the alternative the lint suggests \
                   is the heap the figure path exists to avoid"
     )]
@@ -901,6 +888,7 @@ impl Placement {
                 color: entry.tone[band],
                 near: &entry.edge[band][..rings],
                 far: &entry.edge[band + 1][..rings],
+                plane: entry.plane[band],
             })
         })
     }
@@ -927,19 +915,21 @@ impl Placement {
         bounds
     }
 
-    /// Carry one surface's rings through to the screen and store its strips.
+    /// Carry one surface's rings through to the screen and store its strips,
+    /// answering whether every point of it landed: `false` is a surface
+    /// reaching nearer than the camera sees, and stores nothing.
     ///
     /// The caller has already checked the whole figure fits, so the slot
     /// exists.
     fn push(
         &mut self,
-        stance: &Stance,
-        seen: Seen,
+        stance: &Stance<'_>,
+        light: Body,
         surface: Surface,
         own: Resolved,
         end: Option<Resolved>,
         rest: Option<(Body, Basis)>,
-    ) -> Result<(), FigureError> {
+    ) -> Result<bool, FigureError> {
         let hoops = mesh::carry(
             surface.rings,
             surface.stretch,
@@ -949,48 +939,66 @@ impl Placement {
             rest,
         )?;
         let Some(middle) = hoops.get(hoops.len() / 2) else {
-            return Ok(());
+            return Ok(true);
         };
+        let (lens, heading) = (stance.lens, stance.heading);
 
         let slot = &mut self.entries[self.len];
         slot.rings = u8::try_from(hoops.len()).map_err(|_| FigureError::TooManyParts)?;
-        let mut depth = 0.0;
+        let mut key = 0.0;
+        let mut landed = [[(0.0, 0.0, 0.0); MAX_RINGS]; EDGES];
         for (index, hoop) in hoops.iter().enumerate() {
-            let start = mesh::near(*hoop, seen.view);
-            depth += project(stance.heading, hoop.at).depth;
+            let start = mesh::near(*hoop, lens.toward(heading, hoop.at));
+            let Some(centre) = lens.land(heading, hoop.at) else {
+                return Ok(false);
+            };
+            key += centre.key;
             for (edge, row) in slot.edge.iter_mut().enumerate() {
                 // Bounded by `EDGES`, far below the mantissa's own range.
                 #[allow(clippy::cast_precision_loss, reason = "bounded by EDGES")]
                 let step = edge as f64;
                 let (point, _) = hoop.surface(start + STRIP * step);
-                let placed = project(stance.heading, point);
-                row[index] = subpixel((
-                    stance.at.0 + placed.dx * stance.scale,
-                    stance.at.1 + placed.dy * stance.scale,
-                ));
+                let Some(at) = lens.land(heading, point) else {
+                    return Ok(false);
+                };
+                row[index] = subpixel((at.x, at.y));
+                landed[edge][index] = (at.x, at.y, at.depth);
             }
         }
 
         // The tone is taken once per strip, at the middle ring, because a
         // strip is filled flat: reading it per ring would cost more and
         // change nothing that reaches the surface.
-        let start = mesh::near(*middle, seen.view);
+        let start = mesh::near(*middle, lens.toward(heading, middle.at));
         for (band, tone) in slot.tone.iter_mut().enumerate() {
             // Bounded by `BANDS`, far below the mantissa's own range.
             #[allow(clippy::cast_precision_loss, reason = "bounded by BANDS")]
             let step = band as f64 + 0.5;
             let (_, normal) = middle.surface(start + STRIP * step);
-            *tone = mesh::shaded(surface.color, mesh::level(normal, seen.light));
+            *tone = mesh::shaded(surface.color, mesh::level(normal, light));
+        }
+
+        let rings = hoops.len();
+        for (band, plane) in slot.plane.iter_mut().enumerate() {
+            *plane = match lens {
+                Lens::Oblique { .. } => DepthPlane::flat(Depth::NEAREST),
+                Lens::Perspective { .. } => fit(landed[band][..rings]
+                    .iter()
+                    .chain(&landed[band + 1][..rings])),
+            };
         }
 
         slot.depth = if let Some(point) = surface.sort {
             let local = surface.at.plus(surface.stretch.point(point));
-            project(stance.heading, own.at.plus(own.basis.apply(local))).depth
+            let Some(at) = lens.land(heading, own.at.plus(own.basis.apply(local))) else {
+                return Ok(false);
+            };
+            at.key
         } else {
             // Bounded by `MAX_RINGS`, and a part with no rings returned above.
             #[allow(clippy::cast_precision_loss, reason = "bounded by MAX_RINGS")]
-            let count = hoops.len() as f64;
-            depth / count
+            let count = rings as f64;
+            key / count
         };
         // The order is the tie-break that keeps a caller's paint order
         // identical from frame to frame.
@@ -1001,7 +1009,7 @@ impl Placement {
         let order = self.len as u16;
         slot.order = order;
         self.len += 1;
-        Ok(())
+        Ok(true)
     }
 
     /// Order the entries far-first.
@@ -1022,6 +1030,52 @@ impl Default for Placement {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// How lopsided a strip's points may spread before they are taken to lie on
+/// a line: below this share of an even spread, the across-the-line slope is
+/// rounding, not geometry.
+const FLAT_SPREAD: f64 = 1e-6;
+
+/// The reciprocal-depth plane best fitting `points`, each `(x, y, depth)` in
+/// surface pixels: least squares about their mean, so a strip bent through a
+/// joint is held to its own points as closely as one plane can hold it.
+fn fit<'p>(points: impl Iterator<Item = &'p (f64, f64, f64)> + Clone) -> DepthPlane {
+    let (mut count, mut sx, mut sy, mut sq) = (0.0, 0.0, 0.0, 0.0);
+    for &(x, y, q) in points.clone() {
+        count += 1.0;
+        sx += x;
+        sy += y;
+        sq += q;
+    }
+    if count == 0.0 {
+        return DepthPlane::flat(Depth::NEAREST);
+    }
+    let (mx, my, mq) = (sx / count, sy / count, sq / count);
+    let (mut xx, mut xy, mut yy, mut xq, mut yq) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for &(x, y, q) in points {
+        let (dx, dy, dq) = (x - mx, y - my, q - mq);
+        xx += dx * dx;
+        xy += dx * dy;
+        yy += dy * dy;
+        xq += dx * dq;
+        yq += dy * dq;
+    }
+    let (det, spread) = (xx * yy - xy * xy, xx + yy);
+    let (across, down) = if det > spread * spread * FLAT_SPREAD {
+        ((xq * yy - yq * xy) / det, (yq * xx - xq * xy) / det)
+    } else if spread > 0.0 {
+        // Points on a line: the slope along it, and none across.
+        (xq / spread, yq / spread)
+    } else {
+        (0.0, 0.0)
+    };
+    DepthPlane::through([
+        (mx, my, mq),
+        (mx + 1.0, my, mq + across),
+        (mx, my + 1.0, mq + down),
+    ])
+    .unwrap_or(DepthPlane::flat(Depth::NEAREST))
 }
 
 #[cfg(test)]

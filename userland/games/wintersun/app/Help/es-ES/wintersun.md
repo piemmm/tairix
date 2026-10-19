@@ -8,9 +8,10 @@ wintersun — recorrer un mundo generado proceduralmente
 
 ## DESCRIPTION
 
-Abre una ventana de escritorio sobre un mundo generado: una vista cenital de
-un terreno que la máquina sintetiza en lugar de distribuir, iluminado por un
-sol bajo que proyecta sombras largas por cada ladera.
+Abre una ventana de escritorio sobre un mundo generado, visto desde detrás y por
+encima de usted mientras lo recorre: un terreno que la máquina sintetiza en
+lugar de distribuir, cuyas colinas ocultan lo que hay tras ellas, iluminado por
+un sol bajo que proyecta sombras largas por cada ladera.
 
 El mundo va desde un casquete de hielo en el extremo norte hasta la selva
 tropical más allá del ecuador. Su clima sigue a la latitud, a los vientos
@@ -36,28 +37,27 @@ se anulan. La vista le sigue y se detiene en el borde del mundo en lugar de
 salirse de él. Las laderas demasiado empinadas y el agua demasiado profunda le
 desvían.
 
-`+` y `-` acercan y alejan la vista, en cinco pasos, desde una celda del mundo
-de ocho píxeles de ancho hasta una de ciento veintiocho.
+`+` y `-` acercan y alejan la vista, en cinco pasos, cada uno el doble de lejos
+que el anterior, desde seis celdas del mundo de distancia hasta noventa y seis.
 
 `F11` pone la ventana en pantalla completa y la devuelve después a como
 estaba: una ventana maximizada vuelve maximizada. `Esc` la restaura. `Q` sale.
 
 Cada detalle se dibuja en su nivel más fino hasta que elija otra cosa. La fila
-*Settings…* del menú del juego en la barra de iconos abre su ventana de
-ajustes, donde la calidad es *Ultra*, cada detalle en su nivel más fino;
-*Basic*, cada detalle en su nivel más sencillo al tamaño completo de la
-ventana; *Custom*, su propia elección de la iluminación, las sombras, la
-textura del suelo y la escala de renderizado, cada una en su propio control
-deslizante; o *Auto*. Mover un control deslizante hace que la elección sea
-*Custom*. Su elección se conserva para la próxima vez que juegue.
+*Settings…* del menú del juego en la barra de iconos abre su ventana de ajustes,
+donde la calidad es *Ultra*, cada detalle en su nivel más fino; *Basic*, cada
+detalle en su nivel más sencillo al tamaño completo de la ventana; *Custom*, su
+propia elección de las sombras, la textura del suelo y la escala de renderizado,
+cada una en su propio control deslizante; o *Auto*. Mover un control deslizante
+hace que la elección sea *Custom*. Su elección se conserva para la próxima vez
+que juegue.
 
 En *Auto* el cliente reduce el detalle cuando los fotogramas llevan un rato
-llegando tarde — primero la iluminación, luego las sombras, luego la escala de
-renderizado — y lo devuelve, paso a paso, a medida que se recuperan. Juzga a
-lo largo de segundos y no de fotogramas sueltos, así que un momento de otro
-trabajo en la máquina no cuesta nada y una ventana mayor no lo lleva a su
-nivel más sencillo, y nunca dibuja las figuras demasiado pequeñas para
-leerlas.
+llegando tarde — primero las sombras, luego la escala de renderizado — y lo
+devuelve, paso a paso, a medida que se recuperan. Juzga a lo largo de segundos y
+no de fotogramas sueltos, así que un momento de otro trabajo en la máquina no
+cuesta nada y una ventana mayor no lo lleva a su nivel más sencillo, y nunca
+dibuja las figuras demasiado pequeñas para leerlas.
 
 Una ventana mayor de lo que el renderizador por software puede llenar se
 dibuja a 2560×1440 como máximo y se escala hasta el tamaño de la ventana.

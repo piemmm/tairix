@@ -383,9 +383,9 @@ fn spread_of(piece: &Piece) -> (f64, f64) {
 fn a_lands_grain_shapes_its_relief() {
     let even = |roughness: f64, ridges: f64, dunes: f64| {
         flat(Grains::Even(Grain {
-            roughness,
             ridges,
             dunes,
+            ..Grain::hummocks(roughness)
         }))
     };
     let smooth = even(0.0, 0.0, 0.0);
@@ -414,11 +414,7 @@ fn a_lands_grain_shapes_its_relief() {
     }
     // Rough along the west of the land, smooth along its east.
     let grains = (0..65 * 65)
-        .map(|index| Grain {
-            roughness: if index % 65 < 32 { 8.0 } else { 0.0 },
-            ridges: 0.0,
-            dunes: 0.0,
-        })
+        .map(|index| Grain::hummocks(if index % 65 < 32 { 8.0 } else { 0.0 }))
         .collect();
     let half = flat(Grains::Sampled(grains));
     let side = usize::try_from(half.square.size.0).expect("a side");
@@ -431,14 +427,172 @@ fn a_lands_grain_shapes_its_relief() {
     assert!(column(side - 2) < 1e-9, "smooth in the east");
 }
 
+/// A flat field like [`flat`]'s, eight cells of 30 m a side refined straight
+/// to a metre: fine enough for a stride's knobs.
+fn flat_fine(grains: Grains) -> Piece {
+    flat_refined(&[30], grains)
+}
+
+/// [`flat_fine`]'s field refined through a level for each of `ratios`, and
+/// the last level's whole square.
+fn flat_refined(ratios: &[u32], grains: Grains) -> Piece {
+    let runner = runner();
+    let mut levels = [None; LEVELS];
+    for (level, &ratio) in levels.iter_mut().zip(ratios) {
+        *level = Some(Level {
+            ratio,
+            droplets: 0.0,
+        });
+    }
+    let lattices = Lattices::new(
+        Lattice {
+            step: 30.0,
+            origin: (-4, -4),
+            cells: 8,
+        },
+        levels,
+    )
+    .expect("lattices");
+    let field = Field {
+        lattices,
+        heights: alloc::vec![10.0; 9 * 9],
+        filled: alloc::vec![10.0; 9 * 9],
+        wetness: alloc::vec![0.0; 9 * 9],
+        grains,
+        character: Character {
+            longest: 90.0,
+            growth: 1.0,
+            snow_line: None,
+            sea: None,
+            snowpack: None,
+            seed: 7,
+        },
+    };
+    let land = Coarse::of_field(field, &runner).expect("a field");
+    let mut piece = refined(
+        &land,
+        (0, land.lattices().domain(0).expect("a domain")),
+        None,
+        &runner,
+    );
+    for level in 1..ratios.len() {
+        let domain = land.lattices().domain(level).expect("a domain");
+        piece = refined(&land, (level, domain), Some(&piece), &runner);
+    }
+    piece
+}
+
+/// The knobs a field is studded with stand as high refined through a level of
+/// a metre to one of half a metre as refined straight to it: each level adds
+/// only what it resolves of them beyond its parent.
+#[test]
+fn knobs_are_added_once_however_many_levels_resolve_them() {
+    let knobbed = || {
+        Grains::Even(Grain {
+            knobs: 0.5,
+            ..Grain::hummocks(0.0)
+        })
+    };
+    let (_, straight) = spread_of(&flat_refined(&[60], knobbed()));
+    let (_, stepped) = spread_of(&flat_refined(&[30, 2], knobbed()));
+    assert!(
+        (stepped - straight).abs() < 0.25 * straight,
+        "{stepped} through two levels against {straight} straight"
+    );
+}
+
+/// The mean height a piece's interior vertices stand from their four
+/// neighbours' mean: how much of its relief is in its shortest waves.
+fn short_waves(piece: &Piece) -> f64 {
+    let side = usize::try_from(piece.square.size.0).expect("a side");
+    let at = |x: usize, y: usize| f64::from(piece.heights[y * side + x]);
+    let (mut total, mut count) = (0.0, 0.0);
+    for y in 1..side - 1 {
+        for x in 1..side - 1 {
+            let around = (at(x - 1, y) + at(x + 1, y) + at(x, y - 1) + at(x, y + 1)) / 4.0;
+            total += mathf::fabs(at(x, y) - around);
+            count += 1.0;
+        }
+    }
+    total / count
+}
+
+/// Gullies raise a relief of their own, leaning to the longest waves leaves
+/// less of the shortest and leaning to the shortest more, and knobs stud only
+/// a level fine enough to hold them.
+#[test]
+fn gullies_a_lean_and_knobs_each_shape_the_relief() {
+    let with = |grain: Grain| flat(Grains::Even(grain));
+    let hummocks = with(Grain::hummocks(8.0));
+    let gullied = with(Grain {
+        gullies: 1.0,
+        ..Grain::hummocks(8.0)
+    });
+    let ridged = with(Grain {
+        ridges: 1.0,
+        ..Grain::hummocks(8.0)
+    });
+    let (mean, spread) = spread_of(&gullied);
+    assert!(spread > 0.2, "gullies raise a relief: {spread}");
+    assert!(
+        (mean - 10.0).abs() < 0.4 * spread + 0.05,
+        "about the land's level: {mean}"
+    );
+    assert_ne!(
+        gullied.heights, hummocks.heights,
+        "gullies are not hummocks"
+    );
+    assert_ne!(gullied.heights, ridged.heights, "gullies are not ridges");
+
+    let swollen = with(Grain {
+        lean: 1.0,
+        ..Grain::hummocks(8.0)
+    });
+    assert!(
+        short_waves(&swollen) < 0.8 * short_waves(&hummocks),
+        "a swell leaves {} of the shortest waves against {}",
+        short_waves(&swollen),
+        short_waves(&hummocks)
+    );
+    let broken = with(Grain {
+        lean: -1.0,
+        ..Grain::hummocks(8.0)
+    });
+    assert!(
+        short_waves(&broken) > 1.25 * short_waves(&hummocks),
+        "broken ground leaves {} of the shortest waves against {}",
+        short_waves(&broken),
+        short_waves(&hummocks)
+    );
+
+    let knobbed = Grain {
+        knobs: 0.5,
+        ..Grain::hummocks(0.0)
+    };
+    assert!(
+        with(knobbed)
+            .heights
+            .iter()
+            .all(|&h| (f64::from(h) - 10.0).abs() < 1e-9),
+        "a level of 5 m holds no knobs of 3 m"
+    );
+    let studded = flat_fine(Grains::Even(knobbed));
+    let (_, spread) = spread_of(&studded);
+    assert!(
+        (0.05..0.5).contains(&spread),
+        "knobs half a metre high: {spread}"
+    );
+    assert!(short_waves(&studded) > 0.01, "they are the shortest waves");
+}
+
 /// Where a level is too coarse for even the land's longest wave, it adds no
 /// detail, and the band starts at the first level that holds it.
 #[test]
 fn a_level_too_coarse_for_the_band_adds_none_of_it() {
     let rough = Grains::Even(Grain {
-        roughness: 8.0,
         ridges: 0.5,
         dunes: 0.2,
+        ..Grain::hummocks(8.0)
     });
     // Level 0's step is 5 m: a 15 m wave is under four of its steps.
     let short = flat_at((10.0, None, 15.0), rough.clone());
@@ -457,11 +611,7 @@ fn a_level_too_coarse_for_the_band_adds_none_of_it() {
 /// face, and beneath that lies as the land does, however deep.
 #[test]
 fn the_sea_floor_shelves_only_its_shores_face() {
-    let smooth = Grains::Even(Grain {
-        roughness: 0.0,
-        ridges: 0.0,
-        dunes: 0.0,
-    });
+    let smooth = Grains::Even(Grain::hummocks(0.0));
     for (depth, below) in [(2.0, 4.0 * 2.0 + 3.0 * 0.3), (100.0, 100.0 + 30.0)] {
         let floor = flat_at((-depth, Some(0.0), 90.0), smooth.clone());
         assert!(

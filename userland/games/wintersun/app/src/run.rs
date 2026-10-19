@@ -23,8 +23,10 @@
 //!   the same channel and event mailbox, its picture retained and repainted
 //!   only where its controls report a change;
 //! * `--reference-scene`: the one fixed scene (`reference`) in the same
-//!   window, drawn only when its extent or its retained pixels change, so a
-//!   picture of the window can be checked against the scene drawn elsewhere.
+//!   window, drawn on a worker only when the window's extent changes and
+//!   presented again when the session asks for the window's picture, so a
+//!   picture of the window can be checked against the scene drawn elsewhere
+//!   and a resize never holds the window's events.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy,
 //! and fmt still cover the file.
@@ -47,14 +49,14 @@ mod program {
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::KeyInput;
     use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
-    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
+    use tairix_abi::{Errno, ProcId};
     use tairix_appdata::RtHost;
     use tairix_appdata::{Publication, PublishJob, Published, Settings};
     use tairix_controls::damage::{self, Repaint};
     use tairix_controls::Keystroke;
     use tairix_geometry::Region;
     use tairix_log::{Event, Sink};
-    use tairix_parallel::{JobRunner, Pool, SERIAL};
+    use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::surface::Surface;
     use tairix_rt::io::{StdInfo, Write};
     use tairix_rt::work::{Worker, WorkerGuard};
@@ -83,10 +85,10 @@ mod program {
     use tairix_wintersun_app::reference;
     use tairix_wintersun_app::settings::{self, Request, SettingsWindow, Shown};
     use tairix_wintersun_app::shell::{self, Shell};
-    use tairix_wintersun_app::terrain::{visible_chunks, ChunkDesk, HeldGround, RoadDecals};
+    use tairix_wintersun_app::terrain::{Ask, ChunkDesk, HeldGround, Holding, Made, RoadDecals};
     use tairix_wintersun_app::view::{Reduced, Viewport};
     use tairix_wintersun_art::cache::MaterialCache;
-    use tairix_wintersun_art::decal::Fray;
+    use tairix_wintersun_art::decal::{Bounds, Decal, Fray};
     use tairix_wintersun_art::splat::Warp;
     use tairix_wintersun_figure::actor::Actor;
     use tairix_wintersun_figure::identity::{Identity, RECORD_LEN};
@@ -103,7 +105,7 @@ mod program {
     use tairix_wintersun_rules::terrain::ChunkTerrain;
     use tairix_wintersun_rules::zone::Zone;
     use tairix_wintersun_world::cache::GroundCache;
-    use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
+    use tairix_wintersun_world::chunk::Chunk;
     use tairix_wintersun_world::land::RealmLand;
     use tairix_wintersun_world::params::RealmParams;
     use tairix_wintersun_world::realm::RealmField;
@@ -114,6 +116,10 @@ mod program {
     /// The wait-set token the graphics store worker's answer wake arrives
     /// under.
     const PUBLISH_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+
+    /// The wait-set token the reference scene's worker's answer wake arrives
+    /// under.
+    const SCENE_TOKEN: u64 = app::FIRST_APP_TOKEN + 2;
 
     /// Exit code for a realm that would not generate.
     const EXIT_NO_REALM: i32 = 85;
@@ -145,6 +151,8 @@ mod program {
         /// The graphics store worker, or `None` for a scene that keeps no
         /// choice.
         publisher: Option<&'a Publisher>,
+        /// The reference scene's worker, or `None` in play.
+        scene: Option<&'a SceneWorker>,
         /// What the loop and the park tell each other.
         signals: &'a Signals,
     }
@@ -195,6 +203,12 @@ mod program {
                 Wake::App(PUBLISH_TOKEN) => {
                     if let Some(publisher) = self.publisher {
                         publisher.wake().drain();
+                    }
+                    Ok(Parked::Interrupted)
+                }
+                Wake::App(SCENE_TOKEN) => {
+                    if let Some(scene) = self.scene {
+                        scene.wake().drain();
                     }
                     Ok(Parked::Interrupted)
                 }
@@ -254,27 +268,13 @@ mod program {
         }
     }
 
-    /// What the quarry answers with.
-    ///
-    /// A refusal names its coordinate so the loop can stop asking: a
-    /// chunk the generator will not produce is ground the client does
-    /// not hold, drawn as such, rather than a request re-submitted every
-    /// frame for ever.
-    enum Quarried {
-        /// The ground, solved.
-        Ready(Chunk),
-        /// The generator refused this coordinate.
-        Refused(ChunkCoord),
-    }
-
-    /// The chunk generator, run off the frame loop.
+    /// The ground generator, run off the frame loop.
     ///
     /// Solving a chunk is many frames of relief, water and biome work, so
-    /// the loop *asks* and collects what has arrived. A
-    /// view whose ground has not come back yet draws it as ground the client
-    /// does not hold, which is what it is.
+    /// the loop *asks* and collects what has arrived. Ground that has not
+    /// come back yet is not drawn: the sky shows where it will stand.
     struct Quarry {
-        desk: tairix_rt::sync::Mutex<ChunkDesk<Quarried>>,
+        desk: tairix_rt::sync::Mutex<ChunkDesk<Made>>,
         signal: tairix_rt::sync::Condvar,
         wake: tairix_rt::sync::WorkerWake,
         land: RealmLand,
@@ -294,26 +294,39 @@ mod program {
             }
         }
 
-        /// Ask for `coord`, or — with no worker to take it — solve it
-        /// here. Slower on a single core, never a chunk that never comes.
+        /// Ask for `ask`, or — with no worker to take it — make it here.
+        /// Slower on a single core, never ground that never comes.
         ///
         /// The desk holds one request, so a newer ask displaces an older
         /// one that has not been taken. That is the right policy here:
-        /// the nearest missing chunk is always the best thing to be
-        /// solving, and a displaced one is simply asked for again next
-        /// frame if it is still wanted.
-        fn request(&self, coord: ChunkCoord, armed: bool) -> Option<Quarried> {
+        /// the nearest missing ground is always the best thing to be
+        /// making, and a displaced ask is simply made again next frame if
+        /// it is still wanted.
+        fn request(&self, ask: Ask, armed: bool) -> Option<Made> {
             if !armed {
-                return Some(self.solve(coord));
+                return Some(self.answer(ask));
             }
-            if self.desk.lock().ask(coord) {
+            if self.desk.lock().ask(ask) {
                 self.signal.notify_one();
             }
             None
         }
 
-        fn collect(&self) -> Option<Quarried> {
+        fn answer(&self, ask: Ask) -> Made {
+            match ask {
+                Ask::Solve(coord) => self.solve(coord),
+                Ask::Far(coords) => Made::far(&coords, &self.land),
+            }
+        }
+
+        fn collect(&self) -> Option<Made> {
             self.desk.lock().collect()
+        }
+
+        /// Whether an ask would be taken now, so a loop that would only have
+        /// it declined does not choose one.
+        fn takes_asks(&self) -> bool {
+            self.desk.lock().takes_asks()
         }
 
         /// Ask the worker to leave, and wake it so it can.
@@ -331,11 +344,9 @@ mod program {
             }
         }
 
-        fn solve(&self, coord: ChunkCoord) -> Quarried {
+        fn solve(&self, coord: ChunkCoord) -> Made {
             let mut ground = self.ground.lock();
-            let solved = ChunkBuild::new(coord)
-                .and_then(|build| build.finish(&self.land, &mut *ground, &SERIAL))
-                .map_or(Quarried::Refused(coord), Quarried::Ready);
+            let solved = Made::solved(coord, &self.land, &mut *ground);
             // A band that moved while this held the ground found it held.
             ground.enforce_pressure();
             solved
@@ -355,7 +366,7 @@ mod program {
                         desk = self.signal.wait(desk);
                     }
                 };
-                let answer = self.solve(job);
+                let answer = self.answer(job);
                 if self.desk.lock().deliver(answer) {
                     self.wake.nudge();
                 }
@@ -366,36 +377,34 @@ mod program {
     /// The realm the client is looking at, and the ground it holds.
     struct World {
         params: RealmParams,
-        roads: RoadDecals,
         warp: Warp,
         fray: Fray,
-        ground: HeldGround,
-        refused: Vec<ChunkCoord>,
-        /// Whether the last solved chunk found no room to be held, so a run
-        /// of them is reported once.
-        unheld: bool,
+        holding: Holding,
     }
 
     impl World {
-        fn new(params: RealmParams, field: &RealmField) -> Result<Self, ClientError> {
-            Ok(Self {
+        fn new(params: RealmParams) -> Self {
+            Self {
                 params,
-                roads: RoadDecals::from_realm(field)?,
                 warp: Warp::new(params.seed()),
                 fray: Fray::new(params.seed()),
-                ground: HeldGround::new(),
-                refused: Vec::new(),
-                unheld: false,
-            })
+                holding: Holding::new(),
+            }
         }
 
-        /// Ask the quarry for the nearest chunk the view needs and has
-        /// not got.
+        /// The ground held.
+        fn ground(&self) -> &HeldGround {
+            self.holding.ground()
+        }
+
+        /// Give back the ground `camera` no longer needs through `view`, and
+        /// ask the quarry for the nearest it needs and has not got.
         ///
-        /// One, because the desk holds one: asking for the nearest every
-        /// frame fills the view outward from the player and re-asks for
-        /// anything a newer ask displaced, with no list of outstanding
-        /// requests to keep in step with what is still visible.
+        /// One ask, because the desk holds one: asking for the nearest
+        /// whenever the desk would take one fills the view outward from the
+        /// player and re-asks for anything a newer ask displaced, with no
+        /// list of outstanding requests to keep in step with what is still
+        /// visible.
         fn request_visible(
             &mut self,
             camera: &Camera,
@@ -403,57 +412,29 @@ mod program {
             quarry: &Quarry,
             armed: bool,
         ) {
-            let centre = camera.centre(view);
-            let nearest = visible_chunks(camera.visible(view))
-                .filter(|coord| {
-                    self.params.holds_chunk(coord.x, coord.y)
-                        && !self.ground.holds(*coord)
-                        && !self.refused.contains(coord)
-                })
-                .min_by_key(|coord| chunk_distance(*coord, centre));
-            if let Some(coord) = nearest {
-                if let Some(answer) = quarry.request(coord, armed) {
-                    self.take(answer);
-                }
+            if armed && !quarry.takes_asks() {
+                return;
+            }
+            let focus = camera.focus();
+            let ground = self.holding.ground();
+            let floor = ground.height_at(focus).unwrap_or(0);
+            let Ok(seen) = camera.perspective(view, floor, |at| ground.height_at(at)) else {
+                return;
+            };
+            let Some(ask) = self.holding.next_ask(self.params, &seen, focus) else {
+                return;
+            };
+            if let Some(made) = quarry.request(ask, armed) {
+                self.take(made);
             }
         }
 
-        /// Record what the quarry answered.
-        fn take(&mut self, answer: Quarried) {
-            match answer {
-                Quarried::Ready(chunk) => {
-                    let held = self.ground.adopt(chunk).is_ok();
-                    if !held && !self.unheld {
-                        app::report(
-                            APP_NAME,
-                            "no memory to hold solved ground; it is drawn as unmapped",
-                        );
-                    }
-                    self.unheld = !held;
-                }
-                Quarried::Refused(coord) => {
-                    if !self.refused.contains(&coord) {
-                        self.refused.push(coord);
-                        app::report(
-                            APP_NAME,
-                            "ground refused by the generator; drawn as unmapped",
-                        );
-                    }
-                }
+        /// Hold what the quarry made, saying what is news.
+        fn take(&mut self, made: Made) {
+            if let Some(why) = self.holding.take(made) {
+                app::report(APP_NAME, why);
             }
         }
-    }
-
-    /// How far a chunk's centre is from a world point, squared, so the
-    /// nearest missing ground is solved first.
-    fn chunk_distance(coord: ChunkCoord, from: WorldPoint) -> i64 {
-        let cells = i64::from(tairix_wintersun_world::geom::CHUNK_CELLS);
-        let cell = i64::from(tairix_wintersun_world::geom::CELL_SUB_UNITS);
-        let side = cells * cell;
-        let cx = i64::from(coord.x) * side + side / 2;
-        let cy = i64::from(coord.y) * side + side / 2;
-        let (dx, dy) = (cx - i64::from(from.x), cy - i64::from(from.y));
-        dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
     }
 
     /// What the store held after a write, or why it said nothing.
@@ -630,6 +611,65 @@ mod program {
         /// Whether the last settings present was refused, so a run of them
         /// is reported once.
         settings_refusing: bool,
+        /// Whether the session has asked for the window's whole picture
+        /// since one was last presented.
+        redraw_asked: bool,
+    }
+
+    /// The window's side of a session: the window, the desktop it is drawn
+    /// for, the mailbox its events reach, and the session that answered its
+    /// create.
+    struct Opened {
+        window: AppWindow,
+        look: Look,
+        endpoint: u64,
+        server: ProcId,
+    }
+
+    impl<'a> Session<'a> {
+        /// A session over `opened`, looking at `start` in a realm `bounds`
+        /// wide with `cast` standing in it, keeping `choice` through
+        /// `publisher` and its tiles in `cache`.
+        fn new(
+            opened: Opened,
+            (start, bounds): (WorldPoint, Bounds),
+            cast: Cast<'a>,
+            choice: Publication<Graphics>,
+            publisher: Option<&'a Publisher>,
+            cache: MaterialCache,
+        ) -> Self {
+            let Opened {
+                window,
+                look,
+                endpoint,
+                server,
+            } = opened;
+            Self {
+                window,
+                shell: Shell::new(),
+                camera: Camera::new(start, Zoom::DEFAULT, bounds),
+                follow: Motion::still(start),
+                facing: Facing(0),
+                pacer: Pacer::new(TickRate::default_rate()),
+                controls: Controls::new(),
+                governor: Governor::new(),
+                renderer: Renderer::new(),
+                cache,
+                scaled: Reduced::default(),
+                times: FrameTimes::new(),
+                cast,
+                posed_ns: None,
+                refusing: false,
+                choice,
+                publisher,
+                settings: None,
+                look,
+                endpoint,
+                server,
+                settings_refusing: false,
+                redraw_asked: false,
+            }
+        }
     }
 
     /// Advance the simulation by `ticks` and record where the player got
@@ -644,10 +684,13 @@ mod program {
         if ticks == 0 {
             return;
         }
-        let Ok(borrowed) = world.ground.borrow() else {
-            return;
-        };
-        let Ok(terrain) = ChunkTerrain::new(&borrowed) else {
+        // Held ground is kept in coordinate order, so this refusal is a
+        // broken invariant, said rather than stepped over.
+        let Ok(terrain) = ChunkTerrain::new(world.ground().solved()) else {
+            app::report(
+                APP_NAME,
+                "held ground is out of order; the game did not step",
+            );
             return;
         };
         for _ in 0..ticks {
@@ -672,7 +715,7 @@ mod program {
 
     /// Move the player's figure to where this frame shows its body, over the
     /// real time since it was last posed, in the water it stands in there.
-    fn pose_player(session: &mut Session<'_>, chunks: &[&Chunk], player: EntityId, now: u64) {
+    fn pose_player(session: &mut Session<'_>, chunks: &[Chunk], player: EntityId, now: u64) {
         let at = session.follow.at(session.pacer.alpha());
         // A paused game shows the moment it paused at, so no time passes for
         // its figure either.
@@ -726,6 +769,7 @@ mod program {
     fn draw(
         session: &mut Session<'_>,
         world: &World,
+        decals: &[Decal<'_>],
         player: EntityId,
         runner: &dyn JobRunner,
         now: u64,
@@ -737,7 +781,7 @@ mod program {
             let floor = readable_floor(session, &mode);
             session.governor.hold(floor);
         }
-        match draw_frame(session, world, player, runner, now, &mode) {
+        match draw_frame(session, (world, decals), player, runner, now, &mode) {
             Ok(()) => {
                 session.refusing = false;
                 Ok(true)
@@ -777,7 +821,7 @@ mod program {
     /// that could not be drawn so the window keeps the last one that was.
     fn draw_frame(
         session: &mut Session<'_>,
-        world: &World,
+        (world, decals): (&World, &[Decal<'_>]),
         player: EntityId,
         runner: &dyn JobRunner,
         now: u64,
@@ -785,14 +829,11 @@ mod program {
     ) -> Result<(), Unpresented> {
         let detail = in_force(session);
         let view = Viewport::new(mode.width_px, mode.height_px, detail.resolution.scale())?;
-        let borrowed = world.ground.borrow()?;
-        let chunks = ChunkWindow::new(&borrowed).map_err(|_| ClientError::World)?;
-        let decals = world.roads.decals()?;
-        pose_player(session, &borrowed, player, now);
+        pose_player(session, world.ground().solved(), player, now);
         let scene = Scene {
             camera: session.camera,
-            chunks,
-            decals: &decals,
+            ground: world.ground(),
+            decals,
             fray: &world.fray,
             warp: &world.warp,
             sun: Sun::daylight(),
@@ -898,6 +939,7 @@ mod program {
             WindowEvent::Minimized { .. } => session.shell.minimized(),
             WindowEvent::CloseRequested { .. } => return true,
             WindowEvent::ContentReleased { .. } => session.window.release_frames(),
+            WindowEvent::RedrawRequested { .. } => session.redraw_asked = true,
             WindowEvent::AppBarMenu { item } => match BarCommand::from_item(item) {
                 Some(BarCommand::Settings) => open_settings(session),
                 Some(BarCommand::Quit) => return true,
@@ -1285,10 +1327,15 @@ mod program {
             };
         let start = landing.at;
 
-        let Ok(mut world) = World::new(params, land.field()) else {
+        // Built once: the roads are the realm's and never move.
+        let Ok(roads) = RoadDecals::from_realm(land.field()) else {
             return app::fail(APP_NAME, EXIT_NO_REALM, "the realm's roads did not fit");
         };
-        world.take(Quarried::Ready(landing.chunk));
+        let Ok(decals) = roads.decals() else {
+            return app::fail(APP_NAME, EXIT_NO_REALM, "the realm's roads did not fit");
+        };
+        let mut world = World::new(params);
+        world.take(Made::Solved(landing.chunk));
         let quarry = Arc::new(Quarry::new(land, ground));
         let armed = start_quarry(&quarry, binding.set());
 
@@ -1312,30 +1359,19 @@ mod program {
             Err(code) => return code,
         };
 
-        let mut session = Session {
-            window,
-            shell: Shell::new(),
-            camera: Camera::new(start, Zoom::DEFAULT, realm_bounds(params)),
-            follow: Motion::still(start),
-            facing: Facing(0),
-            pacer: Pacer::new(TickRate::default_rate()),
-            controls: Controls::new(),
-            governor: Governor::new(),
-            renderer: Renderer::new(),
-            cache: MaterialCache::new("wintersun", backing, tairix_rt::pressure::gauge(), &Journal),
-            scaled: Reduced::default(),
-            times: FrameTimes::new(),
+        let mut session = Session::new(
+            Opened {
+                window,
+                look,
+                endpoint: binding.endpoint(),
+                server,
+            },
+            (start, realm_bounds(params)),
             cast,
-            posed_ns: None,
-            refusing: false,
             choice,
-            publisher: Some(&publisher),
-            settings: None,
-            look,
-            endpoint: binding.endpoint(),
-            server,
-            settings_refusing: false,
-        };
+            Some(&publisher),
+            MaterialCache::new("wintersun", backing, tairix_rt::pressure::gauge(), &Journal),
+        );
 
         let signals = Signals::default();
         let events = WindowEvents::new(Park {
@@ -1343,12 +1379,13 @@ mod program {
             set: binding.set(),
             quarry: Some(&quarry),
             publisher: Some(&publisher),
+            scene: None,
             signals: &signals,
         });
         let _guard = QuarryGuard(Arc::clone(&quarry));
         let code = run_loop(
             &mut session,
-            &mut world,
+            (&mut world, &decals),
             &mut zone,
             player,
             &quarry,
@@ -1377,40 +1414,38 @@ mod program {
             (),
             tairix_rt::sync::WorkerWake::create(),
         ));
-        start_publisher(&publisher, set);
+        start_worker(&publisher, set, PUBLISH_TOKEN, "graphics store");
         (Publication::new(graphics), publisher)
     }
 
-    /// Start the graphics store worker and put its answer wake on `set`.
+    /// Start `worker` and put its answer wake on `set` under `token`.
     ///
-    /// A kernel that grants neither leaves the writes on the frame loop: the
-    /// worker's desk is stopped, so a submitted choice is written where it
-    /// is asked for and its answer is waiting when the loop next collects.
-    /// Slower on a single core, never a write that is lost.
-    fn start_publisher(publisher: &Arc<Publisher>, set: u64) {
-        let added = publisher.wake().read_end().is_some_and(|read| {
-            tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                PUBLISH_TOKEN,
-            ) == 0
-        });
-        if !added {
-            publisher.stop();
+    /// A kernel that grants neither leaves the `what` work on the frame loop:
+    /// the desk is stopped, so a submission is carried out where it is made
+    /// and its answer is waiting when the loop next collects. Slower on a
+    /// single core, never work that is lost.
+    fn start_worker<S, Req, Ans>(
+        worker: &Arc<Worker<S, Req, Ans>>,
+        set: u64,
+        token: u64,
+        what: &str,
+    ) where
+        S: Send + 'static,
+        Req: Send + 'static,
+        Ans: Send + 'static,
+    {
+        if let Err(err) = app::watch_wake(set, worker.wake(), token) {
+            worker.stop();
             app::report(
                 APP_NAME,
-                "no wake for the graphics store worker; the choice is kept on the frame loop",
+                format_args!("{what} wake refused ({err}); its work is done on the frame loop"),
             );
             return;
         }
-        if let Err(reason) = Publisher::start(publisher) {
+        if let Err(reason) = Worker::start(worker) {
             app::report(
                 APP_NAME,
-                format_args!(
-                    "no graphics store worker ({reason:?}); the choice is kept on the frame loop"
-                ),
+                format_args!("no {what} worker ({reason:?}); its work is done on the frame loop"),
             );
         }
     }
@@ -1504,24 +1539,19 @@ mod program {
 
     /// Start the chunk worker, answering whether one is running.
     fn start_quarry(quarry: &Arc<Quarry>, set: u64) -> bool {
-        let Some(read) = quarry.wake.read_end() else {
+        if !quarry.wake.is_armed() {
             app::report(
                 APP_NAME,
                 "no chunk-worker wake pipe; ground is solved on the frame loop",
             );
             return false;
-        };
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Stream,
-            u64::from(read),
-            QUARRY_TOKEN,
-        ) != 0
-        {
+        }
+        if let Err(err) = app::watch_wake(set, &quarry.wake, QUARRY_TOKEN) {
             app::report(
                 APP_NAME,
-                "chunk-worker wake refused; ground is solved on the frame loop",
+                format_args!(
+                    "chunk-worker wake refused ({err}); ground is solved on the frame loop"
+                ),
             );
             return false;
         }
@@ -1548,7 +1578,7 @@ mod program {
     )]
     fn run_loop(
         session: &mut Session<'_>,
-        world: &mut World,
+        (world, decals): (&mut World, &[Decal<'_>]),
         zone: &mut Zone,
         player: EntityId,
         quarry: &Arc<Quarry>,
@@ -1569,23 +1599,14 @@ mod program {
             if signals.pressure_moved.replace(false) {
                 session.cache.enforce_pressure();
                 quarry.give_back();
+                world.holding.relieve();
             }
             adopt_desktop(session, &signals.desktop_moved);
             while let Some(answer) = quarry.collect() {
                 world.take(answer);
             }
-            if let Served::Stop(code) = serve(session, waited) {
+            if let Some(code) = drain(session, waited, &mut events) {
                 return code;
-            }
-            // Everything already queued is applied before the frame is drawn
-            // from the state it leaves, so a burst of input is one paint.
-            loop {
-                let read = events.try_wait(session.window.client());
-                match serve(session, read) {
-                    Served::Stop(code) => return code,
-                    Served::Empty => break,
-                    Served::Applied => {}
-                }
             }
             // After the drain, so a write the worker was woken for and one a
             // machine with no worker carried out inline are both adopted
@@ -1606,7 +1627,6 @@ mod program {
             session.camera.look_at(session.follow.at(alpha));
             if let Some(mode) = session.window.mode().copied() {
                 if let Ok(view) = Viewport::new(mode.width_px, mode.height_px, RenderScale::ONE) {
-                    world.ground.release_distant(session.camera.visible(&view));
                     world.request_visible(&session.camera, &view, quarry, armed);
                 }
             }
@@ -1617,7 +1637,7 @@ mod program {
             // region the session released.
             if session.shell.running() && cadence.is_due(now) {
                 cadence.begun(now);
-                match draw(session, world, player, pool, now) {
+                match draw(session, world, decals, player, pool, now) {
                     Ok(true) => governed(session, now),
                     Ok(false) => {}
                     Err(_) => return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"),
@@ -1649,11 +1669,78 @@ mod program {
         }
     }
 
+    /// Serve the event `waited` read and every event already queued behind
+    /// it, so a burst of input is applied before the frame drawn from what it
+    /// leaves; answering the exit code where the session ended.
+    fn drain(
+        session: &mut Session<'_>,
+        waited: Result<Option<WindowEvent>, EventError>,
+        events: &mut WindowEvents<Park<'_>>,
+    ) -> Option<i32> {
+        if let Served::Stop(code) = serve(session, waited) {
+            return Some(code);
+        }
+        loop {
+            let read = events.try_wait(session.window.client());
+            match serve(session, read) {
+                Served::Stop(code) => return Some(code),
+                Served::Empty => return None,
+                Served::Applied => {}
+            }
+        }
+    }
+
+    /// What the reference scene's worker keeps between frames: the realm and
+    /// the cast's motions, and the renderer, tiles and reduced target its
+    /// frames are drawn through.
+    struct Scenery {
+        world: reference::World,
+        motion: Set,
+        renderer: Renderer,
+        cache: MaterialCache,
+        reduced: Reduced,
+        pool: Pool,
+    }
+
+    /// The frame of a window `extent` big, or why the scene could not be
+    /// drawn exactly; `None` for an ask that owed no frame.
+    type Painted = Option<((u32, u32), Result<Surface, ClientError>)>;
+
+    /// The worker the reference scene is drawn on, so a resize never holds
+    /// the window's events while the realm's ground is made.
+    type SceneWorker = Worker<Scenery, reference::SceneAsk, Painted>;
+
+    /// Carry out `ask` over `scenery`.
+    fn paint_scene(scenery: &mut Scenery, ask: &mut reference::SceneAsk) -> Painted {
+        if ask.give_back {
+            scenery.cache.enforce_pressure();
+        }
+        let (width, height) = ask.extent?;
+        Some(((width, height), scenery.frame(width, height)))
+    }
+
+    impl Scenery {
+        /// The scene as a window `width`×`height` shows it.
+        fn frame(&mut self, width: u32, height: u32) -> Result<Surface, ClientError> {
+            let clips = self.motion.clips().map_err(|_| ClientError::Figure)?;
+            let mut window = Surface::new(width, height).ok_or(ClientError::OutOfMemory)?;
+            self.world.draw_window(
+                &clips,
+                &mut window,
+                &mut self.reduced,
+                &mut self.renderer,
+                &mut self.cache,
+                &self.pool,
+            )?;
+            Ok(window)
+        }
+    }
+
     /// The reference scene in the game's window, held still until the player
     /// leaves.
     fn reference_scene(mut window: AppWindow, look: Look, endpoint: u64, set: u64) -> i32 {
         let pool = Pool::for_cpus(online_cpus());
-        let Ok(mut world) = reference::World::generate(&pool) else {
+        let Ok(world) = reference::World::generate(&pool) else {
             return app::fail(
                 APP_NAME,
                 EXIT_NO_REALM,
@@ -1667,44 +1754,53 @@ mod program {
                 "the motion set could not be built",
             );
         };
-        let Ok(clips) = motion.clips() else {
+        if motion.clips().is_err() {
             return app::fail(
                 APP_NAME,
                 EXIT_NO_FIGURE,
                 "the motion set's clips could not be built",
             );
-        };
+        }
         let server = match open_window(&mut window, &look.desktop, endpoint) {
             Ok(server) => server,
             Err(code) => return code,
         };
-        let start = WorldPoint { x: 0, y: 0 };
-        let mut session = Session {
-            window,
-            shell: Shell::new(),
-            camera: Camera::new(start, Zoom::DEFAULT, realm_bounds(world.params())),
-            follow: Motion::still(start),
-            facing: Facing(0),
-            pacer: Pacer::new(TickRate::default_rate()),
-            controls: Controls::new(),
-            governor: Governor::new(),
-            renderer: Renderer::new(),
-            cache: reference::cache(tairix_rt::pressure::gauge()),
-            scaled: Reduced::default(),
-            times: FrameTimes::new(),
-            cast: Cast::new(),
-            posed_ns: None,
-            refusing: false,
-            // The scene is always drawn in its finest detail, keeps no choice,
-            // and declares no slot, so no settings window is ever asked for.
-            choice: Publication::new(Graphics::Ultra),
-            publisher: None,
-            settings: None,
-            look,
-            endpoint,
-            server,
-            settings_refusing: false,
-        };
+        let bounds = realm_bounds(world.params());
+        let scene = Arc::new(SceneWorker::new(
+            paint_scene,
+            Scenery {
+                world,
+                motion,
+                renderer: Renderer::new(),
+                cache: reference::cache(tairix_rt::pressure::gauge()),
+                reduced: Reduced::default(),
+                pool,
+            },
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        start_worker(&scene, set, SCENE_TOKEN, "scene");
+        let _scene_guard = WorkerGuard::new(&scene);
+        // The scene keeps no choice and declares no slot, so no settings
+        // window is ever asked for; it draws nothing of its own either, its
+        // worker drawing every frame.
+        let mut session = Session::new(
+            Opened {
+                window,
+                look,
+                endpoint,
+                server,
+            },
+            (WorldPoint { x: 0, y: 0 }, bounds),
+            Cast::new(),
+            Publication::new(Graphics::Ultra),
+            None,
+            MaterialCache::new(
+                "wintersun-scene-window",
+                0,
+                tairix_rt::pressure::gauge(),
+                &Journal,
+            ),
+        );
         // Never armed: nothing in the scene moves, so no frame is ever owed.
         let signals = Signals::default();
         let events = WindowEvents::new(Park {
@@ -1712,89 +1808,119 @@ mod program {
             set,
             quarry: None,
             publisher: None,
+            scene: Some(&scene),
             signals: &signals,
         });
-        reference_loop(&mut session, &mut world, &clips, &pool, events, &signals)
+        reference_loop(&mut session, &scene, events, &signals)
     }
 
-    /// Serve the reference scene's window: the scene is drawn whenever the
-    /// window owes it — first, then after its extent changed or the session
-    /// gave its copy of the pixels back — and the client parks until an event
-    /// changes that, never drawing for input that moves nothing.
+    /// Serve the reference scene's window: a frame is asked of the scene's
+    /// worker whenever the window's extent is one no frame was drawn for, and
+    /// presented when it lands; the last one is presented again when the
+    /// session asks for the window's picture. The loop parks until an
+    /// event or the worker changes that, never drawing for input that moves
+    /// nothing.
     ///
-    /// Drawn before the first park, because the session shows a window only
-    /// on its first present: parked first, the client would wait for an event
-    /// the session sends only to a window it has shown.
+    /// Asked before the first park, because the session shows a window only
+    /// on its first present: parked first with nothing asked, the client
+    /// would wait for an event the session sends only to a window it has
+    /// shown.
     fn reference_loop(
         session: &mut Session<'_>,
-        world: &mut reference::World,
-        clips: &Clips<'_>,
-        pool: &Pool,
+        scene: &SceneWorker,
         mut events: WindowEvents<Park<'_>>,
         signals: &Signals,
     ) -> i32 {
-        let mut drawn: Option<(u32, u32)> = None;
+        let mut owed = reference::Owed::new();
+        let mut shown: Option<Surface> = None;
         loop {
-            if let Some(mode) = session.window.mode().copied() {
-                let extent = (mode.width_px, mode.height_px);
-                if drawn != Some(extent) || session.window.content_released() {
-                    match draw_reference(session, world, clips, pool, &mode) {
-                        Ok(()) => drawn = Some(extent),
-                        // Holding a picture that is not the scene would
-                        // defeat the one thing this mode is for.
-                        Err(Unpresented::Refused(err)) => {
+            loop {
+                while let Some(painted) = scene.collect() {
+                    let Some((at, frame)) = painted else {
+                        continue;
+                    };
+                    // Holding a picture that is not the scene would defeat the
+                    // one thing this mode is for.
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(err) => {
                             return app::fail(
                                 APP_NAME,
                                 EXIT_NO_SCENE,
                                 format_args!("the reference scene could not be drawn: {err}"),
                             )
                         }
-                        Err(Unpresented::Lost(_)) => {
-                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused")
+                    };
+                    if owed.landed(at, window_extent(session)) {
+                        shown = Some(frame);
+                        if let Err(code) = present_scene(session, shown.as_ref()) {
+                            return code;
                         }
                     }
+                }
+                let on_screen = shown.as_ref().map(|frame| (frame.width(), frame.height()));
+                let Some(ask) = owed.ask(window_extent(session), on_screen) else {
+                    break;
+                };
+                // Carried out here for want of a worker: its answer is waiting.
+                if !scene.submit(ask) {
+                    break;
+                }
+            }
+            // Only when asked: a region released under pressure stays given
+            // back until the session wants the window's pixels again.
+            if core::mem::take(&mut session.redraw_asked) {
+                if let Err(code) = present_scene(session, shown.as_ref()) {
+                    return code;
                 }
             }
             let waited = events.wait(session.window.client());
             if signals.pressure_moved.replace(false) {
-                session.cache.enforce_pressure();
+                owed.pressure_moved();
             }
             adopt_desktop(session, &signals.desktop_moved);
-            if let Served::Stop(code) = serve(session, waited) {
+            if let Some(code) = drain(session, waited, &mut events) {
                 return code;
-            }
-            loop {
-                let read = events.try_wait(session.window.client());
-                match serve(session, read) {
-                    Served::Stop(code) => return code,
-                    Served::Empty => break,
-                    Served::Applied => {}
-                }
             }
         }
     }
 
-    /// Draw the reference scene into the whole window and present it, or
-    /// present nothing where it could not be drawn exactly, a refused tile
-    /// included.
-    fn draw_reference(
-        session: &mut Session<'_>,
-        world: &mut reference::World,
-        clips: &Clips<'_>,
-        runner: &dyn JobRunner,
-        mode: &DisplayMode,
-    ) -> Result<(), Unpresented> {
-        let (renderer, cache, reduced) = (
-            &mut session.renderer,
-            &mut session.cache,
-            &mut session.scaled,
-        );
+    /// The extent the window's mode reports, where it has one.
+    fn window_extent(session: &Session<'_>) -> Option<(u32, u32)> {
         session
             .window
-            .try_present(DamageRect::full(mode), |surface| {
-                world.draw_window(clips, surface, reduced, renderer, cache, runner)
-            })??;
-        Ok(())
+            .mode()
+            .map(|mode| (mode.width_px, mode.height_px))
+    }
+
+    /// Present `shown`, the scene's last frame, where the window is the extent
+    /// it was drawn for; a frame for an extent the window has left is kept for
+    /// none and the next frame asked for replaces it. Answers the exit code
+    /// where the session would not take it.
+    fn present_scene(session: &mut Session<'_>, shown: Option<&Surface>) -> Result<(), i32> {
+        let (Some(mode), Some(frame)) = (session.window.mode().copied(), shown) else {
+            return Ok(());
+        };
+        if (mode.width_px, mode.height_px) != (frame.width(), frame.height()) {
+            return Ok(());
+        }
+        let presented = session
+            .window
+            .try_present(DamageRect::full(&mode), |surface| {
+                if (surface.width(), surface.height()) != (frame.width(), frame.height()) {
+                    return Err(ClientError::Viewport);
+                }
+                for (to, from) in surface.pixels_mut().iter_mut().zip(frame.pixels()) {
+                    *to = *from;
+                }
+                Ok(())
+            });
+        // A window whose surface is not the extent its mode reports keeps its
+        // last frame, and the next resize asks for another.
+        match presented {
+            Ok(_) => Ok(()),
+            Err(_) => Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused")),
+        }
     }
 
     tairix_rt::entry!(main);

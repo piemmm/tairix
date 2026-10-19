@@ -670,9 +670,14 @@ acceptance item like the rest of the Pi peripherals.
 ### Interactive QEMU session (`cargo xtask run`)
 
 `cargo xtask run --target aarch64-rpi [--profile debug|installer]
-[--cpus N] [--firmware <dir>]` builds the requested platform image
-(exactly as `cargo xtask image`) and boots it interactively on
-`qemu-system-aarch64 -M virt`. The Pi-linked kernel inside the image
+[--cpus N] [--ram SIZE] [--firmware <dir>]` builds the requested platform
+image (exactly as `cargo xtask image`) and boots it interactively on
+`qemu-system-aarch64 -M virt`. `--cpus` sets the guest's CPU count (four by
+default) and `--ram` its RAM, as a whole number of mebibytes, bare or
+suffixed `M`, or of gibibytes suffixed `G` — `512M`, `2G` — or the board's
+256 MiB without it. The kernel finds that RAM in the device tree QEMU
+generates, as it would a Pi's, so a session can be sized as the Pi it stands
+in for. The Pi-linked kernel inside the image
 loads at `0x8_0000` (not RAM on `virt`), and QEMU's ELF `-kernel` path
 passes no DTB, so `run` additionally builds the **`virt`-board form of
 the same production kernel crate** (`TAIRIX_KERNEL_BOARD=virt` →

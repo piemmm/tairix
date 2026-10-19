@@ -16,7 +16,9 @@ use alloc::vec::Vec;
 
 use tairix_countryside::Point;
 use tairix_mix::numbered;
-use tairix_noise::{billow2, fbm2, noise2, ridged2, smoothstep};
+use tairix_noise::{
+    billow2_fading, fbm2, fbm2_resolved, noise2, resolved, ridged2_fading, smoothstep,
+};
 use tairix_parallel::JobRunner;
 use tairix_terrain::droplet::{Droplets, Placed, Source, Store, Tiles, Unkept, Wearing, Work};
 use tairix_terrain::TerrainError;
@@ -62,6 +64,22 @@ const SHELF: f64 = 0.3;
 /// How far beneath that the shore's face shelves away more steeply than the
 /// land: about as far down as waves work a beach's face.
 const SHORE_FACE: f64 = 10.0;
+
+/// How much faster than natural ground's halving a full lean to the longest
+/// waves lets each octave of the relief fall away, and how much more slowly a
+/// full lean to the shortest; across the levels, how much steeper or
+/// flatter it makes the spectrum.
+const LEAN_FADE: f64 = 0.6;
+
+/// How fast natural relief fades with a shorter wave: a level whose longest
+/// wave is a tenth of the land's carries a tenth to the power of this of its
+/// roughness.
+const SPECTRAL_SLOPE: f64 = 0.8;
+
+/// The wave of the knobs a grain studs the ground with, in metres: frost
+/// hummocks and tussocks a stride across, the shortest wave a level of a metre
+/// holds without aliasing it.
+const KNOB_WAVE: f64 = 4.0;
 
 /// How far beyond what a piece's ground reads of its parent a Catmull–Rom
 /// patch reaches: one vertex before a cell and two after it.
@@ -229,6 +247,8 @@ impl Lattices {
 struct Band {
     longest: f64,
     octaves: u32,
+    /// The log of how much shorter its longest wave is than the land's.
+    depth: f64,
     spectrum: f64,
 }
 
@@ -249,10 +269,12 @@ impl Coarse {
     /// The band from waves `longest` long down through `octaves` octaves:
     /// fainter the shorter its waves, as natural relief is.
     fn spanning(&self, longest: f64, octaves: u32) -> Band {
+        let depth = mathf::ln(longest / self.character.longest);
         Band {
             longest,
             octaves,
-            spectrum: mathf::exp(0.8 * mathf::ln(longest / self.character.longest)),
+            depth,
+            spectrum: mathf::exp(SPECTRAL_SLOPE * depth),
         }
     }
 
@@ -262,26 +284,67 @@ impl Coarse {
         let Band {
             longest,
             octaves,
+            depth,
             spectrum,
         } = band;
         if octaves == 0 {
             return 0.0;
         }
+        // A lean steepens or flattens the spectrum across the levels as well
+        // as within this one, so a level's share of the relief follows it.
+        let spectrum = if grain.lean == 0.0 {
+            spectrum
+        } else {
+            mathf::exp(SPECTRAL_SLOPE * (1.0 + LEAN_FADE * grain.lean) * depth)
+        };
         let rough = spectrum * grain.roughness * (0.25 + 0.75 * smoothstep(0.05, 0.6, slope));
         let (u, v, seed) = (x / longest, z / longest, self.character.seed);
-        let hummocks = fbm2(u, v, seed ^ 0x4a11, (octaves, 0.5, 2.0));
+        // Leaning to the longest waves lets each octave fall away faster than
+        // natural ground's half, and to the shortest more slowly.
+        let fading = 0.5 * (1.0 - LEAN_FADE * grain.lean);
+        let hummocks = fbm2(u, v, seed ^ 0x4a11, (octaves, fading, 2.0));
         let ridges = if grain.ridges > 0.0 {
-            ridged2(u, v, seed ^ 0xde7a, octaves) - 0.5
+            ridged2_fading(u, v, seed ^ 0xde7a, (octaves, fading)) - 0.5
         } else {
             0.0
         };
-        let mut form = grain.ridges * ridges + (1.0 - grain.ridges - grain.dunes) * hummocks;
+        let mut form =
+            grain.ridges * ridges + (1.0 - grain.ridges - grain.dunes - grain.gullies) * hummocks;
         if grain.dunes > 0.0 {
             // Billowed octaves lie about a quarter on average, so the dunes
             // neither raise nor lower the land.
-            form += grain.dunes * (2.0 * billow2(u, v, seed ^ 0xd0e5, octaves) - 0.5);
+            form +=
+                grain.dunes * (2.0 * billow2_fading(u, v, seed ^ 0xd0e5, (octaves, fading)) - 0.5);
+        }
+        if grain.gullies > 0.0 {
+            // Ridged octaves turned over: their crests become the sharp
+            // creases rills cut, about level on average as the ridges are.
+            form += grain.gullies * (0.5 - ridged2_fading(u, v, seed ^ 0x9411, (octaves, fading)));
         }
         rough * form
+    }
+
+    /// The knobs `grain` studs the ground at `(x, z)` with, for a level whose
+    /// vertices lie `step` apart: rounded where it hummocks and creased into
+    /// rills where it gullies, and none where the level is too coarse to hold
+    /// waves of a few metres, which would only alias.
+    fn knobs(&self, (x, z): (f64, f64), grain: Grain, step: f64) -> f64 {
+        let footprint = step / KNOB_WAVE;
+        // The longest knob wave unresolved, so is every shorter one.
+        if grain.knobs <= 0.0 || resolved(footprint, 1.0) <= 0.0 {
+            return 0.0;
+        }
+        let (u, v) = (x / KNOB_WAVE, z / KNOB_WAVE);
+        let seed = self.character.seed ^ 0x6b0b;
+        let rounded = fbm2_resolved(u, v, seed, (2, 0.5, 2.0), footprint);
+        let rills = if grain.gullies > 0.0 {
+            // The folded noise reaches past its mean as far again as the
+            // rounded one does, so the two read at one depth.
+            2.0 * (0.5 - ridged2_fading(u, v, seed ^ 0x2111, (1, 0.5))) * resolved(footprint, 1.0)
+        } else {
+            0.0
+        };
+        grain.knobs * (rounded + grain.gullies * (rills - rounded))
     }
 
     /// `height` shelving away beneath the sea, if the land has one, so the
@@ -307,7 +370,8 @@ impl Coarse {
         // fades out there, so the clearing stays as level as the relief left it.
         let keep = self.kept((x, z));
         let grain = self.grain((x, z));
-        let natural = worn + keep * self.detail((x, z), (slope, grain), band);
+        let natural = worn
+            + keep * (self.detail((x, z), (slope, grain), band) + self.knobs((x, z), grain, step));
         let (carved, lie, channel) = self.carve((x, z), natural, step);
         // Snow lies down to the clearing's water, unlike the land's own detail.
         let snow = self.character.snowpack.map_or(0.0, |pack| {
@@ -363,9 +427,12 @@ impl Coarse {
             .snowpack
             .map_or(0.0, |pack| pack.carved((x, z), lying, step));
         let grain = self.grain((x, z));
+        // The parent's reading carries what its own step resolved of the
+        // knobs, so this level adds only what it resolves beyond that.
+        let knobs = self.knobs((x, z), grain, step) - self.knobs((x, z), grain, parent.step);
         let own = smooth - inherited
             + lying
-            + keep * self.detail((x, z), (slope, grain), band)
+            + keep * (self.detail((x, z), (slope, grain), band) + knobs)
             + windworn;
         let (carved, lie, channel) = self.carve((x, z), own, step);
         let height = self.pinned((x, z), own + keep * (self.shelve(carved) - own));

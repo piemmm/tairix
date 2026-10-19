@@ -3,10 +3,11 @@
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use tairix_raster::shape::Shape;
+use tairix_raster::view::Perspective;
 use tairix_raster::Color;
 use tairix_util::mathf;
 
-use super::{ring_alpha, Contact, Light, PENUMBRA};
+use super::{ring_alpha, Contact, Footing, Light, PENUMBRA};
 use crate::error::FigureError;
 use crate::frame::FORESHORTEN;
 
@@ -19,6 +20,28 @@ fn close(a: f64, b: f64) -> bool {
 
 fn contact() -> Contact {
     Contact::new(9.0, TONE).expect("a real contact")
+}
+
+/// The oblique drawing's ground at `scale` about `at`.
+#[track_caller]
+fn on(scale: f64, at: (f64, f64)) -> Footing {
+    Footing::oblique(scale, at).expect("a real footing")
+}
+
+/// A camera south of the origin and above it, looking north and down.
+fn camera() -> Perspective {
+    let (sin, cos) = (mathf::sin(0.6), mathf::cos(0.6));
+    let distance = 6000.0;
+    Perspective::new(
+        [0.0, distance * cos, distance * sin],
+        [0.0, -cos, -sin],
+        [1.0, 0.0, 0.0],
+        [0.0, sin, -cos],
+        640.0,
+        (640, 480),
+        256.0,
+    )
+    .expect("a camera")
 }
 
 fn overhead() -> Light {
@@ -69,23 +92,31 @@ fn an_unreal_contact_lift_or_scale_is_refused() {
     let contact = contact();
     assert_eq!(
         contact
-            .cast(overhead(), f64::NAN, 1.0, (0.0, 0.0))
+            .cast(overhead(), f64::NAN, on(1.0, (0.0, 0.0)))
             .map(|_| ()),
         Err(FigureError::GeometryUnreal)
     );
     assert_eq!(
-        contact
-            .cast(overhead(), 0.0, 1.0, (f64::NAN, 0.0))
-            .map(|_| ()),
+        Footing::oblique(1.0, (f64::NAN, 0.0)).map(|_| ()),
         Err(FigureError::GeometryUnreal)
     );
     for scale in [0.0, -1.0, f64::NAN] {
         assert_eq!(
-            contact.cast(overhead(), 0.0, scale, (0.0, 0.0)).map(|_| ()),
+            Footing::oblique(scale, (0.0, 0.0)).map(|_| ()),
             Err(FigureError::ScaleUnreal),
             "a scale of {scale} must be refused"
         );
     }
+    let camera = camera();
+    assert_eq!(
+        Footing::seen(&camera, [0.0, 0.0, 0.0], (f64::NAN, 0.0), 24.0).map(|_| ()),
+        Err(FigureError::GeometryUnreal)
+    );
+    assert_eq!(
+        Footing::seen(&camera, camera.eye(), (0.0, 0.0), 24.0),
+        Ok(None),
+        "ground at the eye cannot be seen"
+    );
 }
 
 /// A light straight overhead throws no shadow sideways, so what lands is the
@@ -93,7 +124,7 @@ fn an_unreal_contact_lift_or_scale_is_refused() {
 #[test]
 fn an_overhead_light_lays_the_footprint_flat_on_the_ground() {
     let placed = contact()
-        .cast(overhead(), 0.0, 1.0, (100.0, 200.0))
+        .cast(overhead(), 0.0, on(1.0, (100.0, 200.0)))
         .expect("it casts");
     assert!(close(placed.x, 100.0) && close(placed.y, 200.0));
     let (wide, tall) = extent(placed.shape, placed.turn);
@@ -112,7 +143,9 @@ fn the_screen_ellipse_matches_the_ground_ellipse_projected() {
         let elevation = 0.6;
         let light =
             Light::new(mathf::cos(bearing), mathf::sin(bearing), elevation).expect("a real light");
-        let placed = contact.cast(light, 0.0, 1.0, (0.0, 0.0)).expect("it casts");
+        let placed = contact
+            .cast(light, 0.0, on(1.0, (0.0, 0.0)))
+            .expect("it casts");
         let (wide, tall) = extent(placed.shape, placed.turn);
 
         // The same ellipse worked out the long way: sweep the ground circle,
@@ -142,6 +175,55 @@ fn the_screen_ellipse_matches_the_ground_ellipse_projected() {
     }
 }
 
+/// Seen through a perspective camera, the footprint lands where the ground
+/// circle under it projects, on level ground and on a slope alike: the
+/// first-order footing is the projection over a footprint's width.
+#[test]
+fn a_footprint_seen_in_perspective_matches_the_ground_circle_projected() {
+    let camera = camera();
+    let units = 24.0;
+    let contact = Contact::new(7.5, TONE).expect("a real contact");
+    for (ground, slope) in [
+        ([0.0, 0.0, 0.0], (0.0, 0.0)),
+        ([300.0, -900.0, 120.0], (0.3, -0.15)),
+    ] {
+        let footing = Footing::seen(&camera, ground, slope, units)
+            .expect("real")
+            .expect("in view");
+        let placed = contact.cast(overhead(), 0.0, footing).expect("it casts");
+        let (wide, tall) = extent(placed.shape, placed.turn);
+        let centre = camera.project(camera.view(ground)).expect("in view");
+        assert!(close(placed.x, centre.x) && close(placed.y, centre.y));
+
+        let (mut widest, mut tallest) = (0.0f64, 0.0f64);
+        for step in 0..720 {
+            let angle = f64::from(step) * core::f64::consts::TAU / 720.0;
+            let (east, south) = (
+                7.5 * units * mathf::cos(angle),
+                7.5 * units * mathf::sin(angle),
+            );
+            let point = [
+                ground[0] + east,
+                ground[1] + south,
+                ground[2] + east * slope.0 + south * slope.1,
+            ];
+            let at = camera.project(camera.view(point)).expect("in view");
+            widest = mathf::fmax(widest, mathf::fabs(at.x - centre.x));
+            tallest = mathf::fmax(tallest, mathf::fabs(at.y - centre.y));
+        }
+        // First order, so it errs by about the footprint over its distance.
+        let slack = 2.0 * 7.5 * units / camera.view(ground)[2];
+        assert!(
+            mathf::fabs(wide - widest) < widest * slack,
+            "solved {wide} swept {widest}"
+        );
+        assert!(
+            mathf::fabs(tall - tallest) < tallest * slack,
+            "solved {tall} swept {tallest}"
+        );
+    }
+}
+
 /// A lower sun rakes the shadow out along its own bearing, and never the
 /// other way.
 #[test]
@@ -151,16 +233,14 @@ fn a_lower_light_rakes_the_shadow_out_along_its_bearing() {
         .cast(
             Light::new(1.0, 0.0, 1.3).expect("a real light"),
             0.0,
-            1.0,
-            (0.0, 0.0),
+            on(1.0, (0.0, 0.0)),
         )
         .expect("it casts");
     let low = contact
         .cast(
             Light::new(1.0, 0.0, 0.35).expect("a real light"),
             0.0,
-            1.0,
-            (0.0, 0.0),
+            on(1.0, (0.0, 0.0)),
         )
         .expect("it casts");
     assert!(extent(low.shape, low.turn).0 > extent(high.shape, high.turn).0);
@@ -178,7 +258,9 @@ fn a_light_near_the_horizon_stops_raking_rather_than_running_away() {
     let mut last = 0.0;
     for elevation in [0.5, 0.3, 0.2, 0.1, 0.01, 1e-6] {
         let light = Light::new(1.0, 0.0, elevation).expect("a real light");
-        let placed = contact.cast(light, 0.0, 1.0, (0.0, 0.0)).expect("it casts");
+        let placed = contact
+            .cast(light, 0.0, on(1.0, (0.0, 0.0)))
+            .expect("it casts");
         let (wide, _) = extent(placed.shape, placed.turn);
         assert!(
             wide.is_finite() && wide <= 9.0 * 4.0 + SLACK,
@@ -195,12 +277,14 @@ fn a_light_near_the_horizon_stops_raking_rather_than_running_away() {
 fn a_rising_figure_leaves_its_shadow_behind_and_fades_it() {
     let contact = contact();
     let light = Light::new(0.6, 0.8, 0.9).expect("a real light");
-    let grounded = contact.cast(light, 0.0, 1.0, (0.0, 0.0)).expect("it casts");
+    let grounded = contact
+        .cast(light, 0.0, on(1.0, (0.0, 0.0)))
+        .expect("it casts");
 
     let (mut away, mut alpha) = (0.0, f64::from(grounded.color.a) + 1.0);
     for lift in [0.0, 2.0, 6.0, 15.0, 40.0] {
         let placed = contact
-            .cast(light, lift, 1.0, (0.0, 0.0))
+            .cast(light, lift, on(1.0, (0.0, 0.0)))
             .expect("it casts");
         let distance = mathf::hypot(placed.x, placed.y);
         assert!(distance >= away, "a rising figure's shadow must slide away");
@@ -219,7 +303,7 @@ fn a_rising_figure_leaves_its_shadow_behind_and_fades_it() {
     // A figure far enough up casts almost nothing, and never a negative
     // amount of anything.
     let far = contact
-        .cast(light, 400.0, 1.0, (0.0, 0.0))
+        .cast(light, 400.0, on(1.0, (0.0, 0.0)))
         .expect("it casts");
     assert!(far.color.a < 10);
 }
@@ -230,19 +314,25 @@ fn a_rising_figure_leaves_its_shadow_behind_and_fades_it() {
 fn a_figure_below_its_ground_point_casts_as_if_on_it() {
     let contact = contact();
     let light = Light::new(1.0, 0.0, 0.8).expect("a real light");
-    let on = contact.cast(light, 0.0, 1.0, (0.0, 0.0)).expect("it casts");
-    let under = contact
-        .cast(light, -5.0, 1.0, (0.0, 0.0))
+    let grounded = contact
+        .cast(light, 0.0, on(1.0, (0.0, 0.0)))
         .expect("it casts");
-    assert_eq!(on, under);
+    let under = contact
+        .cast(light, -5.0, on(1.0, (0.0, 0.0)))
+        .expect("it casts");
+    assert_eq!(grounded, under);
 }
 
 #[test]
 fn scale_takes_the_whole_shadow_with_it() {
     let contact = contact();
     let light = Light::new(0.3, -0.9, 0.7).expect("a real light");
-    let unit = contact.cast(light, 6.0, 1.0, (0.0, 0.0)).expect("it casts");
-    let half = contact.cast(light, 6.0, 0.5, (0.0, 0.0)).expect("it casts");
+    let unit = contact
+        .cast(light, 6.0, on(1.0, (0.0, 0.0)))
+        .expect("it casts");
+    let half = contact
+        .cast(light, 6.0, on(0.5, (0.0, 0.0)))
+        .expect("it casts");
     assert!(close(half.x, unit.x * 0.5) && close(half.y, unit.y * 0.5));
     let (unit_wide, unit_tall) = extent(unit.shape, unit.turn);
     let (half_wide, half_tall) = extent(half.shape, half.turn);
@@ -258,10 +348,10 @@ fn a_softened_shadow_is_the_hard_one_feathered() {
     let light = Light::new(0.6, 0.8, 0.5).expect("a real light");
     for lift in [0.0, 4.0, 30.0] {
         let hard = contact()
-            .cast(light, lift, 1.5, (20.0, 40.0))
+            .cast(light, lift, on(1.5, (20.0, 40.0)))
             .expect("a shadow");
         let rings = contact()
-            .penumbra(light, lift, 1.5, (20.0, 40.0))
+            .penumbra(light, lift, on(1.5, (20.0, 40.0)))
             .expect("a softened shadow");
         let inner = rings[PENUMBRA - 1];
         assert_eq!(

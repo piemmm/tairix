@@ -140,15 +140,17 @@ impl FrameTimes {
         }
     }
 
-    /// Record what a pass cost.
+    /// Record that a pass cost `ns` more: a pass describing its part of the
+    /// frame and then drawing it is charged for both.
     pub fn record(&mut self, pass: Pass, ns: u64) {
-        self.spent[pass.slot()] = ns;
+        let spent = &mut self.spent[pass.slot()];
+        *spent = spent.saturating_add(ns);
     }
 
-    /// Record what the frame spent making its inputs resident, which no
-    /// pass is charged for.
+    /// Record that the frame spent `ns` more making its inputs resident,
+    /// which no pass is charged for.
     pub fn record_warm(&mut self, ns: u64) {
-        self.warm = ns;
+        self.warm = self.warm.saturating_add(ns);
     }
 
     /// What a pass cost.
@@ -157,8 +159,9 @@ impl FrameTimes {
         self.spent[pass.slot()]
     }
 
-    /// What the frame spent making its inputs resident: synthesising the
-    /// material tiles its view needed and the cache did not hold.
+    /// What the frame spent making its inputs resident: building the meshes
+    /// and synthesising the material tiles its view needed and did not
+    /// hold.
     #[must_use]
     pub const fn warm(&self) -> u64 {
         self.warm

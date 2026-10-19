@@ -1,24 +1,26 @@
-//! The splat: turning a cell's weight field into pixels.
+//! The splat: turning the weight field into pixels.
 //!
-//! Terrain has no tile grid. A pixel is the blend of the materials its
-//! cell holds — but blended by **height**, not by weight alone. Each
-//! material carries its own surface relief, and where one stands proud of
-//! the others it wins the pixel outright. That is the difference between
-//! gravel emerging through grass in patches and the two averaging into a
-//! grey that is neither.
+//! Terrain has no tile grid. A pixel is the blend of the materials the
+//! weight field holds where it lies — but blended by **height**, not by
+//! weight alone. Each material carries its own surface relief, and where one
+//! stands proud of the others it wins the pixel outright. That is the
+//! difference between gravel emerging through grass in patches and the two
+//! averaging into a grey that is neither.
 //!
-//! # A span, not a pixel
+//! # A quad, then a fragment
 //!
-//! The unit is a horizontal run of pixels inside one cell row, because
-//! everything a pixel needs that is not its own texel read is linear
-//! along that run: the weights interpolate between the run's two ends, and
-//! so does the anti-repetition warp. Planning a run once and stepping it
-//! turns four hash evaluations per pixel into four per *span*, which is
-//! the difference between this pass fitting its budget and not.
+//! The weight field is a texture of the cells' blends, sampled bilinearly. A
+//! fragment inside one quad of it samples only that quad's four corners, so
+//! the grounds it can draw are planned once per quad ([`QuadPlan`]) and each
+//! fragment interpolates their weights and reads one texel per ground.
 //!
-//! A caller therefore does the vertical interpolation itself — one
-//! [`WeightField::lerp`] per cell row per raster row — and hands this
-//! module the two ends of each horizontal run.
+//! # A mip is the same ground, coarser
+//!
+//! Each ground is read at the mip whose texels are as far apart as its
+//! pixel's footprint on the ground, the choice dithered between neighbouring
+//! levels, and addressed at that mip's own texel spacing: a coarser tile is
+//! the same field sampled further apart, so the ground keeps its scale with
+//! distance rather than shrinking into repetition.
 //!
 //! # Repetition, and the one field that breaks it
 //!
@@ -36,9 +38,10 @@
 use tairix_raster::color::Pixel;
 use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_world::blend::{Kind, BLEND_SLOTS};
-use tairix_wintersun_world::ground::Ground;
+use tairix_wintersun_world::ground::{Ground, GROUND_COUNT};
 
-use crate::material::{self, MaterialTile, Texel};
+use crate::cache::{MaterialCache, TileKey};
+use crate::material::{self, MaterialTile, Mip, Quality, Texel, MIP_LEVELS};
 use crate::noise::{self, Field, Tiled};
 use crate::weight::{WeightField, TOTAL};
 
@@ -67,9 +70,6 @@ const MAX_HEIGHT_SCORE: u16 = (u8::MAX as u16) >> HEIGHT_SHIFT;
 /// them: sharp enough that gravel reads as gravel, soft enough that the
 /// transition is anti-aliased by the blend itself.
 const BLEND_DEPTH: u16 = 24;
-
-/// Fixed-point fraction bits for the per-pixel accumulators.
-const STEP_BITS: u32 = 16;
 
 /// The largest divisor a pixel's blend can produce.
 ///
@@ -166,72 +166,85 @@ impl Warp {
     }
 }
 
-/// The grounds a span draws, and their weights at each of its ends.
+/// The grounds a quad of the weight field draws, and each one's weight at the
+/// quad's four corners.
 ///
-/// Built once per run and stepped, which is what keeps the per-pixel cost
-/// to a texel read and a blend.
+/// The weight field is a texture whose texels are the cells' blends; a
+/// fragment inside a quad samples it bilinearly from the quad's corners, so
+/// the grounds a quad can draw are those its corners hold. Planned once per
+/// quad and read per fragment, which keeps the per-pixel cost to a weight
+/// interpolation, the texel reads and a blend.
 #[derive(Copy, Clone, Debug)]
-pub struct SpanPlan {
+pub struct QuadPlan {
     slots: [PlanSlot; BLEND_SLOTS],
     used: usize,
 }
 
-/// One ground's part in a span.
+/// One ground's part in a quad: its weight at each corner, in the order
+/// [`QuadPlan::new`] takes them.
 #[derive(Copy, Clone, Debug)]
 struct PlanSlot {
     ground: Ground,
-    near: u16,
-    far: u16,
+    corners: [u16; CORNERS],
 }
 
-impl SpanPlan {
-    /// Plan a run between two weight fields.
+/// A quad's corners: north-west, north-east, south-west, south-east.
+pub const CORNERS: usize = 4;
+
+/// A fragment's place across or down its quad, out of this.
+pub const QUAD_ONE: u16 = 256;
+
+impl QuadPlan {
+    /// Plan the quad whose corners hold `corners`, north-west, north-east,
+    /// south-west and south-east.
     ///
-    /// The union of the two fields is kept to the heaviest
-    /// [`BLEND_SLOTS`] by their combined prominence, and each end is
-    /// renormalised over that set — so the per-pixel interpolation between
-    /// two normalised vectors is itself normalised, and the kernel needs
-    /// no per-pixel renormalisation at all.
+    /// The union of the corners' grounds is kept to the heaviest
+    /// [`BLEND_SLOTS`] by their combined prominence and each corner is
+    /// renormalised over that set, so every point the quad interpolates is
+    /// itself normalised and the kernel needs no per-pixel renormalisation.
     #[must_use]
-    pub fn new(left: &WeightField, right: &WeightField) -> Self {
-        let mut entries = [(left.dominant(), 0u32, 0u32); BLEND_SLOTS * 2];
+    pub fn new(corners: [&WeightField; CORNERS]) -> Self {
+        let mut entries = [(corners[0].dominant(), [0u32; CORNERS]); BLEND_SLOTS * CORNERS];
         let mut count = 0;
-        for (field, end) in [(left, 0usize), (right, 1usize)] {
+        for (corner, field) in corners.iter().enumerate() {
             for slot in field.slots() {
                 let index =
                     if let Some(held) = entries[..count].iter().position(|e| e.0 == slot.ground) {
                         held
                     } else {
-                        entries[count] = (slot.ground, 0, 0);
+                        entries[count] = (slot.ground, [0; CORNERS]);
                         count += 1;
                         count - 1
                     };
-                if end == 0 {
-                    entries[index].1 = u32::from(slot.weight);
-                } else {
-                    entries[index].2 = u32::from(slot.weight);
-                }
+                entries[index].1[corner] = u32::from(slot.weight);
             }
         }
         entries[..count].sort_unstable_by(|a, b| {
-            (b.1 + b.2)
-                .cmp(&(a.1 + a.2))
+            let sum = |w: &[u32; CORNERS]| w.iter().sum::<u32>();
+            sum(&b.1)
+                .cmp(&sum(&a.1))
                 .then_with(|| a.0.id().cmp(&b.0.id()))
         });
 
         let kept = count.min(BLEND_SLOTS);
-        let near_sum: u32 = entries[..kept].iter().map(|e| e.1).sum();
-        let far_sum: u32 = entries[..kept].iter().map(|e| e.2).sum();
+        let mut sums = [0u32; CORNERS];
+        for entry in &entries[..kept] {
+            for (sum, weight) in sums.iter_mut().zip(entry.1) {
+                *sum += weight;
+            }
+        }
         let mut slots = [PlanSlot {
             ground: entries[0].0,
-            near: 0,
-            far: 0,
+            corners: [0; CORNERS],
         }; BLEND_SLOTS];
         for (slot, entry) in slots.iter_mut().zip(entries[..kept].iter()) {
+            let mut weights = [0u16; CORNERS];
+            for ((weight, &raw), &sum) in weights.iter_mut().zip(&entry.1).zip(&sums) {
+                *weight = renormalise(raw, sum);
+            }
             *slot = PlanSlot {
                 ground: entry.0,
-                near: renormalise(entry.1, near_sum),
-                far: renormalise(entry.2, far_sum),
+                corners: weights,
             };
         }
         let mut plan = Self {
@@ -242,39 +255,57 @@ impl SpanPlan {
         plan
     }
 
-    /// The grounds this span needs a tile for, heaviest first.
+    /// The grounds this quad can draw, heaviest first.
     pub fn grounds(&self) -> impl Iterator<Item = Ground> + '_ {
         self.slots[..self.used].iter().map(|s| s.ground)
     }
 
-    /// How many grounds the span draws.
+    /// How many grounds the quad draws.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.used
     }
 
-    /// Whether the span draws nothing, which a planned span never does.
+    /// Whether the quad draws nothing, which a planned quad never does.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.used == 0
     }
 
-    /// Hand each end's rounding remainder to its own heaviest slot, so
-    /// both ends sum to exactly [`TOTAL`].
+    /// Each slot's weight at `across` and `down` within the quad, out of
+    /// [`QUAD_ONE`]: the bilinear sample of its corners.
+    #[must_use]
+    pub fn weights_at(&self, across: u16, down: u16) -> [u16; BLEND_SLOTS] {
+        let (across, down) = (
+            i32::from(across.min(QUAD_ONE)),
+            i32::from(down.min(QUAD_ONE)),
+        );
+        let one = i32::from(QUAD_ONE);
+        let mut out = [0u16; BLEND_SLOTS];
+        for (weight, slot) in out.iter_mut().zip(&self.slots[..self.used]) {
+            let [nw, ne, sw, se] = slot.corners.map(i32::from);
+            let north = nw * one + (ne - nw) * across;
+            let south = sw * one + (se - sw) * across;
+            let value = (north * one + (south - north) * down) / (one * one);
+            *weight = u16::try_from(value.clamp(0, i32::from(TOTAL))).unwrap_or(0);
+        }
+        out
+    }
+
+    /// Hand each corner's rounding remainder to its own heaviest slot, so
+    /// every corner sums to exactly [`TOTAL`].
     ///
-    /// Per end, not per plan: the slots are ordered by *combined*
-    /// prominence, so slot zero can hold nothing at one end — and giving
-    /// it the remainder there would put a material into an end whose
-    /// field never had it.
+    /// Per corner, not per plan: the slots are ordered by *combined*
+    /// prominence, so slot zero can hold nothing at one corner — and giving
+    /// it the remainder there would put a ground into a corner whose field
+    /// never had it.
     fn settle(&mut self) {
         let slots = &mut self.slots[..self.used];
-        let near: u16 = slots.iter().map(|s| s.near).sum();
-        if let Some(slot) = slots.iter_mut().find(|s| s.near > 0) {
-            slot.near += TOTAL - near.min(TOTAL);
-        }
-        let far: u16 = slots.iter().map(|s| s.far).sum();
-        if let Some(slot) = slots.iter_mut().find(|s| s.far > 0) {
-            slot.far += TOTAL - far.min(TOTAL);
+        for corner in 0..CORNERS {
+            let held: u16 = slots.iter().map(|s| s.corners[corner]).sum();
+            if let Some(slot) = slots.iter_mut().find(|s| s.corners[corner] > 0) {
+                slot.corners[corner] += TOTAL - held.min(TOTAL);
+            }
         }
     }
 }
@@ -294,149 +325,134 @@ fn renormalise(value: u32, sum: u32) -> u16 {
     }
 }
 
-/// Where a span sits in the world, and how the warp moves across it.
-#[derive(Copy, Clone, Debug)]
-pub struct Geometry {
-    /// World position of the span's first pixel.
-    pub origin: WorldPoint,
-    /// Eastward world sub-units per pixel.
-    pub step: i32,
-    /// The warp at the first pixel.
-    pub warp_near: (i32, i32),
-    /// The warp at the last pixel.
-    ///
-    /// Interpolated linearly across the span rather than evaluated per
-    /// pixel: the field varies over thousands of sub-units and a span is
-    /// a few hundred at most, so the line is within a sub-unit of the
-    /// curve and costs two evaluations instead of one per pixel.
-    pub warp_far: (i32, i32),
+/// The resident tiles a frame draws its grounds from: for each ground and
+/// each mip level, the finest tile at that level or coarser that the cache
+/// holds.
+///
+/// Resolved once a frame, so a fragment's tile is one index and the pass
+/// is total: a level the cache did not admit reads the next coarser one,
+/// and a ground with none draws its flat tone.
+#[derive(Clone, Debug)]
+pub struct Materials<'a> {
+    chains: [[Option<&'a MaterialTile>; MIP_COUNT]; GROUND_COUNT],
 }
 
-impl Geometry {
-    /// A span starting at `origin`, `step` sub-units per pixel, warped by
-    /// `warp` and `pixels` long.
+/// Levels in a ground's chain.
+const MIP_COUNT: usize = MIP_LEVELS as usize;
+
+impl<'a> Materials<'a> {
+    /// No tile for anything: every ground in its flat tone.
     #[must_use]
-    pub fn new(warp: &Warp, origin: WorldPoint, step: i32, pixels: u32) -> Self {
-        let span = i32::try_from(pixels.saturating_sub(1)).unwrap_or(i32::MAX);
-        let end = WorldPoint {
-            x: origin.x.saturating_add(step.saturating_mul(span)),
-            y: origin.y,
-        };
+    pub const fn flat() -> Self {
         Self {
-            origin,
-            step,
-            warp_near: warp.at(origin),
-            warp_far: warp.at(end),
+            chains: [[None; MIP_COUNT]; GROUND_COUNT],
         }
+    }
+
+    /// The tiles `cache` holds at `quality` for each of `grounds`: at each
+    /// level, the tile there or the nearest coarser one, and the nearest finer
+    /// one where nothing coarser is held, so a ground with any tile at all is
+    /// never drawn in its flat tone.
+    pub fn resolve(
+        cache: &'a MaterialCache,
+        quality: Quality,
+        grounds: impl Iterator<Item = Ground>,
+    ) -> Self {
+        let mut materials = Self::flat();
+        for ground in grounds {
+            let Some(chain) = materials.chains.get_mut(usize::from(ground.id())) else {
+                continue;
+            };
+            let mut coarser = None;
+            for (level, slot) in (0..MIP_LEVELS).rev().zip(chain.iter_mut().rev()) {
+                if let Some(mip) = Mip::new(level) {
+                    coarser = cache.peek(quality, &TileKey { ground, mip }).or(coarser);
+                }
+                *slot = coarser;
+            }
+            let mut finer = None;
+            for slot in chain.iter_mut() {
+                finer = slot.or(finer);
+                *slot = finer;
+            }
+        }
+        materials
+    }
+
+    /// Hold `tile` for its own ground: at its own level, and at every finer
+    /// one holding nothing finer than it.
+    pub fn hold(&mut self, tile: &'a MaterialTile) {
+        let Some(chain) = self.chains.get_mut(usize::from(tile.ground().id())) else {
+            return;
+        };
+        let level = tile.mip().level();
+        for slot in chain.iter_mut().take(level as usize + 1) {
+            if slot.is_none_or(|held| held.mip().level() > level) {
+                *slot = Some(tile);
+            }
+        }
+    }
+
+    /// The tile `ground` is read from at `mip`, or `None` for its flat tone.
+    #[must_use]
+    pub fn tile(&self, ground: Ground, mip: Mip) -> Option<&'a MaterialTile> {
+        self.chains
+            .get(usize::from(ground.id()))
+            .and_then(|chain| chain.get(mip.level() as usize))
+            .copied()
+            .flatten()
     }
 }
 
-/// A material's tile for a span, or nothing if none is resident.
+/// One fragment of ground.
 ///
-/// Positional, matching [`SpanPlan::grounds`]. A slot whose tile is for
-/// some other ground is treated as absent rather than drawn, so a caller
-/// that mismatched its lists gets a flat ground and not another ground's
-/// pixels.
-pub type SpanTiles<'a> = [Option<&'a MaterialTile>; BLEND_SLOTS];
+/// Where its material is read — a warped world position — how far across
+/// and down its quad it lies, how much ground one pixel spans there, and the
+/// fraction its mip choice is dithered by.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Fragment {
+    /// The warped world position the materials are read at.
+    pub sample: WorldPoint,
+    /// How far across the quad, out of [`QUAD_ONE`].
+    pub across: u16,
+    /// How far down the quad, out of [`QUAD_ONE`].
+    pub down: u16,
+    /// World sub-units one pixel spans on the ground here.
+    pub footprint: u32,
+    /// Sixteenths of a mip level the choice is raised by, `0..16`.
+    pub dither: u8,
+}
 
-/// Draw a horizontal run of terrain pixels.
+/// Shade one fragment of `plan`'s quad from `materials`.
 ///
-/// Every slot resolves: a material with no resident tile is drawn from
-/// its flat tone, so the pass is total and a frame is never dropped over
-/// a texture the cache would not admit.
-pub fn splat(dst: &mut [Pixel], plan: &SpanPlan, tiles: &SpanTiles<'_>, geometry: &Geometry) {
-    let mut sources = [Source::Flat(Texel::VOID); BLEND_SLOTS];
-    let mut shifts = [0u32; BLEND_SLOTS];
-    for (index, slot) in plan.slots[..plan.used].iter().enumerate() {
-        let params = material::params(slot.ground);
-        shifts[index] = params.grain_shift;
-        sources[index] = match tiles[index] {
-            Some(tile) if tile.ground() == slot.ground => Source::Tile(tile),
-            _ => Source::Flat(params.flat()),
+/// Each ground is read at the mip whose texels its pixel's footprint spans,
+/// addressed at that mip's own spacing, so a feature of the ground keeps its
+/// world size at every distance.
+#[must_use]
+pub fn fragment(plan: &QuadPlan, materials: &Materials<'_>, at: Fragment) -> Pixel {
+    // One ground wins its pixel whatever its weight, and the blend of one
+    // share is exact, so its texel is the pixel.
+    if let [only] = &plan.slots[..plan.used] {
+        let texel = sample(only.ground, materials, at);
+        return Pixel {
+            r: texel.r,
+            g: texel.g,
+            b: texel.b,
+            a: u8::MAX,
         };
     }
-
-    let pixels = dst.len();
-    let last = pixels.saturating_sub(1).max(1);
-    let mut world_x = geometry.origin.x;
-    let mut warp = Accumulator::new(geometry.warp_near, geometry.warp_far, last);
-    let mut weights = [WeightStep::still(0); BLEND_SLOTS];
-    for (step, slot) in weights.iter_mut().zip(plan.slots[..plan.used].iter()) {
-        *step = WeightStep::new(slot.near, slot.far, last);
-    }
-
-    for pixel in dst.iter_mut() {
-        let (warp_x, warp_y) = warp.value();
-        let sample_x = world_x.wrapping_add(warp_x);
-        let sample_y = geometry.origin.y.wrapping_add(warp_y);
-
-        *pixel = shade(
-            &sources[..plan.used],
-            &shifts[..plan.used],
-            &weights[..plan.used],
-            sample_x,
-            sample_y,
-        );
-
-        world_x = world_x.wrapping_add(geometry.step);
-        warp.advance();
-        for step in &mut weights[..plan.used] {
-            step.advance();
-        }
-    }
-}
-
-/// Where a slot's texels come from.
-#[derive(Copy, Clone, Debug)]
-enum Source<'a> {
-    /// A resident synthesised tile.
-    Tile(&'a MaterialTile),
-    /// The material's flat tone, the tier beneath a tile.
-    Flat(Texel),
-}
-
-impl Source<'_> {
-    /// The texel at a warped world position, given the material's grain
-    /// scale.
-    fn texel(&self, x: i32, y: i32, shift: u32) -> Texel {
-        match self {
-            Self::Tile(tile) =>
-            {
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "the tile's own mask makes the wrap two's-complement periodic, \
-                              which is what a negative world coordinate needs"
-                )]
-                tile.texel((x >> shift) as u32, (y >> shift) as u32)
-            }
-            Self::Flat(texel) => *texel,
-        }
-    }
-}
-
-/// One pixel of the height-offset blend.
-fn shade(
-    sources: &[Source<'_>],
-    shifts: &[u32],
-    weights: &[WeightStep],
-    sample_x: i32,
-    sample_y: i32,
-) -> Pixel {
+    let weights = plan.weights_at(at.across, at.down);
+    let heaviest = weights.iter().copied().max().unwrap_or(0);
+    let cutoff = cutoff_below(heaviest);
     let mut texels = [Texel::VOID; BLEND_SLOTS];
     let mut scores = [0u16; BLEND_SLOTS];
-    // A slot this far under the heaviest one cannot reach the blend floor
-    // however tall its relief turns out to be, so its texel is never read.
-    // Most ground is one material with a trace of others, which is exactly
-    // the case this skips: `cutoff_below` proves the arithmetic.
-    let heaviest = weights.iter().map(WeightStep::value).max().unwrap_or(0);
-    let cutoff = cutoff_below(heaviest);
     let mut top = 0u16;
-    for (index, source) in sources.iter().enumerate() {
-        let weight = weights[index].value();
+    for (index, slot) in plan.slots[..plan.used].iter().enumerate() {
+        let weight = weights[index];
         if weight < cutoff {
             continue;
         }
-        let texel = source.texel(sample_x, sample_y, shifts[index]);
+        let texel = sample(slot.ground, materials, at);
         let score = weight.saturating_add(u16::from(texel.height) >> HEIGHT_SHIFT);
         texels[index] = texel;
         scores[index] = score;
@@ -445,8 +461,8 @@ fn shade(
 
     let floor = top.saturating_sub(BLEND_DEPTH);
     let (mut red, mut green, mut blue, mut total) = (0u32, 0u32, 0u32, 0u32);
-    for (index, texel) in texels[..sources.len()].iter().enumerate() {
-        let share = u32::from(scores[index].saturating_sub(floor));
+    for (texel, score) in texels[..plan.used].iter().zip(&scores) {
+        let share = u32::from(score.saturating_sub(floor));
         if share == 0 {
             continue;
         }
@@ -456,7 +472,7 @@ fn shade(
         total += share;
     }
     // The winning slot's share is `BLEND_DEPTH`, so the divisor is never
-    // zero for a non-empty span.
+    // zero for a planned quad.
     Pixel {
         r: mean(red, total),
         g: mean(green, total),
@@ -464,6 +480,25 @@ fn shade(
         // Ground is opaque, and a premultiply by a full alpha is the
         // identity, so the channels above are already premultiplied.
         a: u8::MAX,
+    }
+}
+
+/// `ground`'s texel under fragment `at`, read at the mip its footprint asks
+/// for, or its flat tone where `materials` holds no tile of it.
+fn sample(ground: Ground, materials: &Materials<'_>, at: Fragment) -> Texel {
+    let params = material::params(ground);
+    let wanted = Mip::at(params.grain_shift, at.footprint, at.dither);
+    match materials.tile(ground, wanted) {
+        Some(tile) if tile.ground() == ground => {
+            let shift = params.grain_shift + tile.mip().level();
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the tile's own mask makes the wrap two's-complement periodic, \
+                          which is what a negative world coordinate needs"
+            )]
+            tile.texel((at.sample.x >> shift) as u32, (at.sample.y >> shift) as u32)
+        }
+        _ => params.flat(),
     }
 }
 
@@ -477,81 +512,6 @@ fn shade(
 /// small skips nothing.
 fn cutoff_below(heaviest: u16) -> u16 {
     heaviest.saturating_sub(BLEND_DEPTH.saturating_add(MAX_HEIGHT_SCORE))
-}
-
-/// A two-axis fixed-point walk from one value to another over a span.
-#[derive(Copy, Clone, Debug)]
-struct Accumulator {
-    x: i64,
-    y: i64,
-    dx: i64,
-    dy: i64,
-}
-
-impl Accumulator {
-    fn new(near: (i32, i32), far: (i32, i32), steps: usize) -> Self {
-        let steps = i64::try_from(steps).unwrap_or(1).max(1);
-        Self {
-            x: i64::from(near.0) << STEP_BITS,
-            y: i64::from(near.1) << STEP_BITS,
-            dx: ((i64::from(far.0) - i64::from(near.0)) << STEP_BITS) / steps,
-            dy: ((i64::from(far.1) - i64::from(near.1)) << STEP_BITS) / steps,
-        }
-    }
-
-    fn value(&self) -> (i32, i32) {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "the walk stays between its two i32 endpoints"
-        )]
-        {
-            ((self.x >> STEP_BITS) as i32, (self.y >> STEP_BITS) as i32)
-        }
-    }
-
-    fn advance(&mut self) {
-        self.x += self.dx;
-        self.y += self.dy;
-    }
-}
-
-/// A fixed-point walk of one material's weight across a span.
-#[derive(Copy, Clone, Debug)]
-struct WeightStep {
-    value: i64,
-    delta: i64,
-}
-
-impl WeightStep {
-    fn new(near: u16, far: u16, steps: usize) -> Self {
-        let steps = i64::try_from(steps).unwrap_or(1).max(1);
-        Self {
-            value: i64::from(near) << STEP_BITS,
-            delta: ((i64::from(far) - i64::from(near)) << STEP_BITS) / steps,
-        }
-    }
-
-    const fn still(weight: u16) -> Self {
-        Self {
-            value: (weight as i64) << STEP_BITS,
-            delta: 0,
-        }
-    }
-
-    fn value(&self) -> u16 {
-        #[allow(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "the walk stays between two u16 endpoints"
-        )]
-        {
-            (self.value >> STEP_BITS).clamp(0, i64::from(TOTAL)) as u16
-        }
-    }
-
-    fn advance(&mut self) {
-        self.value += self.delta;
-    }
 }
 
 #[cfg(test)]

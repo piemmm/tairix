@@ -113,16 +113,29 @@ impl Mip {
         TILE_SIDE >> self.0
     }
 
-    /// The level whose texels are closest to `sub_units_per_texel` world
-    /// sub-units apart, given a material's own grain scale.
+    /// The level a pixel spanning `footprint` world sub-units reads a
+    /// material of grain `material_shift` at: the one whose texels are that
+    /// far apart, raised to the next by `dither` sixteenths of the way.
     ///
-    /// Picking the level from the scale it will be drawn at is what keeps
-    /// a distant hillside from shimmering: a tile whose texels are finer
-    /// than the pixels sampling them aliases, however good the filtering.
+    /// Picking the level from the scale it is drawn at is what keeps a
+    /// distant hillside from shimmering: a tile whose texels are finer than
+    /// the pixels sampling them aliases. Dithering the choice between the
+    /// two levels a footprint falls between draws their meeting as a fine
+    /// mixture rather than a line across the ground.
     #[must_use]
-    pub fn for_density(material_shift: u32, sub_units_per_pixel: u32) -> Self {
-        let texel_span = 1u32.checked_shl(material_shift).unwrap_or(u32::MAX);
-        let level = (sub_units_per_pixel / texel_span.max(1)).max(1).ilog2();
+    pub fn at(material_shift: u32, footprint: u32, dither: u8) -> Self {
+        let Some(texel) = 1u32.checked_shl(material_shift) else {
+            return Self::BASE;
+        };
+        if footprint <= texel {
+            return Self::BASE;
+        }
+        let whole = footprint.ilog2();
+        // The four bits after the leading one: the fraction of the way to
+        // the next level, read linearly.
+        let fraction = ((u64::from(footprint) << 4) >> whole) & 15;
+        let raised = (fraction + u64::from(dither & 15)) >> 4;
+        let level = whole - material_shift + u32::try_from(raised).unwrap_or(0);
         Self(level.min(MIP_LEVELS - 1))
     }
 }
@@ -179,7 +192,7 @@ pub struct MaterialParams {
     ///
     /// Sand is fine and rock is coarse, and this is the whole of that
     /// difference. It also decides which mip a given camera distance
-    /// picks ([`Mip::for_density`]).
+    /// picks ([`Mip::at`]).
     pub grain_shift: u32,
     /// Log2 of the grain's lattice cell, in texels.
     pub grain_cell_log2: u32,

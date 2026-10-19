@@ -33,6 +33,7 @@
 //! later one writes.
 
 use alloc::vec::Vec;
+use core::borrow::Borrow;
 use core::ops::RangeInclusive;
 
 use tairix_parallel::JobRunner;
@@ -68,6 +69,17 @@ pub const WETNESS_SPAN: u32 = 3;
 const _: () = assert!(SCATTER_STEP + SHORE_REACH as u32 <= SHORE_CELLS);
 const _: () = assert!(SCATTER_STEP + WETNESS_SPAN <= SHORE_CELLS);
 
+/// Cells of ground and water height a chunk keeps past each of its edges:
+/// what its neighbours hold there, so the ground can be drawn and lit across
+/// a seam without them.
+pub const APRON_CELLS: u32 = 3;
+
+/// Cells of ground blend a chunk keeps past each of its edges.
+pub const GROUND_APRON_CELLS: u32 = 1;
+
+// The apron is read off the working grid, so it lies inside the halo.
+const _: () = assert!(GROUND_APRON_CELLS <= APRON_CELLS && APRON_CELLS <= SHORE_CELLS);
+
 /// Cells along one edge of the working grid: the chunk plus its halo.
 const WORK_CELLS: u32 = CHUNK_CELLS + 2 * SHORE_CELLS;
 
@@ -89,6 +101,21 @@ const ROAD_HALF_WIDTH: f64 = 1.6;
 /// Levelling strength past which a cell counts as cleared by what levelled
 /// it.
 const CLEARED_STRENGTH: f64 = 0.35;
+
+/// The share of its natural relief a settlement's ground keeps where it is
+/// levelled most, so worked ground still reads as ground rather than a
+/// table.
+pub const SETTLEMENT_RELIEF_KEPT: f64 = 0.25;
+
+/// How a structure levels one cell: the height it pulls the ground toward,
+/// how strongly, the share of the ground's own relief it keeps where it pulls
+/// hardest, and the flag it marks the cell with once it has cleared it.
+struct Levelling {
+    target: f64,
+    strength: f64,
+    kept: f64,
+    flag: u8,
+}
 
 /// How many cells of specific catchment a unit gradient sheds: where the
 /// catchment is this times the gradient, a cell gathers as much water as it
@@ -211,14 +238,40 @@ impl Chunk {
     /// Ground height at an in-chunk cell.
     #[must_use]
     pub fn elevation(&self, cx: u32, cy: u32) -> Elevation {
-        self.elevation[cell_index(cx, cy)]
+        self.elevation[within_apron(cx, cy, APRON_CELLS)]
     }
 
     /// Water-surface height at an in-chunk cell, equal to the ground
     /// where it is dry.
     #[must_use]
     pub fn water(&self, cx: u32, cy: u32) -> Elevation {
-        self.water[cell_index(cx, cy)]
+        self.water[within_apron(cx, cy, APRON_CELLS)]
+    }
+
+    /// Ground height at the cell `(dx, dy)` from the chunk's first, within
+    /// [`APRON_CELLS`] of the chunk: inside it, or what the neighbour holds
+    /// there.
+    #[must_use]
+    pub fn elevation_beside(&self, dx: i32, dy: i32) -> Option<Elevation> {
+        self.elevation
+            .get(apron_index(dx, dy, APRON_CELLS)?)
+            .copied()
+    }
+
+    /// Water-surface height at the cell `(dx, dy)` from the chunk's first,
+    /// within [`APRON_CELLS`] of the chunk.
+    #[must_use]
+    pub fn water_beside(&self, dx: i32, dy: i32) -> Option<Elevation> {
+        self.water.get(apron_index(dx, dy, APRON_CELLS)?).copied()
+    }
+
+    /// The grounds the cell `(dx, dy)` from the chunk's first shows, within
+    /// [`GROUND_APRON_CELLS`] of the chunk.
+    #[must_use]
+    pub fn ground_beside(&self, dx: i32, dy: i32) -> Option<Blend<Ground>> {
+        self.ground
+            .get(apron_index(dx, dy, GROUND_APRON_CELLS)?)
+            .copied()
     }
 
     /// Mean annual air temperature at an in-chunk cell.
@@ -243,7 +296,7 @@ impl Chunk {
     /// The grounds an in-chunk cell shows, which the splat draws.
     #[must_use]
     pub fn ground(&self, cx: u32, cy: u32) -> Blend<Ground> {
-        self.ground[cell_index(cx, cy)]
+        self.ground[within_apron(cx, cy, GROUND_APRON_CELLS)]
     }
 
     /// What has been built on an in-chunk cell.
@@ -300,19 +353,57 @@ const fn cell_index(cx: u32, cy: u32) -> usize {
     (((cy & mask) * CHUNK_CELLS) + (cx & mask)) as usize
 }
 
+/// Cells along one edge of a grid keeping `apron` cells past each of the
+/// chunk's edges.
+const fn apron_side(apron: u32) -> u32 {
+    CHUNK_CELLS + 2 * apron
+}
+
+/// The index of an in-chunk cell, wrapped onto the chunk, in a grid keeping
+/// `apron` cells past each edge.
+const fn within_apron(cx: u32, cy: u32, apron: u32) -> usize {
+    let mask = CHUNK_CELLS - 1;
+    let side = apron_side(apron);
+    (((cy & mask) + apron) * side + (cx & mask) + apron) as usize
+}
+
+/// The index of the cell `(dx, dy)` from the chunk's first in a grid keeping
+/// `apron` cells past each edge, or `None` beyond them.
+fn apron_index(dx: i32, dy: i32, apron: u32) -> Option<usize> {
+    let side = apron_side(apron);
+    let x = u32::try_from(dx.checked_add(signed(apron))?).ok()?;
+    let y = u32::try_from(dy.checked_add(signed(apron))?).ok()?;
+    (x < side && y < side).then(|| (y as usize) * (side as usize) + (x as usize))
+}
+
+/// Cells in a grid keeping `apron` cells past each of a chunk's edges.
+const fn apron_area(apron: u32) -> usize {
+    (apron_side(apron) as usize) * (apron_side(apron) as usize)
+}
+
 /// A sorted, borrowed set of resident chunks, searched by cell.
 ///
 /// Both the simulation and a client hold a window of the chunks around
 /// what they are working on and ask it which chunk a cell belongs to. The
 /// *fetching* is a cache with a memory budget and belongs to the process
 /// holding it; this is only the lookup, so there is one of it rather than
-/// one per consumer.
-#[derive(Copy, Clone, Debug)]
-pub struct ChunkWindow<'a> {
-    window: &'a [&'a Chunk],
+/// one per consumer. `C` is however the holder keeps them — borrowed from a
+/// cache, or owned in its own sorted vector — so reading them as a window
+/// copies nothing.
+#[derive(Debug)]
+pub struct ChunkWindow<'a, C = &'a Chunk> {
+    window: &'a [C],
 }
 
-impl<'a> ChunkWindow<'a> {
+impl<C> Clone for ChunkWindow<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for ChunkWindow<'_, C> {}
+
+impl<'a, C: Borrow<Chunk>> ChunkWindow<'a, C> {
     /// Wrap a window of chunks sorted strictly by coordinate.
     ///
     /// Sorted because the lookup binary-searches it: a window is as large
@@ -325,8 +416,8 @@ impl<'a> ChunkWindow<'a> {
     /// increasing. Strictly, so a duplicate coordinate is refused too:
     /// two chunks claiming one coordinate would make an answer depend on
     /// which the search landed on.
-    pub fn new(window: &'a [&'a Chunk]) -> Result<Self, WorldError> {
-        if !window.is_sorted_by(|a, b| a.coord() < b.coord()) {
+    pub fn new(window: &'a [C]) -> Result<Self, WorldError> {
+        if !window.is_sorted_by(|a, b| a.borrow().coord() < b.borrow().coord()) {
             return Err(WorldError::UnsortedWindow);
         }
         Ok(Self { window })
@@ -338,9 +429,9 @@ impl<'a> ChunkWindow<'a> {
         let coord = cell.chunk();
         let index = self
             .window
-            .binary_search_by_key(&coord, |chunk| chunk.coord())
+            .binary_search_by_key(&coord, |chunk| chunk.borrow().coord())
             .ok()?;
-        self.window.get(index).copied()
+        self.window.get(index).map(Borrow::borrow)
     }
 
     /// How many chunks are resident.
@@ -391,15 +482,15 @@ impl Phase {
 
 /// One coarse drainage link, as a line the fine carve follows.
 #[derive(Copy, Clone, Debug)]
-struct Channel {
+pub(crate) struct Channel {
     /// Upstream end, in cells.
-    from: (f64, f64),
+    pub(crate) from: (f64, f64),
     /// Downstream end, in cells.
-    to: (f64, f64),
+    pub(crate) to: (f64, f64),
     /// Water surface at each end, in world units.
-    surface: (f64, f64),
+    pub(crate) surface: (f64, f64),
     /// Half-width of the bed, in cells.
-    half_width: f64,
+    pub(crate) half_width: f64,
     /// Depth below the water surface, in world units.
     depth: f64,
 }
@@ -446,12 +537,12 @@ impl ChunkBuild {
             phase: Phase::Relief,
             chunk: Chunk {
                 coord,
-                elevation: try_filled(CHUNK_AREA, Elevation::SEA_LEVEL)?,
-                water: try_filled(CHUNK_AREA, Elevation::SEA_LEVEL)?,
+                elevation: try_filled(apron_area(APRON_CELLS), Elevation::SEA_LEVEL)?,
+                water: try_filled(apron_area(APRON_CELLS), Elevation::SEA_LEVEL)?,
                 temperature: try_filled(CHUNK_AREA, Temperature::default())?,
                 precipitation: try_filled(CHUNK_AREA, Precipitation::default())?,
                 biome: try_filled(CHUNK_AREA, Blend::solid(Biome::PolarDesert))?,
-                ground: try_filled(CHUNK_AREA, Blend::solid(Ground::Gravel))?,
+                ground: try_filled(apron_area(GROUND_APRON_CELLS), Blend::solid(Ground::Gravel))?,
                 surface: try_filled(CHUNK_AREA, Surface::default())?,
                 scatter: Vec::new(),
             },
@@ -570,8 +661,7 @@ impl ChunkBuild {
                     .get_mut(index)
                     .ok_or(WorldError::Mismatch)? = height;
                 *self.work_level.get_mut(index).ok_or(WorldError::Mismatch)? = height;
-                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
-                    let slot = cell_index(cx, cy);
+                if let Some(slot) = Self::in_apron(wx, wy, APRON_CELLS) {
                     let elevation = Elevation::from_units(height);
                     *self
                         .chunk
@@ -589,7 +679,7 @@ impl ChunkBuild {
     fn water(&mut self, field: &RealmField) -> Result<(), WorldError> {
         self.work_level.fill(f64::MIN);
         self.work_wet.fill(false);
-        for channel in &self.channels(field)? {
+        for channel in &channels(field, self.coord, f64::from(SHORE_CELLS))? {
             self.carve(channel);
         }
 
@@ -618,6 +708,9 @@ impl ChunkBuild {
                 }
 
                 let wet = in_channel || standing;
+                // The realm holds this ground dry, so the relief below its
+                // step cannot sink it under the sea it stands beside.
+                let ground = if wet { ground } else { dry_ground(ground) };
                 self.work_ground[index] = ground;
                 self.work_level[index] = if wet { surface } else { ground };
                 self.work_wet[index] = wet;
@@ -628,11 +721,13 @@ impl ChunkBuild {
                 };
                 self.work_shore[index] = if wet { 0 } else { u16::MAX };
 
-                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
-                    let slot = cell_index(cx, cy);
+                if let Some(slot) = Self::in_apron(wx, wy, APRON_CELLS) {
                     self.chunk.elevation[slot] = Elevation::from_units(ground);
                     self.chunk.water[slot] =
                         Elevation::from_units(if wet { surface } else { ground });
+                }
+                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
+                    let slot = cell_index(cx, cy);
                     if in_channel {
                         self.chunk.surface[slot] = self.chunk.surface[slot].with(Surface::CHANNEL);
                     }
@@ -702,59 +797,6 @@ impl ChunkBuild {
             span(channel.from.0, channel.to.0, origin.x)?,
             span(channel.from.1, channel.to.1, origin.y)?,
         ))
-    }
-
-    /// The coarse drainage links that can reach this chunk.
-    fn channels(&self, field: &RealmField) -> Result<Vec<Channel>, WorldError> {
-        let params = field.params();
-        let step = f64::from(params.cells_per_coarse());
-        // Past the ring by the widest a bed gets, and a link further, so a
-        // channel whose centreline is outside the working grid still carves
-        // the bank that reaches into it.
-        let reach = CHANNEL_MAX_HALF_WIDTH + f64::from(SHORE_CELLS);
-        let margin = mathf::round_i32(mathf::ceil(reach / step)) + 1;
-
-        let (gx, gy) = field.chunk_grid_position(self.coord);
-        let lo = (
-            mathf::round_i32(mathf::floor(gx)) - margin,
-            mathf::round_i32(mathf::floor(gy)) - margin,
-        );
-        let span = signed(CHUNK_CELLS) / signed(params.cells_per_coarse()).max(1) + 2 * margin + 2;
-
-        let mut channels = Vec::new();
-        let across = usize::try_from(span).unwrap_or(0) + 1;
-        channels
-            .try_reserve(across * across)
-            .map_err(|_| WorldError::OutOfMemory)?;
-
-        for dy in 0..=span {
-            for dx in 0..=span {
-                let (sx, sy) = (lo.0 + dx, lo.1 + dy);
-                let sample = field.sample(sx, sy);
-                if sample.flow == FlowDir::Sink || sample.elevation.is_submerged() {
-                    continue;
-                }
-                let Some((ox, oy)) = sample.flow.offset() else {
-                    continue;
-                };
-                let downstream = field.sample(sx + ox, sy + oy);
-                let discharge = f64::from(sample.discharge) / CHANNEL_FULL_DISCHARGE;
-                let fullness =
-                    mathf::clamp(mathf::sqrt(mathf::clamp(discharge, 0.0, 1.0)), 0.0, 1.0);
-                let half_width = 0.9 + fullness * (CHANNEL_MAX_HALF_WIDTH - 0.9);
-                if sample.discharge < 8 {
-                    continue;
-                }
-                channels.push(Channel {
-                    from: grid_to_cells(field, sx, sy),
-                    to: grid_to_cells(field, sx + ox, sy + oy),
-                    surface: (sample.water.units(), downstream.water.units()),
-                    half_width,
-                    depth: 1.2 + fullness * (CHANNEL_MAX_DEPTH - 1.2),
-                });
-            }
-        }
-        Ok(channels)
     }
 
     /// Two chamfer passes over the working grid, carrying which water is
@@ -832,12 +874,11 @@ impl ChunkBuild {
             let level = field.coarse_at(gx, gy).elevation_units();
             self.level_around(|point| {
                 let distance = mathf::hypot(point.0 - centre.0, point.1 - centre.1);
-                (distance < radius).then(|| {
-                    (
-                        level,
-                        1.0 - mathf::smoothstep(distance / radius),
-                        Surface::SETTLEMENT,
-                    )
+                (distance < radius).then(|| Levelling {
+                    target: level,
+                    strength: 1.0 - mathf::smoothstep(distance / radius),
+                    kept: SETTLEMENT_RELIEF_KEPT,
+                    flag: Surface::SETTLEMENT,
                 })
             });
         }
@@ -856,12 +897,11 @@ impl ChunkBuild {
                 let height_b = field.coarse_at(gb.0, gb.1).elevation_units();
                 self.level_around(|point| {
                     let (distance, along) = distance_to_segment(from, to, point);
-                    (distance < ROAD_HALF_WIDTH).then(|| {
-                        (
-                            lerp(height_a, height_b, along),
-                            1.0 - mathf::smoothstep(distance / ROAD_HALF_WIDTH),
-                            Surface::ROAD,
-                        )
+                    (distance < ROAD_HALF_WIDTH).then(|| Levelling {
+                        target: lerp(height_a, height_b, along),
+                        strength: 1.0 - mathf::smoothstep(distance / ROAD_HALF_WIDTH),
+                        kept: 0.0,
+                        flag: Surface::ROAD,
                     })
                 });
             }
@@ -870,7 +910,7 @@ impl ChunkBuild {
 
     /// Pull the ground toward a target height wherever `shape` claims a
     /// cell, and record the flag it claims it with.
-    fn level_around(&mut self, shape: impl Fn((f64, f64)) -> Option<(f64, f64, u8)>) {
+    fn level_around(&mut self, shape: impl Fn((f64, f64)) -> Option<Levelling>) {
         for wy in 0..WORK_CELLS {
             for wx in 0..WORK_CELLS {
                 let index = Self::work_index(wx, wy);
@@ -879,13 +919,20 @@ impl ChunkBuild {
                 }
                 let cell = self.work_cell(wx, wy);
                 let point = (f64::from(cell.x), f64::from(cell.y));
-                let Some((target, strength, flag)) = shape(point) else {
+                let Some(Levelling {
+                    target,
+                    strength,
+                    kept,
+                    flag,
+                }) = shape(point)
+                else {
                     continue;
                 };
+                let strength = mathf::clamp(strength, 0.0, 1.0);
                 let levelled = lerp(
                     self.work_ground[index],
                     target,
-                    mathf::clamp(strength, 0.0, 1.0),
+                    strength * (1.0 - mathf::clamp(kept, 0.0, 1.0)),
                 );
                 self.work_ground[index] = levelled;
                 self.work_level[index] = levelled;
@@ -894,11 +941,13 @@ impl ChunkBuild {
                 // a neighbour's, and it must read as cleared exactly as the
                 // neighbour's own build reads it.
                 self.work_cleared[index] |= cleared;
-                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
-                    let slot = cell_index(cx, cy);
+                if let Some(slot) = Self::in_apron(wx, wy, APRON_CELLS) {
                     self.chunk.elevation[slot] = Elevation::from_units(levelled);
                     self.chunk.water[slot] = self.chunk.elevation[slot];
+                }
+                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
                     if cleared {
+                        let slot = cell_index(cx, cy);
                         self.chunk.surface[slot] = self.chunk.surface[slot].with(flag);
                     }
                 }
@@ -931,17 +980,24 @@ impl ChunkBuild {
         )
     }
 
-    /// Classify every cell and weigh its grounds.
+    /// Classify every cell and weigh its grounds, the grounds of the apron's
+    /// cells too.
     fn biome(&mut self, field: &RealmField) {
-        for cy in 0..CHUNK_CELLS {
-            for cx in 0..CHUNK_CELLS {
-                let slot = cell_index(cx, cy);
-                let reading = self.reading(field, cx + SHORE_CELLS, cy + SHORE_CELLS);
+        let first = SHORE_CELLS - GROUND_APRON_CELLS;
+        let end = SHORE_CELLS + CHUNK_CELLS + GROUND_APRON_CELLS;
+        for wy in first..end {
+            for wx in first..end {
+                let reading = self.reading(field, wx, wy);
                 let biomes = biomes_of(reading.as_ref());
-                self.chunk.ground[slot] = reading.map_or(Blend::solid(Ground::Water), |reading| {
-                    ground::cover(&biomes, &ground_site(field, &reading))
-                });
-                self.chunk.biome[slot] = biomes;
+                if let Some(slot) = Self::in_apron(wx, wy, GROUND_APRON_CELLS) {
+                    self.chunk.ground[slot] = reading
+                        .map_or(Blend::solid(Ground::Water), |reading| {
+                            ground::cover(&biomes, &ground_site(field, &reading))
+                        });
+                }
+                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
+                    self.chunk.biome[cell_index(cx, cy)] = biomes;
+                }
             }
         }
     }
@@ -1046,6 +1102,13 @@ impl ChunkBuild {
         }
     }
 
+    /// Where a working-grid position lies in a grid keeping `apron` cells
+    /// past the chunk's edges, or `None` beyond them.
+    fn in_apron(wx: u32, wy: u32, apron: u32) -> Option<usize> {
+        let shift = |w: u32| signed(w) - signed(SHORE_CELLS);
+        apron_index(shift(wx), shift(wy), apron)
+    }
+
     /// The in-chunk cell a working-grid position refers to, or `None` for
     /// a halo cell.
     fn in_chunk(wx: u32, wy: u32) -> Option<(u32, u32)> {
@@ -1055,25 +1118,90 @@ impl ChunkBuild {
     }
 }
 
-/// What the classification and the ground palette read about a dry working
-/// cell.
-struct Reading {
-    cell: CellCoord,
-    conditions: Conditions,
-    /// The specific catchment, in cells.
-    catchment: f64,
+/// The coarse drainage links whose beds can reach chunk `coord` or `reach`
+/// cells beyond it.
+pub(crate) fn channels(
+    field: &RealmField,
+    coord: ChunkCoord,
+    reach: f64,
+) -> Result<Vec<Channel>, WorldError> {
+    let params = field.params();
+    let step = f64::from(params.cells_per_coarse());
+    // Past the reach by the widest a bed gets, and a link further, so a
+    // channel whose centreline is outside the reach still carves the bank
+    // that reaches into it.
+    let margin = mathf::round_i32(mathf::ceil((CHANNEL_MAX_HALF_WIDTH + reach) / step)) + 1;
+
+    let (gx, gy) = field.chunk_grid_position(coord);
+    let lo = (
+        mathf::round_i32(mathf::floor(gx)) - margin,
+        mathf::round_i32(mathf::floor(gy)) - margin,
+    );
+    let span = signed(CHUNK_CELLS) / signed(params.cells_per_coarse()).max(1) + 2 * margin + 2;
+
+    let mut channels = Vec::new();
+    let across = usize::try_from(span).unwrap_or(0) + 1;
+    channels
+        .try_reserve(across * across)
+        .map_err(|_| WorldError::OutOfMemory)?;
+
+    for dy in 0..=span {
+        for dx in 0..=span {
+            let (sx, sy) = (lo.0 + dx, lo.1 + dy);
+            let sample = field.sample(sx, sy);
+            if sample.flow == FlowDir::Sink || sample.elevation.is_submerged() {
+                continue;
+            }
+            let Some((ox, oy)) = sample.flow.offset() else {
+                continue;
+            };
+            let downstream = field.sample(sx + ox, sy + oy);
+            let discharge = f64::from(sample.discharge) / CHANNEL_FULL_DISCHARGE;
+            let fullness = mathf::clamp(mathf::sqrt(mathf::clamp(discharge, 0.0, 1.0)), 0.0, 1.0);
+            let half_width = 0.9 + fullness * (CHANNEL_MAX_HALF_WIDTH - 0.9);
+            if sample.discharge < 8 {
+                continue;
+            }
+            channels.push(Channel {
+                from: grid_to_cells(field, sx, sy),
+                to: grid_to_cells(field, sx + ox, sy + oy),
+                surface: (sample.water.units(), downstream.water.units()),
+                half_width,
+                depth: 1.2 + fullness * (CHANNEL_MAX_DEPTH - 1.2),
+            });
+        }
+    }
+    Ok(channels)
 }
 
-/// A working cell's biomes: open water where water covers it, else what its
-/// reading classifies as.
-fn biomes_of(reading: Option<&Reading>) -> Blend<Biome> {
+/// What the classification and the ground palette read about a dry cell.
+pub(crate) struct Reading {
+    pub(crate) cell: CellCoord,
+    pub(crate) conditions: Conditions,
+    /// The specific catchment, in cells.
+    pub(crate) catchment: f64,
+}
+
+/// The lowest a dry cell's ground lies: a step of elevation above the sea.
+const DRY_FLOOR: Elevation = Elevation(Elevation::SEA_LEVEL.0 + 1);
+
+/// `ground`, in world units, held no lower than [`DRY_FLOOR`]: where the realm
+/// holds ground dry, a dip of the finer relief below the sea it stands beside
+/// would be a dry pit beneath sea level.
+pub(crate) fn dry_ground(ground: f64) -> f64 {
+    mathf::fmax(ground, DRY_FLOOR.units())
+}
+
+/// A cell's biomes: open water where water covers it, else what its reading
+/// classifies as.
+pub(crate) fn biomes_of(reading: Option<&Reading>) -> Blend<Biome> {
     reading.map_or(Blend::solid(Biome::OpenWater), |reading| {
         biome::classify(&reading.conditions)
     })
 }
 
-/// What a dry working cell's ground palette reads.
-fn ground_site(field: &RealmField, reading: &Reading) -> GroundSite {
+/// What a dry cell's ground palette reads.
+pub(crate) fn ground_site(field: &RealmField, reading: &Reading) -> GroundSite {
     let conditions = &reading.conditions;
     let moisture = conditions.moisture();
     let (shore, water) = conditions.shore;
@@ -1108,7 +1236,7 @@ fn ground_site(field: &RealmField, reading: &Reading) -> GroundSite {
 /// the gradient that sheds it, as `a / (a + k·tan β)` — the topographic
 /// wetness index's ratio mapped into `0.0..1.0`, which orders cells the way
 /// its logarithm does.
-fn wetness(catchment: f64, gradient: f64) -> f64 {
+pub(crate) fn wetness(catchment: f64, gradient: f64) -> f64 {
     let catchment = mathf::fmax(catchment, 0.0);
     let shed = WETNESS_SCALE * mathf::fmax(gradient, 1.0e-3);
     catchment / (catchment + shed)
@@ -1152,7 +1280,7 @@ fn grid_to_cells(field: &RealmField, sx: i32, sy: i32) -> (f64, f64) {
 
 /// Distance from `point` to the segment `a`–`b`, and the parameter of the
 /// nearest point on it.
-fn distance_to_segment(a: (f64, f64), b: (f64, f64), point: (f64, f64)) -> (f64, f64) {
+pub(crate) fn distance_to_segment(a: (f64, f64), b: (f64, f64), point: (f64, f64)) -> (f64, f64) {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let length2 = dx * dx + dy * dy;
     if length2 <= f64::EPSILON {

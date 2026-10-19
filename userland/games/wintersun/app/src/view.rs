@@ -9,19 +9,16 @@
 //!
 //! # Why a band and not a square tile
 //!
-//! Every pass in the frame steps *horizontally*: the terrain splat walks a
-//! span of pixels inside one cell row, the light composite walks a row of
-//! the buffer, the resample reads a source row. A vertical cut would
-//! divide the unit each of those is built around, so the piece handed to
-//! another core is a full-width run of rows. That is a tile whose width
-//! happens to be the target's — the bucketing a later pass does per piece
-//! is unaffected — and it keeps every span whole.
+//! Every pass in the frame steps *horizontally*: the scan converter walks a
+//! triangle's row between its crossings, the light composite walks a row of
+//! the geometry buffer, the resample reads a source row. A vertical cut
+//! would divide the unit each of those is built around, so the piece handed
+//! to another core is a full-width run of rows, and every row stays whole.
 
 use tairix_parallel::{bands, JobRunner};
 use tairix_raster::surface::Surface;
 use tairix_raster::{Region, ResampleScratch};
 
-use crate::camera::Zoom;
 use crate::error::ClientError;
 use crate::quality::{RenderScale, CAPS};
 
@@ -45,10 +42,9 @@ const MIN_BAND_PIXELS: usize = 1 << 14;
 
 /// Where a frame is drawn, and at what size.
 ///
-/// The render target covers the same piece of the world as the window at
-/// every scale: each of its pixels covers the world the window's would,
-/// widened by the inverse of the fraction it is drawn at, so shedding
-/// resolution never changes what the player sees, only how finely.
+/// The render target sees the same view as the window at every scale, its
+/// focal length shrinking with it, so shedding resolution never changes what
+/// the player sees, only how finely.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Viewport {
     window_width: u32,
@@ -66,7 +62,7 @@ impl Viewport {
     ///
     /// [`ClientError::Viewport`] for a window with no pixels, which is not
     /// a frame to be drawn smaller but a window there is nothing to draw
-    /// in, and for a scale no zoom's step stays whole at.
+    /// in.
     pub fn new(
         window_width: u32,
         window_height: u32,
@@ -76,11 +72,6 @@ impl Viewport {
             return Err(ClientError::Viewport);
         }
         let scale = cap(window_width, window_height).of(scale);
-        // The nearest zoom's step is the smallest and every other is a power
-        // of two times it, so a fraction that keeps it whole keeps them all.
-        if scale.step(Zoom::NEAREST.sub_units_per_pixel()).is_none() {
-            return Err(ClientError::Viewport);
-        }
         Ok(Self {
             window_width,
             window_height,
@@ -88,15 +79,6 @@ impl Viewport {
             render_height: scale.apply(window_height),
             scale,
         })
-    }
-
-    /// The world sub-units one render pixel spans at `zoom`.
-    ///
-    /// Whole by construction: [`Self::new`] refuses a scale that is not.
-    #[must_use]
-    pub fn step(&self, zoom: Zoom) -> i32 {
-        let base = zoom.sub_units_per_pixel();
-        self.scale.step(base).unwrap_or(base)
     }
 
     /// The fraction of the window the render target is drawn at, the

@@ -14,12 +14,11 @@ use super::*;
 /// The command word the bundle is installed under.
 const OWN_WORD: &str = "wintersun";
 
-/// The four knobs' keys, which a non-custom choice leaves unset.
-const KNOB_KEYS: [&str; 4] = [LIGHTING_KEY, SHADOWS_KEY, GROUND_KEY, RESOLUTION_KEY];
+/// The three knobs' keys, which a non-custom choice leaves unset.
+const KNOB_KEYS: [&str; 3] = [SHADOWS_KEY, GROUND_KEY, RESOLUTION_KEY];
 
 /// Every knob moved off its finest.
 const DETAIL: Detail = Detail {
-    lighting: Lighting::Medium,
     shadows: Shadows::Hard,
     ground: MaterialQuality::new(2),
     resolution: Resolution::TwoThirds,
@@ -85,7 +84,6 @@ fn the_store_keeps_the_knobs_only_while_the_choice_is_custom() {
     let mut host = FakeService::for_word(OWN_WORD);
     publish(&mut host, CUSTOM).expect("written");
     assert_eq!(host.committed().get(MODE_KEY), Some("custom"));
-    assert_eq!(host.committed().get(LIGHTING_KEY), Some("medium"));
     assert_eq!(host.committed().get(SHADOWS_KEY), Some("hard"));
     assert_eq!(host.committed().get(GROUND_KEY), Some("2"));
     assert_eq!(host.committed().get(RESOLUTION_KEY), Some("two-thirds"));
@@ -101,21 +99,19 @@ fn the_store_keeps_the_knobs_only_while_the_choice_is_custom() {
 fn a_broken_line_costs_only_itself() {
     let (graphics, refused) = Graphics::load(&document(
         "graphics.mode = custom\n\
-         graphics.lighting = dazzling\n\
-         graphics.shadows = flat\n\
+         graphics.shadows = dusky\n\
          graphics.ground = 99\n\
          graphics.resolution = half\n",
     ));
     assert_eq!(
         graphics,
         Graphics::Custom(Detail {
-            lighting: Lighting::Fine,
-            shadows: Shadows::Flat,
+            shadows: Shadows::Soft,
             ground: Detail::FINEST.ground,
             resolution: Resolution::Half,
         })
     );
-    assert_eq!(refused, [GraphicsKey::Lighting, GraphicsKey::Ground]);
+    assert_eq!(refused, [GraphicsKey::Shadows, GraphicsKey::Ground]);
 
     let (unknown, refused) = Graphics::load(&document("graphics.mode = cinematic\n"));
     assert_eq!(unknown, Graphics::DEFAULT);
@@ -125,7 +121,7 @@ fn a_broken_line_costs_only_itself() {
 #[test]
 fn a_knob_left_behind_by_another_choice_means_nothing() {
     let (graphics, refused) = Graphics::load(&document(
-        "graphics.mode = basic\ngraphics.lighting = dazzling\n",
+        "graphics.mode = basic\ngraphics.shadows = dusky\n",
     ));
     assert_eq!(graphics, Graphics::Basic);
     assert!(refused.is_empty(), "a knob a preset ignores is not refused");
@@ -205,13 +201,49 @@ fn a_knob_moved_while_its_write_is_out_stays_where_the_player_put_it() {
     let _ = publication.settle();
     let lit = Graphics::Custom(Detail {
         shadows: Shadows::Soft,
-        lighting: Lighting::Coarse,
+        resolution: Resolution::Half,
         ..DETAIL
     });
     choose(&mut publication, lit);
     let _ = answered(&mut publication, soft);
     assert_eq!(*publication.live(), lit);
     assert_eq!(publication.settle(), Some(PublishJob::Save(lit)));
+}
+
+#[test]
+fn a_custom_choice_made_anew_while_an_older_one_is_written_is_kept() {
+    let newer = Graphics::Custom(Detail {
+        shadows: Shadows::Soft,
+        resolution: Resolution::Half,
+        ..DETAIL
+    });
+    let mut publication = Publication::new(Graphics::Ultra);
+    choose(&mut publication, CUSTOM);
+    assert_eq!(publication.settle(), Some(PublishJob::Save(CUSTOM)));
+    // Out of custom and back while that write is out, onto other knobs.
+    choose(&mut publication, Graphics::Ultra);
+    choose(&mut publication, newer);
+    assert_eq!(answered(&mut publication, CUSTOM), None);
+    assert_eq!(
+        *publication.live(),
+        newer,
+        "the older write's knobs came back over the newer choice"
+    );
+    assert_eq!(publication.settle(), Some(PublishJob::Save(newer)));
+}
+
+#[test]
+fn a_knob_left_beside_a_preset_is_removed_by_the_next_save() {
+    let mut host = FakeService::for_word(OWN_WORD)
+        .with_store("graphics.mode = basic\ngraphics.shadows = hard\n");
+    assert_eq!(load(&mut host), (Graphics::Basic, Vec::new()));
+    publish(&mut host, Graphics::Basic).expect("written");
+    assert_eq!(host.committed().get(MODE_KEY), Some("basic"));
+    assert_eq!(
+        host.committed().get(SHADOWS_KEY),
+        None,
+        "a knob outlived the custom choice it belonged to"
+    );
 }
 
 #[test]

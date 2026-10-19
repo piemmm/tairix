@@ -65,8 +65,12 @@ What the levels read stands apart from the plan: their geometry
 (`plan::Lattices` — steps, domains, halos, the squares a piece holds and
 reads, what refining one costs), the relief's character below the coarse step
 and what lies over the land (`plan::Character`), its grain at each place — how
-rough it is, how much of it ridged and how much of it dunes (`plan::Grain`),
-even or read between the coarse samples (`plan::Grains`) — the clearing
+rough it is, how much of it runs in ridges, dunes or gullies rather than
+rounded hummocks, which of its waves it leans to (rolling swells, or ground
+breaking at its finest waves), and the knobs of a few metres it is studded
+with, each level adding what it resolves of them beyond its parent
+(`plan::Grain`) — even
+or read between the coarse samples (`plan::Grains`), the clearing
 (`relief::Clearing`), the rivers' form and the season.
 
 ## Levels and pieces

@@ -71,9 +71,10 @@ A set or an unset *stages* a pending edit against the calling **process
 instance** (keyed on the unforgeable `ProcId`, so one instance can never publish
 another's half-finished edits) in the scope it named. The commit loads that
 scope's committed document, applies the pending edits for it, and publishes the
-result as one document replacement. A caller that never commits changes nothing
-on the volume, and its own reads see its own pending edits, so a settings sheet
-reads back what it just set.
+result as one document replacement — unless the edits changed nothing, as an
+unset of a key only the policy layer holds does, when it writes nothing. A
+caller that never commits changes nothing on the volume, and its own reads see
+its own pending edits, so a settings sheet reads back what it just set.
 
 Staging and committing are **per scope**, and the pending-edit bound is too:
 one rename replaces one name, so a commit that claimed to publish two documents

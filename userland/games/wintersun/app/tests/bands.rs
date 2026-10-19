@@ -25,7 +25,7 @@ use tairix_wintersun_app::figures::Cast;
 use tairix_wintersun_app::frame::{Renderer, Scene, Stopped};
 use tairix_wintersun_app::light::{Sky, Sun};
 use tairix_wintersun_app::quality::{Detail, RenderScale};
-use tairix_wintersun_app::terrain::{visible_chunks, RoadDecals};
+use tairix_wintersun_app::terrain::{HeldGround, RoadDecals};
 use tairix_wintersun_app::view::Viewport;
 use tairix_wintersun_art::cache::MaterialCache;
 use tairix_wintersun_art::decal::Fray;
@@ -35,7 +35,6 @@ use tairix_wintersun_figure::motion::{Kind, Set};
 use tairix_wintersun_figure::reference;
 use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_net::value::{EntityId, Facing, WorldPoint};
-use tairix_wintersun_world::chunk::{Chunk, ChunkBuild, ChunkWindow};
 use tairix_wintersun_world::land::{Keeping, RealmLand};
 use tairix_wintersun_world::params::{RealmParams, RealmSpec};
 use tairix_wintersun_world::realm::RealmField;
@@ -50,16 +49,16 @@ impl tairix_log::Sink for Quiet {
 static SINK: Quiet = Quiet;
 static PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
-/// The test realm's land, a camera on it, and every chunk a view through the
-/// camera needs: solved once, for each runner to draw.
+/// The test realm's land, a camera close in on it, and the ground a view
+/// through the camera draws: held once, for each runner to draw.
 struct Ground {
     land: RealmLand,
     camera: Camera,
-    held: Vec<Chunk>,
+    held: HeldGround,
 }
 
 impl Ground {
-    fn solve(view: &Viewport) -> Self {
+    fn hold(view: &Viewport) -> Self {
         let params = RealmParams::new(RealmSpec {
             extent_chunks: 8,
             coarse_samples: 32,
@@ -70,30 +69,30 @@ impl Ground {
         let land = RealmField::generate(params)
             .and_then(|field| RealmLand::new(field, &tairix_parallel::SERIAL))
             .expect("the realm generates");
+        // The focus is a corner four solved chunks meet at, so their seams
+        // cross the frame too.
         let camera = Camera::new(
             WorldPoint { x: 0, y: 0 },
-            Zoom::FURTHEST,
+            Zoom::NEAREST,
             realm_bounds(params),
         );
-        let mut worn = Keeping::within(usize::MAX);
-        let held = visible_chunks(camera.visible(view))
-            .filter(|c| params.holds_chunk(c.x, c.y))
-            .map(|coord| {
-                ChunkBuild::new(coord)
-                    .expect("a chunk fits")
-                    .finish(&land, &mut worn, &tairix_parallel::SERIAL)
-                    .expect("a chunk generates")
-            })
-            .collect();
+        let mut held = HeldGround::new();
+        held.hold(
+            &land,
+            &mut Keeping::within(usize::MAX),
+            &camera,
+            view,
+            1,
+            &tairix_parallel::SERIAL,
+        )
+        .expect("the ground generates");
         Self { land, camera, held }
     }
 }
 
 fn draw(runner: &dyn JobRunner, view: &Viewport, ground: &Ground) -> Vec<Pixel> {
     let Ground { land, camera, held } = ground;
-    let (params, camera) = (land.field().params(), *camera);
-    let borrowed: Vec<&Chunk> = held.iter().collect();
-    let chunks = ChunkWindow::new(&borrowed).expect("generated in coordinate order");
+    let params = land.field().params();
     let roads = RoadDecals::from_realm(land.field()).expect("the roads fit");
     let decals = roads.decals().expect("the decals fit");
     let warp = Warp::new(params.seed());
@@ -103,7 +102,7 @@ fn draw(runner: &dyn JobRunner, view: &Viewport, ground: &Ground) -> Vec<Pixel> 
     // mid-cast, so every band boundary a runner could cut falls through one.
     let set = Set::new().expect("the shipped set");
     let clips = set.clips().expect("the shipped clips");
-    let centre = camera.centre(view);
+    let focus = camera.focus();
     let mut cast = Cast::new();
     for (id, species) in (0u64..).zip(Species::ALL) {
         let identity = reference::identity(species).expect("a record");
@@ -113,8 +112,8 @@ fn draw(runner: &dyn JobRunner, view: &Viewport, ground: &Ground) -> Vec<Pixel> 
         }
         let offset = i32::try_from(id).expect("a handful") - 2;
         let mut at = WorldPoint {
-            x: centre.x + offset * 2600,
-            y: centre.y + offset * 900,
+            x: focus.x + offset * 1000,
+            y: focus.y + offset * 400,
         };
         cast.join(EntityId(id), actor, at).expect("it joins");
         let figure = cast.get_mut(EntityId(id)).expect("it is there");
@@ -127,17 +126,17 @@ fn draw(runner: &dyn JobRunner, view: &Viewport, ground: &Ground) -> Vec<Pixel> 
     }
 
     PRESSURE.report(PressureBand::Normal);
-    let mut cache = MaterialCache::new("wintersun-bands-test", 32 * 1024 * 1024, &PRESSURE, &SINK);
+    let mut cache = MaterialCache::new("wintersun-bands-test", 256 * 1024 * 1024, &PRESSURE, &SINK);
     let mut renderer = Renderer::new();
     let (width, height) = view.render();
     let mut target = Surface::new(width, height).expect("a target");
     renderer
-        .render(
+        .render_whole(
             &mut target,
             view,
             &Scene {
-                camera,
-                chunks,
+                camera: *camera,
+                ground: held,
                 decals: &decals,
                 fray: &fray,
                 warp: &warp,
@@ -162,7 +161,7 @@ fn draw(runner: &dyn JobRunner, view: &Viewport, ground: &Ground) -> Vec<Pixel> 
 #[test]
 fn the_number_of_bands_does_not_change_the_picture() {
     let view = Viewport::new(160, 120, RenderScale::ONE).expect("a real window");
-    let ground = Ground::solve(&view);
+    let ground = Ground::hold(&view);
     let once = draw(&tairix_parallel::SERIAL, &view, &ground);
     assert!(
         once.iter().all(|p| p.a == 255),
@@ -180,7 +179,7 @@ fn the_number_of_bands_does_not_change_the_picture() {
 #[test]
 fn a_target_one_row_tall_still_bands() {
     let view = Viewport::new(160, 1, RenderScale::ONE).expect("a real window");
-    let ground = Ground::solve(&view);
+    let ground = Ground::hold(&view);
     let once = draw(&tairix_parallel::SERIAL, &view, &ground);
     let split = draw(&Reversed::new(16), &view, &ground);
     assert_eq!(split, once, "a single row cut sixteen ways changed");

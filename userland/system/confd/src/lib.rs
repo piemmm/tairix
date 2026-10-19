@@ -410,8 +410,9 @@ impl Session {
     }
 
     /// Apply every edit staged in `scope` to `document`, in the order they
-    /// were staged. Edits in the other scope belong to another document and
-    /// are not applied here.
+    /// were staged, answering whether any could have changed it: a set may,
+    /// an unset only of a key the document holds. Edits in the other scope
+    /// belong to another document and are not applied here.
     ///
     /// # Errors
     ///
@@ -420,17 +421,21 @@ impl Session {
     /// for a key or value the format refuses. The two are distinguished
     /// because a caller can act on the first — drop a setting — and on the
     /// second only by fixing what it sent.
-    fn apply(&self, scope: ConfigScope, document: &mut Document) -> Result<(), Errno> {
+    fn apply(&self, scope: ConfigScope, document: &mut Document) -> Result<bool, Errno> {
+        let mut changed = false;
         for edit in self.edits.iter().filter(|edit| edit.scope == scope) {
-            match &edit.value {
-                Some(value) => document.set(&edit.key, value).map_err(|err| match err {
+            if let Some(value) = &edit.value {
+                document.set(&edit.key, value).map_err(|err| match err {
                     ConfError::TooManySettings | ConfError::TooManyLines => Errno::LimitExceeded,
                     _ => Errno::OutOfRange,
-                })?,
-                None => document.unset(&edit.key),
+                })?;
+                changed = true;
+            } else {
+                changed |= document.get(&edit.key).is_some();
+                document.unset(&edit.key);
             }
         }
-        Ok(())
+        Ok(changed)
     }
 }
 
@@ -905,9 +910,10 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
 
     /// Publish the caller's staged edits as one atomic document replacement.
     ///
-    /// A commit with nothing staged succeeds and writes nothing: a caller that
-    /// changed no setting must not rewrite the user's file, which would cost
-    /// the document's timestamp for no change.
+    /// A commit with nothing staged, or whose edits change nothing, succeeds
+    /// and writes nothing: a caller that changed no setting must not rewrite
+    /// the user's file, which would cost the document's timestamp for no
+    /// change.
     fn config_commit<F: Storage + ?Sized>(
         &mut self,
         fs: &mut F,
@@ -936,9 +942,12 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
         // and a second lookup could otherwise report a failure for a commit
         // that had already succeeded.
         let index = self.session_index(origin).ok_or(Errno::NotFound)?;
-        self.sessions[index].apply(scope, &mut document)?;
-        let outcome = store.publish(fs, scope, &document);
-        self.resolve(origin, outcome)?;
+        // An unset of a key only a layer beneath holds changes nothing here,
+        // and a rewrite would cost the document's timestamp for no change.
+        if self.sessions[index].apply(scope, &mut document)? {
+            let outcome = store.publish(fs, scope, &document);
+            self.resolve(origin, outcome)?;
+        }
         // The staged edits are dropped only once the publish landed, so a
         // failed commit leaves them for a retry — and only this scope's, so a
         // settings sheet's unsaved work survives a publish about itself. A

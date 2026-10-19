@@ -2,19 +2,24 @@
 
 use tairix_raster::shape::Shape;
 use tairix_raster::surface::SUBPIXEL;
+use tairix_raster::view::Perspective;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::{Facing, WorldPoint};
 
 use super::{
-    readable, turned, Actor, Shade, RELEASE, SHADOW_DROWN, SIT_AFTER, TURN_RATE, WORLD_SCALE,
+    readable, turned, Actor, Relief, Shade, RELEASE, SHADOW_DROWN, SIT_AFTER, TURN_RATE,
+    WORLD_SCALE,
 };
+use crate::digest::scene_camera;
 use crate::error::FigureError;
+use crate::frame::{plan, Body, Heading};
 use crate::humanoid::LEAST_REACH;
 use crate::identity::{Identity, Setting};
 use crate::motion::{Clips, Kind, Layer, Set};
-use crate::reference::{self, Reference, SIDES};
+use crate::reference::{self, Reference, LEVEL, SHADOW, SIDES};
 use crate::rig::Placement;
 use crate::shadow::PENUMBRA;
+use crate::socket::Side;
 use crate::species::Species;
 
 /// A sixtieth of a second, in nanoseconds.
@@ -25,6 +30,31 @@ const FRAME_SECONDS: f64 = 1.0 / 60.0;
 
 /// The step the game's default zoom draws at, in world sub-units a pixel.
 const DEFAULT_STEP: i32 = 32;
+
+/// Ground a case stands on, as a function of where.
+struct Ground(fn(WorldPoint) -> Option<i32>);
+
+impl Relief for Ground {
+    fn height(&self, at: WorldPoint) -> Option<i32> {
+        (self.0)(at)
+    }
+}
+
+/// Level ground at height nought.
+const LEVEL_GROUND: Ground = Ground(|_| Some(0));
+
+/// Where a case's figure stands.
+const SPOT: WorldPoint = WorldPoint { x: 3200, y: 6400 };
+
+/// How far the cases' camera stands from what it looks at, and how far it
+/// looks down: the game's default view.
+const VIEW: (f64, f64) = (24_576.0, 0.87);
+
+/// The scene's camera `distance` sub-units from `at` on level ground,
+/// looking down by `tilt`.
+fn camera(at: WorldPoint, (distance, tilt): (f64, f64)) -> Perspective {
+    scene_camera([f64::from(at.x), f64::from(at.y), 0.0], distance, tilt).expect("a camera")
+}
 
 fn human() -> Identity {
     reference::identity(Species::Human).expect("the reference human")
@@ -52,9 +82,9 @@ fn run(actor: &mut Actor<'_>, frames: u32, speed: f64) {
 fn place(actor: &Actor<'_>, out: &mut Placement) -> super::Drawn {
     actor
         .place(
-            WorldPoint { x: 3200, y: 6400 },
-            WorldPoint { x: 0, y: 0 },
-            DEFAULT_STEP,
+            SPOT,
+            &LEVEL_GROUND,
+            &camera(SPOT, VIEW),
             light(),
             Shade::Hard,
             out,
@@ -271,11 +301,11 @@ fn a_figure_left_standing_sits_and_rises_when_it_moves() {
     assert_eq!(actor.performing().0, None, "it stayed seated while walking");
 }
 
-/// A figure standing in water stands on the bed, below the surface drawn
-/// over it: sunk by the depth, cut off at the waterline, and its shadow
-/// thinning as the water deepens.
+/// A figure standing in water stands on the bed the relief reports, drawn
+/// exactly as on dry ground there — the water drawn over it is what hides
+/// it — and its shadow thins as the water deepens.
 #[test]
-fn a_wading_figure_is_sunk_below_the_waterline() {
+fn a_wading_figure_stands_on_the_bed_and_its_shadow_thins() {
     let set = Set::new().expect("the shipped set");
     let clips = clips(&set);
     let mut dry = Actor::new(&human(), &clips, Facing(0)).expect("a figure");
@@ -290,19 +320,10 @@ fn a_wading_figure_is_sunk_below_the_waterline() {
     let (mut out_dry, mut out_wet) = (Placement::new(), Placement::new());
     let drawn_dry = place(&dry, &mut out_dry);
     let drawn_wet = place(&wet, &mut out_wet);
-    assert_eq!(drawn_dry.waterline, None);
-    let waterline = drawn_wet
-        .waterline
-        .expect("a wading figure has a waterline");
-    // The ground point is 6400 sub-units down at 32 a pixel.
-    assert_eq!(waterline, 200);
-    let (_, top_dry, _, bottom_dry) = out_dry.extent().expect("placed");
-    let (_, top_wet, _, bottom_wet) = out_wet.extent().expect("placed");
-    let sunk = f64::from(depth) / f64::from(DEFAULT_STEP);
-    let unit = f64::from(SUBPIXEL);
-    assert!(mathf::fabs(f64::from(bottom_wet - bottom_dry) / unit - sunk) < 0.25);
-    assert!(mathf::fabs(f64::from(top_wet - top_dry) / unit - sunk) < 0.25);
-    assert!(f64::from(bottom_wet) / unit > f64::from(waterline));
+    assert!(
+        out_dry.strips().eq(out_wet.strips()),
+        "wading moved the figure"
+    );
 
     let dry_alpha = drawn_dry.shadow[0].color.a;
     let wet_alpha = drawn_wet.shadow[0].color.a;
@@ -330,62 +351,149 @@ fn a_figure_never_sits_in_water() {
     assert_eq!(wet.performing().0, None, "a figure sat down in the water");
 }
 
-/// The ground point lands exactly where the view samples it, to a fraction
-/// of a pixel, and the figure is drawn at the world's own scale.
+/// The ground point lands where the camera sees it, and a figure nearer the
+/// camera is drawn larger: half the distance, twice the height.
 #[test]
-fn placing_puts_the_ground_point_where_the_view_samples_it() {
+fn placing_puts_the_ground_point_where_the_camera_sees_it() {
     let set = Set::new().expect("the shipped set");
     let clips = clips(&set);
     let actor = Actor::new(&human(), &clips, Facing(0)).expect("a figure");
     let mut out = Placement::new();
-    let origin = WorldPoint { x: -512, y: 1024 };
-    let ground = WorldPoint {
-        x: origin.x + 100 * DEFAULT_STEP + DEFAULT_STEP / 2,
-        y: origin.y + 50 * DEFAULT_STEP,
-    };
+    let view = camera(SPOT, VIEW);
     let drawn = actor
-        .place(ground, origin, DEFAULT_STEP, light(), Shade::Hard, &mut out)
+        .place(SPOT, &LEVEL_GROUND, &view, light(), Shade::Hard, &mut out)
         .expect("it places");
+    let seen = view
+        .project(view.view([f64::from(SPOT.x), f64::from(SPOT.y), 0.0]))
+        .expect("in view");
     let shadow = drawn.shadow[0];
-    assert!(mathf::fabs(shadow.x - 100.5) < 1e-9 && mathf::fabs(shadow.y - 50.0) < 1e-9);
+    assert!(mathf::fabs(shadow.x - seen.x) < 1e-9 && mathf::fabs(shadow.y - seen.y) < 1e-9);
 
-    // Twice the step draws the same figure at half the size.
-    let mut near = Placement::new();
-    actor
-        .place(
-            ground,
-            origin,
-            DEFAULT_STEP,
-            light(),
-            Shade::Hard,
-            &mut near,
-        )
-        .expect("it places");
-    let mut far = Placement::new();
-    actor
-        .place(
-            ground,
-            origin,
-            DEFAULT_STEP * 2,
-            light(),
-            Shade::Hard,
-            &mut far,
-        )
-        .expect("it places");
-    let height = |placed: &Placement| {
+    let height = |distance: f64| {
+        let mut placed = Placement::new();
+        actor
+            .place(
+                SPOT,
+                &LEVEL_GROUND,
+                &camera(SPOT, (distance, VIEW.1)),
+                light(),
+                Shade::Hard,
+                &mut placed,
+            )
+            .expect("it places");
         let (_, top, _, bottom) = placed.extent().expect("placed");
         f64::from(bottom - top) / f64::from(SUBPIXEL)
     };
-    assert!(mathf::fabs(height(&near) / height(&far) - 2.0) < 0.05);
+    // A little over twice: the crown is nearer the eye than the feet, and
+    // more so from closer in.
+    let (near, far) = (height(VIEW.0 * 0.5), height(VIEW.0));
+    assert!((2.0..2.3).contains(&(near / far)), "{near} against {far}");
+}
 
-    for step in [0, -32] {
-        assert_eq!(
-            actor
-                .place(ground, origin, step, light(), Shade::Hard, &mut out)
-                .err(),
-            Some(FigureError::ScaleUnreal)
-        );
-    }
+/// Each foot stands on the ground under it: across a slope the downhill foot
+/// sets how far the body comes down, and both feet land.
+#[test]
+fn each_foot_is_planted_on_the_relief_beneath_it() {
+    let set = Set::new().expect("the shipped set");
+    let clips = clips(&set);
+    // Facing south, so the figure's left is east and the slope runs across it.
+    let actor = Actor::new(&human(), &clips, Facing(0x4000)).expect("a figure");
+    let slope = Ground(|at| Some(at.x / 4));
+    let floor = slope.height(SPOT).expect("held");
+    let heading = Heading::of(actor.heading());
+    let under = |feet: [Body; 2]| {
+        feet.map(|foot| {
+            let (east, _) = plan(heading, foot);
+            let x = SPOT.x + mathf::round_i32(east * WORLD_SCALE);
+            f64::from(x / 4 - floor) / WORLD_SCALE
+        })
+    };
+    let mut asked = [0.0; 2];
+    let sloped = actor
+        .planted(|feet| {
+            asked = under(feet);
+            asked
+        })
+        .expect("it plants");
+    let level = actor.planted(|_| LEVEL).expect("it plants");
+    assert!(asked[Side::Left as usize] > 0.0 && asked[Side::Right as usize] < 0.0);
+    let drop = sloped.root().at.up - level.root().at.up;
+    assert!(
+        mathf::fabs(drop - asked[Side::Right as usize]) < 1e-9,
+        "{drop}"
+    );
+    assert!(sloped.worst_miss() < 1e-9, "a foot missed its ground");
+
+    // Placing on the slope plants the same way.
+    let mut out = Placement::new();
+    actor
+        .place(
+            SPOT,
+            &slope,
+            &camera(SPOT, VIEW),
+            light(),
+            Shade::Hard,
+            &mut out,
+        )
+        .expect("it places");
+    assert!(!out.is_empty());
+}
+
+/// A figure the eye is inside is drawn as nothing at all, shadow included,
+/// and a figure on ground the scene does not hold is refused.
+#[test]
+fn a_figure_the_camera_cannot_see_whole_draws_nothing() {
+    let set = Set::new().expect("the shipped set");
+    let clips = clips(&set);
+    let actor = Actor::new(&human(), &clips, Facing(0)).expect("a figure");
+    let mut out = Placement::new();
+    let inside = camera(SPOT, (40.0, VIEW.1));
+    let drawn = actor
+        .place(SPOT, &LEVEL_GROUND, &inside, light(), Shade::Soft, &mut out)
+        .expect("it places");
+    assert!(out.is_empty() && drawn.shadow.is_empty() && drawn.rows == (0, 0));
+
+    let nowhere = Ground(|_| None);
+    assert_eq!(
+        actor
+            .place(
+                SPOT,
+                &nowhere,
+                &camera(SPOT, VIEW),
+                light(),
+                Shade::Soft,
+                &mut out
+            )
+            .err(),
+        Some(FigureError::GroundUnreal)
+    );
+}
+
+/// The shadow shows on the ground it lies on, and anything nearer the eye
+/// than its own reach hides it.
+#[test]
+fn the_shadow_takes_its_ground_and_hides_behind_anything_nearer() {
+    let set = Set::new().expect("the shipped set");
+    let clips = clips(&set);
+    let actor = Actor::new(&human(), &clips, Facing(0)).expect("a figure");
+    let mut out = Placement::new();
+    let view = camera(SPOT, VIEW);
+    let drawn = actor
+        .place(SPOT, &LEVEL_GROUND, &view, light(), Shade::Hard, &mut out)
+        .expect("it places");
+    let point = view.view([f64::from(SPOT.x), f64::from(SPOT.y), 0.0]);
+    let seen = view.project(point).expect("in view");
+    let pixel = |value: f64| u32::try_from(mathf::round_i32(mathf::floor(value))).expect("on");
+    let shadow = drawn.depth.at(pixel(seen.x), pixel(seen.y)).0;
+    let reach = SHADOW.0 * WORLD_SCALE;
+    assert!(
+        f64::from(shadow) > seen.depth,
+        "the shadow is behind its ground"
+    );
+    assert!(
+        f64::from(shadow) < view.depth(point[2] - 2.0 * reach),
+        "the shadow shows through what is in front of it"
+    );
 }
 
 /// The shade says how many rings the shadow is drawn as.
@@ -398,9 +506,9 @@ fn the_shade_decides_how_the_shadow_is_drawn() {
     for (shade, rings) in [(Shade::Soft, PENUMBRA), (Shade::Hard, 1)] {
         let drawn = actor
             .place(
-                WorldPoint { x: 0, y: 0 },
-                WorldPoint { x: -3200, y: -3200 },
-                DEFAULT_STEP,
+                SPOT,
+                &LEVEL_GROUND,
+                &camera(SPOT, VIEW),
                 light(),
                 shade,
                 &mut out,
@@ -421,11 +529,12 @@ fn the_rows_hold_everything_a_figure_draws() {
     actor.perform(Kind::Fall).expect("a state");
     run(&mut actor, 40, 30.0);
     let mut out = Placement::new();
+    let at = WorldPoint { x: 800, y: 800 };
     let drawn = actor
         .place(
-            WorldPoint { x: 800, y: 800 },
-            WorldPoint { x: 0, y: 0 },
-            8,
+            at,
+            &LEVEL_GROUND,
+            &camera(at, (6_144.0, VIEW.1)),
             light(),
             Shade::Soft,
             &mut out,
@@ -518,7 +627,7 @@ fn every_clip_on_every_species_places_a_real_figure() {
                     .expect("a frame");
                 let drawn = place(&actor, &mut out);
                 assert!(drawn.rows.0 < drawn.rows.1, "{species:?} {}", kind.name());
-                let planted = actor.planted().expect("a pose");
+                let planted = actor.planted(|_| LEVEL).expect("a pose");
                 for param in crate::pose::Param::ALL {
                     assert!(param.range().holds(planted.pose().get(param)));
                 }
@@ -577,7 +686,7 @@ fn a_moving_figure_plants_its_feet_at_every_speed() {
             if tick_index < 960 {
                 continue;
             }
-            let planted = actor.planted().expect("a pose");
+            let planted = actor.planted(|_| LEVEL).expect("a pose");
             rigging
                 .posture(&planted.pose())
                 .expect("posturable")

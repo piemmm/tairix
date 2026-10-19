@@ -30,6 +30,7 @@ use tairix_wintersun_net::value::ChunkCoord;
 use crate::blend::{Blend, Kind};
 use crate::chunk::{Chunk, ChunkBuild};
 use crate::error::WorldError;
+use crate::far::FarPatch;
 use crate::land::{Keeping, RealmLand};
 use crate::params::{RealmParams, RealmSpec};
 use crate::realm::RealmField;
@@ -41,7 +42,7 @@ use crate::realm::RealmField;
 /// is the record of what the generator produces. A change that moves it
 /// is a change to every realm anyone has ever generated, and the new
 /// value is written down deliberately, not pasted from a failure.
-pub const REFERENCE_DIGEST: u64 = 0x162F_B55C_9F9C_1D9D;
+pub const REFERENCE_DIGEST: u64 = 0x4D4B_9655_8DCD_F0E1;
 
 /// The chunks the reference digest covers, as offsets from the origin.
 ///
@@ -49,6 +50,12 @@ pub const REFERENCE_DIGEST: u64 = 0x162F_B55C_9F9C_1D9D;
 /// coast, interior and edge — a stage that is wrong only near the rim
 /// would otherwise pass.
 const PROBE_CHUNKS: [(i32, i32); 6] = [(0, 0), (1, 0), (0, 1), (-3, 2), (5, -4), (-7, -7)];
+
+/// The chunks a far patch is folded over: one inland, one about a coast.
+const FAR_PROBES: [(i32, i32); 2] = [(9, 3), (-11, 8)];
+
+/// The stages after the realm: each probe chunk, then each far patch.
+const STAGES: usize = PROBE_CHUNKS.len() + FAR_PROBES.len();
 
 /// The most bytes of ground the probes keep for one another.
 const PROBE_KEPT_BYTES: usize = 24 * 1024 * 1024;
@@ -102,7 +109,8 @@ pub fn world(params: RealmParams) -> Result<u64, WorldError> {
 }
 
 /// A realm's digest being folded a stage at a time — its field and land,
-/// then each probe chunk — so a caller can say how far it has come.
+/// then each probe chunk and each far patch — so a caller can say how far it
+/// has come.
 #[derive(Debug)]
 pub struct Folding {
     params: RealmParams,
@@ -145,8 +153,11 @@ impl Folding {
                 ChunkBuild::new(ChunkCoord { x, y })?.finish(land, &mut self.kept, &SERIAL)?;
             fold_chunk(&mut self.hasher, &chunk);
             self.folded += 1;
+        } else if let Some(&(x, y)) = FAR_PROBES.get(self.folded - PROBE_CHUNKS.len()) {
+            fold_far(&mut self.hasher, &land.far(ChunkCoord { x, y })?);
+            self.folded += 1;
         }
-        Ok((self.folded == PROBE_CHUNKS.len()).then(|| self.hasher.finish()))
+        Ok((self.folded == STAGES).then(|| self.hasher.finish()))
     }
 }
 
@@ -216,20 +227,33 @@ fn fold_generated(hasher: &mut FastHash, field: &RealmField) {
     }
 }
 
-/// Every cell, then everything standing on it.
+/// Every cell and the apron about them, then everything standing on them.
 fn fold_chunk(hasher: &mut FastHash, chunk: &Chunk) {
-    use crate::geom::CHUNK_CELLS;
+    use crate::chunk::{APRON_CELLS, GROUND_APRON_CELLS};
+    use crate::geom::{signed, CHUNK_CELLS};
 
     hasher.write(&chunk.coord().x.to_le_bytes());
     hasher.write(&chunk.coord().y.to_le_bytes());
+    let around = |apron: u32| -signed(apron)..signed(CHUNK_CELLS + apron);
+    for dy in around(APRON_CELLS) {
+        for dx in around(APRON_CELLS) {
+            let cell = |height: Option<crate::geom::Elevation>| height.map_or(i16::MIN, |h| h.0);
+            hasher.write(&cell(chunk.elevation_beside(dx, dy)).to_le_bytes());
+            hasher.write(&cell(chunk.water_beside(dx, dy)).to_le_bytes());
+        }
+    }
+    for dy in around(GROUND_APRON_CELLS) {
+        for dx in around(GROUND_APRON_CELLS) {
+            if let Some(ground) = chunk.ground_beside(dx, dy) {
+                fold_blend(hasher, &ground);
+            }
+        }
+    }
     for cy in 0..CHUNK_CELLS {
         for cx in 0..CHUNK_CELLS {
-            hasher.write(&chunk.elevation(cx, cy).0.to_le_bytes());
-            hasher.write(&chunk.water(cx, cy).0.to_le_bytes());
             hasher.write(&chunk.temperature(cx, cy).0.to_le_bytes());
             hasher.write(&chunk.precipitation(cx, cy).0.to_le_bytes());
             fold_blend(hasher, &chunk.biome(cx, cy));
-            fold_blend(hasher, &chunk.ground(cx, cy));
             hasher.write(&[chunk.surface(cx, cy).bits()]);
         }
     }
@@ -237,6 +261,31 @@ fn fold_chunk(hasher: &mut FastHash, chunk: &Chunk) {
         hasher.write(&item.at.x.to_le_bytes());
         hasher.write(&item.at.y.to_le_bytes());
         hasher.write(&[item.kind as u8, item.host.id(), item.variant, item.scale]);
+    }
+}
+
+/// A far patch's every vertex.
+fn fold_far(hasher: &mut FastHash, patch: &FarPatch) {
+    hasher.write(&patch.coord().x.to_le_bytes());
+    hasher.write(&patch.coord().y.to_le_bytes());
+    hasher.write(&patch.step().to_le_bytes());
+    for j in 0..patch.side() {
+        for i in 0..patch.side() {
+            if let (Some(surface), Some(ground)) = (patch.surface(i, j), patch.ground(i, j)) {
+                hasher.write(&surface.0.to_le_bytes());
+                fold_blend(hasher, &ground);
+            }
+        }
+    }
+    // The halo, which a slope at the patch's edge is read across.
+    let edge = i64::from(patch.side());
+    for j in -1..=edge {
+        for i in -1..=edge {
+            if i == -1 || j == -1 || i == edge || j == edge {
+                let height = patch.surface_beside(i, j).map_or(i16::MIN, |at| at.0);
+                hasher.write(&height.to_le_bytes());
+            }
+        }
     }
 }
 

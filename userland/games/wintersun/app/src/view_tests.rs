@@ -1,6 +1,5 @@
-//! The target keeps the window's shape, never exceeds the cap, keeps every
-//! zoom's step whole, and the bands it is cut into tile its rows exactly
-//! once.
+//! The target keeps the window's shape, never exceeds the cap, and the bands
+//! it is cut into tile its rows exactly once.
 
 use super::*;
 use crate::quality::Resolution;
@@ -71,24 +70,6 @@ fn capping_keeps_the_window_proportions() {
         (tall.scale().apply(1000), tall.scale().apply(4000)),
         "the two axes were scaled by different fractions"
     );
-}
-
-#[test]
-fn every_capped_step_is_whole() {
-    for (w, h) in [(3840u32, 2160u32), (7680, 1080), (1000, 4000), (9000, 9000)] {
-        for resolution in Resolution::ALL {
-            let view = Viewport::new(w, h, resolution.scale()).expect("a window");
-            for zoom in [Zoom::NEAREST, Zoom::DEFAULT, Zoom::FURTHEST] {
-                let base = i64::from(zoom.sub_units_per_pixel());
-                let scale = view.scale();
-                assert_eq!(
-                    i64::from(view.step(zoom)) * i64::from(scale.numerator()),
-                    base * i64::from(scale.denominator()),
-                    "{w}x{h} at {resolution:?} split a sub-unit at {zoom:?}"
-                );
-            }
-        }
-    }
 }
 
 #[test]

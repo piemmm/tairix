@@ -1,17 +1,16 @@
-//! The body frame: the one projection that serves every heading.
+//! The body frame, and the lenses a figure is seen through.
 //!
-//! The world is drawn top-down, but a figure standing in it is drawn as a
-//! billboard seen from a shallower angle — otherwise a part offset along the
-//! heading would read as a figure lying on the floor. [`FORESHORTEN`] is that
-//! angle and the whole of the projection; the ground's own scale is the
-//! camera's and is applied by the caller.
+//! A part carries a [`Body`] offset and reaches the screen through a [`Lens`]:
+//! the scene's perspective camera, or the oblique drawing the art harness and
+//! the designer's preview make, whose depth axis is foreshortened by
+//! [`FORESHORTEN`] and whose figure is one size at every depth.
 //!
 //! # Why the turnaround is free
 //!
-//! A part carries a [`Body`] offset and is painted far-first by its projected
-//! [`Projected::depth`]. Facing away, a face sorts behind the skull and is
-//! covered; facing the camera it comes forward. Nothing asks which way the
-//! figure points, so eight or sixteen headings need no artwork and no `cfg`.
+//! A part is painted far-first by the depth its lens gives it. Facing away, a
+//! face sorts behind the skull and is covered; facing the camera it comes
+//! forward. Nothing asks which way the figure points, so eight or sixteen
+//! headings need no artwork and no `cfg`.
 //!
 //! The depth key is deliberately not the screen row: a raised hand draws
 //! higher without becoming further away, so sorting on the row would put it
@@ -27,8 +26,12 @@
 //! walk, a thigh's drawn end missed its knee by a third of the figure's
 //! height.
 
+use tairix_raster::mesh::Depth;
+use tairix_raster::view::Perspective;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
+
+use crate::error::FigureError;
 
 /// How much of a step *into* the scene shows as vertical screen movement.
 ///
@@ -300,14 +303,15 @@ impl Heading {
     }
 }
 
-/// Project body-frame `offset` for a figure facing along `heading`.
+/// Project body-frame `offset` for a figure facing along `heading`, as the
+/// oblique drawing does.
 ///
 /// The answer is in the same figure-local pixels `offset` is, relative to the
 /// figure's ground point; scaling to the surface and adding the anchor is the
 /// caller's one conversion.
 #[must_use]
 pub fn project(heading: Heading, offset: Body) -> Projected {
-    let (across, into) = ground(heading, offset);
+    let (across, into) = plan(heading, offset);
     Projected {
         // Into the scene moves down the screen, foreshortened; height moves
         // up it unforeshortened.
@@ -317,8 +321,8 @@ pub fn project(heading: Heading, offset: Body) -> Projected {
     }
 }
 
-/// The direction from a surface point toward the camera, in the frame of a
-/// figure facing along `heading`.
+/// The direction from a surface point toward the oblique drawing's eye, in
+/// the frame of a figure facing along `heading`.
 ///
 /// The one direction a point may move along without moving on screen, which
 /// is what makes it the axis a silhouette is taken against: a surface is on
@@ -332,9 +336,10 @@ pub fn toward_camera(heading: Heading) -> Body {
     toward.scaled(1.0 / toward.length())
 }
 
-/// `offset`'s displacement across the screen and into the scene, before the
-/// depth axis is foreshortened.
-fn ground(heading: Heading, offset: Body) -> (f64, f64) {
+/// Where body-frame `offset` lies east and south of the figure's ground
+/// point, for a figure facing along `heading`, in the units `offset` is.
+#[must_use]
+pub fn plan(heading: Heading, offset: Body) -> (f64, f64) {
     // Zero faces east and the turn advances toward south, which is the sense
     // the world's own axes have. The figure's left is therefore a quarter
     // turn back from its heading: east when facing south.
@@ -343,6 +348,140 @@ fn ground(heading: Heading, offset: Body) -> (f64, f64) {
         offset.forward * east + offset.side * south,
         offset.forward * south - offset.side * east,
     )
+}
+
+/// How a figure's offsets reach the screen.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Lens<'a> {
+    /// The drawing the art harness and the designer's preview make: one size
+    /// at every depth, the depth axis foreshortened by [`FORESHORTEN`].
+    Oblique {
+        /// Surface pixels a figure unit.
+        scale: f64,
+        /// The surface point the ground contact sits on.
+        at: (f64, f64),
+    },
+    /// The scene's camera, which draws a figure larger as it nears.
+    Perspective {
+        /// The view.
+        camera: &'a Perspective,
+        /// The ground point in the world: east, south and up.
+        ground: [f64; 3],
+        /// World units a figure unit.
+        units: f64,
+    },
+}
+
+/// Where a body-frame offset lands through a [`Lens`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Landed {
+    /// Surface pixels across.
+    pub x: f64,
+    /// Surface pixels down.
+    pub y: f64,
+    /// What it is painted in order of; larger is nearer.
+    pub key: f64,
+    /// Its reciprocal depth, which a scene's depth buffer is compared with.
+    /// The oblique drawing has no scene to stand in, so it lands nearest.
+    pub depth: f64,
+}
+
+impl Lens<'_> {
+    /// Refuse a lens no figure can be seen through.
+    ///
+    /// # Errors
+    ///
+    /// [`FigureError::ScaleUnreal`] for a scale or a unit that is not finite
+    /// and positive, and [`FigureError::GeometryUnreal`] for a ground point
+    /// that is not finite.
+    pub fn check(&self) -> Result<(), FigureError> {
+        let (size, finite) = match *self {
+            Self::Oblique { scale, at } => (scale, at.0.is_finite() && at.1.is_finite()),
+            Self::Perspective { ground, units, .. } => {
+                (units, ground.iter().all(|value| value.is_finite()))
+            }
+        };
+        if !size.is_finite() || size <= 0.0 {
+            return Err(FigureError::ScaleUnreal);
+        }
+        if !finite {
+            return Err(FigureError::GeometryUnreal);
+        }
+        Ok(())
+    }
+
+    /// Where body-frame `offset` lands for a figure facing along `heading`,
+    /// or `None` nearer than the camera can see.
+    #[must_use]
+    pub fn land(&self, heading: Heading, offset: Body) -> Option<Landed> {
+        match *self {
+            Self::Oblique { scale, at } => {
+                let placed = project(heading, offset);
+                Some(Landed {
+                    x: at.0 + placed.dx * scale,
+                    y: at.1 + placed.dy * scale,
+                    key: placed.depth,
+                    depth: f64::from(Depth::NEAREST.0),
+                })
+            }
+            Self::Perspective {
+                camera,
+                ground,
+                units,
+            } => {
+                let view = camera.view(in_world(ground, units, heading, offset));
+                let at = camera.project(view)?;
+                Some(Landed {
+                    x: at.x,
+                    y: at.y,
+                    key: -view[2],
+                    depth: at.depth,
+                })
+            }
+        }
+    }
+
+    /// The unit direction from body-frame point `at` toward the eye, in the
+    /// frame of a figure facing along `heading`.
+    #[must_use]
+    pub fn toward(&self, heading: Heading, at: Body) -> Body {
+        let Self::Perspective {
+            camera,
+            ground,
+            units,
+        } = *self
+        else {
+            return toward_camera(heading);
+        };
+        let (eye, world) = (camera.eye(), in_world(ground, units, heading, at));
+        let (east, south) = (eye[0] - world[0], eye[1] - world[1]);
+        let Heading {
+            east: ex,
+            south: sx,
+        } = heading;
+        let toward = Body::new(
+            east * ex + south * sx,
+            east * sx - south * ex,
+            eye[2] - world[2],
+        );
+        let length = toward.length();
+        if length > 0.0 {
+            toward.scaled(1.0 / length)
+        } else {
+            toward_camera(heading)
+        }
+    }
+}
+
+/// Where body-frame `offset` is in the world, for a figure standing at
+/// `ground` facing along `heading`, `units` world units a figure unit.
+fn in_world(ground: [f64; 3], units: f64, heading: Heading, offset: Body) -> [f64; 3] {
+    let (east, south) = plan(heading, offset);
+    [
+        ground[0] + east * units,
+        ground[1] + south * units,
+        ground[2] + offset.up * units,
+    ]
 }
 
 #[cfg(test)]

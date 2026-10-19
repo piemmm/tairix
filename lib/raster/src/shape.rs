@@ -24,6 +24,7 @@ use tairix_inline::ArrayVec;
 use tairix_util::mathf;
 
 use crate::color::Color;
+use crate::mesh::Occlusion;
 use crate::scan::ScanScratch;
 use crate::surface::{Canvas, SUBPIXEL};
 
@@ -473,12 +474,38 @@ impl Scratch {
 
 /// Fill `placed`'s outline onto `canvas`, tracing it through `scratch`.
 pub fn fill<C: Canvas + ?Sized>(canvas: &mut C, placed: &Placed, scratch: &mut Scratch) {
+    if place(placed, scratch) {
+        canvas.fill_polygon_subpixel(&scratch.device, placed.color, &mut scratch.scan);
+    }
+}
+
+/// Fill `placed`'s outline onto `canvas` as [`fill`] does, but only where
+/// `occlusion` lets it show.
+pub fn fill_occluded<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    placed: &Placed,
+    occlusion: &Occlusion<'_>,
+    scratch: &mut Scratch,
+) {
+    if place(placed, scratch) {
+        canvas.fill_polygon_subpixel_occluded(
+            &scratch.device,
+            placed.color,
+            occlusion,
+            &mut scratch.scan,
+        );
+    }
+}
+
+/// Trace `placed`'s outline into `scratch` in device sub-pixel units,
+/// answering whether there is anything to fill.
+fn place(placed: &Placed, scratch: &mut Scratch) -> bool {
     if placed.color.a == 0 {
-        return;
+        return false;
     }
     placed.shape.trace(&mut scratch.local);
     if scratch.local.len() < 3 {
-        return;
+        return false;
     }
     let (sin, cos) = (mathf::sin(placed.turn), mathf::cos(placed.turn));
     scratch.device.clear();
@@ -492,7 +519,7 @@ pub fn fill<C: Canvas + ?Sized>(canvas: &mut C, placed: &Placed, scratch: &mut S
             .device
             .try_push((to_subpixel(placed.x + rx), to_subpixel(placed.y - ry)));
     }
-    canvas.fill_polygon_subpixel(&scratch.device, placed.color, &mut scratch.scan);
+    true
 }
 
 /// A surface coordinate in the scan converter's sub-pixel units.

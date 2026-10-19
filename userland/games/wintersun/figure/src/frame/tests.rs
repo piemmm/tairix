@@ -3,10 +3,12 @@
 
 use core::f64::consts::{FRAC_PI_2, PI};
 
+use tairix_raster::view::Perspective;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::Facing;
 
-use super::{project, toward_camera, Basis, Body, Heading, Rotation, FORESHORTEN};
+use super::{plan, project, toward_camera, Basis, Body, Heading, Lens, Rotation, FORESHORTEN};
+use crate::error::FigureError;
 
 /// Facings in the sense `Facing` itself documents: zero east, advancing south.
 const EAST: Facing = Facing(0);
@@ -237,4 +239,124 @@ fn the_camera_direction_moves_nothing_on_screen() {
         );
         assert!(moved.depth > here.depth, "{facing:?} must come nearer");
     }
+}
+
+/// A camera south of the origin and above it, looking at it.
+fn camera() -> Perspective {
+    let (sin, cos) = (mathf::sin(0.7), mathf::cos(0.7));
+    let distance = 5000.0;
+    Perspective::new(
+        [0.0, distance * cos, distance * sin],
+        [0.0, -cos, -sin],
+        [1.0, 0.0, 0.0],
+        [0.0, sin, -cos],
+        600.0,
+        (640, 480),
+        256.0,
+    )
+    .expect("a camera")
+}
+
+#[test]
+fn the_oblique_lens_is_the_projection_scaled_and_anchored() {
+    let lens = Lens::Oblique {
+        scale: 1.75,
+        at: (40.5, 90.25),
+    };
+    for facing in [EAST, SOUTH, Facing(0x2345)] {
+        let heading = Heading::of(facing);
+        let offset = Body::new(3.0, -2.0, 11.0);
+        let placed = project(heading, offset);
+        let landed = lens.land(heading, offset).expect("it lands");
+        assert_eq!(landed.x.to_bits(), (40.5 + placed.dx * 1.75).to_bits());
+        assert_eq!(landed.y.to_bits(), (90.25 + placed.dy * 1.75).to_bits());
+        assert_eq!(landed.key.to_bits(), placed.depth.to_bits());
+        assert_eq!(lens.toward(heading, offset), toward_camera(heading));
+    }
+}
+
+#[test]
+fn the_perspective_lens_lands_where_its_camera_projects_the_world_point() {
+    let camera = camera();
+    let ground = [120.0, -340.0, 64.0];
+    let lens = Lens::Perspective {
+        camera: &camera,
+        ground,
+        units: 24.0,
+    };
+    let heading = Heading::of(Facing(0x3000));
+    let offset = Body::new(2.0, 5.0, 30.0);
+    let (east, south) = plan(heading, offset);
+    let world = [
+        ground[0] + east * 24.0,
+        ground[1] + south * 24.0,
+        ground[2] + 30.0 * 24.0,
+    ];
+    let view = camera.view(world);
+    let seen = camera.project(view).expect("in view");
+    let landed = lens.land(heading, offset).expect("it lands");
+    let bits = |values: [f64; 4]| values.map(f64::to_bits);
+    assert_eq!(
+        bits([landed.x, landed.y, landed.depth, landed.key]),
+        bits([seen.x, seen.y, seen.depth, -view[2]])
+    );
+    // Higher on the figure is higher on the screen, and nearer the eye.
+    let crown = lens
+        .land(heading, Body::new(0.0, 0.0, 90.0))
+        .expect("it lands");
+    let feet = lens.land(heading, Body::ORIGIN).expect("it lands");
+    assert!(crown.y < feet.y && crown.key > feet.key);
+}
+
+#[test]
+fn the_perspective_lens_looks_back_at_the_eye_from_every_point() {
+    let camera = camera();
+    let lens = Lens::Perspective {
+        camera: &camera,
+        ground: [0.0, 0.0, 0.0],
+        units: 24.0,
+    };
+    // Facing east, the figure's left is north: the eye to the south and above
+    // lies to its right and up.
+    let toward = lens.toward(Heading::of(EAST), Body::ORIGIN);
+    let (sin, cos) = (mathf::sin(0.7), mathf::cos(0.7));
+    assert!(close(toward.forward, 0.0));
+    assert!(close(toward.side, -cos) && close(toward.up, sin));
+    assert!(close(toward.length(), 1.0));
+}
+
+#[test]
+fn a_lens_no_figure_can_be_seen_through_is_refused() {
+    let camera = camera();
+    for scale in [0.0, -1.0, f64::NAN] {
+        let lens = Lens::Oblique {
+            scale,
+            at: (0.0, 0.0),
+        };
+        assert_eq!(lens.check(), Err(FigureError::ScaleUnreal));
+    }
+    let lens = Lens::Oblique {
+        scale: 1.0,
+        at: (f64::INFINITY, 0.0),
+    };
+    assert_eq!(lens.check(), Err(FigureError::GeometryUnreal));
+    let lens = Lens::Perspective {
+        camera: &camera,
+        ground: [0.0, f64::NAN, 0.0],
+        units: 24.0,
+    };
+    assert_eq!(lens.check(), Err(FigureError::GeometryUnreal));
+    let lens = Lens::Perspective {
+        camera: &camera,
+        ground: [0.0, 0.0, 0.0],
+        units: 0.0,
+    };
+    assert_eq!(lens.check(), Err(FigureError::ScaleUnreal));
+    // A point at the eye cannot be seen.
+    let lens = Lens::Perspective {
+        camera: &camera,
+        ground: camera.eye(),
+        units: 24.0,
+    };
+    assert_eq!(lens.land(Heading::of(EAST), Body::ORIGIN), None);
 }

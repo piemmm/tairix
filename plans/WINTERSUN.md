@@ -48,8 +48,9 @@ realm unattended).
 | WS23 | The client vertical: the bundle launched by name on its reference scene, its window read back as it opened, fullscreen, restored and maximised, and held pixel for pixel to the host's drawing and to the session's witness of how each frame reached the display | done |
 | WS24 | The same vertical on virtio-gpu, where the fullscreen frame must be promoted to a single layer | blocked: the live session presents through the layer path only after `plans/FIX-DISPLAY-ACCELERATION.md` Stages A–E (P9) |
 | WS25 | Climate, geology and biomes from ice sheet to rainforest: the latitude span and its circulation belts, seasonality, rock provinces and soils, biomes apart from the ground they cover, a synthesised material for every ground, the parameter document on the wire, and `--seed` | done |
-| WS32 | The world in 3D: a perspective view across the real relief, terrain uneven after its biome and mostly flattened where villagers settled, and every pass drawn in depth, built as the stages a GPU runs so `lib/gpu` accelerates it with no redesign | planned |
+| WS32 | The world in 3D: a perspective view across the real relief, terrain uneven after its biome and mostly flattened where villagers settled, and every pass drawn in depth, built as the stages a GPU runs so `lib/gpu` accelerates it with no redesign | done |
 | WS33 | The camera the player positions: hold the right mouse button and move the mouse to swing the camera around the character and tilt it | planned |
+| WS37 | SIMD kernels for the software 3D path, selected through `lib/cpuops`: the scan converter's span, the splat's fragment read and blend, and the light composite, each measured against WS32's baseline | planned |
 | WS26 | Flora, rocks and clutter as objects: the object vocabulary and its identity, species per biome, forest stands, edges, glades and riparian belts, deadwood, rocks by geology, wild clutter, ground cover, and the district scale | planned |
 | WS27 | Scenery drawn and solid: the `wintersun/scenery` art, the sprite cache, standing things sorted with figures, the canopy pass and its readability fade, ground cover drawn, and swept collision against static obstacles | planned |
 | WS28 | Landforms: volcanoes and hotspot chains, islands and atolls, mesas, canyons and badlands, karst, sea cliffs and sheltered bays, glaciated valleys and fjords, and the realm feature index | planned |
@@ -57,6 +58,7 @@ realm unattended).
 | WS35 | Ways as they are travelled: highways, roads, lanes, tracks and paths routed over the fine relief by rank — curving, contouring and switchbacking, wandering where they are trodden, widening and narrowing with the ground — over a looped network, with bridges, fords, ferries, causeways, stepping stones and culverts | planned |
 | WS30 | Settlements and the land they farm: cities, towns, ports and castles; villages, hamlets, farmsteads and special sites; streets, plots, buildings, walls, gates and harbours; fields, pasture, orchards and paddies with their hedges, walls and fences | planned |
 | WS31 | Caves, and the levels they need: positions that carry a level, and karst caves, lava tubes, sea caves and mines generated from the public seed, with their mouths on the surface | planned |
+| WS38 | Seams that never crack: each terrain skirt hung to the lowest edge vertex on either side of its seam, so a stride or far/solved seam meets however steep the ground the world items generate | planned |
 | WS7 | The realm store, `wintersund`'s `Code/wintersun-store`: the schemas and the realm's single writer | planned |
 | WS8 | `wintersund`, the realm server as a program of its own: its host, `Code/wintersun-gateway` and `Code/wintersun-zone`, interest management, back-pressure, the thousand-player floor, and the private realm the client starts to play alone | planned |
 | WS36 | The realm server's console: one command set, in a terminal and in a desktop window, with the realm's live graphs | planned |
@@ -91,7 +93,7 @@ milestone whose exit criterion is unmet.
 |---|---|---|
 | **M0 — the ground** *(met)* | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
-| **M2 — a world worth exploring** | WS25, WS32, WS33, WS26, WS27, WS28, WS29, WS35, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest, along roads and paths that bend with the land and across a meandering river at its ford, into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, with the software path's frame time measured and made as fast as the CPU allows (§3), and the world digest identical run to run on each target (decision 4). |
+| **M2 — a world worth exploring** | WS25, WS32, WS33, WS37, WS26, WS27, WS28, WS29, WS35, WS30, WS31, WS38 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest, along roads and paths that bend with the land and across a meandering river at its ford, into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, with the software path's frame time measured and made as fast as the CPU allows (§3), and the world digest identical run to run on each target (decision 4). |
 | **M3 — a world you share** | WS7, WS8, WS36 | The realm runs as a program of its own, watched and commanded from its console in a terminal and in a desktop window. Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
 | **M4 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
 | **M5 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
@@ -840,7 +842,11 @@ What a later item needs to know:
   pavement, and is where WS31's caves are densest.
 - **Coasts.** Steep relief meeting the sea makes cliffs, not beaches. A
   sheltered-water measure (how much of the horizon land closes off) finds
-  the coves and bays WS30's harbours are built in.
+  the coves and bays WS30's harbours are built in. Today a low coast can run
+  straight for tens of metres along a line of coarse samples — one a chunk in
+  the default realm and the reference one alike — because the sea is read off
+  the coarse water field; the coastline this item shapes must not follow the
+  coarse grid.
 - **Glaciers.** Ice above the snowline widens the valleys it fills into
   U-profiles and leaves boulder moraines. Where it reaches the sea it leaves
   fjords.
@@ -1283,29 +1289,24 @@ know:
   roads merge — a second stamp at the same coverage is a no-op — and a stamp
   lighter than every material already on a full field is refused rather than
   displacing something heavier.
-- **A span is the unit, not a pixel.** Everything a pixel needs beyond its
-  own texel read is linear along a horizontal run inside one cell row, so a
-  caller does the *vertical* interpolation (one `WeightField::lerp` per cell
-  row per raster row) and `splat::splat` steps the horizontal. That turns
-  four hash evaluations per pixel into four per span, and it is what the
-  budget assumes.
-- **Resolution is total, so the pass never fails.** A tile the cache will not
-  admit degrades to a coarser mip and then to the material's flat mid tone at
-  its standing height. `MaterialCache::ensure` reports residency and
-  `peek` reads it, deliberately as two calls: a splat needs four tiles at
-  once and four live borrows cannot come out of four mutable calls — and it
-  is the ask-then-paint shape an interactive loop wants anyway.
+- **A quad is the unit, not a pixel.** A mesh quad is planned once, when the
+  mesh is built (`splat::QuadPlan`: its grounds and their weights at its
+  corners), and a fragment interpolates those weights, reads one texel per
+  ground at its own mip and blends; a quad of one ground draws its texel.
+- **Resolution is total, so the pass never fails.** A level the cache does
+  not hold reads the nearest coarser tile, then the nearest finer one, and only
+  a ground with no tile at all draws its flat mid tone at its standing height.
+  `MaterialCache::ensure` reports residency and `peek` reads it, deliberately
+  as two calls: a fragment needs up to four tiles at once and four live
+  borrows cannot come out of four mutable calls — and it is the ask-then-paint
+  shape an interactive loop wants anyway.
 - **Two detail knobs exist here.** Particle density is `area / pressure
   band`, and `material::Quality` is the octave count that is also the tile
   cache's generation token. The octaves are a player's ground-texture setting
   and never a rung `auto` turns: they cost a synthesis, not a frame.
-- **No `lib/cpuops` family yet, deliberately.** A family with one portable
-  candidate selects nothing, and reaching for per-architecture intrinsics
-  before a measurement says the portable kernel misses its budget is the
-  speculative optimisation the charter forbids. The measurement is M1's exit
-  criterion. The kernel is already shaped as the contiguous span function such
-  a candidate would replace, so adding one later is adding a candidate, not a
-  reshape.
+- **No `lib/cpuops` family yet.** The per-fragment read and blend are a
+  portable kernel; its hand-written candidates are WS37's, measured against
+  the baseline WS32 recorded.
 - **No fuzz target, because there is no decoder.** Material rows are compiled
   in, weight fields come from the generator's own output, and a decal path is
   either that generator's road or a player-caused change `wintersun/net`
@@ -1322,62 +1323,35 @@ know:
 
 ### What WS5 settled
 
-The client shell is built, in `wintersun/app`: the `[lib]` holds the camera,
-the ladder, the render target, the terrain lattice and its splat, the light,
-the tiled frame, the pacing, the input drain, the size-state model, the budget
-governor and the frame digest; the `[[bin]]` is the bundle's `Run` and only
-composes them. What a later item needs to know:
+The client shell is built, in `wintersun/app`, its renderer since redrawn in
+3D (WS32): the `[lib]` holds the camera, the ladder, the render target, the
+frame, the pacing, the input drain, the size-state model, the budget governor
+and the frame digest; the `[[bin]]` is the bundle's `Run` and only composes
+them. What a later item needs to know:
 
-- **The frame budget was measured, and it holds on the reference machine.**
-  At 1280×720 on four threads: terrain **4.1 ms** against its 5.0 ms
-  allocation (81%), light **1.7 ms** against 2.0 ms (87%), 5.8 ms of drawing
-  in a 16.6 ms frame, a 3.49× speedup over one thread. The number this plan
-  called "the single most likely to be wrong" is right. `tests/budget.rs` is
-  the measurement and prints it, and asserts no elapsed time: a wall-clock
-  bound is a claim about the machine and what else is running on it, so what
-  the test gates is that real threads draw the picture one thread does. On a
-  slower development host the same frame costs more per pass — the light
-  pass most, at 1.3 to 2.5 times its allocation — which is the figure to
-  re-measure whenever the reference machine changes.
-  - **Three output-identical optimisations have already been taken**, so
-    they are not re-derived: `FastHash::hash_bytes` is `#[inline]` (the
-    noise lattice hashes a fixed 16-byte key, and folding the length at the
-    call site removes the slice walk — the hash was ~18% of the whole
-    profile); the blend's three per-pixel channel divisions are an exact
-    reciprocal table over the bounded divisor, proven exhaustively by
-    `reciprocals_are_exact`; and `shade` skips the texel fetch for any slot
-    whose weight is too far under the heaviest to reach the blend floor
-    however tall its relief, proven by
-    `a_skipped_slot_could_not_have_reached_the_floor`. The light pass's
-    composite walks texel-wide runs instead of dividing per pixel. What
-    remains is the noise: the warp's four lattice corners are re-hashed per
-    span, and adjacent spans in a row share a warp cell, so memoising the
-    corners is the next real gain and the one that needs a design — the
-    field is read through `&Warp` from every worker.
-  - The light pass was **53% over budget** on its first measurement, entirely
-    because its buffer was shaded on the calling thread while only the
-    composite was distributed. Shading its texel rows through the same runner
-    brought it to 87%. That is the whole reason the measurement exists.
+- **Three output-identical optimisations are taken**, so they are not
+  re-derived: `FastHash::hash_bytes` is `#[inline]` (the noise lattice hashes a
+  fixed 16-byte key); the blend's per-pixel channel divisions are an exact
+  reciprocal table over the bounded divisor, proven exhaustively by
+  `reciprocals_are_exact`; and a slot too far under the heaviest to reach the
+  blend floor however tall its relief skips its texel fetch, proven by
+  `a_skipped_slot_could_not_have_reached_the_floor`.
 - **A tile is a full-width band of rows**, not a square. Every pass steps
-  horizontally — the splat walks a span inside one cell row, the composite
-  walks a row of the buffer — so a vertical cut would divide the unit each is
-  built around. The per-tile bucketing a later item does is unaffected.
-- **The camera clamps where the view is projected, not where it is aimed**,
-  and carries the realm's extent to do it with. Clamping on being aimed is
-  correct until the window grows, at which point the wider view reaches past
-  an edge the camera had already settled against. The proptest model found it;
-  `look_at` now records a wish and `centre(w, h)` settles it.
+  horizontally — the scan converter walks a row of each triangle, the
+  composite a row of the buffer — so a vertical cut would divide the unit each
+  is built around.
+- **The camera clamps its focus when it projects, not when it is aimed**, and
+  carries the realm's extent to do it with: `look_at` records a wish and
+  `focus` settles it. The view past the realm's edge is sky.
 - **Shading is relative to the palette.** A slope facing neither way draws the
   material's own colour. A plain multiply by a tint darkens every surface in
   the world by whatever the tint's mid-point is, which is a palette change
   wearing lighting's clothes. The relief term saturates at
   `MAX_STEP_RISE_SUB_UNITS` — the rules' own slope/cliff line — so ground a
   player can walk over is shaded across its whole range.
-- **The ladder's shadow rung is shadow softness, across the frame.** Its first
-  notch hardens every shadow edge at once — each figure's contact shadow to
-  one ellipse, the relief term to a one-cell stencil — and its second drops
-  the relief term. The wider stencil is both the penumbra and the dearer, so
-  narrowing it before dropping the term is the right order either way.
+- **The ladder's shadow rung is shadow softness.** Its first notch hardens
+  each figure's contact shadow to one ellipse, and its second draws the ground
+  unlit, in its materials' own colours; a contact shadow never goes.
 - **A paint reads nothing.** Chunk generation is handed to a worker through
   the shared deferral desk; the frame draws the ground that has arrived and
   marks the rest. The desk holds one request, which is the right policy: the
@@ -1396,26 +1370,20 @@ composes them. What a later item needs to know:
   and copying it, and resamples into a destination and a filter scratch the
   session holds (`view::Reduced`) rather than allocating either per frame on
   the path a machine reaches precisely because it is short of time.
-- **`world::chunk::ChunkWindow` is the one sorted-window lookup**, hoisted out
-  of `rules::ChunkTerrain`, which now wraps it. The client needs a chunk's
-  blend and the simulation needs its heights; both were binary-searching the
-  same slice the same way.
+- **`world::chunk::ChunkWindow` is the simulation's sorted-window lookup**,
+  hoisted out of `rules::ChunkTerrain`, which now wraps it; the client's held
+  ground answers its own through `HeldGround::chunk` and `HeldGround::patch`,
+  one lookup for each kind it holds.
 - **The library takes `tairix-parallel` with `default-features = false`**, as
   `lib/raster` does: the pool creates threads through `lib/rt`, which brings a
   global allocator and a panic handler, and a bare-metal *consumer* of the
   library — each of the four verticals — supplies both itself. The binary's
   runtime sits behind the default `run` feature for the same reason.
-- **Still no `lib/cpuops` family.** The portable kernel makes its budget, so
-  adding per-architecture candidates now would be the speculative optimisation
-  the charter forbids. The splat is still shaped as the contiguous span
-  function such a candidate would replace.
 - **No fuzz target**, for WS4's reason: the client decodes nothing untrusted.
   Its adversarial coverage is the proptest model, enrolled as `wintersun-app`.
-- **What WS5 deliberately does not draw**: figures (WS6), particles and
+- **What the client does not draw yet**: scenery (WS27), particles and
   weather (WS13), the console and chat (WS15/WS16). The frame's pass order and
-  the budget name them now so each lands in a place that is already measured.
-  The camera follows an ordinary `rules` entity walking real collision ground,
-  so the body is there before the art for it is.
+  the budget name them so each lands in a place that is already measured.
 
 ### Lighting, and why the name matters
 
@@ -1425,22 +1393,22 @@ long directional shadows, strong rim light on north faces, and a cold-to-warm
 gradient across a slope, all of which read at the game's distance and all of
 which are cheap. Terrain is shaded by its slope normal against the sun; entities and
 scenery cast soft projected contact shadows squashed along the light direction
-(the readable-jump trick `cinder` already uses). Night is the same pass with a
-moon and point lights from lanterns, fires, and spell effects, accumulated into
-a light buffer at half resolution and upsampled.
+(the readable-jump trick `cinder` already uses). Night is the same composite
+with a moon, and point lights from lanterns, fires and spell effects taken per
+pixel from the geometry buffer's depth and normal.
 
 ### The frame
 
-A tiled, threaded software renderer. The visible area is split into
-full-width bands of rows, each a job on `lib/parallel`, and the passes are
-terrain splat with its decals → light/fog composite → ground scenery and
-entities depth-sorted by ground y → overhead canopy → particles → weather →
-UI. Scenery and entities come *after* the light: the light buffer is the
-ground's own relief shading, and a figure standing on a slope is neither
-tilted with it nor lit by it — it is already shaded from its own surfaces by
-the same sun — so what it takes from the ground is the fog at its feet, as a
-veil over its every stroke. Each band draws only the figures whose rows reach
-it.
+A frame is described once and drawn in the stages a GPU runs (WS32): the
+vertex stage carries each chunk mesh through the perspective; each full-width
+band of rows, a job on `lib/parallel`, sets up the triangles reaching it and
+scan-converts them depth-tested into a geometry buffer, shaded by the splat
+with its decals; the light, fog and atmosphere composite lights each pixel
+once; scenery and figures are drawn far to near, hidden wherever the ground is
+nearer; then the canopy, particles, weather and UI. A figure is shaded from its
+own surfaces by the same sun rather than lit by the ground's composite, so what
+it takes from the ground is the mist and fog at its feet, as a veil over its
+every stroke. Each band draws only the figures whose rows reach it.
 
 Per §28: input is drained, then the frame is produced once from the state the
 events left. The simulation runs at a fixed tick; the render interpolates
@@ -1459,8 +1427,9 @@ same change, exactly like a failed test (§2.16).
 is more work than a CPU does in 16.6 ms, and a GPU does it faster, so the
 software path is not failed against the table below. It is held instead to
 being as fast as the CPU allows: SIMD kernels selected through `lib/cpuops` on
-every hot stage, every core through `lib/parallel`, its frame time measured
-per pass and recorded, and a regression in it treated as a defect. The ladder
+every hot stage (WS37), every core through `lib/parallel`, its frame time
+measured per pass and recorded (WS32), and a regression in it treated as a
+defect. The ladder
 still sheds on it, so the game stays playable at whatever rate the machine
 gives.
 
@@ -1478,9 +1447,8 @@ simulation runs on its own cadence and is **not** inside the frame budget.
 
 **A new install draws every detail at its finest, and `auto` is the player's
 to choose.** On `auto` the renderer sheds, when frames run late for long
-enough, in this sequence and no other: light-buffer resolution → shadow softness
-→ render scale (with upscale to the window) — the knobs that cost frame time,
-one notch at a time. The order is fixed so degradation is reproducible and
+enough, in this sequence and no other: shadow softness → render scale (with
+upscale to the window) — the knobs that cost frame time, one notch at a time. The order is fixed so degradation is reproducible and
 reviewable rather than an emergent surprise, and the active step is observable
 for diagnosis. The ground's octaves are not on it: they cost a synthesis, not a
 frame. `auto` reads the machine over seconds rather than frames, so a moment of
@@ -1532,88 +1500,91 @@ through `lib/cpuops` and tiles distributed over `lib/parallel`, and it is the
 single most likely number in this plan to be wrong. That is precisely why M1
 exists and why its exit criterion is this measurement.
 
-### WS32 — the world in 3D
+### What WS32 settled
 
-What stands now, and is this item's to change: the view is orthographic from
-directly above (WS5's `Camera`). The relief exists only as light — a slope is
-shaded, but a hill hides nothing behind it and a cliff reads as a dark patch —
-and the fine relief has one character everywhere but for dunes where it is dry
-and ridges in a mountain belt.
+The view is a perspective across the real relief, drawn in the stages a GPU
+runs over the data a GPU holds. What a later item needs to know:
 
-- **A perspective view across the land.** The camera looks at the character
-  from a height and an angle the player sets (WS33), through a perspective
-  projection. The terrain is drawn as its true surface: nearer ground hides
-  farther ground, a hill has a far side, a valley falls away, a bank drops to
-  its water.
-  - The low sun and the distance fog read on the true surface, so a slope is
-    lit as it is seen rather than as a map shades it.
-- **Built to be accelerated.** The view is the stages a GPU runs, over the
-  data a GPU holds, so `lib/gpu` takes it over without a redesign.
-  - The terrain is a chunked triangle mesh with distance-based detail,
-    transformed, clipped and depth-tested, then shaded per fragment by the
-    material splat and the light. It is not a column raymarch or any other
-    trick only a CPU can play, because triangles are what the hardware draws.
-    Figures and scenery are meshes in the same passes.
-  - A frame is described once — meshes, the material tiles and weight field
-    as textures, the camera and the sun as uniforms — and either path executes
-    it; neither holds scene logic the other lacks. The software path runs the
-    stages on `lib/parallel` through `lib/raster`'s one scan converter, which
-    gains the depth test rather than the game growing a second rasteriser
-    (decision 6). The GPU path runs them as `plans/GPU.md` GP4's pinned
-    pipelines (WS19, GP7).
-  - Each stage is specified exactly — depth precision, sample positions, the
-    blend — so the GPU's picture can be held to the software path's within a
-    stated tolerance (M6), never bit for bit. Until the game is complete the
-    software path need not match across targets either (decision 4): its SIMD
-    kernels may use whatever each CPU offers, fused multiply-add included.
-  - The GPU is never required (decision 6), but the frame budget is the GPU
-    path's to hold: a GPU does this work faster than a CPU can, so the
-    software path may run over it. The software path is still made as fast as
-    the CPU allows — its hot stages are SIMD kernels selected through
-    `lib/cpuops`, and every core draws through `lib/parallel` — and a
-    regression in its measured frame time is a defect.
-- **Terrain uneven after its biome.** The fine relief takes its character from
-  the ground it is: rolling swells on grassland and savanna, frost hummocks on
-  tundra, tussocks in a bog, broken rock above the treeline, gullies in
-  badlands, dunes in sand, scree below a face. Wetlands, salt pans and
-  floodplains lie near flat.
-  - The character is chosen from the conditions the classifier reads —
-    climate, rock, belt and drainage — before the fine relief is laid, never
-    from the classification, which reads the fine relief's slope: a relief
-    that followed its own biome would be a loop.
-  - It stays a pure function of position under the same halo discipline, so a
-    hummock is one hummock from either side of a seam.
-- **Settlements are mostly flattened.** Villagers level the ground they build
-  on, but not to a table: the structure stamp pulls a settlement toward its
-  grade and keeps a stated share of the natural relief, so worked ground
-  still reads as ground. Streets, plots and terraced slopes level further
-  where they need to (WS30).
-- **Figures and objects stand in the same view.** A figure's parts are
-  already meshes carried in three dimensions and projected vertex by vertex,
-  so they project through the scene's camera. A figure now grows as it nears
-  the camera, so `plans/FIGURE.md`'s rule that a figure's size does not vary
-  with depth changes in this item, and FG5's readability floor is measured
-  over the distances the camera allows. Feet meet the relief they stand on:
-  the per-foot terrain solve WS6 left for a view that draws relief
-  (`plans/FIGURE.md` FG4) lands here. Scenery follows (WS27).
-- **Nothing authoritative moves.** The rules already walk bodies over the
-  heightfield and test each step against it; what changes is that the player
-  sees the heights. Collision, the rules digest and the wire are unchanged.
-- **Budget.** §3's frame budget binds the GPU path once WS19 lands, with the
-  terrain pass's 5.0 ms covering the projected, textured heightfield. This item
-  measures the software path per pass on a long view across broken ground at
-  the lowest tilt WS33 allows, and records it as the baseline its regressions
-  are judged against.
-- **Tests.**
-  - The frame description carries everything a pass draws: executing it twice
-    from the same description gives the same picture, with no scene state read
-    outside it.
-  - Each biome's relief falls within its stated roughness band over the probe
-    realms, and a settlement's interior within its flattened band.
-  - A hill hides the ground behind it: a probe beyond a ridge draws the ridge.
-  - Relief reads the same from either side of a seam.
-  - The world and client digests move, and the client vertical (WS23) is
-    redrawn.
+- **One projection.** `lib/raster::view::Perspective` is the only one: the
+  terrain's vertex stage and `wintersun/figure`'s `Lens::Perspective` both
+  project through it, in `f64` basic operations in a fixed order, so a point
+  projects to the same bits on every target. The client stays float-free
+  outside the projection's set-up (`camera::perspective`), the atmosphere's
+  tables (`Atmosphere::new`) and a fragment's share and footprint
+  (`raster::shares`, `raster::footprint`).
+- **One scan converter, gaining depth** (decision 6). Triangles go through
+  `lib/raster::mesh` under the coverage fill's centre rule, so a shared edge's
+  centres belong to one triangle each; depth is a reversed reciprocal integer,
+  interpolated exactly, and a fragment's weights are perspective-correct. A
+  triangle a corner of which does not project is clipped to the near plane and
+  a guard band, each edge cut from its inside end so a mesh stays watertight
+  (`docs/src/lib/raster.md`).
+- **A frame is described once.** `Renderer::describe` makes a `Frame` — the
+  meshes, the material tiles, the camera and the sun — and `execute` reads
+  nothing else, so the GPU path (WS19) executes the same description. The
+  stages: each mesh's vertices are carried through the camera once; each
+  full-width band of rows, a `lib/parallel` job, sets up the triangles reaching
+  it and scan-converts them depth-tested into a geometry buffer (depth, albedo,
+  the texel reading, the distance to the covering edge); the composite lights
+  each pixel once from its normal, under the low sun, the mist and the distance
+  fog, and resolves silhouettes against the edge distance the fill recorded,
+  with no multisampled buffer; then figures, far to near, hidden wherever the
+  ground is nearer. The light-buffer rung and its Settings control are retired:
+  the ladder is shadow softness, then render scale.
+- **The terrain mesh.** Solved chunks within `SOLVE_RADIUS` of the focus,
+  drawn over each chunk's far reading — a ground blend the world crate answers
+  at level 0's vertices from the realm field's own conditions, through the one
+  classifier — held wherever the view reaches out to `VIEW_RANGE`, where the
+  fog has closed it, and under solved ground too, so a chunk given back leaves
+  its far reading in place. A mesh not yet built at its stride is stood in for
+  by one of its chunk's that is, its own source's first. A
+  mesh's stride is the coarsest power of two whose quads span at most
+  `QUAD_PIXELS` there (`stride_for`). A skirt hangs from an edge only where the
+  neighbour differs in source or stride or is absent, as deep as the mesh's
+  spacing; hanging it to what the seam needs is WS38's. A quad's splat plan is
+  made when its mesh is built, its weights interpolate across it, and each
+  fragment reads its own mip.
+- **The software path skips what a GPU's clip and early depth test would.** A
+  mesh whose box the view does not see, rows of vertices wholly behind the eye,
+  triangles wholly behind the near plane, and quads wholly behind what an
+  eight-pixel row segment already holds: a segment's coarse depth is a bound
+  taken from what was written, never an estimate. Quads go near first so that
+  test bites.
+- **Relief by biome.** `lib/land`'s `Grain` carries ridges, dunes and gullies,
+  a lean toward the long or the short waves, and knobs at the scale of a
+  stride; `wintersun/world::land` chooses it from the belt, the climate, the
+  rock and the drainage before any fine relief exists — never from the biome,
+  which reads the fine relief's slope. Each biome's measured roughness falls in
+  its stated band over the probe realms (`world/tests/relief.rs`), and level
+  ground's band and broken ground's never overlap.
+- **Settlements keep a quarter of their relief.** The structure stamp pulls a
+  settlement's ground toward its grade and keeps `SETTLEMENT_RELIEF_KEPT` of
+  the natural relief; a road keeps none. Streets, plots and terraces level
+  further with WS30.
+- **Figures stand in the same view.** A figure projects through the scene's
+  camera and grows as it nears it; its strips carry their own depth planes and
+  are hidden wherever the ground is nearer, while its own parts cover one
+  another by paint order. A figure crossing the near plane places nothing. Feet
+  plant on the relief through `actor::Relief` (`plans/FIGURE.md` FG4), and the
+  ladder's floor keeps the figure at the focus at FG5's readable size at every
+  zoom stop.
+- **The software path's baseline**, the bar a regression is judged against and
+  WS37 measures from (`tests/budget.rs`, release): 1280×720 north across the
+  most broken ground of a 64-chunk realm at the lowest tilt, with 64 rigs
+  standing in it — 1 809 meshes. On an i7-13700HX, one thread: terrain
+  45.9 ms, light 9.9 ms, figures 15.5 ms, 71.2 ms in all, and 55 µs to place
+  a figure; four threads: 17.9, 5.2 and 7.1 ms, 30.1 ms in all. The one-thread
+  figures repeat to within a few per cent; the four-thread ones move by a
+  couple of milliseconds with which of the host's performance and efficiency
+  cores the bands land on, so a regression is judged on one thread. §3's
+  table is the GPU path's to hold (WS19).
+- **Nothing authoritative moved.** Collision, the rules digest and the wire
+  are as they were; the world digest is the new relief's, the client digest
+  the 3D view's, and the client vertical (WS23) checks the 3D view.
+- **What WS33 inherits.** The heading is fixed north and the tilt set in code;
+  nothing yet draws the camera in when ground rises between it and the
+  character, so a low tilt behind a ridge can hide the character until WS33
+  lands that.
 
 ### WS33 — the camera the player positions
 
@@ -1640,6 +1611,57 @@ and ridges in a mountain belt.
   - The tilt clamps at both ends, and the camera never enters the ground.
   - Walking forward walks away from the camera at every heading.
   - A burst of pointer motion yields one frame.
+
+### WS37 — the software path's SIMD kernels
+
+- **Each hot stage of WS32's software path becomes a `lib/cpuops` family**:
+  the depth-tested span the scan converter walks (`lib/raster::mesh`), the
+  splat's per-fragment texel read and blend (`wintersun/art::splat`), and the
+  light composite's per-pixel lighting, mist and fog (`wintersun/app::light`).
+  Each keeps its portable kernel as the family's baseline; the hand-written
+  candidates are AVX2 on `x86_64`, NEON on `aarch64` and the vector extension
+  on `riscv64` where the hart has it, chosen by measurement.
+- **Bit-identical to the portable kernel.** All three stages are integer
+  arithmetic, so a candidate gives the portable kernel's bits and the verticals
+  hold without re-scoping; decision 4's licence for target-dependent results
+  is not needed and not taken.
+- **Where the kernels live is settled first.** The span is shared code, so its
+  family is `lib/raster`'s, and its `unsafe` brings `lib/raster` into miri's
+  enrolment. The splat and the composite are the game's: either their families
+  live in their game crates, carrying the target-specific kernels behind build
+  configuration as `lib/crc32c` does, or the kernels move to a `lib/*` home a
+  second consumer would justify. The item decides it before writing a kernel.
+- **Measured against WS32's baseline**, per pass, on the same long view at the
+  lowest tilt; a candidate is kept only where it measures faster, and the
+  baseline is replaced by the new measurement.
+- **Tests.** Each candidate agrees with its portable kernel over exhaustive or
+  generated inputs, including the edges of a span and of a band; the frame
+  digest does not move; the client verticals hold on every target.
+
+### WS38 — seams that never crack
+
+- **What stands.** WS32 hangs a skirt from each edge whose neighbour differs
+  from it in stride or source, as deep as the mesh's own spacing
+  (`TerrainMesh::skirt`). That meets the neighbour on ground no steeper than
+  one in one. A channel cut deeper than a coarse edge's spacing between its
+  vertices, a face, a fall, or the fine relief a far patch's level-0 reading
+  omits at a far/solved seam can still open a crack the sky shows through.
+- **No bound is derived from the generator.** Every world item adds relief —
+  WS28's faces and canyons, WS29's channels and falls, WS30's terraces, WS35's
+  cuttings — so a bound on how far the fine surface stands off its coarser
+  readings would move with each of them. The depth is measured from what the
+  meshes hold instead, which no later item can outgrow.
+- **Measured at the seam.** Each edge is drawn straight between its own
+  vertices, so neither side of a seam dips below the lowest edge vertex on
+  either side of it. A mesh records its lowest vertex on each edge when it is
+  built, and a skirt across a seam hangs to the lower of its own and its
+  neighbour's, both held when the frame is drawn. An edge facing no drawn
+  neighbour keeps its spacing below its lowest vertex.
+- **Tests.** Seen from inside a trench deeper than a coarse neighbour's
+  spacing, crossing a stride seam, no sky shows at the seam; the same at a
+  far/solved seam; a skirt's foot is never above the lowest edge vertex on
+  either side of its seam; and the picture still does not depend on how the
+  rows are cut.
 
 ### WS27 — scenery on screen, and solid
 
@@ -1859,8 +1881,9 @@ the frame's third pass). What a later item needs to know:
   between them — the settings window's included — draws nothing.
 - **The ground held is the view's working set.** A chunk is some hundred
   kibibytes, and the client kept every one it had generated; it now gives
-  back any the view and a one-chunk margin no longer need
-  (`terrain::worth_holding`), so walking the realm no longer grows it.
+  back every solved chunk a chunk past the solve radius and every far patch
+  past the view range (`HeldGround::release_distant`), so walking the realm
+  no longer grows it.
 - **The client digest draws figures.** Five of them — every species, a walk
   and a run, both action layers, a figure in the air and one wading — stand in
   both reference frames.
@@ -2790,13 +2813,13 @@ it is made in. What a later item needs to know:
   `Ultra`: every detail at its finest. `Basic` is every knob at its plainest at
   the window's own resolution — a preset chooses effects, not a blurrier
   picture — and `Custom` is the player's own setting of each knob.
-- **A detail is four knobs** (`quality::Detail`): lighting (the light
-  buffer's resolution), shadows (contact softness and the relief term,
-  hardening together), the ground's octaves, and the render scale. The ladder
-  is `auto`'s path through them and carries only the three that cost frame
-  time; a knob no pass draws — particle density until WS13 — is on neither.
+- **A detail is three knobs** (`quality::Detail`): shadows (contact softness
+  and the relief term, hardening together), the ground's octaves, and the
+  render scale. The ladder is `auto`'s path through them and carries only the
+  two that cost frame time, shadow softness and then render scale; a knob no
+  pass draws — particle density until WS13 — is on neither.
 - **The store holds what is in force and nothing else**: `graphics.mode`
-  always, and the four knobs only while the choice is custom, in the
+  always, and the three knobs only while the choice is custom, in the
   application's own per-app data. It is never sent to a realm and is no input
   to the simulation or the digest. It is read once before the window opens,
   and a store that cannot be read leaves every detail at its finest with the

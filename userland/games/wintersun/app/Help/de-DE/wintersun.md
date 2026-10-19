@@ -8,9 +8,11 @@ wintersun — eine prozedural erzeugte Welt durchwandern
 
 ## DESCRIPTION
 
-Öffnet ein Desktop-Fenster auf eine erzeugte Welt: die Draufsicht auf einen
-Boden, den die Maschine synthetisiert statt ihn mitzuliefern, beleuchtet von
-einer tief stehenden Sonne, die lange Schatten über jeden Hang wirft.
+Öffnet ein Desktop-Fenster auf eine erzeugte Welt, gesehen von hinter und über
+Ihnen, während Sie sie durchwandern: ein Boden, den die Maschine synthetisiert
+statt ihn mitzuliefern, dessen Hügel verbergen, was hinter ihnen liegt,
+beleuchtet von einer tief stehenden Sonne, die lange Schatten über jeden Hang
+wirft.
 
 Die Welt reicht von einem Eisschild im hohen Norden bis zum Regenwald jenseits
 des Äquators. Ihr Klima folgt der geographischen Breite, den vorherrschenden
@@ -37,29 +39,28 @@ entgegengesetzte Tasten heben sich auf. Die Ansicht folgt Ihnen und hält am
 Rand der Welt an, statt darüber hinauszugleiten. Zu steile Hänge und zu tiefes
 Wasser lenken Sie ab.
 
-`+` und `-` holen die Ansicht näher und weiter weg, in fünf Stufen von einer
-Weltzelle über acht Pixel bis zu einer über hundertachtundzwanzig.
+`+` und `-` holen die Ansicht näher und weiter weg, in fünf Stufen, jede doppelt
+so weit wie die vorige, von sechs Weltzellen Abstand bis zu sechsundneunzig.
 
 `F11` schaltet das Fenster in den Vollbildmodus und gibt es danach in seinen
 vorherigen Zustand zurück: ein maximiertes Fenster kommt maximiert wieder.
 `Esc` stellt es wieder her. `Q` beendet.
 
 Jedes Detail wird in seiner feinsten Stufe gezeichnet, bis Sie etwas anderes
-wählen. Die Zeile *Settings…* im Menü des Spiels in der Symbolleiste öffnet
-sein Einstellungsfenster. Dort ist die Qualität *Ultra*, jedes Detail in
-seiner feinsten Stufe; *Basic*, jedes Detail in seiner schlichtesten bei
-voller Fenstergröße; *Custom*, Ihre eigene Wahl für Beleuchtung, Schatten,
-Bodentextur und Rendergröße, jede auf ihrem eigenen Schieberegler; oder
-*Auto*. Wer einen Schieberegler bewegt, macht die Wahl zu *Custom*. Ihre Wahl
-bleibt für das nächste Spiel erhalten.
+wählen. Die Zeile *Settings…* im Menü des Spiels in der Symbolleiste öffnet sein
+Einstellungsfenster. Dort ist die Qualität *Ultra*, jedes Detail in seiner
+feinsten Stufe; *Basic*, jedes Detail in seiner schlichtesten bei voller
+Fenstergröße; *Custom*, Ihre eigene Wahl für Schatten, Bodentextur und
+Rendergröße, jede auf ihrem eigenen Schieberegler; oder *Auto*. Wer einen
+Schieberegler bewegt, macht die Wahl zu *Custom*. Ihre Wahl bleibt für das
+nächste Spiel erhalten.
 
-Unter *Auto* nimmt der Client Detail zurück, wenn die Bilder eine Weile zu
-spät kamen — zuerst die Beleuchtung, dann die Schatten, dann die Rendergröße —
-und gibt es Schritt für Schritt zurück, sobald sie sich erholen. Er urteilt
-über Sekunden statt über einzelne Bilder, sodass ein Augenblick anderer Arbeit
-auf der Maschine nichts kostet und ein größeres Fenster ihn nicht auf die
-schlichteste Stufe schickt, und er zeichnet Figuren nie zu klein, um sie zu
-erkennen.
+Unter *Auto* nimmt der Client Detail zurück, wenn die Bilder eine Weile zu spät
+kamen — zuerst die Schatten, dann die Rendergröße — und gibt es Schritt für
+Schritt zurück, sobald sie sich erholen. Er urteilt über Sekunden statt über
+einzelne Bilder, sodass ein Augenblick anderer Arbeit auf der Maschine nichts
+kostet und ein größeres Fenster ihn nicht auf die schlichteste Stufe schickt,
+und er zeichnet Figuren nie zu klein, um sie zu erkennen.
 
 Ein Fenster, das größer ist, als der Software-Renderer füllen kann, wird mit
 höchstens 2560×1440 gezeichnet und auf die Fenstergröße hochskaliert.

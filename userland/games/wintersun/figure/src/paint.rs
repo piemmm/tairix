@@ -12,7 +12,8 @@
 //! the moment one of them grows a part.
 
 use tairix_inline::ArrayVec;
-use tairix_raster::shape::{fill, Placed, Scratch};
+use tairix_raster::mesh::{DepthBuffer, DepthCompare, DepthPlane, Occlusion};
+use tairix_raster::shape::{fill, fill_occluded, Placed, Scratch};
 use tairix_raster::surface::{Canvas, SUBPIXEL};
 use tairix_raster::{Color, ScanScratch};
 use tairix_util::mathf;
@@ -119,9 +120,9 @@ pub fn draw<C: Canvas + ?Sized>(
 
 /// The first half of [`draw`]: the contact shadow's rings, outermost first.
 ///
-/// Apart from the figure for a canvas that has to hold the two to different
-/// rows — a figure wading is cut at the waterline, and its shadow on the
-/// surface is not.
+/// Apart from the figure for a caller that lays every shadow before it stands
+/// any figure up, as a scene does: a shadow is on the ground, and a figure
+/// nearer the eye is drawn over it.
 pub fn ground<C: Canvas + ?Sized>(
     canvas: &mut C,
     shadow: &[Placed],
@@ -137,6 +138,30 @@ pub fn ground<C: Canvas + ?Sized>(
     }
 }
 
+/// [`ground`] in a scene: hidden wherever `scene` holds something nearer than
+/// `plane`, the shadow's own depth.
+pub fn ground_occluded<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    shadow: &[Placed],
+    plane: DepthPlane,
+    scene: &DepthBuffer,
+    brush: &mut Brush,
+    veil: Veil,
+) {
+    let occlusion = Occlusion {
+        depth: scene,
+        plane,
+        compare: DepthCompare::Nearer,
+    };
+    for ring in shadow {
+        let seen = Placed {
+            color: veil.over(ring.color),
+            ..*ring
+        };
+        fill_occluded(canvas, &seen, &occlusion, &mut brush.shape);
+    }
+}
+
 /// The second half of [`draw`]: the figure's own strips, far-first.
 pub fn figure<C: Canvas + ?Sized>(
     canvas: &mut C,
@@ -147,6 +172,34 @@ pub fn figure<C: Canvas + ?Sized>(
     for strip in placement.strips() {
         walk(&strip, &mut brush.outline);
         canvas.fill_polygon_subpixel(&brush.outline, veil.over(strip.color), &mut brush.scan);
+    }
+}
+
+/// [`figure`] in a scene: each strip hidden wherever `scene` holds something
+/// nearer than the strip's own plane.
+///
+/// The scene's depth is read and never written, so the figure's own parts
+/// still cover one another by the far-first order alone.
+pub fn figure_occluded<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    placement: &Placement,
+    scene: &DepthBuffer,
+    brush: &mut Brush,
+    veil: Veil,
+) {
+    for strip in placement.strips() {
+        walk(&strip, &mut brush.outline);
+        let occlusion = Occlusion {
+            depth: scene,
+            plane: strip.plane,
+            compare: DepthCompare::Nearer,
+        };
+        canvas.fill_polygon_subpixel_occluded(
+            &brush.outline,
+            veil.over(strip.color),
+            &occlusion,
+            &mut brush.scan,
+        );
     }
 }
 

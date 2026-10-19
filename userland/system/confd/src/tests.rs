@@ -533,6 +533,42 @@ fn a_commit_with_nothing_staged_writes_nothing() {
 }
 
 #[test]
+fn a_commit_whose_edits_change_nothing_writes_nothing() {
+    let (mut svc, mut fs) = service();
+    fs.put(
+        "/System/Settings/os.tairix.terminal/settings.conf",
+        b"scheme = corporate\n",
+    );
+    let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
+    set(&mut svc, &mut fs, &ada, "font", "large");
+    commit(&mut svc, &mut fs, &ada);
+    let written = fs.replaced();
+    // Only the policy layer holds the key, so removing it from the user's
+    // own document changes nothing there.
+    let reply = call(
+        &mut svc,
+        &mut fs,
+        &ada,
+        &AppDataRequest::ConfigUnset {
+            scope: ConfigScope::Private,
+            key: "scheme",
+        },
+    );
+    assert_eq!(decode_status_reply(&reply), Ok(()));
+    commit(&mut svc, &mut fs, &ada);
+    assert_eq!(
+        fs.replaced(),
+        written,
+        "an unchanged document was rewritten"
+    );
+    assert_eq!(svc.staging_sessions(), 0, "the edits were not let go");
+    assert_eq!(
+        get(&mut svc, &mut fs, &ada, "scheme").as_deref(),
+        Ok("corporate")
+    );
+}
+
+#[test]
 fn a_committed_change_preserves_the_users_own_hand_edits() {
     let (mut svc, mut fs) = service();
     let ada = origin(ACCOUNT_UID, 1, Some(identity(1)));
